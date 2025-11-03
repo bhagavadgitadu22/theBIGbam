@@ -15,7 +15,10 @@ PHAROKKA_COLORS = {
 }
 
 # Define subplots characteristics
-def config_feature_subplot(plot_type, color, alpha, size, title):
+def config_feature_subplot(plot_type, color, title, alpha=0.8, size=2):
+    if plot_type == "bars":
+        alpha = 0.5
+        size = 3
     return {
         "type_picked": plot_type,
         "color_picked": color,
@@ -25,9 +28,21 @@ def config_feature_subplot(plot_type, color, alpha, size, title):
     }
 
 FEATURE_SUBPLOTS = {
-    "coverage": config_feature_subplot("curve", "black", 0.5, 2, "Coverage Depth"),
-    "coverage_reduced": config_feature_subplot("curve", "black", 0.5, 2, "Coverage Depth (only reads starting and ending with a match)"),
-    "reads_starts": config_feature_subplot("dots", "blue", 0.3, 6, "Reads' Starts (more than deviation_factor*std away from the mean)"),
-    "reads_ends": config_feature_subplot("dots", "red", 0.3, 6, "Reads' Ends (more than deviation_factor*std away from the mean)"),
-    "tau": config_feature_subplot("dots", "green", 0.3, 6, "Tau (more than deviation_factor*std away from the mean)"),
+    "coverage": config_feature_subplot("curve", "black", "Coverage Depth"),
+
+    # Starts subplots
+    "coverage_reduced": config_feature_subplot("curve", "black", "Coverage Depth (only reads starting and ending with a match)"),
+    "reads_starts": config_feature_subplot("bars", "blue", "Reads' Starts (more than deviation_factor*std away from the mean)"),
+    "reads_ends": config_feature_subplot("bars", "blue", "Reads' Ends (more than deviation_factor*std away from the mean)"),
+    "tau": config_feature_subplot("bars", "blue", "Tau (more than deviation_factor*std away from the mean)"),
+
+    # Misassembly subplots
+    "read_lengths": config_feature_subplot("bars", "green", "Read Lengths (more than deviation_factor*std away from the mean)"),
+    "insert_sizes": config_feature_subplot("bars", "green", "Insert Sizes (more than deviation_factor*std away from the mean)"),
+    "bad_orientations": config_feature_subplot("bars", "green", "Bad Orientations (more than deviation_factor*std away from the mean)"),
+    "left_clippings": config_feature_subplot("bars", "purple", "Left Clippings (more than deviation_factor*std away from the mean)"),
+    "right_clippings": config_feature_subplot("bars", "purple", "Right Clippings (more than deviation_factor*std away from the mean)"),
+    "insertions": config_feature_subplot("bars", "red", "Insertions (more than deviation_factor*std away from the mean)"),
+    "deletions": config_feature_subplot("bars", "red", "Deletions (more than deviation_factor*std away from the mean)"),
+    "mismatches": config_feature_subplot("bars", "pink", "Mismatches (more than deviation_factor*std away from the mean)"),
 }

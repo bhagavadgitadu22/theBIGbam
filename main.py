@@ -37,8 +37,8 @@ def main():
     parser.add_argument("-g", "--genbank", required=True, help="Path to genbank file")
     parser.add_argument("-a", "--annotation", required=True, help="Annotation tool used (options allowed 'pharokka' or 'other')")
     parser.add_argument("-m", "--mapping", required=True, help="Path to mapping file")
-    parser.add_argument("-s", "--sequencing", required=True, choices=["short", "long"], help="Type of sequencing (options allowed 'short' for short-read sequencing and 'long' for long-read sequencing)")
-    parser.add_argument("-f", "--features", required=False, help="List of feature subplots to include (comma-separated) (options allowed: coverage, starts, tau)")
+    parser.add_argument("-s", "--sequencing", required=True, choices=["short-paired", "short-single", "long"], help="Type of sequencing (options allowed 'short-paired' and 'short-single' for short-read sequencing and 'long' for long-read sequencing)")
+    parser.add_argument("-f", "--features", required=False, help="List of feature subplots to include (comma-separated) (options allowed: coverage, starts, misassembly)")
     parser.add_argument("-p", "--precision", required=False, default=100, help="Size of the average window for the features' calculation (in bp)")
     parser.add_argument("-w", "--width", required=False, default=1800, help="Width of the plot (in pixels)")
     parser.add_argument("-sh", "--subplot_height", required=False, default=130, help="Height of each subplot (in pixels)")
@@ -79,16 +79,26 @@ def main():
 
     # Adding the feature subplots
     requested_features = args.features.split(",") if args.features else []
+    sequencing_type = args.sequencing
+
     # if starts in feature_list replace it by starts_plus, starts_minus, ends_plus, ends_minus
     feature_list = []
     for feature in requested_features:
         if feature == "starts":
-            feature_list.extend(["coverage_reduced", "reads_starts", "reads_ends"])
+            feature_list.extend(["coverage_reduced", "reads_starts", "reads_ends", "tau"])
+
+        elif feature == "misassembly":
+            if sequencing_type == "long":
+                feature_list.extend(["insert_sizes"])
+            if sequencing_type == "short-paired":
+                feature_list.extend(["insert_sizes", "bad_orientations"])
+            feature_list.extend(["left_clippings", "right_clippings", "insertions", "deletions", "mismatches"])
+
         else:
             feature_list.append(feature)
 
+    sequencing_type = "short" if sequencing_type.startswith("short") else "long"
     window_size = int(args.precision)
-    sequencing_type = args.sequencing
     
     subplots = []
     if feature_list:

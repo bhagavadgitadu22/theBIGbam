@@ -1,8 +1,10 @@
+from pyexpat import features
 import constants
 from bokeh.plotting import figure
 from bokeh.models import ColumnDataSource, HoverTool
 import numpy as np
 import pysam
+from re import findall
 
 # Function dedicated to specific features
 def reduce_position(pos, ref_length):
@@ -45,39 +47,38 @@ def starts_with_match(read, start):
         md_status = md[-1].isdigit()  # check end if start is False
     return md_status
 
-def calculate_reads_starts_and_ends(read, temporary_feature_dict, ref_length):
-    if temporary_feature_dict:
-        if starts_with_match(read, start=True) and starts_with_match(read, start=False):
-            start = read.reference_start
-            end = read.reference_end
+def calculate_reads_starts_and_ends(read, temporary_dict, ref_length):
+    if starts_with_match(read, start=True) and starts_with_match(read, start=False):
+        start = read.reference_start
+        end = read.reference_end
 
-            if start < ref_length and end > ref_length:
-                temporary_feature_dict["coverage_reduced"][start:ref_length] += 1
-                temporary_feature_dict["coverage_reduced"][0:reduce_position(end, ref_length)] += 1
-            else:
-                temporary_feature_dict["coverage_reduced"][reduce_position(start, ref_length):reduce_position(end, ref_length)] += 1
+        if start < ref_length and end > ref_length:
+            temporary_dict["coverage_reduced"][start:ref_length] += 1
+            temporary_dict["coverage_reduced"][0:reduce_position(end, ref_length)] += 1
+        else:
+            temporary_dict["coverage_reduced"][reduce_position(start, ref_length):reduce_position(end, ref_length)] += 1
 
-            start_pos = reduce_position(read.reference_start, ref_length)
-            end_pos = reduce_position(read.reference_end - 1, ref_length)  # end is exclusive
+        start_pos = reduce_position(read.reference_start, ref_length)
+        end_pos = reduce_position(read.reference_end - 1, ref_length)  # end is exclusive
 
-            if read.is_reverse:
-                temporary_feature_dict["start_minus"][start_pos] += 1
-                temporary_feature_dict["end_minus"][end_pos] += 1
-            else:
-                temporary_feature_dict["start_plus"][start_pos] += 1
-                temporary_feature_dict["end_plus"][end_pos] += 1
+        if read.is_reverse:
+            temporary_dict["start_minus"][start_pos] += 1
+            temporary_dict["end_minus"][end_pos] += 1
+        else:
+            temporary_dict["start_plus"][start_pos] += 1
+            temporary_dict["end_plus"][end_pos] += 1
 
-    return temporary_feature_dict
+    return temporary_dict
 
-def compute_final_starts_ends_and_tau(feature_dict, temporary_feature_dict, sequencing_type, ref_length):
+def compute_final_starts_ends_and_tau(feature_dict, temporary_dict, sequencing_type, ref_length):
     # Combine per sequencing_type
-    feature_dict["coverage_reduced"] = temporary_feature_dict["coverage_reduced"]
+    feature_dict["coverage_reduced"] = temporary_dict["coverage_reduced"]
     if sequencing_type == "short":
-        feature_dict["reads_starts"] = temporary_feature_dict["start_plus"]
-        feature_dict["reads_ends"] = temporary_feature_dict["end_minus"]
+        feature_dict["reads_starts"] = temporary_dict["start_plus"]
+        feature_dict["reads_ends"] = temporary_dict["end_minus"]
     elif sequencing_type == "long":
-        feature_dict["reads_starts"] = temporary_feature_dict["start_plus"] + temporary_feature_dict["start_minus"]
-        feature_dict["reads_ends"] = temporary_feature_dict["end_plus"] + temporary_feature_dict["end_minus"]
+        feature_dict["reads_starts"] = temporary_dict["start_plus"] + temporary_dict["start_minus"]
+        feature_dict["reads_ends"] = temporary_dict["end_plus"] + temporary_dict["end_minus"]
     else:
         raise ValueError("Sequencing_type must be 'short' or 'long'")
 
@@ -89,28 +90,153 @@ def compute_final_starts_ends_and_tau(feature_dict, temporary_feature_dict, sequ
 
     return feature_dict
 
+def compute_read_lengths(read, ref_length):
+    sum_read_lengths = np.zeros(ref_length, dtype=np.uint32)
+    counts_read_lengths = np.zeros(ref_length, dtype=np.uint32)
+
+    read_length = read.query_length
+    for pos in read.get_reference_positions():
+        pos_reduced = reduce_position(pos, ref_length)
+        sum_read_lengths[pos_reduced] += read_length
+        counts_read_lengths[pos_reduced] += 1
+
+    return sum_read_lengths, counts_read_lengths
+
+def compute_inserts_characteristics(features, read, ref_length):
+    sum_insert_sizes = np.zeros(ref_length, dtype=np.uint32)
+    counts_insert_sizes = np.zeros(ref_length, dtype=np.uint32)
+    arr_bad_orientations = np.zeros(ref_length, dtype=np.float32)
+
+    for pos in read.get_reference_positions():
+        pos_reduced = reduce_position(pos, ref_length)  # wrap-around safety
+
+        if read.is_paired and not read.mate_is_unmapped:
+            if "insert_sizes" in features and read.is_read1 and abs(read.template_length) > 0:
+                sum_insert_sizes[pos_reduced] += abs(read.template_length)
+                counts_insert_sizes[pos_reduced] += 1
+
+            if "bad_orientations" in features and not read.is_proper_pair:
+                arr_bad_orientations[pos_reduced] += 1
+    
+    return sum_insert_sizes, counts_insert_sizes, arr_bad_orientations
+
+def compute_clippings(feature_dict, features, read, ref_length):
+    if read.cigartuples:
+        first_op, first_len = read.cigartuples[0]
+        last_op, last_len = read.cigartuples[-1]
+
+        if "left_clippings" in features:
+            if first_op in (4, 5):
+                pos_reduced = read.reference_start % ref_length
+                feature_dict["left_clippings"][pos_reduced] += 1
+
+        if "right_clippings" in features:
+            if last_op in (4, 5):
+                pos_reduced = (read.reference_end - 1) % ref_length
+                feature_dict["right_clippings"][pos_reduced] += 1
+
+    return feature_dict
+
+def compute_indels(feature_dict, features, read, ref_length):
+    ref_pos = read.reference_start
+    for cigar_op, length in read.cigartuples:
+        if "insertions" in features:  # Insertion
+            if cigar_op == 1:
+                pos_reduced = ref_pos % ref_length
+                feature_dict["insertions"][pos_reduced] += 1
+        elif "deletions" in features: # Deletion
+            if cigar_op == 2:
+                for i in range(length):
+                    pos_reduced = (ref_pos + i) % ref_length
+                    feature_dict["deletions"][pos_reduced] += 1
+                ref_pos += length
+        else:
+            ref_pos += length
+
+    return feature_dict
+
+def compute_mismatches(feature_dict, features, read, ref_length):
+    if "mismatches" in features:
+        if read.has_tag("MD"):
+            ref_pos = read.reference_start
+            md_tag = read.get_tag("MD")
+            tokens = findall(r'\d+|\^[A-Z]+|[A-Z]', md_tag)
+            for token in tokens:
+                if token.isdigit():
+                    ref_pos += int(token)
+                elif token.startswith("^"):
+                    ref_pos += len(token) - 1
+                else:
+                    pos_reduced = ref_pos % ref_length
+                    feature_dict["mismatches"][pos_reduced] += 1
+                    ref_pos += 1
+    
+    return feature_dict
+
+def compute_final_lengths(sum_lengths, count_lengths, ref_length):
+    arr = np.zeros(ref_length, dtype=np.float32)
+    for i in range(ref_length):
+        total = sum_lengths[i]
+        count = count_lengths[i]
+        arr[i] = total / count if count > 0 else 0
+    return arr
+
 ### Main logic to get features
 def get_features(bamfile, features, reference, ref_length, sequencing_type):    
     # Initialize arrays for all requested features
     feature_dict = {feature: np.zeros(ref_length, dtype=np.uint64) for feature in features}
     
-    # Temporary array for reduced coverage (reads starting/ending with a match)
-    temporary_starts_ends_dict = {}
-    if {"reads_starts", "reads_ends"}.intersection(features) or "tau" in features:
-        temporary_feature = ["start_plus", "start_minus", "end_plus", "end_minus", "coverage_reduced"]
-        temporary_starts_ends_dict = {feature: np.zeros(ref_length, dtype=np.uint64) for feature in temporary_feature}
+    # Temporary array
+    temporary_feature = []
+    temporary_dict = {}
+    if "tau" in features:
+        temporary_feature.extend(["start_plus", "start_minus", "end_plus", "end_minus", "coverage_reduced"])
+    if "reads_lengths" in features:
+        temporary_feature.extend(["sum_read_lengths", "count_read_lengths"])
+    if "insert_sizes" in features:
+        temporary_feature.extend(["sum_insert_sizes", "count_insert_sizes"])
+    new_dict = {feature: np.zeros(ref_length, dtype=np.uint64) for feature in temporary_feature}
+    temporary_dict.update(new_dict)
 
     for read in bamfile.fetch(reference):
         if read.is_unmapped:
             continue
 
         # --- COVERAGE ---
-        feature_dict["coverage"] = calculate_coverage(feature_dict["coverage"], read, ref_length) if "coverage" in features else feature_dict["coverage"]
+        if "coverage" in features:
+            feature_dict["coverage"] = calculate_coverage(feature_dict["coverage"], read, ref_length)
+
         # --- START/END BY STRAND ---
-        temporary_starts_ends_dict = calculate_reads_starts_and_ends(read, temporary_starts_ends_dict, ref_length) if temporary_starts_ends_dict else temporary_starts_ends_dict
+        if "tau" in features:
+            temporary_dict = calculate_reads_starts_and_ends(read, temporary_dict, ref_length)
+
+        # --- Read lengths / insert sizes / bad orientations ---
+        if "read_lengths" in features:
+            temporary_dict["sum_read_lengths"], temporary_dict["count_read_lengths"] = compute_read_lengths(features, read, ref_length)
+        if {"insert_sizes", "bad_orientations"}.intersection(features):
+            temporary_dict["sum_insert_sizes"], temporary_dict["count_insert_sizes"], feature_dict["bad_orientations"] = compute_inserts_characteristics(features, read, ref_length)
+
+        # --- CIGAR parsing of the read endings ---
+        if {"left_clippings", "right_clippings"}.intersection(features):
+            feature_dict = compute_clippings(feature_dict, features, read, ref_length)
+
+        # --- CIGAR parsing within the read for indels ---
+        if {"insertions", "deletions"}.intersection(features):
+            feature_dict = compute_indels(feature_dict, features, read, ref_length)
+
+        # --- Mismatches can only obtained from MD tag ---
+        if "mismatches" in features:
+            feature_dict = compute_mismatches(feature_dict, features, read, ref_length)
 
     # --- FINALIZE START/END AND TAU ---
-    feature_dict = compute_final_starts_ends_and_tau(feature_dict, temporary_starts_ends_dict, sequencing_type, ref_length) if temporary_starts_ends_dict else feature_dict
+    if "tau" in features:
+        feature_dict = compute_final_starts_ends_and_tau(feature_dict, temporary_dict, sequencing_type, ref_length)
+
+    # --- FINALIZE READ LENGTHS AND INSERT SIZES ---
+    if "read_lengths" in features:
+        feature_dict["read_lengths"] = compute_final_lengths(temporary_dict["sum_read_lengths"], temporary_dict["count_read_lengths"], ref_length)
+    if "insert_sizes" in features:
+        feature_dict["insert_sizes"] = compute_final_lengths(temporary_dict["sum_insert_sizes"], temporary_dict["count_insert_sizes"], ref_length)
 
     return feature_dict
 
@@ -154,13 +280,14 @@ def make_bokeh_subplot(feature, xx, yy, width, height, x_range):
             line_alpha=alpha_picked,
             line_width=size_picked,
         )
-    elif type_picked == "dots":
-        p.scatter(
+    elif type_picked == "bars":
+        p.vbar(
             x=xx,
-            y=yy,
+            bottom=0,
+            top=yy,
             color=color_picked,
             alpha=alpha_picked,
-            size=size_picked
+            width=size_picked
         )
 
     # Add hover
@@ -193,13 +320,16 @@ def prepare_subplot(feature, feature_values, locus_size, max_visible_width, subp
     yy = np.array([feature_values_averaged[i + 1] for i in range(len(xx))], dtype=float)
 
     type_picked = constants.FEATURE_SUBPLOTS[feature]["type_picked"]
-    if type_picked == "dots":
+    if type_picked == "bars":
         # --- Filter values that diverge strongly ---
         mean_y = np.mean(yy)
         std_y = np.std(yy)
         mask = np.abs(yy - mean_y) > (deviation_factor * std_y)
         xx = xx[mask]
         yy = yy[mask]
+
+    if len(xx) == 0:
+        return None  # skip this feature subplot
 
     feature_subplot = make_bokeh_subplot(feature, xx, yy, max_visible_width, subplot_size, shared_xrange)
     return feature_subplot
@@ -215,7 +345,8 @@ def adding_subplots(mapping_file, features_list, locus_name, locus_size, sequenc
     subplots = []
     for feature in features_list:
         subplot_feature = prepare_subplot(feature, feature_values[feature], locus_size, max_visible_width, subplot_size, shared_xrange, window_size)
-        subplots.append(subplot_feature)
+        if subplot_feature is not None:
+            subplots.append(subplot_feature)
 
     bam_file.close()
     return subplots
