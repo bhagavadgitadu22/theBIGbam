@@ -5,21 +5,9 @@ import pysam
 
 # Feature functions
 def reduce_position(pos, ref_length):
-    return (pos - 1) % ref_length + 1
+    return pos % ref_length
 
-def get_coverage_slow(bamfile, reference, ref_length, window_size):
-    n_windows = (ref_length + window_size - 1) // window_size
-    coverage_dict = {i + 1: {"coverage_depth": 0} for i in range(n_windows)}
-    for read in bamfile.fetch(reference):
-        if read.is_unmapped:
-            continue
-        for pos in read.get_reference_positions():
-            pos_reduced = reduce_position(pos + 1, ref_length)  # Find which window this position belongs to
-            window_index = (pos_reduced - 1) // window_size + 1
-            coverage_dict[window_index]["coverage_depth"] += 1
-    return coverage_dict
-
-def get_coverage(bamfile, reference, ref_length, window_size):
+def get_coverage(bamfile, reference, ref_length):
     # Preallocate coverage array (integer)
     coverage = np.zeros(ref_length, dtype=np.uint64)
 
@@ -36,6 +24,10 @@ def get_coverage(bamfile, reference, ref_length, window_size):
             else:
                 coverage[reduce_position(start, ref_length):reduce_position(end, ref_length)] += 1
 
+    return coverage
+
+# Main logic
+def smooth_values(coverage, ref_length, window_size):
     # Aggregate by window
     n_windows = (ref_length + window_size - 1) // window_size
     window_cov = np.add.reduceat(coverage, np.arange(0, ref_length, window_size))
@@ -44,13 +36,12 @@ def get_coverage(bamfile, reference, ref_length, window_size):
 
     # Convert to dict of window -> coverage_depth (sum or mean)
     coverage_dict = {
-        i + 1: {"coverage_depth": float(window_cov[i]) / window_size}
+        i + 1: float(window_cov[i]) / window_size
         for i in range(n_windows)
     }
 
     return coverage_dict
 
-# Main logic
 def make_bokeh_subplot(xx, yy, width, height, color_picked, alpha_picked, title_picked, edge_picked, x_range):
     p = figure(
         width=width,
@@ -88,11 +79,16 @@ def make_bokeh_subplot(xx, yy, width, height, color_picked, alpha_picked, title_
 
 def prepare_subplot(bam_file, feature, locus_name, locus_size, max_visible_width, subplot_size, shared_xrange, window_size):
     if feature == "coverage":
-        coverage_dict = get_coverage(bam_file, locus_name, locus_size, window_size)
+        coverage_all_values = get_coverage(bam_file, locus_name, locus_size)
+        coverage_averaged = smooth_values(coverage_all_values, locus_size, window_size)
+        print(type(coverage_all_values))
+        print(type(coverage_averaged))
+        print(coverage_all_values[:100])
+        print(list(coverage_averaged.values())[:100])
 
         # Define window midpoints and y-values
         xx = np.arange(window_size/2, locus_size, window_size)
-        yy = [coverage_dict[i + 1]["coverage_depth"] for i in range(len(xx))]
+        yy = [coverage_averaged[i + 1] for i in range(len(xx))]
 
         coverage_fig = make_bokeh_subplot(
             xx=xx,
