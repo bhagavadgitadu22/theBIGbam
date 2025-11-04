@@ -90,10 +90,7 @@ def compute_final_starts_ends_and_tau(feature_dict, temporary_dict, sequencing_t
 
     return feature_dict
 
-def compute_read_lengths(read, ref_length):
-    sum_read_lengths = np.zeros(ref_length, dtype=np.uint32)
-    counts_read_lengths = np.zeros(ref_length, dtype=np.uint32)
-
+def compute_read_lengths(sum_read_lengths, counts_read_lengths, read, ref_length):
     read_length = read.query_length
     for pos in read.get_reference_positions():
         pos_reduced = reduce_position(pos, ref_length)
@@ -102,11 +99,8 @@ def compute_read_lengths(read, ref_length):
 
     return sum_read_lengths, counts_read_lengths
 
-def compute_inserts_characteristics(features, read, ref_length):
-    sum_insert_sizes = np.zeros(ref_length, dtype=np.uint32)
-    counts_insert_sizes = np.zeros(ref_length, dtype=np.uint32)
+def compute_inserts_characteristics(sum_insert_sizes, counts_insert_sizes, features, read, ref_length):
     arr_bad_orientations = np.zeros(ref_length, dtype=np.float32)
-
     for pos in read.get_reference_positions():
         pos_reduced = reduce_position(pos, ref_length)  # wrap-around safety
 
@@ -191,7 +185,7 @@ def get_features(bamfile, features, reference, ref_length, sequencing_type):
     temporary_dict = {}
     if "tau" in features:
         temporary_feature.extend(["start_plus", "start_minus", "end_plus", "end_minus", "coverage_reduced"])
-    if "reads_lengths" in features:
+    if "read_lengths" in features:
         temporary_feature.extend(["sum_read_lengths", "count_read_lengths"])
     if "insert_sizes" in features:
         temporary_feature.extend(["sum_insert_sizes", "count_insert_sizes"])
@@ -212,9 +206,13 @@ def get_features(bamfile, features, reference, ref_length, sequencing_type):
 
         # --- Read lengths / insert sizes / bad orientations ---
         if "read_lengths" in features:
-            temporary_dict["sum_read_lengths"], temporary_dict["count_read_lengths"] = compute_read_lengths(features, read, ref_length)
+            temporary_dict["sum_read_lengths"], temporary_dict["count_read_lengths"] = compute_read_lengths(
+                temporary_dict["sum_read_lengths"], temporary_dict["count_read_lengths"], read, ref_length
+            )
         if {"insert_sizes", "bad_orientations"}.intersection(features):
-            temporary_dict["sum_insert_sizes"], temporary_dict["count_insert_sizes"], feature_dict["bad_orientations"] = compute_inserts_characteristics(features, read, ref_length)
+            temporary_dict["sum_insert_sizes"], temporary_dict["count_insert_sizes"], feature_dict["bad_orientations"] = compute_inserts_characteristics(
+                temporary_dict["sum_insert_sizes"], temporary_dict["count_insert_sizes"], features, read, ref_length
+            )
 
         # --- CIGAR parsing of the read endings ---
         if {"left_clippings", "right_clippings"}.intersection(features):
@@ -244,16 +242,13 @@ def smooth_values(feature_values, ref_length, window_size):
     # Aggregate by window
     n_windows = (ref_length + window_size - 1) // window_size
     window_cov = np.add.reduceat(feature_values, np.arange(0, ref_length, window_size))
-    # If genome length not divisible by window size, trim
+    # Trim if genome length not divisible by window size
     window_cov = window_cov[:n_windows]
 
-    # Convert to dict of window -> coverage_depth (sum or mean)
-    coverage_dict = {
-        i + 1: float(window_cov[i]) / window_size
-        for i in range(n_windows)
-    }
+    # Convert to mean coverage per window
+    coverage_list = (window_cov / window_size).tolist()
 
-    return coverage_dict
+    return coverage_list
 
 ### Plotting functions
 def make_bokeh_subplot(feature, xx, yy, width, height, x_range):
@@ -270,33 +265,36 @@ def make_bokeh_subplot(feature, xx, yy, width, height, x_range):
         x_range=x_range,
         tools="xpan,xwheel_zoom,reset,save"
     )
+    source = ColumnDataSource(data=dict(x=xx, y=yy))
 
     # Part specific to the type of subplot
     if type_picked == "curve":
         p.line(
-            x=xx,
-            y=yy,
+            x='x',
+            y='y',
+            source=source,
             line_color=color_picked,
             line_alpha=alpha_picked,
             line_width=size_picked,
         )
     elif type_picked == "bars":
+        source = ColumnDataSource(data=dict(x=xx, y=yy))
         p.vbar(
-            x=xx,
+            x='x',
             bottom=0,
-            top=yy,
+            top='y',
+            source=source,
             color=color_picked,
             alpha=alpha_picked,
             width=size_picked
         )
 
     # Add hover
-    source = ColumnDataSource(data=dict(x=xx, y=yy))
-    p.line(x='x', y='y', source=source, line_alpha=0, line_width=1)  # line_alpha=0 makes it invisible
-    hover = HoverTool(tooltips=[("Position", "@x"), (title_picked, "@y")], mode='vline')
+    hover = HoverTool(tooltips=[("Position", "@x"), ("Number", "@y")], mode='vline')
     p.add_tools(hover)
 
     # A clean style like your matplotlib setup
+    p.toolbar.logo = None
     p.xgrid.visible = False
 
     p.y_range.start = 0
@@ -312,26 +310,30 @@ def make_bokeh_subplot(feature, xx, yy, width, height, x_range):
 
     return p
 
-def prepare_subplot(feature, feature_values, locus_size, max_visible_width, subplot_size, shared_xrange, window_size, deviation_factor = 3):
-    feature_values_averaged = smooth_values(feature_values, locus_size, window_size)
-
+def prepare_subplot(feature, feature_averaged, coverage_averaged, locus_size, max_visible_width, subplot_size, shared_xrange, window_size, min_ratio = 0.1):
     # Define window midpoints and y-values
     xx = np.arange(window_size / 2, locus_size, window_size)
-    yy = np.array([feature_values_averaged[i + 1] for i in range(len(xx))], dtype=float)
+    feature_averaged = np.asarray(feature_averaged, dtype=float)
+    coverage_averaged = np.asarray(coverage_averaged, dtype=float)
+
+    # Skip if nothing left
+    if len(xx) == 0:
+        return None
 
     type_picked = constants.FEATURE_SUBPLOTS[feature]["type_picked"]
     if type_picked == "bars":
-        # --- Filter values that diverge strongly ---
-        mean_y = np.mean(yy)
-        std_y = np.std(yy)
-        mask = np.abs(yy - mean_y) > (deviation_factor * std_y)
+        with np.errstate(divide='ignore', invalid='ignore'):
+            ratios = np.where(coverage_averaged > 0, feature_averaged / coverage_averaged, np.nan)
+
+        # Mask values where ratio < min_ratio
+        mask = ratios >= min_ratio
         xx = xx[mask]
-        yy = yy[mask]
+        feature_averaged = feature_averaged[mask]
 
     if len(xx) == 0:
         return None  # skip this feature subplot
 
-    feature_subplot = make_bokeh_subplot(feature, xx, yy, max_visible_width, subplot_size, shared_xrange)
+    feature_subplot = make_bokeh_subplot(feature, xx, feature_averaged, max_visible_width, subplot_size, shared_xrange)
     return feature_subplot
 
 ### One function to rule them all
@@ -342,11 +344,16 @@ def adding_subplots(mapping_file, features_list, locus_name, locus_size, sequenc
     feature_values = get_features(bam_file, features_list, locus_name, locus_size, sequencing_type)
 
     print("Plotting feature subplots...", flush=True)
-    subplots = []
+    coverage_averaged = smooth_values(feature_values["coverage"], locus_size, window_size)
+    subplot_coverage = prepare_subplot("coverage", coverage_averaged, coverage_averaged, locus_size, max_visible_width, subplot_size, shared_xrange, window_size)
+    subplots = [subplot_coverage]
+
     for feature in features_list:
-        subplot_feature = prepare_subplot(feature, feature_values[feature], locus_size, max_visible_width, subplot_size, shared_xrange, window_size)
-        if subplot_feature is not None:
-            subplots.append(subplot_feature)
+        if feature != "coverage":
+            feature_averaged = smooth_values(feature_values[feature], locus_size, window_size)
+            subplot_feature = prepare_subplot(feature, feature_averaged, coverage_averaged, locus_size, max_visible_width, subplot_size, shared_xrange, window_size)
+            if subplot_feature is not None:
+                subplots.append(subplot_feature)
 
     bam_file.close()
     return subplots
