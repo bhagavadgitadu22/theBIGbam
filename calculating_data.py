@@ -1,7 +1,10 @@
 import numpy as np
 import pysam
 from re import findall
+from multiprocessing import Pool, cpu_count
 import constants
+import os
+import csv
 
 # Function dedicated to specific features
 def reduce_position(pos, ref_length):
@@ -173,7 +176,7 @@ def compute_final_lengths(sum_lengths, count_lengths, ref_length):
     return arr
 
 ### Main logic to get features per position
-def get_features(bamfile, features, reference, ref_length, sequencing_type):    
+def get_features(reads_mapped, features, ref_length, sequencing_type):    
     # Initialize arrays for all requested features
     feature_dict = {feature: np.zeros(ref_length, dtype=np.uint64) for feature in features}
     
@@ -189,7 +192,7 @@ def get_features(bamfile, features, reference, ref_length, sequencing_type):
     new_dict = {feature: np.zeros(ref_length, dtype=np.uint64) for feature in temporary_feature}
     temporary_dict.update(new_dict)
 
-    for read in bamfile.fetch(reference):
+    for read in reads_mapped:
         if read.is_unmapped:
             continue
 
@@ -240,11 +243,16 @@ def smooth_values(feature_values, ref_length, window_size):
     # Aggregate by window
     n_windows = (ref_length + window_size - 1) // window_size
     window_cov = np.add.reduceat(feature_values, np.arange(0, ref_length, window_size))
-    # Trim if genome length not divisible by window size
     window_cov = window_cov[:n_windows]
 
-    # Convert to mean coverage per window
-    coverage_list = (window_cov / window_size).tolist()
+    # Compute actual counts per window (last one may be smaller)
+    counts = np.full(n_windows, window_size)
+    remainder = ref_length % window_size
+    if remainder:
+        counts[-1] = remainder
+
+    # Convert to mean coverage per window safely
+    coverage_list = (window_cov / counts).tolist()
 
     return coverage_list
 
@@ -274,16 +282,14 @@ def summarise_data(feature, feature_averaged, coverage_averaged, locus_size, win
         return None  # skip this feature subplot
     return {"x": xx, "y": feature_averaged}
 
-### One function to rule them all
-def generating_data_from_bam(mapping_file, locus_name, locus_size, feature_list, sequencing_type, window_size):
+### Calculating features per contig per sample
+def calculating_features_per_contig_per_sample(reads_mapped, locus_size, feature_list, sequencing_type, window_size):
     sequencing_type = "short" if sequencing_type.startswith("short") else "long"
 
     # Read bam once to calculate all features
-    print("Read bam once to calculate all features...", flush=True)
-    bam_file = pysam.AlignmentFile(mapping_file, "rb")
-    feature_values = get_features(bam_file, feature_list, locus_name, locus_size, sequencing_type)
+    feature_values = get_features(reads_mapped, feature_list, locus_size, sequencing_type)
 
-    print("Averaging and masking data per feature...", flush=True)
+    # Averaging and masking data per feature
     coverage_averaged = smooth_values(feature_values["coverage"], locus_size, window_size)
     coverage_masked = summarise_data("coverage", coverage_averaged, coverage_averaged, locus_size, window_size)
     data = {"coverage": coverage_masked}  # always include coverage data
@@ -294,6 +300,77 @@ def generating_data_from_bam(mapping_file, locus_name, locus_size, feature_list,
             feature_masked = summarise_data(feature, feature_averaged, coverage_averaged, locus_size, window_size)
             if feature_masked is not None:
                 data[feature] = feature_masked
+                
+    return data
+    
+### Distributing the calculation for all the contigs in the bam file
+def calculating_features_per_sample(mapping_file, feature_list, sequencing_type, window_size):
+    print("Calculating features per sample...", flush=True)
+    bam_file = pysam.AlignmentFile(mapping_file, "rb")
+    references = bam_file.references
+    lengths = [l // 2 for l in bam_file.lengths]  # need to divide by 2 because each contig was doubled for mapping to deal with circularity
+
+    all_data = {}
+    for ref, length in zip(references, lengths):
+        # Fetch reads only for this contig
+        reads_iter = bam_file.fetch(ref)
+        contig_data = calculating_features_per_contig_per_sample(reads_iter, length, feature_list, sequencing_type, window_size)
+        all_data[ref] = contig_data
 
     bam_file.close()
-    return data
+    return all_data
+
+### Save data computed per sample
+# Will be replaced by calls to database in future version
+def save_data_dictionary(bam_name, contigs_list, output_file):
+    """
+    Save a nested data dictionary to a CSV file.
+    """
+    # Define CSV headers
+    fieldnames = ["sample", "contig", "variable", "position", "value"]
+
+    with open(output_file, mode="w", newline="") as csvfile:
+        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+        writer.writeheader()
+
+        for contig_name, variables_list in contigs_list.items():
+            for variable_name, content in variables_list.items():
+                xs = content.get("x", [])
+                ys = content.get("y", [])
+                # Ensure lengths match
+                for pos, val in zip(xs, ys):
+                    writer.writerow({
+                        "sample": bam_name,
+                        "contig": contig_name,
+                        "variable": variable_name,
+                        "position": pos,
+                        "value": val
+                    })
+
+### Distributing the calculation for all the bam files (samples)
+def _process_single_sample(bam_file, feature_list, sequencing_type, window_size, output_prefix, n_contig_cores=None):
+    sample_name = os.path.basename(bam_file).replace(".bam", "")
+    print(f"Processing sample: {sample_name}", flush=True)
+    
+    # Calculate features per contig (can still be parallelized with n_contig_cores)
+    sample_data = calculating_features_per_sample(bam_file, feature_list, sequencing_type, window_size)
+
+    # Save to CSV
+    output_name = f"{output_prefix}_{os.path.splitext(sample_name)[0]}_features.csv"
+    save_data_dictionary(sample_name, sample_data, output_name)
+
+    return sample_name, sample_data
+
+def calculating_all_features_parallel(bam_files, feature_list, sequencing_type, window_size, output_prefix, n_sample_cores=None, n_contig_cores=None):
+    if n_sample_cores is None:
+        n_sample_cores = max(1, cpu_count() - 1)
+    print(f"Using {n_sample_cores} cores to process {len(bam_files)} samples in parallel...", flush=True)
+
+    args_list = [(bam, feature_list, sequencing_type, window_size, output_prefix, n_contig_cores) for bam in bam_files]
+
+    with Pool(processes=n_sample_cores) as pool:
+        results = pool.starmap(_process_single_sample, args_list)
+
+    all_samples_data = {sample: data for sample, data in results}
+    print("Finished all samples.", flush=True)
+    return all_samples_data

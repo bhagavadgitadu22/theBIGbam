@@ -1,5 +1,5 @@
 from bokeh.models import Range1d,ColumnDataSource, HoverTool
-from bokeh.layouts import column
+from bokeh.layouts import column, gridplot
 from bokeh.plotting import output_file, save, figure
 from dna_features_viewer import BiopythonTranslator
 import constants
@@ -122,3 +122,31 @@ def prepare_main_plot(data_dictionary, genbank_record, protein_annotation_tool, 
     output_file(output_name)
     save(layout)
     print(f"Saved interactive plot to {output_name}")
+
+
+def prepare_main_plot(data_dictionary, genbank_record, protein_annotation_tool, locus_size, window_size, max_visible_width, subplot_size, output_name):
+    global ANNOTATION_TOOL
+    ANNOTATION_TOOL = protein_annotation_tool
+
+    # --- Main gene annotation plot
+    print("Plotting gene map...", flush=True)
+    graphic_record = CustomTranslator().translate_record(genbank_record)
+    # figure_width and figure_height for the arrow size
+    annotation_fig = graphic_record.plot_with_bokeh(figure_width=30, figure_height=40)
+    annotation_fig.width = max_visible_width
+    annotation_fig.height = subplot_size
+
+    shared_xrange = Range1d(0, locus_size)
+    annotation_fig.x_range = shared_xrange
+
+    # --- Prepare subplots
+    subplots = prepare_all_subplots(data_dictionary, max_visible_width,subplot_size, shared_xrange, window_size)
+
+    # --- Combine all figures in a single grid with one shared toolbar
+    all_plots = [annotation_fig] + subplots
+    grid = gridplot([[p] for p in all_plots], merge_tools=True)
+
+    # --- Save interactive HTML
+    output_file(output_name)
+    save(grid)
+    print(f"Saved interactive plot with shared toolbar to {output_name}")
