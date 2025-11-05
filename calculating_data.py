@@ -1,10 +1,7 @@
-from pyexpat import features
-import constants
-from bokeh.plotting import figure
-from bokeh.models import ColumnDataSource, HoverTool
 import numpy as np
 import pysam
 from re import findall
+import constants
 
 # Function dedicated to specific features
 def reduce_position(pos, ref_length):
@@ -175,7 +172,7 @@ def compute_final_lengths(sum_lengths, count_lengths, ref_length):
         arr[i] = total / count if count > 0 else 0
     return arr
 
-### Main logic to get features
+### Main logic to get features per position
 def get_features(bamfile, features, reference, ref_length, sequencing_type):    
     # Initialize arrays for all requested features
     feature_dict = {feature: np.zeros(ref_length, dtype=np.uint64) for feature in features}
@@ -238,6 +235,7 @@ def get_features(bamfile, features, reference, ref_length, sequencing_type):
 
     return feature_dict
 
+### Summarise data for each feature
 def smooth_values(feature_values, ref_length, window_size):
     # Aggregate by window
     n_windows = (ref_length + window_size - 1) // window_size
@@ -250,75 +248,17 @@ def smooth_values(feature_values, ref_length, window_size):
 
     return coverage_list
 
-### Plotting functions
-def make_bokeh_subplot(feature, xx, yy, width, height, x_range):
-    type_picked = constants.FEATURE_SUBPLOTS[feature]["type_picked"]
-    color_picked = constants.FEATURE_SUBPLOTS[feature]["color_picked"]
-    alpha_picked = constants.FEATURE_SUBPLOTS[feature]["alpha_picked"]
-    size_picked = constants.FEATURE_SUBPLOTS[feature]["size_picked"]
-    title_picked = constants.FEATURE_SUBPLOTS[feature]["title_picked"]
-
-    p = figure(
-        width=width,
-        height=height,
-        title=title_picked,
-        x_range=x_range,
-        tools="xpan,xwheel_zoom,reset,save"
-    )
-    source = ColumnDataSource(data=dict(x=xx, y=yy))
-
-    # Part specific to the type of subplot
-    if type_picked == "curve":
-        p.line(
-            x='x',
-            y='y',
-            source=source,
-            line_color=color_picked,
-            line_alpha=alpha_picked,
-            line_width=size_picked,
-        )
-    elif type_picked == "bars":
-        source = ColumnDataSource(data=dict(x=xx, y=yy))
-        p.vbar(
-            x='x',
-            bottom=0,
-            top='y',
-            source=source,
-            color=color_picked,
-            alpha=alpha_picked,
-            width=size_picked
-        )
-
-    # Add hover
-    hover = HoverTool(tooltips=[("Position", "@x"), ("Number", "@y")], mode='vline')
-    p.add_tools(hover)
-
-    # A clean style like your matplotlib setup
-    p.toolbar.logo = None
-    p.xgrid.visible = False
-
-    p.y_range.start = 0
-    p.yaxis.axis_label = title_picked
-    p.yaxis.axis_label_text_font_size = "10pt"
-    p.yaxis.axis_label_standoff = 0
-    p.ygrid.grid_line_alpha = 0.2
-    p.yaxis.axis_label = None
-    
-    p.outline_line_color = None  # hides top/right borders
-    p.min_border_left = 40
-    p.min_border_right = 10
-
-    return p
-
-def prepare_subplot(feature, feature_averaged, coverage_averaged, locus_size, max_visible_width, subplot_size, shared_xrange, window_size, min_ratio = 0.1):
+def summarise_data(feature, feature_averaged, coverage_averaged, locus_size, window_size, min_ratio = 0.1):
     # Define window midpoints and y-values
-    xx = np.arange(window_size / 2, locus_size, window_size)
+    if window_size == 1:
+        # For window size 1, use integer positions starting from 1
+        xx = np.arange(1, locus_size + 1)
+    else:
+        # For larger windows, use midpoints including the last window if it fits
+        xx = np.arange(window_size / 2, locus_size + window_size / 2, window_size)
+        
     feature_averaged = np.asarray(feature_averaged, dtype=float)
     coverage_averaged = np.asarray(coverage_averaged, dtype=float)
-
-    # Skip if nothing left
-    if len(xx) == 0:
-        return None
 
     type_picked = constants.FEATURE_SUBPLOTS[feature]["type_picked"]
     if type_picked == "bars":
@@ -332,28 +272,28 @@ def prepare_subplot(feature, feature_averaged, coverage_averaged, locus_size, ma
 
     if len(xx) == 0:
         return None  # skip this feature subplot
-
-    feature_subplot = make_bokeh_subplot(feature, xx, feature_averaged, max_visible_width, subplot_size, shared_xrange)
-    return feature_subplot
+    return {"x": xx, "y": feature_averaged}
 
 ### One function to rule them all
-def adding_subplots(mapping_file, features_list, locus_name, locus_size, sequencing_type, max_visible_width, subplot_size, shared_xrange, window_size):
+def generating_data_from_bam(mapping_file, locus_name, locus_size, feature_list, sequencing_type, window_size):
+    sequencing_type = "short" if sequencing_type.startswith("short") else "long"
+
     # Read bam once to calculate all features
     print("Read bam once to calculate all features...", flush=True)
     bam_file = pysam.AlignmentFile(mapping_file, "rb")
-    feature_values = get_features(bam_file, features_list, locus_name, locus_size, sequencing_type)
+    feature_values = get_features(bam_file, feature_list, locus_name, locus_size, sequencing_type)
 
-    print("Plotting feature subplots...", flush=True)
+    print("Averaging and masking data per feature...", flush=True)
     coverage_averaged = smooth_values(feature_values["coverage"], locus_size, window_size)
-    subplot_coverage = prepare_subplot("coverage", coverage_averaged, coverage_averaged, locus_size, max_visible_width, subplot_size, shared_xrange, window_size)
-    subplots = [subplot_coverage]
+    coverage_masked = summarise_data("coverage", coverage_averaged, coverage_averaged, locus_size, window_size)
+    data = {"coverage": coverage_masked}  # always include coverage data
 
-    for feature in features_list:
+    for feature in feature_list:
         if feature != "coverage":
             feature_averaged = smooth_values(feature_values[feature], locus_size, window_size)
-            subplot_feature = prepare_subplot(feature, feature_averaged, coverage_averaged, locus_size, max_visible_width, subplot_size, shared_xrange, window_size)
-            if subplot_feature is not None:
-                subplots.append(subplot_feature)
+            feature_masked = summarise_data(feature, feature_averaged, coverage_averaged, locus_size, window_size)
+            if feature_masked is not None:
+                data[feature] = feature_masked
 
     bam_file.close()
-    return subplots
+    return data

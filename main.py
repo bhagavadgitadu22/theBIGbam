@@ -1,11 +1,8 @@
 import argparse
-from pyexpat import features
-import constants, plotting_features
+import csv
 from Bio import SeqIO
-from dna_features_viewer import BiopythonTranslator
-from bokeh.models import Range1d
-from bokeh.layouts import column
-from bokeh.plotting import output_file, save
+from calculating_data import generating_data_from_bam
+from plotting_data import prepare_main_plot
 
 def check_single_locus(gbk_file):
     try:
@@ -14,22 +11,30 @@ def check_single_locus(gbk_file):
     except ValueError:
         raise SystemExit(f"Error: {gbk_file} must contain exactly 1 locus.")
 
-class CustomTranslator(BiopythonTranslator):
-    def compute_feature_color(self, feature):
-        if ANNOTATION_TOOL == "pharokka":
-            function = feature.qualifiers.get("function", [""])[0].lower()
-            color_scheme = constants.PHAROKKA_COLORS
-            for key, color in color_scheme.items():
-                if key in function:
-                    return color
-        return "#AAAAAA"
+def save_data_dictionary(data_dictionary, bam_name, locus_name, output_file):
+    """
+    Save a nested data dictionary to a CSV file.
+    """
+    # Define CSV headers
+    fieldnames = ["sample", "contig", "variable", "position", "value"]
 
-    def compute_feature_label(self, feature):
-        return None  # fallback to None if missing or invalid
-    
-    def compute_feature_html(self, feature):
-        return feature.qualifiers.get("product", [])
-    
+    with open(output_file, mode="w", newline="") as csvfile:
+        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+        writer.writeheader()
+
+        for variable_name, content in data_dictionary.items():
+            xs = content.get("x", [])
+            ys = content.get("y", [])
+            # Ensure lengths match
+            for pos, val in zip(xs, ys):
+                writer.writerow({
+                    "sample": bam_name,
+                    "contig": locus_name,
+                    "variable": variable_name,
+                    "position": pos,
+                    "value": val
+                })
+
 def main():
     # Parse command line arguments
     print("Parsing arguments...", flush=True)
@@ -44,7 +49,7 @@ def main():
     parser.add_argument("-sh", "--subplot_height", required=False, default=130, help="Height of each subplot (in pixels)")
     args = parser.parse_args()
 
-    # Read annotation file
+    # Read files
     print("Reading genbank and mapping file...", flush=True)
     genbank_file = args.genbank
     record = check_single_locus(genbank_file)
@@ -54,33 +59,22 @@ def main():
     print(f"Locus: {record.name} ({locus_size} bp)", flush=True)
 
     allowed_types = ["CDS", "tRNA/tmRNA", "rRNA", "ncRNA", "ncRNA-region", "CRISPR", "Gap", "Misc"]
-    filtered_features = [f for f in record.features if f.type in allowed_types]
-    record.features = filtered_features
+    filtered_genbank_features = [f for f in record.features if f.type in allowed_types]
+    record.features = filtered_genbank_features
 
     mapping_file = args.mapping
     bam_name = args.mapping.split("/")[-1].replace(".bam", "")
 
-    global ANNOTATION_TOOL
-    ANNOTATION_TOOL = args.annotation
+    requested_features = args.features.split(",") if args.features else []
 
-    # Plotting gene map
-    print("Plotting gene map...", flush=True)
+    protein_annotation_tool = args.annotation
+    sequencing_type = args.sequencing
+    window_size = int(args.precision)
+
     max_visible_width = int(args.plot_width)
     subplot_size = int(args.subplot_height)
 
-    graphic_record = CustomTranslator().translate_record(record)
-    # figure_width and figure_height for the arrow size
-    annotation_fig = graphic_record.plot_with_bokeh(figure_width=30, figure_height=40)
-    annotation_fig.width = max_visible_width
-    annotation_fig.height = subplot_size
-
-    shared_xrange = Range1d(0, locus_size)
-    annotation_fig.x_range = shared_xrange
-
-    # Adding the feature subplots
-    requested_features = args.features.split(",") if args.features else []
-    sequencing_type = args.sequencing
-
+    # Getting list of features requested
     # if starts in feature_list replace it by starts_plus, starts_minus, ends_plus, ends_minus
     feature_list = ["coverage"]  # always include coverage subplot
     for feature in requested_features:
@@ -97,18 +91,18 @@ def main():
         else:
             feature_list.append(feature)
 
-    sequencing_type = "short" if sequencing_type.startswith("short") else "long"
-    window_size = int(args.precision)
+    # Generating data from bam
+    print("Generating data from mapping file...", flush=True)
+    data_dictionary = generating_data_from_bam(mapping_file, locus_name, locus_size, feature_list, sequencing_type, window_size)
     
-    subplots = []
-    if feature_list:
-        subplots = plotting_features.adding_subplots(mapping_file, feature_list, locus_name, locus_size, sequencing_type, max_visible_width, subplot_size, shared_xrange, window_size)
+    print("Saving data as csv files...", flush=True)
+    output_csv = f"MGFeaturesViewer_{bam_name}_mapped_on_{locus_name}.csv"
+    save_data_dictionary(data_dictionary, bam_name, locus_name, output_csv)
 
-    layout = column(annotation_fig, *subplots)
-    output_path = f"MGFeaturesViewer_{bam_name}_mapped_on_{locus_name}.html"
-    output_file(output_path)
-    save(layout)
-    print(f"Saved interactive plot to {output_path}")
+    # Prepare main plot
+    print("Preparing main plot...", flush=True)
+    output_html = f"MGFeaturesViewer_{bam_name}_mapped_on_{locus_name}.html"
+    prepare_main_plot(data_dictionary, record, protein_annotation_tool, locus_size, window_size, max_visible_width, subplot_size, output_html)
 
 if __name__ == "__main__":
     main()
