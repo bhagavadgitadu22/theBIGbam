@@ -30,6 +30,32 @@ def print_timing_summary():
         print(f"{name:35s}: {t:.3f} s ({t/total*100:.1f}%)", flush=True)
     print(f"Total tracked time: {total:.3f} s", flush=True)
 
+### Find sequencing type from BAM file
+def find_sequencing_type_from_bam(bam_file, n_reads_check=100):
+    """
+    Infer sequencing type from a BAM file.
+    Rules:
+      - If any read > 1000 bp, reads are "long"
+      - Elif any read.is_paired, reads are "short-paired"
+      - Else reads are "short-single"
+    """
+    bam = pysam.AlignmentFile(bam_file, "rb")
+
+    for i, read in enumerate(bam.fetch(until_eof=True)):
+        if read.is_unmapped:
+            continue
+        if read.query_length and read.query_length > 1000:
+            bam.close()
+            return "long"
+        if read.is_paired:
+            return "short-paired"
+
+        if i + 1 >= n_reads_check:
+            break
+
+    bam.close()
+    return "short-single"
+
 ### Summarise data for each feature
 def merge_sorted_unique(*arrays):
     """Merge multiple sorted 1D arrays into a unique sorted array (very fast)."""
@@ -41,7 +67,6 @@ def merge_sorted_unique(*arrays):
     # Drop duplicates efficiently
     return merged[np.concatenate(([True], np.diff(merged) != 0))]
 
-@track_time
 def compress_signal(feature_values, ref_length, step=50, z_thresh=3, deriv_thresh=3, max_points=10000):
     """
     step : int, Keep every Nth point
@@ -116,7 +141,6 @@ def calculate_coverage_numba(coverage, starts, ends, ref_length):
             for j in range(0, end_mod):
                 coverage[j] += 1
 
-@track_time
 def get_feature_coverage(reads_mapped, ref_length, output_dir, sample_name, ref_name):    
     coverage = np.zeros(ref_length, dtype=np.uint64)
 
@@ -159,7 +183,6 @@ def starts_with_match(read, start):
         md_status = md[-1].isdigit()  # check end if start is False
     return md_status
 
-@track_time
 def calculate_reads_starts_and_ends(read, temporary_dict, ref_length):
     if starts_with_match(read, True) and starts_with_match(read, False):
         start = read.reference_start % ref_length
@@ -180,10 +203,9 @@ def calculate_reads_starts_and_ends(read, temporary_dict, ref_length):
             temporary_dict["start_plus"][start] += 1
             temporary_dict["end_plus"][end] += 1
 
-@track_time
 def compute_final_starts_ends_and_tau(feature_dict, temporary_dict, sequencing_type, ref_length):
     feature_dict["coverage_reduced"] = temporary_dict["coverage_reduced"]
-    if sequencing_type == "short":
+    if sequencing_type == "short-paired" or sequencing_type == "short-single":
         feature_dict["reads_starts"] = temporary_dict["start_plus"]
         feature_dict["reads_ends"] = temporary_dict["end_minus"]
     else:
@@ -213,14 +235,19 @@ def get_features_phagetermini(reads_mapped, ref_length, sequencing_type, output_
         save_feature_values_per_contig_per_sample(feature, feature_values, output_dir, sample_name, ref_name)
 
 ### Functions of assemblycheck module
+@njit
+def add_read_lengths_numba(sum_read_lengths, counts_read_lengths, positions, read_len, ref_length):
+    for i in range(positions.size):
+        pos = positions[i] % ref_length
+        sum_read_lengths[pos] += read_len
+        counts_read_lengths[pos] += 1
+
 @track_time
 def compute_read_lengths(sum_read_lengths, counts_read_lengths, read, ref_length):
     positions = np.fromiter(read.get_reference_positions(), dtype=np.int32)
     if positions.size == 0:
         return
-    positions %= ref_length
-    np.add.at(sum_read_lengths, positions, read.query_length)
-    np.add.at(counts_read_lengths, positions, 1)
+    add_read_lengths_numba(sum_read_lengths, counts_read_lengths, positions, read.query_length, ref_length)
 
 @njit
 def add_insert_sizes_numba(sum_insert_sizes, counts_insert_sizes, bad_orientations, positions, insert_len, is_read1, proper_pair, insert_flag, bad_flag, ref_length):
@@ -315,7 +342,7 @@ def compute_mismatches(feature_dict, features, read, ref_length):
     add_mismatches_numba_from_md(feature_dict["mismatches"], md_chars, md_chars.size, read.reference_start, ref_length)
     
 @track_time
-def compute_final_lengths(sum_lengths, count_lengths, ref_length):
+def compute_final_lengths(sum_lengths, count_lengths):
     count_lengths = np.maximum(count_lengths, 1)  # avoid division by zero
     arr = sum_lengths / count_lengths
     arr[count_lengths == 0] = 0
@@ -325,6 +352,8 @@ def compute_final_lengths(sum_lengths, count_lengths, ref_length):
 def get_features_assemblycheck(reads_mapped, ref_length, sequencing_type, output_dir, sample_name, ref_name):    
     features = []
     temporary_features = []
+
+    # Select features depending on sequencing type
     if sequencing_type == "long":
         features.extend(["read_lengths"])
         temporary_features.extend(["sum_read_lengths", "count_read_lengths"])
@@ -333,6 +362,7 @@ def get_features_assemblycheck(reads_mapped, ref_length, sequencing_type, output
         temporary_features.extend(["sum_insert_sizes", "count_insert_sizes", "bad_orientation"])
     features.extend(["left_clippings", "right_clippings", "insertions", "deletions", "mismatches"])
 
+    # Initialize arrays
     feature_dict = {f: np.zeros(ref_length, dtype=np.uint64) for f in features}
     temporary_dict = {f: np.zeros(ref_length, dtype=np.uint64) for f in temporary_features}
 
@@ -350,9 +380,9 @@ def get_features_assemblycheck(reads_mapped, ref_length, sequencing_type, output
         compute_mismatches(feature_dict, features, read, ref_length)
 
     if sequencing_type == "long":
-        feature_dict["read_lengths"] = compute_final_lengths(temporary_dict["sum_read_lengths"], temporary_dict["count_read_lengths"], ref_length)
+        feature_dict["read_lengths"] = compute_final_lengths(temporary_dict["sum_read_lengths"], temporary_dict["count_read_lengths"])
     if sequencing_type == "short-paired":
-        feature_dict["insert_sizes"] = compute_final_lengths(temporary_dict["sum_insert_sizes"], temporary_dict["count_insert_sizes"], ref_length)
+        feature_dict["insert_sizes"] = compute_final_lengths(temporary_dict["sum_insert_sizes"], temporary_dict["count_insert_sizes"])
 
     for feature in features:
         feature_values = compress_signal(feature_dict[feature], ref_length)
@@ -360,16 +390,19 @@ def get_features_assemblycheck(reads_mapped, ref_length, sequencing_type, output
 
 ### Calculating features per contig per sample
 @track_time
-def calculating_features_per_contig_per_sample(module_list, reads_mapped, locus_size, sequencing_type, output_dir, sample_name, ref_name):
-    sequencing_type = "short" if sequencing_type.startswith("short") else "long"
+def calculating_features_per_contig_per_sample(module_list, bam_file, ref, locus_size, sequencing_type, output_dir, sample_name, ref_name):
+    reads_mapped = bam_file.fetch(ref)
+    reads_mapped = list(reads_mapped)  # Convert to list for multiple passes
 
     # Calculate all features
     if "coverage" in module_list:
-        coverage_values = get_feature_coverage(reads_mapped, locus_size, output_dir, sample_name, ref_name)
+        get_feature_coverage(reads_mapped, locus_size, output_dir, sample_name, ref_name)
     if "phagetermini" in module_list:
-        phagetermini_values = get_features_phagetermini(reads_mapped, locus_size, sequencing_type, output_dir, sample_name, ref_name)
+        reads_mapped = bam_file.fetch(ref)
+        get_features_phagetermini(reads_mapped, locus_size, sequencing_type, output_dir, sample_name, ref_name)
     if "assemblycheck" in module_list:
-        assemblycheck_values = get_features_assemblycheck(reads_mapped, locus_size, sequencing_type, output_dir, sample_name, ref_name)
+        reads_mapped = bam_file.fetch(ref)
+        get_features_assemblycheck(reads_mapped, locus_size, sequencing_type, output_dir, sample_name, ref_name)
     
 ### Distributing the calculation for all the contigs in the bam file
 def calculating_features_per_sample(module_list, mapping_file, sequencing_type, output_dir, sample_name):
@@ -378,15 +411,14 @@ def calculating_features_per_sample(module_list, mapping_file, sequencing_type, 
     lengths = [l // 2 for l in bam_file.lengths]  # need to divide by 2 because each contig was doubled for mapping to deal with circularity
 
     for ref, length in zip(references, lengths):
-        # Fetch reads only for this contig
-        reads_iter = bam_file.fetch(ref)
-        calculating_features_per_contig_per_sample(module_list, reads_iter, length, sequencing_type, output_dir, sample_name, ref)
+        calculating_features_per_contig_per_sample(module_list, bam_file, ref, length, sequencing_type, output_dir, sample_name, ref)
 
     bam_file.close()
 
 ### Distributing the calculation for all the bam files (samples)
-def _process_single_sample(list_modules, bam_file, sequencing_type, output_dir):
+def _process_single_sample(list_modules, bam_file, output_dir):
     sample_name = os.path.basename(bam_file).replace(".bam", "")
+    sequencing_type = find_sequencing_type_from_bam(bam_file)
 
     # Calculate features per contig (can still be parallelized with n_contig_cores)
     calculating_features_per_sample(list_modules, bam_file, sequencing_type, output_dir, sample_name)
@@ -394,12 +426,12 @@ def _process_single_sample(list_modules, bam_file, sequencing_type, output_dir):
     # Temporary debugging
     print_timing_summary()
 
-def calculating_all_features_parallel(list_modules, bam_files, sequencing_type, output_dir, n_sample_cores=None):
+def calculating_all_features_parallel(list_modules, bam_files, output_dir, n_sample_cores=None):
     if n_sample_cores is None:
         n_sample_cores = max(1, cpu_count() - 1)
     print(f"Using {n_sample_cores} cores to process {len(bam_files)} samples in parallel...", flush=True)
 
-    args_list = [(list_modules, bam, sequencing_type, output_dir) for bam in bam_files]
+    args_list = [(list_modules, bam, output_dir) for bam in bam_files]
 
     with Pool(processes=n_sample_cores) as pool:
         pool.starmap(_process_single_sample, args_list)
@@ -412,7 +444,6 @@ def main():
     parser = argparse.ArgumentParser(description="Parse input files.")
     parser.add_argument("-t", "--threads", required=True, help="Number of threads available")
     parser.add_argument("-b", "--bam_files", required=True, help="Path to bam file or directory containing mapping files (BAM format)")
-    parser.add_argument("-s", "--sequencing", required=True, choices=["short-paired", "short-single", "long"], help="Type of sequencing (options allowed 'short-paired' and 'short-single' for short-read sequencing and 'long' for long-read sequencing)")
     parser.add_argument("-m", "--modules", required=True, help="List of modules to compute (comma-separated) (options allowed: coverage, phagetermini, assemblycheck)")
     parser.add_argument("-o", "--output_dir", required=True, help="Output directory to store output csv files")
     args = parser.parse_args()
@@ -428,14 +459,13 @@ def main():
     # Getting list of features requested
     # If starts in feature_list replace it by starts_plus, starts_minus, ends_plus, ends_minus
     requested_modules = args.modules.split(",")
-    sequencing_type = args.sequencing
     output_dir = args.output_dir
     os.makedirs(output_dir, exist_ok=True)
     n_cores = int(args.threads)
 
     # Calculating values for all requested features from mapping files
     print("### Calculating values for all requested features from mapping files...", flush=True)
-    calculating_all_features_parallel(requested_modules, bam_files, sequencing_type, output_dir, n_cores)
+    calculating_all_features_parallel(requested_modules, bam_files, output_dir, n_cores)
 
 if __name__ == "__main__":
     main()
