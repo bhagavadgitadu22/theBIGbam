@@ -128,7 +128,8 @@ def save_feature_values_per_contig_per_sample(feature, feature_values, output_di
 ### Functions of coverage module
 @njit
 def calculate_coverage_numba(coverage, starts, ends, ref_length):
-    for i in range(starts.size):
+    n = starts.size
+    for i in range(n):
         start_mod = starts[i] % ref_length
         end_mod = ends[i] % ref_length
 
@@ -136,72 +137,54 @@ def calculate_coverage_numba(coverage, starts, ends, ref_length):
             for j in range(start_mod, end_mod):
                 coverage[j] += 1
         else:
+            # Handle wrap-around for circular contigs
             for j in range(start_mod, ref_length):
                 coverage[j] += 1
             for j in range(0, end_mod):
                 coverage[j] += 1
 
-def get_feature_coverage(reads_mapped, ref_length, output_dir, sample_name, ref_name):    
+def get_feature_coverage(ref_starts, ref_ends, ref_length, output_dir, sample_name, ref_name):
     coverage = np.zeros(ref_length, dtype=np.uint64)
-
-    for read in reads_mapped:
-        blocks = np.array(read.get_blocks(), dtype=np.int32)
-        if blocks.size == 0:
-            return
-        starts = blocks[:, 0]
-        ends = blocks[:, 1]
-        calculate_coverage_numba(coverage, starts, ends, ref_length)
+    calculate_coverage_numba(coverage, ref_starts, ref_ends, ref_length)
 
     coverage_compact = compress_signal(coverage, ref_length)
     save_feature_values_per_contig_per_sample("coverage", coverage_compact, output_dir, sample_name, ref_name)
 
 ### Functions of phagetermini module
-def starts_with_match(read, start):
+def starts_with_match(cigar, md, start):
     """
     Return True if the first aligned base is a match (not clipped, not insertion, not mismatch).
     """
-    if read.is_unmapped or read.cigartuples is None:
+    # Check clipping or insertion at start/end
+    op, length = cigar[0] if start else cigar[-1]
+    if op in (4, 5):  # soft or hard clip
+        return False
+    if op == 1:  # insertion
         return False
 
-    # Check clipping at start
-    first_op, _ = read.cigartuples[0]
-    if not start:
-        first_op, _ = read.cigartuples[-1]  # check end if start is False
-    if first_op in (4, 5):  # soft or hard clip
-        return False
-    if first_op == 1:  # insertion
-        return False
+    # Check MD tag for match at start/end
+    # MD string: digits represent matches, letters/deletions mismatches
+    val = md[0] if start else md[-1]
+    return val > 0
 
-    # Now check MD tag
-    try:
-        md = read.get_tag("MD")
-    except KeyError:
-        raise ValueError("No MD tag present in BAM")
+def calculate_reads_starts_and_ends(start, end, is_reverse, temporary_dict, ref_length):
+    start = start % ref_length
+    end = end % ref_length
 
-    md_status = md[0].isdigit()
-    if not start:
-        md_status = md[-1].isdigit()  # check end if start is False
-    return md_status
+    # Update coverage
+    if start <= end:
+        temporary_dict["coverage_reduced"][start:end+1] += 1
+    else:
+        temporary_dict["coverage_reduced"][start:ref_length] += 1
+        temporary_dict["coverage_reduced"][0:end+1] += 1
 
-def calculate_reads_starts_and_ends(read, temporary_dict, ref_length):
-    if starts_with_match(read, True) and starts_with_match(read, False):
-        start = read.reference_start % ref_length
-        end = (read.reference_end - 1) % ref_length
-
-        s = read.reference_start
-        e = read.reference_end
-        if s < ref_length and e > ref_length:
-            temporary_dict["coverage_reduced"][s:ref_length] += 1
-            temporary_dict["coverage_reduced"][0:e % ref_length] += 1
-        else:
-            temporary_dict["coverage_reduced"][s % ref_length:e % ref_length] += 1
-
-        if read.is_reverse:
-            temporary_dict["start_minus"][start] += 1
-            temporary_dict["end_minus"][end] += 1
-        else:
-            temporary_dict["start_plus"][start] += 1
-            temporary_dict["end_plus"][end] += 1
+    # Update strand-specific starts/ends
+    if is_reverse:
+        temporary_dict["start_minus"][start] += 1
+        temporary_dict["end_minus"][end] += 1
+    else:
+        temporary_dict["start_plus"][start] += 1
+        temporary_dict["end_plus"][end] += 1
 
 def compute_final_starts_ends_and_tau(feature_dict, temporary_dict, sequencing_type, ref_length):
     feature_dict["coverage_reduced"] = temporary_dict["coverage_reduced"]
@@ -218,18 +201,28 @@ def compute_final_starts_ends_and_tau(feature_dict, temporary_dict, sequencing_t
     feature_dict["tau"] = tau
 
 @track_time
-def get_features_phagetermini(reads_mapped, ref_length, sequencing_type, output_dir, sample_name, ref_name):    
+def get_features_phagetermini(ref_starts, ref_ends, is_reverse, cigars, md_list, 
+                              sequencing_type, ref_length, output_dir, sample_name, ref_name):
     features = ["coverage_reduced", "reads_starts", "reads_ends", "tau"]
-    temporary_features = ["coverage_reduced", "start_plus", "start_minus", "end_plus", "end_minus", "tau"]
+    temporary_features = ["coverage_reduced", "start_plus", "start_minus", "end_plus", "end_minus"]
 
     feature_dict = {f: np.zeros(ref_length, dtype=np.uint64) for f in features}
     temporary_dict = {f: np.zeros(ref_length, dtype=np.uint64) for f in temporary_features}
 
-    for read in reads_mapped:
-        calculate_reads_starts_and_ends(read, temporary_dict, ref_length)
+    # Iterate through preprocessed reads
+    for i in range(len(ref_starts)):
+        cigar = cigars[i]
+        md = md_list[i]
+        if starts_with_match(cigar, md, start=True) and starts_with_match(cigar, md, start=False):
+            start = ref_starts[i]
+            end = ref_ends[i]
+            is_reverse_flag = is_reverse[i]
+            calculate_reads_starts_and_ends(start, end, is_reverse_flag, temporary_dict, ref_length)
 
+    # Compute tau
     compute_final_starts_ends_and_tau(feature_dict, temporary_dict, sequencing_type, ref_length)
 
+    # Save features
     for feature in features:
         feature_values = compress_signal(feature_dict[feature], ref_length)
         save_feature_values_per_contig_per_sample(feature, feature_values, output_dir, sample_name, ref_name)
@@ -390,16 +383,72 @@ def get_features_assemblycheck(reads_mapped, ref_length, sequencing_type, output
 
 ### Calculating features per contig per sample
 @track_time
+def preprocess_reads(reads_mapped, modules):
+    ref_starts, ref_ends = [], []
+    query_lengths, template_lengths = [], []
+    is_read1, is_proper_pair, is_paired, is_reverse = [], [], [], []
+    cigars, has_md, md_list, md_lengths = [], [], [], []
+
+    for read in reads_mapped:
+        if read.is_unmapped:
+            continue
+
+        ref_starts.append(read.reference_start)
+        ref_ends.append(read.reference_end)
+        query_lengths.append(read.query_length)
+        template_lengths.append(abs(read.template_length))
+        is_read1.append(read.is_read1)
+        is_proper_pair.append(read.is_proper_pair)
+        is_paired.append(read.is_paired)
+        is_reverse.append(read.is_reverse)
+
+        # CIGAR as array of ops/lengths
+        cigars.append(np.array(read.cigartuples, dtype=np.int32) if read.cigartuples else np.zeros((0,2), dtype=np.int32))
+
+        # Only store MD tags if mismatches will be computed
+        if {"phagetermini", "assemblycheck"}.intersection(modules):
+            if read.has_tag("MD"):
+                md_bytes = np.frombuffer(read.get_tag("MD").encode("ascii"), dtype=np.uint8)
+                md_list.append(md_bytes)
+                md_lengths.append(len(md_bytes))
+                has_md.append(True)
+            else:
+                md_list.append(np.zeros(0, dtype=np.uint8))
+                md_lengths.append(0)
+                has_md.append(False)
+
+    # Convert all lists to numpy arrays
+    ref_starts = np.array(ref_starts, dtype=np.int32)
+    ref_ends = np.array(ref_ends, dtype=np.int32)
+    query_lengths = np.array(query_lengths, dtype=np.int32)
+    template_lengths = np.array(template_lengths, dtype=np.int32)
+    is_read1 = np.array(is_read1, dtype=np.bool_)
+    is_proper_pair = np.array(is_proper_pair, dtype=np.bool_)
+    is_paired = np.array(is_paired, dtype=np.bool_)
+    is_reverse = np.array(is_reverse, dtype=np.bool_)
+    cigars = np.array(cigars, dtype=object)
+    has_md = np.array(has_md, dtype=np.bool_)
+    md_lengths = np.array(md_lengths, dtype=np.int32)
+    md_list = np.array(md_list, dtype=object)
+
+    return (ref_starts, ref_ends, query_lengths, template_lengths,
+            is_read1, is_proper_pair, is_paired, is_reverse,
+            cigars, has_md, md_list, md_lengths)
+
+@track_time
 def calculating_features_per_contig_per_sample(module_list, bam_file, ref, locus_size, sequencing_type, output_dir, sample_name, ref_name):
     reads_mapped = bam_file.fetch(ref)
-    reads_mapped = list(reads_mapped)  # Convert to list for multiple passes
+    # Save relevant info from bam file
+    (ref_starts, ref_ends, query_lengths, template_lengths,
+     is_read1, is_proper_pair, is_paired, is_reverse,
+     cigars, has_md, md_list, md_lengths) = preprocess_reads(reads_mapped, module_list)
 
     # Calculate all features
     if "coverage" in module_list:
-        get_feature_coverage(reads_mapped, locus_size, output_dir, sample_name, ref_name)
+        get_feature_coverage(ref_starts, ref_ends, locus_size, output_dir, sample_name, ref_name)
     if "phagetermini" in module_list:
-        reads_mapped = bam_file.fetch(ref)
-        get_features_phagetermini(reads_mapped, locus_size, sequencing_type, output_dir, sample_name, ref_name)
+        get_features_phagetermini(ref_starts, ref_ends, is_reverse, cigars, md_list, 
+                                  sequencing_type, locus_size, output_dir, sample_name, ref_name)
     if "assemblycheck" in module_list:
         reads_mapped = bam_file.fetch(ref)
         get_features_assemblycheck(reads_mapped, locus_size, sequencing_type, output_dir, sample_name, ref_name)
