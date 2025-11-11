@@ -4,11 +4,19 @@ import csv
 import re
 
 # --- Args ---
-if len(sys.argv) != 9:
-    print("Usage: python add_variables.py <database.db> <variable_name> <status> <type> <color> <alpha> <size> <title> <data.csv>")
+print(len(sys.argv), flush=True)
+if len(sys.argv) != 7:
+    print("Usage: python add_variable.py <database.db> <variable_name> <type> <color> <title> <data.csv>")
     sys.exit(1)
 
-DB, var_name, status, vtype, color, alpha, size, title, csv_file = sys.argv[1:9]
+DB, var_name, vtype, color, title, csv_file = sys.argv[1:9]
+
+if vtype == "bars":
+    alpha = 0.5
+    size = 3
+elif vtype == "curve":
+    alpha = 0.7
+    size = 1
 
 # --- Validate variable name ---
 if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", var_name):
@@ -37,9 +45,9 @@ try:
 
     # --- Create new variable ---
     cur.execute("""
-    INSERT INTO Variable (Variable_name, Status, Type, Color, Size, Feature_table_name)
-    VALUES (?, ?, ?, ?, ?, ?)
-    """, (var_name, status, vtype, color, float(size), feature_table))
+    INSERT INTO Variable (Variable_name, Status, Type, Color, Alpha, Size, Title, Feature_table_name)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    """, (var_name, "external", vtype, color, float(alpha), float(size), title, feature_table))
 
     # --- Create associated feature table ---
     cur.execute(f"""

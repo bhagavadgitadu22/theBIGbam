@@ -4,14 +4,14 @@ from bokeh.models import Range1d,ColumnDataSource, HoverTool
 from bokeh.layouts import column, gridplot
 from bokeh.plotting import output_file, save, figure
 from dna_features_viewer import BiopythonTranslator
-import constants
+import colors_for_genbank
 
 ### Custom translator for coloring and labeling features (with DNAFeaturesViewer python library)
 class CustomTranslator(BiopythonTranslator):
     def compute_feature_color(self, feature):
         if ANNOTATION_TOOL == "pharokka":
             function = feature.qualifiers.get("function", [""])[0].lower()
-            color_scheme = constants.PHAROKKA_COLORS
+            color_scheme = colors_for_genbank.PHAROKKA_COLORS
             for key, color in color_scheme.items():
                 if key in function:
                     return color
@@ -164,11 +164,11 @@ def generate_html_plots(genbank_path, bam_files, input_csv_dir, requested_featur
                 feature_dict["filename"] = os.path.join(input_csv_dir, f"{feature}_values_for_{locus_name}_in_{sample_name}.csv")
                 
                 # Subplot characteristics
-                feature_dict["type"] = constants.FEATURE_SUBPLOTS[feature]["type"]
-                feature_dict["color"] = constants.FEATURE_SUBPLOTS[feature]["color"]
-                feature_dict["alpha"] = constants.FEATURE_SUBPLOTS[feature]["alpha"]
-                feature_dict["size"] = constants.FEATURE_SUBPLOTS[feature]["size"]
-                feature_dict["title"] = constants.FEATURE_SUBPLOTS[feature]["title"]
+                feature_dict["type"] = colors_for_genbank.FEATURE_SUBPLOTS[feature]["type"]
+                feature_dict["color"] = colors_for_genbank.FEATURE_SUBPLOTS[feature]["color"]
+                feature_dict["alpha"] = colors_for_genbank.FEATURE_SUBPLOTS[feature]["alpha"]
+                feature_dict["size"] = colors_for_genbank.FEATURE_SUBPLOTS[feature]["size"]
+                feature_dict["title"] = colors_for_genbank.FEATURE_SUBPLOTS[feature]["title"]
                 
                 # Initialize subplot values
                 feature_dict["x"] = []
@@ -237,7 +237,7 @@ def main():
         for custom_var in custom_variables.split(","):
             filename, type_picked, color, title = custom_var.split(":")
             custom_charac = {"filename": filename, "x": [], "y": []}
-            custom_charac.update(constants.config_feature_subplot(type_picked, color, title))
+            custom_charac.update(colors_for_genbank.config_feature_subplot(type_picked, color, title))
             custom_characs.append(custom_charac)
     
     # Optional plotting parameters

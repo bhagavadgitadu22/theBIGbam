@@ -1,14 +1,14 @@
-import argparse, sys, os, csv
+import argparse, sys, os
 from multiprocessing import Pool, cpu_count
-from pyexpat import features
 from numba import njit
 import numpy as np
 import pysam
-import constants
 
 import time
 from functools import wraps
 from collections import defaultdict
+import sqlite3
+import subprocess
 
 ### Measuring time spent in each function
 function_times = defaultdict(float)
@@ -112,31 +112,44 @@ def compress_signal(type_picked, feature_values, ref_length, step, z_thresh, der
     return {"x": x[keep_idx], "y": feature_values[keep_idx]}
 
 ### Save data computed per sample
-# Will be replaced by calls to database in future version
-def save_feature_values_per_contig_per_sample(feature, feature_values, output_dir, sample_name, ref_name):
-    # Define CSV headers
-    fieldnames = ["sample", "contig", "position", "value"]
+def add_sample(conn, sample_name):
+    cur = conn.cursor()
+    cur.execute("INSERT OR IGNORE INTO Sample (Sample_name) VALUES (?)", (sample_name,))
+    conn.commit()
+    cur.execute("SELECT Sample_id FROM Sample WHERE Sample_name=?", (sample_name,))
+    row = cur.fetchone()
+    return row[0] if row else None
 
-    output_file = os.path.join(output_dir, feature+"_values_for_"+ref_name+"_in_"+sample_name+".csv")
-    with open(output_file, mode="w", newline="") as csvfile:
-        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-        writer.writeheader()
+def add_contig(conn, contig_name, contig_length):
+    cur = conn.cursor()
+    cur.execute("INSERT OR IGNORE INTO Contig (Contig_name, Contig_length) VALUES (?, ?)", (contig_name, contig_length))
+    # If contig already exists, update length if different
+    cur.execute("SELECT Contig_id, Contig_length FROM Contig WHERE Contig_name=?", (contig_name,))
+    row = cur.fetchone()
+    if row and row[1] != contig_length:
+        cur.execute("UPDATE Contig SET Contig_length=? WHERE Contig_name=?", (contig_length, contig_name))
+    conn.commit()
+    cur.execute("SELECT Contig_id FROM Contig WHERE Contig_name=?", (contig_name,))
+    return cur.fetchone()[0]
 
-        xs = feature_values.get("x", [])
-        ys = feature_values.get("y", [])
-        # Ensure lengths match
-        for pos, val in zip(xs, ys):
-            writer.writerow({
-                "sample": sample_name,
-                "contig": ref_name,
-                "position": pos,
-                "value": val
-            })
+def compress_and_write_features(feature, feature_values, db_conn, sample_id, contig_id, ref_length, step, z_thresh, deriv_thresh, max_points):
+    # Read variable metadata from DB instead of constants
+    cur = db_conn.cursor()
 
-def save_features_from_module(feature, feature_values, output_dir, sample_name, ref_name, ref_length, step, z_thresh, deriv_thresh, max_points):
-    type_picked = constants.FEATURE_SUBPLOTS[feature]["type_picked"]
+    cur.execute("SELECT Type, Feature_table_name FROM Variable WHERE Variable_name=?", (feature,))
+    row = cur.fetchone()
+    type_picked, feature_table = row
+
+    # Compress the signal to limit points
     feature_compressed = compress_signal(type_picked, feature_values, ref_length, step, z_thresh, deriv_thresh, max_points)
-    save_feature_values_per_contig_per_sample(feature, feature_compressed, output_dir, sample_name, ref_name)
+
+    xs = feature_compressed.get("x", [])
+    ys = feature_compressed.get("y", [])
+    to_insert = [(contig_id, sample_id, int(x), float(y)) for x, y in zip(xs, ys)]
+
+    if to_insert:
+        cur.executemany(f"INSERT INTO {feature_table} (Contig_id, Sample_id, Position, Value) VALUES (?, ?, ?, ?)", to_insert)
+        db_conn.commit()
 
 ### Functions of coverage module
 @njit
@@ -157,12 +170,12 @@ def calculate_coverage_numba(coverage, starts, ends, ref_length):
                 coverage[j] += 1
 
 @track_time
-def get_feature_coverage(ref_starts, ref_ends, ref_length, output_dir, sample_name, ref_name, step, z_thresh, deriv_thresh, max_points):
+def get_feature_coverage(ref_starts, ref_ends, ref_length, db_conn, sample_id, contig_id, step, z_thresh, deriv_thresh, max_points):
     coverage = np.zeros(ref_length, dtype=np.uint64)
     calculate_coverage_numba(coverage, ref_starts, ref_ends, ref_length)
 
-    coverage_compact = compress_signal("curve", coverage, ref_length, step, z_thresh, deriv_thresh, max_points)
-    save_feature_values_per_contig_per_sample("coverage", coverage_compact, output_dir, sample_name, ref_name)
+    # Save into DB
+    compress_and_write_features("coverage", coverage, db_conn, sample_id, contig_id, ref_length, step, z_thresh, deriv_thresh, max_points)
 
 ### Functions of phagetermini module
 def starts_with_match(cigar, md, start):
@@ -215,9 +228,8 @@ def compute_final_starts_ends_and_tau(feature_dict, temporary_dict, sequencing_t
     feature_dict["tau"] = tau
 
 @track_time
-def get_features_phagetermini(ref_starts, ref_ends, is_reverse, cigars, md_list, 
-                              sequencing_type, ref_length, output_dir, sample_name, ref_name,
-                              step, z_thresh, deriv_thresh, max_points):
+def get_features_phagetermini(ref_starts, ref_ends, is_reverse, cigars, md_list, sequencing_type, ref_length, 
+                              db_conn, sample_id, contig_id, step, z_thresh, deriv_thresh, max_points):
     features = ["coverage_reduced", "reads_starts", "reads_ends", "tau"]
     temporary_features = ["coverage_reduced", "start_plus", "start_minus", "end_plus", "end_minus"]
 
@@ -237,10 +249,9 @@ def get_features_phagetermini(ref_starts, ref_ends, is_reverse, cigars, md_list,
     # Compute tau
     compute_final_starts_ends_and_tau(feature_dict, temporary_dict, sequencing_type, ref_length)
 
-    # Save features
+    # Save features into DB
     for feature in features:
-        save_features_from_module(feature, feature_dict[feature], output_dir, sample_name, ref_name, ref_length, 
-                                  step, z_thresh, deriv_thresh, max_points)
+        compress_and_write_features(feature, feature_dict[feature], db_conn, sample_id, contig_id, ref_length, step, z_thresh, deriv_thresh, max_points)
 
 ### Functions of assemblycheck module
 @njit
@@ -308,10 +319,9 @@ def compute_final_lengths(sum_lengths, count_lengths):
     return arr.astype(np.float32)
 
 @track_time
-def get_features_assemblycheck(ref_starts, ref_ends, query_lengths, template_lengths, is_read1, 
-                               is_proper_pair, is_paired, is_reverse, cigars, has_md, md_list, md_lengths,
-                               sequencing_type, ref_length, output_dir, sample_name, ref_name,
-                               step, z_thresh, deriv_thresh, max_points):
+def get_features_assemblycheck(ref_starts, ref_ends, query_lengths, template_lengths, is_read1, is_proper_pair, 
+                               cigars, has_md, md_list, md_lengths, sequencing_type, ref_length, 
+                               db_conn, sample_id, contig_id, step, z_thresh, deriv_thresh, max_points):
     features = []
     temporary_features = []
 
@@ -368,10 +378,9 @@ def get_features_assemblycheck(ref_starts, ref_ends, query_lengths, template_len
     if sequencing_type == "short-paired":
         feature_dict["insert_sizes"] = compute_final_lengths(temporary_dict["sum_insert_sizes"], temporary_dict["count_insert_sizes"])
 
-    # --- Save features ---
+    # --- Save features into DB ---
     for feature in features:
-        save_features_from_module(feature, feature_dict[feature], output_dir, sample_name, ref_name, ref_length,
-                                  step, z_thresh, deriv_thresh, max_points)
+        compress_and_write_features(feature, feature_dict[feature], db_conn, sample_id, contig_id, ref_length, step, z_thresh, deriv_thresh, max_points)
 
 ### Calculating features per contig per sample
 @track_time
@@ -424,14 +433,12 @@ def preprocess_reads(reads_mapped, modules):
     md_lengths = np.array(md_lengths, dtype=np.int32)
     md_list = np.array(md_list, dtype=object)
 
-    return (ref_starts, ref_ends, query_lengths, template_lengths,
-            is_read1, is_proper_pair, is_paired, is_reverse,
-            cigars, has_md, md_list, md_lengths)
+    return (ref_starts, ref_ends, query_lengths, template_lengths, is_read1, is_proper_pair, is_paired, is_reverse, cigars, has_md, md_list, md_lengths)
 
 @track_time
-def calculating_features_per_contig_per_sample(module_list, bam_file, ref, locus_size, sequencing_type, output_dir, sample_name, ref_name,
-                                               step, z_thresh, deriv_thresh, max_points):
-    reads_mapped = bam_file.fetch(ref)
+def calculating_features_per_contig_per_sample(module_list, sample_name, bam_file, sequencing_type, ref_name, locus_size, 
+                                               db_conn, sample_id, contig_id, step, z_thresh, deriv_thresh, max_points):
+    reads_mapped = bam_file.fetch(ref_name)
     # Save relevant info from bam file
     (ref_starts, ref_ends, query_lengths, template_lengths,
      is_read1, is_proper_pair, is_paired, is_reverse,
@@ -439,50 +446,50 @@ def calculating_features_per_contig_per_sample(module_list, bam_file, ref, locus
 
     # Calculate all features
     if {"coverage", "assemblycheck"}.intersection(module_list):
-        get_feature_coverage(ref_starts, ref_ends, locus_size, output_dir, sample_name, ref_name, 
-                             step, z_thresh, deriv_thresh, max_points)
+        get_feature_coverage(ref_starts, ref_ends, locus_size, db_conn, sample_id, contig_id, step, z_thresh, deriv_thresh, max_points)
     if "phagetermini" in module_list:
-        get_features_phagetermini(ref_starts, ref_ends, is_reverse, cigars, md_list, 
-                                  sequencing_type, locus_size, output_dir, sample_name, ref_name,
-                                  step, z_thresh, deriv_thresh, max_points)
+        get_features_phagetermini(ref_starts, ref_ends, is_reverse, cigars, md_list, sequencing_type, locus_size, 
+                                  db_conn, sample_id, contig_id, step, z_thresh, deriv_thresh, max_points)
     if "assemblycheck" in module_list:
-        get_features_assemblycheck(ref_starts, ref_ends, query_lengths, template_lengths, is_read1, 
-                                   is_proper_pair, is_paired, is_reverse, cigars, has_md, md_list, md_lengths,
-                                   sequencing_type, locus_size, output_dir, sample_name, ref_name,
-                                   step, z_thresh, deriv_thresh, max_points)
+        get_features_assemblycheck(ref_starts, ref_ends, query_lengths, template_lengths, is_read1, is_proper_pair, cigars, has_md, md_list, md_lengths, 
+                                   sequencing_type, locus_size, db_conn, sample_id, contig_id, step, z_thresh, deriv_thresh, max_points)
 
 ### Distributing the calculation for all the contigs in the bam file
 @track_time
-def calculating_features_per_sample(module_list, mapping_file, sequencing_type, output_dir, sample_name,
-                                    step, z_thresh, deriv_thresh, max_points):
+def calculating_features_per_sample(module_list, mapping_file, db_conn, step, z_thresh, deriv_thresh, max_points):
     bam_file = pysam.AlignmentFile(mapping_file, "rb")
     references = bam_file.references
     lengths = [l // 2 for l in bam_file.lengths]  # need to divide by 2 because each contig was doubled for mapping to deal with circularity
 
-    for ref, length in zip(references, lengths):
-        calculating_features_per_contig_per_sample(module_list, bam_file, ref, length, sequencing_type, output_dir, sample_name, ref,
-                                                   step, z_thresh, deriv_thresh, max_points)
+    # Save sample and contig names into DB
+    sample_name = os.path.basename(mapping_file).replace(".bam", "")
+    sequencing_type = find_sequencing_type_from_bam(mapping_file)
 
+    sample_id = add_sample(db_conn, sample_name)
+    for ref, length in zip(references, lengths):
+        contig_id = add_contig(db_conn, ref, length)
+        calculating_features_per_contig_per_sample(module_list, sample_name, bam_file, sequencing_type, ref, length, 
+                                                   db_conn, sample_id, contig_id, step, z_thresh, deriv_thresh, max_points)
     bam_file.close()
 
 ### Distributing the calculation for all the bam files (samples)
-def _process_single_sample(list_modules, bam_file, output_dir, step, z_thresh, deriv_thresh, max_points):
-    sample_name = os.path.basename(bam_file).replace(".bam", "")
-    sequencing_type = find_sequencing_type_from_bam(bam_file)
-
-    # Calculate features per contig (can still be parallelized with n_contig_cores)
-    calculating_features_per_sample(list_modules, bam_file, sequencing_type, output_dir, sample_name,
-                                    step, z_thresh, deriv_thresh, max_points)
+def _process_single_sample(list_modules, bam_file, db_path, step, z_thresh, deriv_thresh, max_points):
+    # Each worker opens its own DB connection
+    conn = sqlite3.connect(db_path)
+    try:
+        calculating_features_per_sample(list_modules, bam_file, conn, step, z_thresh, deriv_thresh, max_points)
+    finally:
+        conn.close()
 
     # Temporary debugging
     print_timing_summary()
 
-def calculating_all_features_parallel(list_modules, bam_files, output_dir, step, z_thresh, deriv_thresh, max_points, n_sample_cores=None):
+def calculating_all_features_parallel(list_modules, bam_files, db_path, step, z_thresh, deriv_thresh, max_points, n_sample_cores=None):
     if n_sample_cores is None:
         n_sample_cores = max(1, cpu_count() - 1)
     print(f"Using {n_sample_cores} cores to process {len(bam_files)} samples in parallel...", flush=True)
 
-    args_list = [(list_modules, bam, output_dir, step, z_thresh, deriv_thresh, max_points) for bam in bam_files]
+    args_list = [(list_modules, bam, db_path, step, z_thresh, deriv_thresh, max_points) for bam in bam_files]
 
     with Pool(processes=n_sample_cores) as pool:
         pool.starmap(_process_single_sample, args_list)
@@ -496,8 +503,7 @@ def main():
     parser.add_argument("-t", "--threads", required=True, help="Number of threads available")
     parser.add_argument("-b", "--bam_files", required=True, help="Path to bam file or directory containing mapping files (BAM format)")
     parser.add_argument("-m", "--modules", required=True, help="List of modules to compute (comma-separated) (options allowed: coverage, phagetermini, assemblycheck)")
-    parser.add_argument("-o", "--output_dir", required=True, help="Output directory to store output csv files")
-    parser.add_argument("--subsample", type=int, default=100, help="Only consider a coverage depth of N to speed up calculations")
+    parser.add_argument("-d", "--db", required=True, help="Path to sqlite database file to store results")
     parser.add_argument("--step", type=int, default=50, help="Step size for compression (keep every Nth point in addition to the outliers)")
     parser.add_argument("--outlier_threshold", type=int, default=3, help="Points beyond mean+std*N are kept as outliers")
     parser.add_argument("--derivative_threshold", type=int, default=3, help="Points were the derivative is beyond mean+std*N are kept as outliers")
@@ -515,8 +521,6 @@ def main():
     # Getting list of features requested
     # If starts in feature_list replace it by starts_plus, starts_minus, ends_plus, ends_minus
     requested_modules = args.modules.split(",")
-    output_dir = args.output_dir
-    os.makedirs(output_dir, exist_ok=True)
 
     # TO-CONSIDER: implement subsampling
     # No subsampling for a certain coverage depth per sample for now
@@ -528,14 +532,20 @@ def main():
     deriv_thresh = args.derivative_threshold
     max_points = args.max_points
 
+    # Number of cores to use for multithreading on samples
+    # TO-CONSIDER: implement also multithreading on contigs within each sample
     n_cores = int(args.threads)
 
+    # Running generate_database.py to create database
+    db_path = args.db
+    subprocess.run([sys.executable, os.path.join(os.path.dirname(__file__), "generate_database.py"), db_path], check=True)
+
     # Calculating values for all requested features from mapping files
-    print("### Calculating values for all requested features from mapping files...", flush=True)
-    calculating_all_features_parallel(requested_modules, bam_files, output_dir, step, z_thresh, deriv_thresh, max_points, n_cores)
+    print("Calculating values for all requested features from mapping files...", flush=True)
+    calculating_all_features_parallel(requested_modules, bam_files, db_path, step, z_thresh, deriv_thresh, max_points, n_cores)
 
 if __name__ == "__main__":
     start_time = time.perf_counter()
     main()
     end_time = time.perf_counter()
-    print(f"Total execution time: {end_time - start_time:.2f} seconds", flush=True)
+    print(f"\nTotal execution time: {end_time - start_time:.2f} seconds", flush=True)
