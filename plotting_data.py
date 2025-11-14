@@ -26,37 +26,58 @@ class CustomTranslator(BiopythonTranslator):
         return feature.qualifiers.get("product", [])
     
 ### Plotting functions
-def make_bokeh_subplot(xx, yy, width, height, x_range, type_picked, color, alpha, size, title):
+def make_bokeh_subplot(feature_dict, width, height, x_range):
     p = figure(
         width=width,
         height=height,
-        title=title,
         x_range=x_range,
         tools="xpan,xwheel_zoom,reset,save"
     )
-    source = ColumnDataSource(data=dict(x=xx, y=yy))
+            
+    for feature in feature_dict:
+        data_feature = feature_dict[feature]
+        xx = data_feature["x"]
+        yy = data_feature["y"]
+        type_picked = data_feature["type"]
+        color = data_feature["color"]
+        alpha = data_feature["alpha"]
+        fill_alpha = data_feature["fill_alpha"]
+        size = data_feature["size"]
+        title = data_feature["title"]
 
-    # Part specific to the type of subplot
-    if type_picked == "curve":
-        p.line(
-            x='x',
-            y='y',
-            source=source,
-            line_color=color,
-            line_alpha=alpha,
-            line_width=size,
-        )
-    elif type_picked == "bars":
         source = ColumnDataSource(data=dict(x=xx, y=yy))
-        p.vbar(
-            x='x',
-            bottom=0,
-            top='y',
-            source=source,
-            color=color,
-            alpha=alpha,
-            width=size
-        )
+
+        # Part specific to the type of subplot
+        if type_picked == "curve":
+            p.varea(
+                x='x',
+                y1=0,
+                y2='y',
+                source=source,
+                fill_color=color,
+                fill_alpha=fill_alpha,
+                legend_label = title
+            )
+            p.line(
+                x='x',
+                y='y',
+                source=source,
+                line_color=color,
+                line_alpha=alpha,
+                line_width=size,
+                legend_label = title
+            )
+        elif type_picked == "bars":
+            p.vbar(
+                x='x',
+                bottom=0,
+                top='y',
+                source=source,
+                color=color,
+                alpha=alpha,
+                width=size,
+                legend_label = title
+            )
 
     # Add hover
     hover = HoverTool(tooltips=[("Position", "@x"), ("Number", "@y")], mode='vline')
@@ -72,12 +93,45 @@ def make_bokeh_subplot(xx, yy, width, height, x_range, type_picked, color, alpha
     p.yaxis.axis_label_standoff = 0
     p.ygrid.grid_line_alpha = 0.2
     p.yaxis.axis_label = None
-    
+
     p.outline_line_color = None  # hides top/right borders
     p.min_border_left = 40
     p.min_border_right = 10
 
+    p.legend.location = "top_left"
+    if len(feature_dict) > 1:
+        p.legend.click_policy="hide"
+
     return p
+
+### Function to get features of one variable
+def get_feature_data(cur, feature, contig_id, sample_id):
+    feature_dict = {} 
+
+    # Query Variable table to get rendering info and feature table name
+    cur.execute("SELECT Type, Color, Alpha, Fill_alpha, Size, Title, Feature_table_name FROM Variable WHERE Variable_name=?", (feature,))
+    row = cur.fetchone()
+
+    type_picked, color, alpha, fill_alpha, size, title, feature_table = row
+    feature_dict["type"] = type_picked
+    feature_dict["color"] = color
+    feature_dict["alpha"] = alpha
+    feature_dict["fill_alpha"] = fill_alpha
+    feature_dict["size"] = size
+    feature_dict["title"] = title
+    feature_dict["x"] = []
+    feature_dict["y"] = []
+
+    # Query feature table for this sample and contig
+    try:
+        cur.execute(f"SELECT Position, Value FROM {feature_table} WHERE Sample_id=? AND Contig_id=? ORDER BY Position", (sample_id, contig_id))
+        rows = cur.fetchall()
+        feature_dict["x"] = [r[0] for r in rows]
+        feature_dict["y"] = [r[1] for r in rows]
+    except Exception as e:
+        print(f"WARNING: Could not read feature table {feature_table}: {e}", flush=True)
+
+    return feature_dict
 
 ### Function to generate one HTML plot per locus
 def generate_bokeh_plot(db_path, requested_features, contig_name, sample_name, max_visible_width, subplot_size):
@@ -138,37 +192,32 @@ def generate_bokeh_plot(db_path, requested_features, contig_name, sample_name, m
     subplots = []
     for feature in requested_features:
         feature_dict = {}
-        # Query Variable table to get rendering info and feature table name
-        cur.execute("SELECT Type, Color, Alpha, Size, Title, Feature_table_name FROM Variable WHERE Variable_name=?", (feature,))
-        row = cur.fetchone()
-
-        type_picked, color, alpha, size, title, feature_table = row
-        feature_dict["type"] = type_picked
-        feature_dict["color"] = color
-        feature_dict["alpha"] = alpha
-        feature_dict["size"] = size
-        feature_dict["title"] = title
-        feature_dict["x"] = []
-        feature_dict["y"] = []
-
-        # Query feature table for this sample and contig
-        try:
-            cur.execute(f"SELECT Position, Value FROM {feature_table} WHERE Sample_id=? AND Contig_id=? ORDER BY Position", (sample_id, contig_id))
-            rows = cur.fetchall()
-            feature_dict["x"] = [r[0] for r in rows]
-            feature_dict["y"] = [r[1] for r in rows]
-        except Exception as e:
-            print(f"WARNING: Could not read feature table {feature_table}: {e}", flush=True)
-
-        # --- Prepare subplots
-        if len(feature_dict["x"]) == 0:
-            continue
-
-        subplot_feature = make_bokeh_subplot(feature_dict["x"], feature_dict["y"], 
-                                             max_visible_width, subplot_size, shared_xrange,
-                                             type_picked, color, alpha, size, title)
-        if subplot_feature is not None:
-            subplots.append(subplot_feature)
+        
+        if feature in ["clippings", "indels", "reads_ends"]:
+            if feature == "clippings":
+                feature_dict["right_clippings"] = get_feature_data(cur, "right_clippings", contig_id, sample_id)
+                feature_dict["left_clippings"] = get_feature_data(cur, "left_clippings", contig_id, sample_id)
+            elif feature == "indels":
+                feature_dict["insertions"] = get_feature_data(cur, "insertions", contig_id, sample_id)
+                feature_dict["deletions"] = get_feature_data(cur, "deletions", contig_id, sample_id)
+            elif feature == "reads_ends":
+                feature_dict["reads_starts"] = get_feature_data(cur, "reads_starts", contig_id, sample_id)
+                feature_dict["reads_ends"] = get_feature_data(cur, "reads_ends", contig_id, sample_id)
+            
+            if all(len(vals["x"]) == 0 for vals in feature_dict.values()):
+                continue
+            subplot_feature = make_bokeh_subplot(feature_dict, max_visible_width, subplot_size, shared_xrange)
+            if subplot_feature is not None:
+                subplots.append(subplot_feature)
+ 
+        else:            
+            feature_dict[feature] = get_feature_data(cur, feature, contig_id, sample_id)
+            
+            if len(feature_dict[feature]["x"]) == 0:
+                continue
+            subplot_feature = make_bokeh_subplot(feature_dict, max_visible_width, subplot_size, shared_xrange)
+            if subplot_feature is not None:
+                subplots.append(subplot_feature)
 
     conn.close()
 
@@ -204,9 +253,9 @@ def parse_requested_features(list_features):
         if feature == "coverage":
             features.append("coverage")
         elif feature == "assemblycheck":
-            features.extend(["read_lengths", "insert_sizes", "bad_orientations", "left_clippings", "right_clippings", "insertions", "deletions", "mismatches"])
+            features.extend(["read_lengths", "insert_sizes", "bad_orientations", "clippings", "indels", "mismatches"])
         elif feature == "phagetermini":
-            features.extend(["coverage_reduced", "reads_starts", "reads_ends", "tau"])
+            features.extend(["coverage_reduced", "reads_ends", "tau"])
         else:
             features.append(feature)
     return(features)
@@ -240,7 +289,6 @@ def main():
     # Optional plotting parameters
     global ANNOTATION_TOOL
     ANNOTATION_TOOL = args.color if args.color else "other"
-    print(ANNOTATION_TOOL, flush=True)
     max_visible_width = int(args.plot_width)
     subplot_size = int(args.subplot_height)
 

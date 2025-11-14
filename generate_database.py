@@ -50,6 +50,7 @@ CREATE TABLE Variable (
     Type TEXT,
     Color TEXT,
     Alpha REAL,
+    Fill_alpha REAL,
     Size REAL,
     Title TEXT,
     Feature_table_name TEXT
@@ -58,37 +59,38 @@ CREATE TABLE Variable (
 
 # Populate Variable table from constants.FEATURE_SUBPLOTS
 # Define subplots characteristics
-def config_feature_subplot(module, plot_type, color, title, alpha=0.7, size=1):
+def config_feature_subplot(module, plot_type, color, title, alpha=0.8, fill_alpha=0.4, size=1):
     if plot_type == "bars":
         alpha = 0.5
-        size = 3
+        size = 5
     return {
         "module": module,
         "type": plot_type,
         "color": color,
         "alpha": alpha,
+        "fill_alpha": fill_alpha,
         "size": size,
         "title": title
     }
 
 FEATURE_SUBPLOTS = {
-    "coverage": config_feature_subplot("coverage", "curve", "black", "Coverage Depth"),
+    "coverage": config_feature_subplot("coverage", "curve", "#333333", "Coverage Depth"),
 
     # Starts subplots
-    "coverage_reduced": config_feature_subplot("phagetermini", "curve", "black", "Coverage Depth (only reads starting and ending with a match)"),
-    "reads_starts": config_feature_subplot("phagetermini", "bars", "blue", "Reads' Starts"),
-    "reads_ends": config_feature_subplot("phagetermini", "bars", "blue", "Reads' Ends"),
-    "tau": config_feature_subplot("phagetermini", "bars", "blue", "Tau"),
+    "coverage_reduced": config_feature_subplot("phagetermini", "curve", "#00c53b", "Coverage Depth (only reads starting and ending with a match)"),
+    "reads_starts": config_feature_subplot("phagetermini", "bars", "#215732", "Reads' Starts"),
+    "reads_ends": config_feature_subplot("phagetermini", "bars", "#6cc24a", "Reads' Ends"),
+    "tau": config_feature_subplot("phagetermini", "bars", "#44883e", "Tau"),
 
     # Misassembly subplots
-    "read_lengths": config_feature_subplot("assemblycheck", "curve", "green", "Read Lengths"),
-    "insert_sizes": config_feature_subplot("assemblycheck", "curve", "green", "Insert Sizes"),
-    "bad_orientations": config_feature_subplot("assemblycheck", "bars", "green", "Bad Orientations"),
-    "left_clippings": config_feature_subplot("assemblycheck", "bars", "purple", "Left Clippings"),
-    "right_clippings": config_feature_subplot("assemblycheck", "bars", "purple", "Right Clippings"),
-    "insertions": config_feature_subplot("assemblycheck", "bars", "red", "Insertions"),
-    "deletions": config_feature_subplot("assemblycheck", "bars", "red", "Deletions"),
-    "mismatches": config_feature_subplot("assemblycheck", "bars", "red", "Mismatches"),
+    "read_lengths": config_feature_subplot("assemblycheck", "curve", "#ed8b00", "Read Lengths"),
+    "insert_sizes": config_feature_subplot("assemblycheck", "curve", "#ed8b00", "Insert Sizes"),
+    "bad_orientations": config_feature_subplot("assemblycheck", "bars", "#c94009", "Bad Orientations"),
+    "left_clippings": config_feature_subplot("assemblycheck", "bars", "#7f0091", "Left Clippings"),
+    "right_clippings": config_feature_subplot("assemblycheck", "bars", "#8e43e7", "Right Clippings"),
+    "insertions": config_feature_subplot("assemblycheck", "bars", "#e50001", "Insertions"),
+    "deletions": config_feature_subplot("assemblycheck", "bars", "#97011a", "Deletions"),
+    "mismatches": config_feature_subplot("assemblycheck", "bars", "#5a0f0b", "Mismatches"),
 }
 
 for var_name, cfg in FEATURE_SUBPLOTS.items():
@@ -97,10 +99,11 @@ for var_name, cfg in FEATURE_SUBPLOTS.items():
     vtype = cfg.get("type")
     color = cfg.get("color")
     alpha = cfg.get("alpha")
+    fill_alpha = cfg.get("fill_alpha")
     size = cfg.get("size")
     title = cfg.get("title")
-    cur.execute("INSERT OR IGNORE INTO Variable (Variable_name, Module, Type, Color, Alpha, Size, Title, Feature_table_name) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (var_name, module, vtype, color, alpha, size, title, feature_table))
+    cur.execute("INSERT OR IGNORE INTO Variable (Variable_name, Module, Type, Color, Alpha, Fill_alpha, Size, Title, Feature_table_name) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (var_name, module, vtype, color, alpha, fill_alpha, size, title, feature_table))
     
     # Create the feature table for this variable
     cur.execute(f"""

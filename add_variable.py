@@ -4,7 +4,6 @@ import csv
 import re
 
 # --- Args ---
-print(len(sys.argv), flush=True)
 if len(sys.argv) != 7:
     print("Usage: python add_variable.py <database.db> <variable_name> <type> <color> <title> <data.csv>")
     sys.exit(1)
