@@ -1,7 +1,5 @@
 .left-col {
     background-color: #f8f9fa; /* light gray background */
     padding: 15px;
-    min-width: 300px;
-    flex: 0 0 20%;
-    max-width: 20%;
+    min-width: 350px;
 }

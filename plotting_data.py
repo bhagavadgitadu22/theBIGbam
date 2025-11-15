@@ -2,7 +2,7 @@ import argparse, sqlite3
 from Bio.Seq import Seq
 from Bio.SeqRecord import SeqRecord
 from Bio.SeqFeature import SeqFeature, FeatureLocation
-from bokeh.models import Range1d,ColumnDataSource, HoverTool
+from bokeh.models import Range1d,ColumnDataSource, HoverTool, WheelZoomTool
 from bokeh.layouts import gridplot
 from bokeh.plotting import output_file, save, figure
 from dna_features_viewer import BiopythonTranslator
@@ -31,11 +31,10 @@ def make_bokeh_subplot(feature_dict, height, x_range):
     p = figure(
         height=height,
         x_range=x_range,
-        tools="xpan,xwheel_zoom,reset,save"
+        tools="xpan,reset,save"
     )
             
-    for feature in feature_dict:
-        data_feature = feature_dict[feature]
+    for data_feature in feature_dict:
         xx = data_feature["x"]
         yy = data_feature["y"]
         type_picked = data_feature["type"]
@@ -102,36 +101,41 @@ def make_bokeh_subplot(feature_dict, height, x_range):
     if len(feature_dict) > 1:
         p.legend.click_policy="hide"
 
+    wheel = WheelZoomTool(dimensions='width')  # or dimensions='both' for full zoom
+    p.add_tools(wheel)
+    p.toolbar.active_scroll = wheel
+
     return p
 
 ### Function to get features of one variable
 def get_feature_data(cur, feature, contig_id, sample_id):
-    feature_dict = {} 
+    list_feature_dict = []
 
     # Query Variable table to get rendering info and feature table name
-    cur.execute("SELECT Type, Color, Alpha, Fill_alpha, Size, Title, Feature_table_name FROM Variable WHERE Variable_name=?", (feature,))
-    row = cur.fetchone()
+    cur.execute("SELECT Type, Color, Alpha, Fill_alpha, Size, Title, Feature_table_name FROM Variable WHERE Subplot=?", (feature,))
+    rows = cur.fetchall()
 
-    type_picked, color, alpha, fill_alpha, size, title, feature_table = row
-    feature_dict["type"] = type_picked
-    feature_dict["color"] = color
-    feature_dict["alpha"] = alpha
-    feature_dict["fill_alpha"] = fill_alpha
-    feature_dict["size"] = size
-    feature_dict["title"] = title
-    feature_dict["x"] = []
-    feature_dict["y"] = []
+    for row in rows:
+        feature_dict = {}
 
-    # Query feature table for this sample and contig
-    try:
+        type_picked, color, alpha, fill_alpha, size, title, feature_table = row
+        feature_dict["type"] = type_picked
+        feature_dict["color"] = color
+        feature_dict["alpha"] = alpha
+        feature_dict["fill_alpha"] = fill_alpha
+        feature_dict["size"] = size
+        feature_dict["title"] = title
+        feature_dict["x"] = []
+        feature_dict["y"] = []
+
+        # Query feature table for this sample and contig
         cur.execute(f"SELECT Position, Value FROM {feature_table} WHERE Sample_id=? AND Contig_id=? ORDER BY Position", (sample_id, contig_id))
         rows = cur.fetchall()
         feature_dict["x"] = [r[0] for r in rows]
         feature_dict["y"] = [r[1] for r in rows]
-    except Exception as e:
-        print(f"WARNING: Could not read feature table {feature_table}: {e}", flush=True)
+        list_feature_dict.append(feature_dict)
 
-    return feature_dict
+    return list_feature_dict
 
 ### Function to generate the bokeh plot
 def generate_bokeh_plot(db_path, list_features, contig_name, sample_name, subplot_size=130):
@@ -184,7 +188,11 @@ def generate_bokeh_plot(db_path, list_features, contig_name, sample_name, subplo
     annotation_fig = graphic_record.plot_with_bokeh(figure_width=30, figure_height=40)
     annotation_fig.height = subplot_size
 
-    shared_xrange = Range1d(0, locus_size)
+    wheel = WheelZoomTool(dimensions='width')  # only x-axis
+    annotation_fig.add_tools(wheel)
+    annotation_fig.toolbar.active_scroll = wheel
+
+    shared_xrange = Range1d(-1000, locus_size+1000)
     annotation_fig.x_range = shared_xrange
 
     # --- Add one subplot per feature requested ---
@@ -193,25 +201,11 @@ def generate_bokeh_plot(db_path, list_features, contig_name, sample_name, subplo
     requested_features = parse_requested_features(list_features)
 
     for feature in requested_features:
-        feature_dict = {}
-
-        if feature in ["clippings", "indels", "reads_termini"]:
-            if feature == "clippings":
-                feature_dict["right_clippings"] = get_feature_data(cur, "right_clippings", contig_id, sample_id)
-                feature_dict["left_clippings"] = get_feature_data(cur, "left_clippings", contig_id, sample_id)
-            elif feature == "indels":
-                feature_dict["insertions"] = get_feature_data(cur, "insertions", contig_id, sample_id)
-                feature_dict["deletions"] = get_feature_data(cur, "deletions", contig_id, sample_id)
-            elif feature == "reads_termini":
-                feature_dict["reads_starts"] = get_feature_data(cur, "reads_starts", contig_id, sample_id)
-                feature_dict["reads_ends"] = get_feature_data(cur, "reads_ends", contig_id, sample_id)
- 
-        else:            
-            feature_dict[feature] = get_feature_data(cur, feature, contig_id, sample_id)
-            
-        if all(len(vals["x"]) == 0 for vals in feature_dict.values()):
+        list_feature_dict = get_feature_data(cur, feature, contig_id, sample_id)
+        if all(len(vals["x"]) == 0 for vals in list_feature_dict):
             continue
-        subplot_feature = make_bokeh_subplot(feature_dict, subplot_size, shared_xrange)
+
+        subplot_feature = make_bokeh_subplot(list_feature_dict, subplot_size, shared_xrange)
         if subplot_feature is not None:
             subplots.append(subplot_feature)
 
@@ -233,64 +227,14 @@ def save_html_plot(db_path, list_features, contig_name, sample_name, subplot_siz
 def parse_requested_features(list_features):
     features = []
     for feature in list_features:
-        if feature == "coverage":
-            features.append("coverage")
-        elif feature == "assemblycheck":
-            features.extend(["read_lengths", "insert_sizes", "bad_orientations", "clippings", "indels", "mismatches"])
-        elif feature == "phagetermini":
-            features.extend(["coverage_reduced", "reads_termini", "tau"])
+        if feature == "Coverage":
+            features.append("Coverage")
+        elif feature == "Assembly check":
+            features.extend(["Read lengths", "Insert sizes", "Bad orientations", "Clippings", "Indels", "Mismatches"])
+        elif feature == "Phage termini":
+            features.extend(["Coverage reduced", "Reads termini", "Tau"])
         else:
             features.append(feature)
-    
-    # Deduplicate features while preserving order
-    if "right_clippings" in features and "left_clippings" in features:
-        new_features = []
-        clippings_replaced = False
-        for f in features:
-            if f in ("right_clippings", "left_clippings"):
-                if not clippings_replaced:
-                    # replace the first occurrence with "clippings"
-                    new_features.append("clippings")
-                    clippings_replaced = True
-                # skip the second occurrence
-            else:
-                new_features.append(f)
-        features = new_features
-
-    if "insertions" in features and "deletions" in features:
-        new_features = []
-        clippings_replaced = False
-        for f in features:
-            if f in ("insertions", "deletions"):
-                if not clippings_replaced:
-                    # replace the first occurrence with "indels"
-                    new_features.append("indels")
-                    clippings_replaced = True
-                # skip the second occurrence
-            else:
-                new_features.append(f)
-        features = new_features
-
-    if "reads_starts" in features and "reads_ends" in features:
-        new_features = []
-        clippings_replaced = False
-        for f in features:
-            if f in ("reads_starts", "reads_ends"):
-                if not clippings_replaced:
-                    # replace the first occurrence with "reads_termini"
-                    new_features.append("reads_termini")
-                    clippings_replaced = True
-                # skip the second occurrence
-            else:
-                new_features.append(f)
-        features = new_features
-
-    if "clippings" in features:
-        features = [f for f in features if f not in ("right_clippings", "left_clippings")]
-    if "indels" in features:
-        features = [f for f in features if f not in ("insertions", "deletions")]
-    if "reads_termini" in features:
-        features = [f for f in features if f not in ("reads_starts", "reads_ends")]
 
     seen = set()
     deduped_features = [f for f in features if not (f in seen or seen.add(f))]

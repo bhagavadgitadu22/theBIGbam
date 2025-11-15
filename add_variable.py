@@ -10,15 +10,16 @@ if len(sys.argv) != 7:
     print("Usage: python add_variable.py <database.db> <variable_name> <type> <color> <title> <data.csv>")
     sys.exit(1)
 
-DB, var_name, vtype, color, title, csv_file = sys.argv[1:9]
+DB, var_name, vtype, color, title, csv_file = sys.argv[1:7]
 
 # --- Validate variable name ---
 if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", var_name):
     print("ERROR: Invalid variable name. Use only letters, digits, and underscores, not starting with a digit.")
     sys.exit(1)
 
-cfg = config_feature_subplot("External", vtype, color, title)
+cfg = config_feature_subplot(var_name, "External", vtype, color, title)
 feature_table = f"Feature_{var_name}"
+subplot = cfg.get("subplot")
 module = cfg.get("module")
 alpha = cfg.get("alpha")
 fill_alpha = cfg.get("fill_alpha")
@@ -44,9 +45,9 @@ try:
 
     # --- Create new variable ---
     cur.execute("""
-    INSERT INTO Variable (Variable_name, Module, Type, Color, Alpha, Fill_alpha, Size, Title, Feature_table_name)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (var_name, "External", vtype, color, float(alpha), float(fill_alpha), float(size), title, feature_table))
+    INSERT INTO Variable (Variable_name, Subplot, Module, Type, Color, Alpha, Fill_alpha, Size, Title, Help, Feature_table_name)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (var_name, subplot, "External", vtype, color, float(alpha), float(fill_alpha), float(size), title, "", feature_table))
 
     # --- Create associated feature table ---
     cur.execute(f"""

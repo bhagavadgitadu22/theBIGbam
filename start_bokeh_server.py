@@ -4,8 +4,9 @@ import sqlite3
 import traceback
 
 from bokeh.layouts import column, row
-from bokeh.models import Div, InlineStyleSheet
-from bokeh.models.widgets import Select, CheckboxGroup, CheckboxButtonGroup, Button
+from bokeh.models import Div, InlineStyleSheet, Tooltip, Toggle
+from bokeh.models.widgets import Select, CheckboxGroup, HelpButton, Button
+from matplotlib import widgets
 
 # Import the plotting function from the repo
 from plotting_data import generate_bokeh_plot
@@ -31,9 +32,12 @@ def build_controls(conn):
     # For each module get variables
     module_widgets = []
     variables_widgets = []
+    helps_widgets = []
     for module in modules:
-        cur.execute("SELECT Variable_name FROM Variable WHERE Module=?", (module,))
-        variables_checkbox = [r[0] for r in cur.fetchall()]
+        cur.execute("SELECT DISTINCT Subplot, Help FROM Variable WHERE Module=?", (module,))
+        records = cur.fetchall()
+        variables_checkbox = [r[0] for r in records]
+        helps_checkbox = [r[1] for r in records]
 
         if len(variables_checkbox) > 1:
             module_checkbox = CheckboxGroup(labels=[module], active=[])
@@ -42,8 +46,22 @@ def build_controls(conn):
             module_widgets.append(None)
 
         # use CheckboxButtonGroup for selecting individual variables
-        vars_buttons = CheckboxButtonGroup(labels=variables_checkbox, active=[], orientation='vertical', width=350, width_policy = "fixed", max_width = 350)
-        variables_widgets.append(vars_buttons)
+        checkboxes = []
+        helps = []
+        for label, help_text in zip(variables_checkbox, helps_checkbox):
+            checkbox = Toggle(label=label, active=False, sizing_mode="stretch_width", height=30)
+            checkboxes.append(checkbox)
+
+            tooltip = Tooltip(
+                content=f"{help_text}",
+                position="right"
+            )
+            help_button = HelpButton(tooltip=tooltip, width=30, height=30)
+            helps.append(help_button)
+
+        # Combine into a column
+        variables_widgets.append(checkboxes)
+        helps_widgets.append(helps)
 
     apply_button = Button(label="Apply", button_type="primary")
 
@@ -52,6 +70,7 @@ def build_controls(conn):
         'contig_select': contig_select,
         'module_widgets': module_widgets,
         'variables_widgets': variables_widgets,
+        'helps_widgets': helps_widgets,
         'apply_button': apply_button
     }
     return widgets
@@ -76,55 +95,66 @@ def modify_doc_factory(db_path):
     for i, module_widget in enumerate(widgets['module_widgets']):
         if module_widget is not None:
             controls_children.append(module_widget)
-        
-        var_widget = widgets['variables_widgets'][i]
-        controls_children.append(var_widget)
+
+        # Get the variable widget block (no layout inside)
+        checkboxes = widgets['variables_widgets'][i]
+        helps = widgets['helps_widgets'][i]
+
+        for cb, hb in zip(checkboxes, helps):
+            controls_children.append(row(cb, hb, sizing_mode="stretch_width"))
 
     controls_children.append(widgets['apply_button'])
-    controls_column = column(*controls_children, width=350, sizing_mode="stretch_height")
+    controls_column = column(*controls_children, width=350, sizing_mode="stretch_height", spacing=0)
     controls_column.css_classes = ["left-col"]
 
     main_placeholder = column(Div(text="<i>No plot yet. Select options and click Apply.</i>"), sizing_mode="stretch_both")
 
     # Wrap everything in a Flex container
-    layout = row(controls_column, main_placeholder, sizing_mode="stretch_both")
+    layout = row(controls_column, main_placeholder, sizing_mode="stretch_both", spacing = 0)
     layout.stylesheets = [stylesheet]
 
     ### Attach callbacks
-    def make_module_callback(i, mc, vb):
-        """Module checkbox clicked → toggle its variable buttons."""
-        def callback(attr, old, new):
-            if 0 in mc.active:   # module checkbox active
-                vb.active = list(range(len(vb.labels)))
-            else:
-                vb.active = []
-        return callback
-
-    def make_variable_callback(i, mc, vb):
-        """Variable toggled → update module checkbox."""
-        def callback(attr, old, new):
-            total = len(vb.labels)
-
-            if len(vb.active) == total:
-                # all active → module checkbox should be active
-                if mc.active != [0]:
-                    mc.active = [0]
-            else:
-                # some inactive → module checkbox should be inactive
-                if mc.active != []:
-                    mc.active = []
-        return callback
-    
-    # module checkbox callback
     for i, mc in enumerate(widgets['module_widgets']):
-        vb = widgets['variables_widgets'][i]
         if mc is None:
             continue
 
-        # module → variables
-        mc.on_change("active", make_module_callback(i, mc, vb))
-        # variables → module
-        vb.on_change("active", make_variable_callback(i, mc, vb))
+        toggles = widgets['variables_widgets'][i]
+        lock = {"locked": False}  # per-module lock
+
+        # Module → toggles
+        def make_module_callback(mc, toggles, lock):
+            def callback(attr, old, new):
+                # Only act if this change comes from user
+                if lock.get("locked", False):
+                    return
+                lock["locked"] = True
+                module_on = 0 in mc.active
+                for t in toggles:
+                    t.active = module_on
+                lock["locked"] = False
+            return callback
+
+        mc.on_change("active", make_module_callback(mc, toggles, lock))
+
+        # Variable → module (update module checkbox only)
+        def make_variable_callback(mc, toggles, lock):
+            def callback(attr, old, new):
+                if lock.get("locked", False):
+                    return
+                # Count toggles that are ON
+                total = len(toggles)
+                active_count = sum(1 for t in toggles if t.active)
+
+                lock["locked"] = True
+                if active_count == total:
+                    mc.active = [0]  # all selected → module ON
+                else:
+                    mc.active = []   # not all selected → module OFF
+                lock["locked"] = False
+            return callback
+
+        for t in toggles:
+            t.on_change("active", make_variable_callback(mc, toggles, lock))
 
     def apply_clicked():
         try:
@@ -133,15 +163,14 @@ def modify_doc_factory(db_path):
 
             # Build requested_features list
             requested_features = []
-            for variables_widget in widgets['variables_widgets']:
-                for vidx in variables_widget.active:
-                    requested_features.append(variables_widget.labels[vidx])
+            for cb_list in widgets['variables_widgets']:
+                for cb in cb_list:
+                    if cb.active:  # means checkbox is checked
+                        requested_features.append(cb.label)
 
-            # Call plotting_data.generate_bokeh_plot to build the grid
             print(f"[start_bokeh_server] Generating plot for sample={sample}, contig={contig}, features={requested_features}")
             grid = generate_bokeh_plot(db_path, requested_features, contig, sample)
 
-            # Replace main panel
             main_placeholder.children = [grid]
 
         except Exception as e:

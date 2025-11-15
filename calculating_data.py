@@ -235,7 +235,9 @@ def get_features_phagetermini(ref_starts, ref_ends, is_reverse, cigars, md_list,
     for i in range(len(ref_starts)):
         cigar = cigars[i]
         md = md_list[i]
-        if starts_with_match(cigar, md, start=True) and starts_with_match(cigar, md, start=False):
+
+        # Check if read starts with a match (and ends with a match for long reads)
+        if starts_with_match(cigar, md, start=True) and (sequencing_type != "long" or starts_with_match(cigar, md, start=False)):
             start = ref_starts[i]
             end = ref_ends[i]
             is_reverse_flag = is_reverse[i]
