@@ -500,6 +500,7 @@ def main():
     parser.add_argument("-b", "--bam_files", required=True, help="Path to bam file or directory containing mapping files (BAM format)")
     parser.add_argument("-m", "--modules", required=True, help="List of modules to compute (comma-separated) (options allowed: coverage, phagetermini, assemblycheck)")
     parser.add_argument("-d", "--db", required=True, help="Path to sqlite database file to store results")
+    parser.add_argument("-a", "--annotation_tool", default="", help="Optional: to color the contigs specify the annotation tool used (options allowed: pharokka)")
     parser.add_argument("--step", type=int, default=50, help="Step size for compression (keep every Nth point in addition to the outliers)")
     parser.add_argument("--outlier_threshold", type=int, default=3, help="Points beyond mean+std*N are kept as outliers")
     parser.add_argument("--derivative_threshold", type=int, default=3, help="Points were the derivative is beyond mean+std*N are kept as outliers")
@@ -509,6 +510,7 @@ def main():
     ### Checking genbank and mapping files are compatible... (sanity checks)
     print("### Checking that genbank and mapping files are compatible...", flush=True)
     genbank_loci = set(rec.id for rec in SeqIO.parse(args.genbank, "genbank"))
+    annotation_tool = args.annotation_tool
     if not genbank_loci:
         sys.exit("ERROR: No loci found in the provided GenBank file.")
 
@@ -568,7 +570,6 @@ def main():
 
     ### Running generate_database.py to create database
     db_path = args.db
-
     # First check if database file already exists
     # If exists, raise error to avoid overwriting
     if os.path.exists(db_path):
@@ -588,10 +589,10 @@ def main():
         # Insert contig (or ignore if exists)
         contig_name = rec.id
         contig_length = len(rec.seq)
-        cur.execute("INSERT OR IGNORE INTO Contig (Contig_name, Contig_length) VALUES (?, ?)", (contig_name, contig_length))
+        cur.execute("INSERT OR IGNORE INTO Contig (Contig_name, Contig_length, Annotation_tool) VALUES (?, ?, ?)", (contig_name, contig_length, annotation_tool))
         contig_count += 1
 
-        # Ensure length is up-to-date
+        # Recover novel contig_id
         cur.execute("SELECT Contig_id FROM Contig WHERE Contig_name=?", (contig_name,))
         contig_id = cur.fetchone()[0]
         contig_count += 1
@@ -618,7 +619,7 @@ def main():
                 feature_count += 1
 
     if seq_rows:
-        cur.executemany("INSERT INTO Sequence_annotation (Contig_id, Start, End, Strand, Type, Product, Function, Phrog) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", seq_rows)
+        cur.executemany("INSERT INTO Contig_annotation (Contig_id, Start, End, Strand, Type, Product, Function, Phrog) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", seq_rows)
     conn.commit()
     conn.close()
 

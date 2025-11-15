@@ -1,0 +1,22 @@
+/* Local styles for MGFeaturesViewer Bokeh app (bundled, no CDN) */
+/* Make the main row a flex container so left column (controls) and main area share space */
+.app-row {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+}
+/* left column: at least 300px, prefer 20% */
+.left-col {
+  flex: 0 0 20%;
+  min-width: 300px;
+  max-width: 420px;
+}
+/* main area: take remaining space */
+.main-placeholder {
+  flex: 1 1 0%;
+  min-width: 400px;
+}
+/* Make checkbox-button-group buttons wrap nicely */
+.checkbox-button-group .bk-btn {
+  white-space: normal;
+}

@@ -1,22 +1,23 @@
-import argparse, sys, os, csv, sqlite3
+import argparse, sqlite3
 from Bio.Seq import Seq
 from Bio.SeqRecord import SeqRecord
 from Bio.SeqFeature import SeqFeature, FeatureLocation
 from bokeh.models import Range1d,ColumnDataSource, HoverTool
-from bokeh.layouts import column, gridplot
+from bokeh.layouts import gridplot
 from bokeh.plotting import output_file, save, figure
 from dna_features_viewer import BiopythonTranslator
+
 import colors_for_genbank
 
 ### Custom translator for coloring and labeling features (with DNAFeaturesViewer python library)
 class CustomTranslator(BiopythonTranslator):
     def compute_feature_color(self, feature):
-        #if ANNOTATION_TOOL == "pharokka":
-        #    function = feature.qualifiers.get("function", [""]).lower()
-        #    color_scheme = colors_for_genbank.PHAROKKA_COLORS
-        #    for key, color in color_scheme.items():
-        #        if key in function:
-        #            return color
+        if feature.qualifiers.get("annotation_tool", []) == "pharokka":
+            function = feature.qualifiers.get("function", [""]).lower()
+            color_scheme = colors_for_genbank.PHAROKKA_COLORS
+            for key, color in color_scheme.items():
+                if key in function:
+                    return color
         return "#AAAAAA"
 
     def compute_feature_label(self, feature):
@@ -133,18 +134,18 @@ def get_feature_data(cur, feature, contig_id, sample_id):
 
     return feature_dict
 
-### Function to generate one HTML plot per locus
-def generate_bokeh_plot(db_path, requested_features, contig_name, sample_name, max_visible_width, subplot_size):
+### Function to generate the bokeh plot
+def generate_bokeh_plot(db_path, list_features, contig_name, sample_name, max_visible_width, subplot_size):
     # Connect to DB and gather contigs and samples
     conn = sqlite3.connect(db_path)
     cur = conn.cursor()
 
     # Get contig characteristics
-    cur.execute("SELECT Contig_id, Contig_name, Contig_length FROM Contig WHERE Contig_name=?", (contig_name,))
+    cur.execute("SELECT Contig_id, Contig_name, Contig_length, Annotation_tool FROM Contig WHERE Contig_name=?", (contig_name,))
     row = cur.fetchone()
     if row is None:
         raise ValueError(f"Contig not found: {contig_name}")
-    contig_id, locus_name, locus_size = row
+    contig_id, locus_name, locus_size, annotation_tool = row
     print(f"Locus {locus_name} validated ({locus_size} bp)", flush=True)
 
     # Get sample characteristics
@@ -156,15 +157,15 @@ def generate_bokeh_plot(db_path, requested_features, contig_name, sample_name, m
     print(f"Sample {sample_name} validated.", flush=True)
 
     # --- Main gene annotation plot ---
-    # Build a SeqRecord from Sequence_annotation entries for this contig
-    cur.execute("SELECT Start, End, Strand, Type, Product, Function, Phrog FROM Sequence_annotation WHERE Contig_id=?", (contig_id,))
+    # Build a SeqRecord from Contig_annotation entries for this contig
+    cur.execute("SELECT Start, End, Strand, Type, Product, Function, Phrog FROM Contig_annotation WHERE Contig_id=?", (contig_id,))
     seq_ann_rows = cur.fetchall()
 
     sequence_annotations = []
     for start, end, strand, ftype, product, function, phrog in seq_ann_rows:
         # Biopython FeatureLocation is 0-based half-open
         try:
-            floc = FeatureLocation(start - 1, end, strand=strand)
+            floc = FeatureLocation(start-1, end, strand=strand)
         except Exception:
             continue
         qualifiers = {}
@@ -174,6 +175,7 @@ def generate_bokeh_plot(db_path, requested_features, contig_name, sample_name, m
             qualifiers['function'] = function
         if phrog:
             qualifiers['phrog'] = phrog
+        qualifiers['annotation_tool'] = annotation_tool
         feat = SeqFeature(location=floc, type=ftype, qualifiers=qualifiers)
         sequence_annotations.append(feat)
         
@@ -190,34 +192,30 @@ def generate_bokeh_plot(db_path, requested_features, contig_name, sample_name, m
     # --- Add one subplot per feature requested ---
     # Requested features are variables like 'coverage', 'reads_starts', etc.
     subplots = []
+    requested_features = parse_requested_features(list_features)
+
     for feature in requested_features:
         feature_dict = {}
-        
-        if feature in ["clippings", "indels", "reads_ends"]:
+
+        if feature in ["clippings", "indels", "reads_termini"]:
             if feature == "clippings":
                 feature_dict["right_clippings"] = get_feature_data(cur, "right_clippings", contig_id, sample_id)
                 feature_dict["left_clippings"] = get_feature_data(cur, "left_clippings", contig_id, sample_id)
             elif feature == "indels":
                 feature_dict["insertions"] = get_feature_data(cur, "insertions", contig_id, sample_id)
                 feature_dict["deletions"] = get_feature_data(cur, "deletions", contig_id, sample_id)
-            elif feature == "reads_ends":
+            elif feature == "reads_termini":
                 feature_dict["reads_starts"] = get_feature_data(cur, "reads_starts", contig_id, sample_id)
                 feature_dict["reads_ends"] = get_feature_data(cur, "reads_ends", contig_id, sample_id)
-            
-            if all(len(vals["x"]) == 0 for vals in feature_dict.values()):
-                continue
-            subplot_feature = make_bokeh_subplot(feature_dict, max_visible_width, subplot_size, shared_xrange)
-            if subplot_feature is not None:
-                subplots.append(subplot_feature)
  
         else:            
             feature_dict[feature] = get_feature_data(cur, feature, contig_id, sample_id)
             
-            if len(feature_dict[feature]["x"]) == 0:
-                continue
-            subplot_feature = make_bokeh_subplot(feature_dict, max_visible_width, subplot_size, shared_xrange)
-            if subplot_feature is not None:
-                subplots.append(subplot_feature)
+        if all(len(vals["x"]) == 0 for vals in feature_dict.values()):
+            continue
+        subplot_feature = make_bokeh_subplot(feature_dict, max_visible_width, subplot_size, shared_xrange)
+        if subplot_feature is not None:
+            subplots.append(subplot_feature)
 
     conn.close()
 
@@ -227,10 +225,10 @@ def generate_bokeh_plot(db_path, requested_features, contig_name, sample_name, m
 
     return grid
 
-def save_html_plot(db_path, requested_features, contig_name, sample_name, max_visible_width, subplot_size, output_filename):
+def save_html_plot(db_path, list_features, contig_name, sample_name, max_visible_width, subplot_size, output_filename):
     # --- Save interactive HTML plot ---
     output_file(filename = output_filename)
-    grid = generate_bokeh_plot(db_path, requested_features, contig_name, sample_name, max_visible_width, subplot_size)
+    grid = generate_bokeh_plot(db_path, list_features, contig_name, sample_name, max_visible_width, subplot_size)
     save(grid)
 
 ### Parsing features
@@ -242,10 +240,63 @@ def parse_requested_features(list_features):
         elif feature == "assemblycheck":
             features.extend(["read_lengths", "insert_sizes", "bad_orientations", "clippings", "indels", "mismatches"])
         elif feature == "phagetermini":
-            features.extend(["coverage_reduced", "reads_ends", "tau"])
+            features.extend(["coverage_reduced", "reads_termini", "tau"])
         else:
             features.append(feature)
-    return(features)
+    
+    # Deduplicate features while preserving order
+    if "right_clippings" in features and "left_clippings" in features:
+        new_features = []
+        clippings_replaced = False
+        for f in features:
+            if f in ("right_clippings", "left_clippings"):
+                if not clippings_replaced:
+                    # replace the first occurrence with "clippings"
+                    new_features.append("clippings")
+                    clippings_replaced = True
+                # skip the second occurrence
+            else:
+                new_features.append(f)
+        features = new_features
+
+    if "insertions" in features and "deletions" in features:
+        new_features = []
+        clippings_replaced = False
+        for f in features:
+            if f in ("insertions", "deletions"):
+                if not clippings_replaced:
+                    # replace the first occurrence with "indels"
+                    new_features.append("indels")
+                    clippings_replaced = True
+                # skip the second occurrence
+            else:
+                new_features.append(f)
+        features = new_features
+
+    if "reads_starts" in features and "reads_ends" in features:
+        new_features = []
+        clippings_replaced = False
+        for f in features:
+            if f in ("reads_starts", "reads_ends"):
+                if not clippings_replaced:
+                    # replace the first occurrence with "reads_termini"
+                    new_features.append("reads_termini")
+                    clippings_replaced = True
+                # skip the second occurrence
+            else:
+                new_features.append(f)
+        features = new_features
+
+    if "clippings" in features:
+        features = [f for f in features if f not in ("right_clippings", "left_clippings")]
+    if "indels" in features:
+        features = [f for f in features if f not in ("insertions", "deletions")]
+    if "reads_termini" in features:
+        features = [f for f in features if f not in ("reads_starts", "reads_ends")]
+
+    seen = set()
+    deduped_features = [f for f in features if not (f in seen or seen.add(f))]
+    return(deduped_features)
 
 ### Main function
 def main():
@@ -263,12 +314,9 @@ def main():
     parser.add_argument("--subplot_height", required=False, default=130, help="Height of each subplot (in pixels)")
     args = parser.parse_args()
 
-    # Get requested features
-    list_features = args.modules.split(",")
-    requested_features = parse_requested_features(list_features)
-
     # Path parameters
     db_path = args.db
+    list_features = args.modules.split(",")
     contig_name = args.contig
     sample_name = args.sample
     output_filename = args.html
@@ -281,7 +329,7 @@ def main():
 
     # Reading values from database and plotting
     print(f"Saving static HTML to {output_filename}...", flush=True)
-    save_html_plot(db_path, requested_features, contig_name, sample_name, max_visible_width, subplot_size, output_filename)
+    save_html_plot(db_path, list_features, contig_name, sample_name, max_visible_width, subplot_size, output_filename)
     
 if __name__ == "__main__":
     main()

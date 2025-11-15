@@ -3,6 +3,8 @@ import sys
 import csv
 import re
 
+from generate_database import config_feature_subplot 
+
 # --- Args ---
 if len(sys.argv) != 7:
     print("Usage: python add_variable.py <database.db> <variable_name> <type> <color> <title> <data.csv>")
@@ -10,19 +12,17 @@ if len(sys.argv) != 7:
 
 DB, var_name, vtype, color, title, csv_file = sys.argv[1:9]
 
-if vtype == "bars":
-    alpha = 0.5
-    size = 3
-elif vtype == "curve":
-    alpha = 0.7
-    size = 1
-
 # --- Validate variable name ---
 if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", var_name):
     print("ERROR: Invalid variable name. Use only letters, digits, and underscores, not starting with a digit.")
     sys.exit(1)
 
+cfg = config_feature_subplot("External", vtype, color, title)
 feature_table = f"Feature_{var_name}"
+module = cfg.get("module")
+alpha = cfg.get("alpha")
+fill_alpha = cfg.get("fill_alpha")
+size = cfg.get("size")
 
 # --- Connect ---
 conn = sqlite3.connect(DB)
@@ -44,9 +44,9 @@ try:
 
     # --- Create new variable ---
     cur.execute("""
-    INSERT INTO Variable (Variable_name, Module, Type, Color, Alpha, Size, Title, Feature_table_name)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    """, (var_name, "External", vtype, color, float(alpha), float(size), title, feature_table))
+    INSERT INTO Variable (Variable_name, Module, Type, Color, Alpha, Fill_alpha, Size, Title, Feature_table_name)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (var_name, "External", vtype, color, float(alpha), float(fill_alpha), float(size), title, feature_table))
 
     # --- Create associated feature table ---
     cur.execute(f"""
