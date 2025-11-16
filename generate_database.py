@@ -44,6 +44,17 @@ def main():
     );
     """)
 
+    cur.execute("""
+    CREATE TABLE Presences (
+        Presence_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        Contig_id INTEGER,
+        Sample_id INTEGER,
+        Coverage_percentage REAL,
+        FOREIGN KEY(Contig_id) REFERENCES Contig(Contig_id),
+        FOREIGN KEY(Sample_id) REFERENCES Sample(Sample_id)
+    );
+    """)
+
     # --- Create Contig tables ---
     cur.execute("""
     CREATE TABLE Contig_annotation (

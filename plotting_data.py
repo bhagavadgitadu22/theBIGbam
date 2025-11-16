@@ -138,9 +138,7 @@ def get_feature_data(cur, feature, contig_id, sample_id):
     return list_feature_dict
 
 ### Function to generate the bokeh plot
-def generate_bokeh_plot(db_path, list_features, contig_name, sample_name, subplot_size=130):
-    # Connect to DB and gather contigs and samples
-    conn = sqlite3.connect(db_path)
+def generate_bokeh_plot(conn, list_features, contig_name, sample_name, subplot_size=130):
     cur = conn.cursor()
 
     # Get contig characteristics
@@ -220,7 +218,8 @@ def generate_bokeh_plot(db_path, list_features, contig_name, sample_name, subplo
 def save_html_plot(db_path, list_features, contig_name, sample_name, subplot_size, output_filename):
     # --- Save interactive HTML plot ---
     output_file(filename = output_filename)
-    grid = generate_bokeh_plot(db_path, list_features, contig_name, sample_name, subplot_size)
+    conn = sqlite3.connect(db_path)
+    grid = generate_bokeh_plot(conn, list_features, contig_name, sample_name, subplot_size)
     save(grid)
 
 ### Parsing features

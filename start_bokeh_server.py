@@ -5,8 +5,7 @@ import traceback
 
 from bokeh.layouts import column, row
 from bokeh.models import Div, InlineStyleSheet, Tooltip, Toggle
-from bokeh.models.widgets import Select, CheckboxGroup, HelpButton, Button
-from matplotlib import widgets
+from bokeh.models.widgets import Select, CheckboxGroup, HelpButton, Button, RadioButtonGroup
 
 # Import the plotting function from the repo
 from plotting_data import generate_bokeh_plot
@@ -15,15 +14,15 @@ def build_controls(conn):
     """Query DB and return widgets and helper mappings."""
     cur = conn.cursor()
 
-    # Widget Selector for Samples
-    cur.execute("SELECT Sample_name FROM Sample ORDER BY Sample_name")
-    samples = [r[0] for r in cur.fetchall()]
-    sample_select = Select(title="Sample", value=samples[0], options=samples)
-
     # Widget Selector for Contigs
     cur.execute("SELECT Contig_name FROM Contig ORDER BY Contig_name")
     contigs = [r[0] for r in cur.fetchall()]
-    contig_select = Select(title="Contig", value=contigs[0], options=contigs)
+    contig_select = Select(value=contigs[0], options=contigs, sizing_mode="stretch_width")
+
+    # Widget Selector for Samples
+    cur.execute("SELECT Sample_name FROM Sample ORDER BY Sample_name")
+    samples = [r[0] for r in cur.fetchall()]
+    sample_select = Select(value=samples[0], options=samples, sizing_mode="stretch_width")
 
     # Modules and variables
     cur.execute("SELECT DISTINCT Module FROM Variable")
@@ -52,18 +51,21 @@ def build_controls(conn):
             checkbox = Toggle(label=label, active=False, sizing_mode="stretch_width", height=30)
             checkboxes.append(checkbox)
 
-            tooltip = Tooltip(
-                content=f"{help_text}",
-                position="right"
-            )
-            help_button = HelpButton(tooltip=tooltip, width=30, height=30)
-            helps.append(help_button)
+            if help_text != "":
+                tooltip = Tooltip(
+                    content=f"{help_text}",
+                    position="right"
+                )
+                help_button = HelpButton(tooltip=tooltip, width=30, height=30)
+                helps.append(help_button)
+            else:
+                helps.append(None)
 
         # Combine into a column
         variables_widgets.append(checkboxes)
         helps_widgets.append(helps)
 
-    apply_button = Button(label="Apply", button_type="primary")
+    apply_button = Button(label="Apply", button_type="primary", align="center")
 
     widgets = {
         'sample_select': sample_select,
@@ -85,11 +87,20 @@ def modify_doc_factory(db_path):
 
     instructions = Div(text="<b>Select elements to plot and click Apply:</b>")
 
+    views_title = Div(text="<b>View</b>")
+    views = RadioButtonGroup(labels=["One sample", "All samples"], active=0, sizing_mode="stretch_width")
+
     conn = sqlite3.connect(db_path)
     widgets = build_controls(conn)
 
-    variables_title = Div(text="Variables")
-    controls_children = [instructions, widgets['sample_select'], widgets['contig_select'], variables_title]
+    contigs_title = Div(text="<b>Contig</b>")
+    filter_contigs = CheckboxGroup(labels=["Only show contigs present with selected sample"], active=[])
+
+    samples_title = Div(text="<b>Sample</b>")
+    filter_samples = CheckboxGroup(labels=["Only show samples present with selected contig"], active=[])
+
+    variables_title = Div(text="<b>Variables</b>")
+    controls_children = [instructions, views_title, views, contigs_title, widgets['contig_select'], filter_contigs, samples_title, widgets['sample_select'], filter_samples, variables_title]
     
     # Append variable selectors
     for i, module_widget in enumerate(widgets['module_widgets']):
@@ -101,7 +112,10 @@ def modify_doc_factory(db_path):
         helps = widgets['helps_widgets'][i]
 
         for cb, hb in zip(checkboxes, helps):
-            controls_children.append(row(cb, hb, sizing_mode="stretch_width"))
+            if hb is not None:
+                controls_children.append(row(cb, hb, sizing_mode="stretch_width"))
+            else:
+                controls_children.append(cb)
 
     controls_children.append(widgets['apply_button'])
     controls_column = column(*controls_children, width=350, sizing_mode="stretch_height", spacing=0)
@@ -169,7 +183,7 @@ def modify_doc_factory(db_path):
                         requested_features.append(cb.label)
 
             print(f"[start_bokeh_server] Generating plot for sample={sample}, contig={contig}, features={requested_features}")
-            grid = generate_bokeh_plot(db_path, requested_features, contig, sample)
+            grid = generate_bokeh_plot(conn, requested_features, contig, sample)
 
             main_placeholder.children = [grid]
 
