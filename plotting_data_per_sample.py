@@ -2,7 +2,7 @@ import argparse, sqlite3
 from Bio.Seq import Seq
 from Bio.SeqRecord import SeqRecord
 from Bio.SeqFeature import SeqFeature, FeatureLocation
-from bokeh.models import Range1d,ColumnDataSource, HoverTool, WheelZoomTool
+from bokeh.models import Range1d, ColumnDataSource, HoverTool, WheelZoomTool
 from bokeh.layouts import gridplot
 from bokeh.plotting import output_file, save, figure
 from dna_features_viewer import BiopythonTranslator
@@ -13,11 +13,22 @@ import colors_for_genbank
 class CustomTranslator(BiopythonTranslator):
     def compute_feature_color(self, feature):
         if feature.qualifiers.get("annotation_tool", []) == "pharokka":
-            function = feature.qualifiers.get("function", [""]).lower()
+
+            # Get the function field safely
+            function = feature.qualifiers.get("function")
+            if isinstance(function, list):  # Biopython often stores qualifiers as lists
+                function = function[0] if function else None
+
+            if not isinstance(function, str):  # Missing or wrong type
+                return "#AAAAAA"
+
+            function = function.lower()
+
             color_scheme = colors_for_genbank.PHAROKKA_COLORS
             for key, color in color_scheme.items():
                 if key in function:
                     return color
+
         return "#AAAAAA"
 
     def compute_feature_label(self, feature):
@@ -27,7 +38,52 @@ class CustomTranslator(BiopythonTranslator):
         return feature.qualifiers.get("product", [])
     
 ### Plotting functions
-def make_bokeh_subplot(feature_dict, height, x_range):
+def get_contig_info(cur, contig_name):
+    cur.execute("SELECT Contig_id, Contig_name, Contig_length, Annotation_tool FROM Contig WHERE Contig_name=?", (contig_name,))
+    row = cur.fetchone()
+    if row is None:
+        raise ValueError(f"Contig not found: {contig_name}")
+    return row
+
+def make_bokeh_genemap(conn, contig_id, locus_name, locus_size, annotation_tool, subplot_size, shared_xrange):
+    cur = conn.cursor()
+
+    cur.execute("SELECT Start, End, Strand, Type, Product, Function, Phrog FROM Contig_annotation WHERE Contig_id=?", (contig_id,))
+    seq_ann_rows = cur.fetchall()
+
+    sequence_annotations = []
+    for start, end, strand, ftype, product, function, phrog in seq_ann_rows:
+        # Biopython FeatureLocation is 0-based half-open
+        try:
+            floc = FeatureLocation(start-1, end, strand=strand)
+        except Exception:
+            continue
+        qualifiers = {}
+        if product:
+            qualifiers['product'] = product
+        if function:
+            qualifiers['function'] = function
+        if phrog:
+            qualifiers['phrog'] = phrog
+        qualifiers['annotation_tool'] = annotation_tool
+        feat = SeqFeature(location=floc, type=ftype, qualifiers=qualifiers)
+        sequence_annotations.append(feat)
+        
+    sequence_records = SeqRecord(Seq('N' * locus_size), id=locus_name, features=sequence_annotations)
+    graphic_record = CustomTranslator().translate_record(sequence_records)
+    # figure_width and figure_height for the arrow size
+    annotation_fig = graphic_record.plot_with_bokeh(figure_width=30, figure_height=40)
+    annotation_fig.height = subplot_size
+
+    wheel = WheelZoomTool(dimensions='width')  # only x-axis
+    annotation_fig.add_tools(wheel)
+    annotation_fig.toolbar.active_scroll = wheel
+
+    annotation_fig.x_range = shared_xrange
+
+    return annotation_fig
+
+def make_bokeh_subplot(feature_dict, height, x_range, sample_title=None):
     p = figure(
         height=height,
         x_range=x_range,
@@ -42,7 +98,10 @@ def make_bokeh_subplot(feature_dict, height, x_range):
         alpha = data_feature["alpha"]
         fill_alpha = data_feature["fill_alpha"]
         size = data_feature["size"]
+        
         title = data_feature["title"]
+        if sample_title:
+            title = f"{sample_title} {title}"
 
         source = ColumnDataSource(data=dict(x=xx, y=yy))
 
@@ -138,16 +197,17 @@ def get_feature_data(cur, feature, contig_id, sample_id):
     return list_feature_dict
 
 ### Function to generate the bokeh plot
-def generate_bokeh_plot(conn, list_features, contig_name, sample_name, subplot_size=130):
+def generate_bokeh_plot_per_sample(conn, list_features, contig_name, sample_name, subplot_size=130):
     cur = conn.cursor()
 
     # Get contig characteristics
-    cur.execute("SELECT Contig_id, Contig_name, Contig_length, Annotation_tool FROM Contig WHERE Contig_name=?", (contig_name,))
-    row = cur.fetchone()
-    if row is None:
-        raise ValueError(f"Contig not found: {contig_name}")
-    contig_id, locus_name, locus_size, annotation_tool = row
+    contig_id, locus_name, locus_size, annotation_tool = get_contig_info(cur, contig_name)
     print(f"Locus {locus_name} validated ({locus_size} bp)", flush=True)
+
+    # --- Main gene annotation plot ---
+    # Build a SeqRecord from Contig_annotation entries for this contig
+    shared_xrange = Range1d(-1000, locus_size+1000)
+    annotation_fig = make_bokeh_genemap(conn, contig_id, locus_name, locus_size, annotation_tool, subplot_size, shared_xrange)
 
     # Get sample characteristics
     cur.execute("SELECT Sample_id, Sample_name FROM Sample WHERE Sample_name=?", (sample_name,))
@@ -159,39 +219,8 @@ def generate_bokeh_plot(conn, list_features, contig_name, sample_name, subplot_s
 
     # --- Main gene annotation plot ---
     # Build a SeqRecord from Contig_annotation entries for this contig
-    cur.execute("SELECT Start, End, Strand, Type, Product, Function, Phrog FROM Contig_annotation WHERE Contig_id=?", (contig_id,))
-    seq_ann_rows = cur.fetchall()
-
-    sequence_annotations = []
-    for start, end, strand, ftype, product, function, phrog in seq_ann_rows:
-        # Biopython FeatureLocation is 0-based half-open
-        try:
-            floc = FeatureLocation(start-1, end, strand=strand)
-        except Exception:
-            continue
-        qualifiers = {}
-        if product:
-            qualifiers['product'] = product
-        if function:
-            qualifiers['function'] = function
-        if phrog:
-            qualifiers['phrog'] = phrog
-        qualifiers['annotation_tool'] = annotation_tool
-        feat = SeqFeature(location=floc, type=ftype, qualifiers=qualifiers)
-        sequence_annotations.append(feat)
-        
-    sequence_records = SeqRecord(Seq('N' * locus_size), id=locus_name, features=sequence_annotations)
-    graphic_record = CustomTranslator().translate_record(sequence_records)
-    # figure_width and figure_height for the arrow size
-    annotation_fig = graphic_record.plot_with_bokeh(figure_width=30, figure_height=40)
-    annotation_fig.height = subplot_size
-
-    wheel = WheelZoomTool(dimensions='width')  # only x-axis
-    annotation_fig.add_tools(wheel)
-    annotation_fig.toolbar.active_scroll = wheel
-
     shared_xrange = Range1d(-1000, locus_size+1000)
-    annotation_fig.x_range = shared_xrange
+    annotation_fig = make_bokeh_genemap(conn, contig_id, locus_name, locus_size, annotation_tool, subplot_size, shared_xrange)
 
     # --- Add one subplot per feature requested ---
     # Requested features are variables like 'coverage', 'reads_starts', etc.
@@ -213,11 +242,11 @@ def generate_bokeh_plot(conn, list_features, contig_name, sample_name, subplot_s
 
     return grid
 
-def save_html_plot(db_path, list_features, contig_name, sample_name, subplot_size, output_filename):
+def save_html_plot_per_sample(db_path, list_features, contig_name, sample_name, subplot_size, output_filename):
     # --- Save interactive HTML plot ---
     output_file(filename = output_filename)
     conn = sqlite3.connect(db_path)
-    grid = generate_bokeh_plot(conn, list_features, contig_name, sample_name, subplot_size)
+    grid = generate_bokeh_plot_per_sample(conn, list_features, contig_name, sample_name, subplot_size)
     save(grid)
     conn.close()
 
@@ -243,31 +272,27 @@ def main():
     # Parse command line arguments
     print("Parsing arguments...", flush=True)
     parser = argparse.ArgumentParser(description="Parse input files.")
-    parser.add_argument("-t", "--threads", required=True, help="Number of threads available")
     parser.add_argument("-d", "--db", required=True, help="Path to sqlite database file to store results")
-    parser.add_argument("-m", "--modules", required=True, help="List of modules to compute (comma-separated) (options allowed: coverage, phagetermini, assemblycheck)")
+    parser.add_argument("-v", "--variables", required=True, help="List of variables or full modules to compute (comma-separated) (options allowed for modules: coverage, phagetermini, assemblycheck)")
     parser.add_argument("--contig", required=True, help="Name of the contig to plot")
     parser.add_argument("--sample", required=True, help="Name of the sample to plot")
-    parser.add_argument("--html", required=True, default="MGFeaturesViewer.html", help="Name for output html files. A bokeh server will be started if not provided")
-    parser.add_argument("--color", required=False, help="Color system for the sequence annotations (options allowed 'pharokka' or 'other')")
+    parser.add_argument("--html", required=False, default="MGFeaturesViewer_per_sample.html", help="Name for output html files. A bokeh server will be started if not provided")
     parser.add_argument("--subplot_height", required=False, default=130, help="Height of each subplot (in pixels)")
     args = parser.parse_args()
 
     # Path parameters
     db_path = args.db
-    list_features = args.modules.split(",")
+    list_features = args.variables.split(",")
     contig_name = args.contig
     sample_name = args.sample
     output_filename = args.html
 
     # Optional plotting parameters
-    global ANNOTATION_TOOL
-    ANNOTATION_TOOL = args.color if args.color else "other"
     subplot_size = int(args.subplot_height)
 
     # Reading values from database and plotting
     print(f"Saving static HTML to {output_filename}...", flush=True)
-    save_html_plot(db_path, list_features, contig_name, sample_name, subplot_size, output_filename)
+    save_html_plot_per_sample(db_path, list_features, contig_name, sample_name, subplot_size, output_filename)
     
 if __name__ == "__main__":
     main()

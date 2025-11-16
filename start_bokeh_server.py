@@ -8,7 +8,9 @@ from bokeh.models import Div, InlineStyleSheet, Tooltip
 from bokeh.models.widgets import Select, CheckboxGroup, HelpButton, Button, RadioButtonGroup, CheckboxButtonGroup
 
 # Import the plotting function from the repo
-from plotting_data import generate_bokeh_plot
+from plotting_data_per_sample import generate_bokeh_plot_per_sample
+from plotting_data_all_samples import generate_bokeh_plot_all_samples
+from plotting_data_all_samples import generate_bokeh_plot_all_samples
 
 def build_controls(conn):
     """Query DB and return widgets and helper mappings."""
@@ -50,8 +52,7 @@ def build_controls(conn):
         combined_help = "\n".join([f"{lbl}: {ht}" for lbl, ht in zip(variables_checkbox, helps_checkbox) if ht and ht.strip() != ""])
         if combined_help:
             tooltip = Tooltip(content=combined_help, position="right")
-            help_button = HelpButton(tooltip=tooltip, width=26, height=26, align="center")
-            help_button.css_classes = ["help-btn-tight"]
+            help_button = HelpButton(tooltip=tooltip, width=30, height=30, align="center")
         else:
             help_button = None
         helps_widgets.append(help_button)
@@ -341,7 +342,29 @@ def modify_doc_factory(db_path):
                     requested_features.append(cbg.labels[idx])
 
             print(f"[start_bokeh_server] Generating plot for sample={sample}, contig={contig}, features={requested_features}")
-            grid = generate_bokeh_plot(conn, requested_features, contig, sample)
+            if views.active == 1:
+                # All-samples view: require exactly one variable selected across all modules
+                selected_var = None
+                for cbg in widgets['variables_widgets']:
+                    if cbg.active:
+                        # pick the last selected index in this group
+                        selected_var = cbg.labels[cbg.active[-1]]
+                        break
+
+                if not selected_var:
+                    raise ValueError("When in 'All samples' view you must select one variable to plot.")
+
+                print(f"[start_bokeh_server] Generating plot for all samples with variable={selected_var}, contig={contig}")
+                grid = generate_bokeh_plot_all_samples(conn, selected_var, contig)
+            else:
+                # One-sample view: collect possibly-many requested features and call per-sample plot
+                requested_features = []
+                for cbg in widgets['variables_widgets']:
+                    for idx in cbg.active:
+                        requested_features.append(cbg.labels[idx])
+
+                print(f"[start_bokeh_server] Generating plot for sample={sample}, contig={contig}, features={requested_features}")
+                grid = generate_bokeh_plot_per_sample(conn, requested_features, contig, sample)
 
             main_placeholder.children = [grid]
 

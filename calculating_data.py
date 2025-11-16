@@ -25,8 +25,8 @@ def track_time(func):
         return result
     return wrapper
 
-def print_timing_summary():
-    print("\nTiming Summary", flush=True)
+def print_timing_summary(bam_file):
+    print("\nTiming Summary for bam file", bam_file, flush=True)
     total = sum(function_times.values())
     for name, t in sorted(function_times.items(), key=lambda x: -x[1]):
         print(f"{name:35s}: {t:.3f} s ({t/total*100:.1f}%)", flush=True)
@@ -508,7 +508,7 @@ def _process_single_sample(list_modules, bam_file, db_path, min_coverage, step, 
         conn.close()
 
     # Temporary debugging
-    print_timing_summary()
+    print_timing_summary(bam_file)
 
 def calculating_all_features_parallel(list_modules, bam_files, db_path, min_coverage, step, z_thresh, deriv_thresh, max_points, n_sample_cores=None):
     if n_sample_cores is None:
@@ -603,10 +603,18 @@ def main():
 
     ### Running generate_database.py to create database
     db_path = args.db
-    # First check if database file already exists
-    # If exists, raise error to avoid overwriting
+
+    # Must have a filename and end in .db
+    directory, filename = os.path.split(db_path)
+    if not filename or not filename.endswith(".db"):
+        sys.exit(f"ERROR: Invalid database path '{db_path}'. Must provide a file ending in '.db'.")
+    # If a directory is provided, verify it exists
+    if directory and not os.path.isdir(directory):
+        sys.exit(f"ERROR: Directory '{directory}' does not exist. Please create it or choose a valid path.")
+    # Check that database file do not already exist
     if os.path.exists(db_path):
         sys.exit(f"ERROR: Database file '{db_path}' already exists. Please provide a new path to avoid overwriting.")
+
     subprocess.run([sys.executable, os.path.join(os.path.dirname(__file__), "generate_database.py"), db_path], check=True)
 
     ### Saving genbank info into database
@@ -623,9 +631,6 @@ def main():
         contig_name = rec.id
         contig_length = len(rec.seq)
         cur.execute("INSERT OR IGNORE INTO Contig (Contig_name, Contig_length, Annotation_tool) VALUES (?, ?, ?)", (contig_name, contig_length, annotation_tool))
-        contig_count += 1
-
-        # Recover novel contig_id
         contig_id = get_contig_id(conn, contig_name)
         contig_count += 1
 

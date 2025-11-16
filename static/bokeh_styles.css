@@ -3,13 +3,3 @@
     padding: 15px;
     min-width: 350px;
 }
-
-.help-btn-tight .bk-btn {
-    padding: 0 !important;
-    margin: 0 !important;
-    line-height: 1 !important;
-    height: 100% !important;
-    display: flex !important;
-    align-items: center !important;   /* vertically center "?" */
-    justify-content: center !important; /* horizontally center "?" */
-}
