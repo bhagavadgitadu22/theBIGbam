@@ -6,7 +6,7 @@ from bokeh.plotting import output_file, save
 from plotting_data_per_sample import get_contig_info, get_feature_data, make_bokeh_subplot, make_bokeh_genemap
 
 ### Function to generate the bokeh plot
-def generate_bokeh_plot_all_samples(conn, variable, contig_name, subplot_size=130):
+def generate_bokeh_plot_all_samples(conn, variable, contig_name, xstart=None, xend=None, subplot_size=130):
     cur = conn.cursor()
 
     # Get contig characteristics
@@ -16,6 +16,10 @@ def generate_bokeh_plot_all_samples(conn, variable, contig_name, subplot_size=13
     # --- Main gene annotation plot ---
     # Build a SeqRecord from Contig_annotation entries for this contig
     shared_xrange = Range1d(-1000, locus_size+1000)
+    if xstart is not None and xend is not None:
+        shared_xrange.start = xstart
+        shared_xrange.end = xend
+    
     annotation_fig = make_bokeh_genemap(conn, contig_id, locus_name, locus_size, annotation_tool, subplot_size, shared_xrange)
 
     # Get list of samples

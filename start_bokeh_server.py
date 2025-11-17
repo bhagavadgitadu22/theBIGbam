@@ -6,6 +6,7 @@ import traceback
 from bokeh.layouts import column, row
 from bokeh.models import Div, InlineStyleSheet, Tooltip
 from bokeh.models.widgets import Select, CheckboxGroup, HelpButton, Button, RadioButtonGroup, CheckboxButtonGroup
+from bokeh.models.plots import GridPlot
 
 # Import the plotting function from the repo
 from plotting_data_per_sample import generate_bokeh_plot_per_sample
@@ -147,18 +148,44 @@ def modify_doc_factory(db_path):
         def callback(attr, old, new):
             if global_toggle_lock['locked']:
                 return
-            # Only enforce in All samples mode and when some index was selected
-            if views.active == 1 and new:
-                # pick the last selected index
+            # Only enforce in All samples mode
+            if views.active != 1:
+                return
+
+            # Determine which index was most-recently changed.
+            # Use set difference to find an added index (preferred).
+            sel_index = None
+            try:
+                old_set = set(old) if old else set()
+                new_set = set(new) if new else set()
+            except Exception:
+                # Fallback: if types are unexpected, use last element of new
+                old_set = set(old) if old else set()
+                new_set = set(new) if new else set()
+
+            added = new_set - old_set
+            removed = old_set - new_set
+
+            if added:
+                # pick the (one) newly added index
+                sel_index = next(iter(added))
+            elif new:
+                # no clear addition, fall back to last element
                 sel_index = new[-1]
-                global_toggle_lock['locked'] = True
-                for other in widgets['variables_widgets']:
-                    if other is cbg:
-                        # ensure current cbg only has sel_index
-                        other.active = [sel_index]
-                    else:
+            else:
+                # user cleared selection entirely
+                sel_index = None
+
+            global_toggle_lock['locked'] = True
+            for other in widgets['variables_widgets']:
+                if other is cbg:
+                    if sel_index is None:
                         other.active = []
-                global_toggle_lock['locked'] = False
+                    else:
+                        other.active = [sel_index]
+                else:
+                    other.active = []
+            global_toggle_lock['locked'] = False
         return callback
 
     # Attach global variable callbacks to all CheckboxButtonGroups
@@ -261,8 +288,7 @@ def modify_doc_factory(db_path):
         else:
             # No module checkbox exists: show plain title (with help if available)
             if help_btn is not None:
-                hdr = row(module_title_div, help_btn, sizing_mode="stretch_width"
-                          )
+                hdr = row(module_title_div, help_btn, sizing_mode="stretch_width")
             else:
                 hdr = module_title_div
             hdr.visible = True
@@ -342,6 +368,16 @@ def modify_doc_factory(db_path):
                     requested_features.append(cbg.labels[idx])
 
             print(f"[start_bokeh_server] Generating plot for sample={sample}, contig={contig}, features={requested_features}")
+            # Save current positions of the plot for restoration after re-plot
+            fig = main_placeholder.children[0]
+            
+            xstart = None
+            xend = None
+            if isinstance(fig, GridPlot):
+                subplot = fig.children[0][0]
+                xstart = subplot.x_range.start
+                xend = subplot.x_range.end
+
             if views.active == 1:
                 # All-samples view: require exactly one variable selected across all modules
                 selected_var = None
@@ -355,7 +391,7 @@ def modify_doc_factory(db_path):
                     raise ValueError("When in 'All samples' view you must select one variable to plot.")
 
                 print(f"[start_bokeh_server] Generating plot for all samples with variable={selected_var}, contig={contig}")
-                grid = generate_bokeh_plot_all_samples(conn, selected_var, contig)
+                grid = generate_bokeh_plot_all_samples(conn, selected_var, contig, xstart=xstart, xend=xend)
             else:
                 # One-sample view: collect possibly-many requested features and call per-sample plot
                 requested_features = []
@@ -364,7 +400,7 @@ def modify_doc_factory(db_path):
                         requested_features.append(cbg.labels[idx])
 
                 print(f"[start_bokeh_server] Generating plot for sample={sample}, contig={contig}, features={requested_features}")
-                grid = generate_bokeh_plot_per_sample(conn, requested_features, contig, sample)
+                grid = generate_bokeh_plot_per_sample(conn, requested_features, contig, sample, xstart=xstart, xend=xend)
 
             main_placeholder.children = [grid]
 

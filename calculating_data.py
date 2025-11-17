@@ -84,20 +84,28 @@ def compress_signal(type_picked, feature_values, ref_length, step, z_thresh, der
     y_std = np.std(feature_values) or 1e-9
     val_outliers = np.abs(feature_values - y_mean) > z_thresh * y_std
 
-    # Derivative outliers
-    dy = np.diff(feature_values, prepend=feature_values[0])
-    dy_std = np.std(dy) or 1e-9
-    der_outliers = np.abs(dy) > deriv_thresh * dy_std
-
     # Regular subsampling
     if type_picked == "curve":
         regular_idx = np.arange(0, n, step, dtype=int) if n > 0 else np.array([], dtype=int)
-        outlier_idx = np.nonzero(val_outliers | der_outliers)[0]
+
+        # Derivative outliers
+        dy = np.diff(feature_values, prepend=feature_values[0])
+        dy_std = np.std(dy) or 1e-9
+        der_outliers = np.abs(dy) > deriv_thresh * dy_std
+
+        # Include the point before each derivative outlier
+        der_outliers = np.unique(np.clip(np.concatenate([der_outliers - 1, der_outliers]), 0, n - 1))
+
+        # Combine value and derivative outliers
+        outlier_idx = np.nonzero(val_outliers)[0]
+        outlier_idx = np.unique(np.concatenate([outlier_idx, der_outliers]))
+
         last_idx = np.array([n - 1], dtype=int) if n > 0 else np.array([], dtype=int)
         keep_idx = merge_sorted_unique(regular_idx, outlier_idx, last_idx)
+        
     elif type_picked == "bars":
         # For bars: only keep outliers (value OR derivative)
-        keep_idx = np.nonzero(val_outliers | der_outliers)[0]
+        keep_idx = np.nonzero(val_outliers)[0]
     else:
         raise ValueError(f"Unknown type_picked: {type_picked}")
     
@@ -431,10 +439,17 @@ def preprocess_reads(reads_mapped, modules):
     is_proper_pair = np.array(is_proper_pair, dtype=np.bool_)
     is_paired = np.array(is_paired, dtype=np.bool_)
     is_reverse = np.array(is_reverse, dtype=np.bool_)
-    cigars = np.array(cigars, dtype=object)
+    # Keep `cigars` as a Python list of numpy arrays instead of an
+    # object-dtype numpy array. Passing elements extracted from an
+    # object array into numba-decorated functions causes numba to see
+    # non-precise object types (array(pyobject,...)) and fail typing.
+    # A list preserves the concrete numpy array elements when indexed.
+    cigars = cigars
     has_md = np.array(has_md, dtype=np.bool_)
     md_lengths = np.array(md_lengths, dtype=np.int32)
-    md_list = np.array(md_list, dtype=object)
+    # Similarly, keep `md_list` as a list of numpy uint8 arrays so numba
+    # functions that receive `md_list[i]` get a concrete array type.
+    md_list = md_list
 
     return (ref_starts, ref_ends, query_lengths, template_lengths, is_read1, is_proper_pair, is_paired, is_reverse, cigars, has_md, md_list, md_lengths)
 
@@ -541,7 +556,7 @@ def main():
 
     ### Checking genbank and mapping files are compatible... (sanity checks)
     print("### Checking that genbank and mapping files are compatible...", flush=True)
-    genbank_loci = set(rec.id for rec in SeqIO.parse(args.genbank, "genbank"))
+    genbank_loci = set(rec.name for rec in SeqIO.parse(args.genbank, "genbank"))
     annotation_tool = args.annotation_tool
     if not genbank_loci:
         sys.exit("ERROR: No loci found in the provided GenBank file.")
@@ -628,7 +643,7 @@ def main():
     feature_count = 0
     for rec in SeqIO.parse(args.genbank, "genbank"):
         # Insert contig (or ignore if exists)
-        contig_name = rec.id
+        contig_name = rec.name
         contig_length = len(rec.seq)
         cur.execute("INSERT OR IGNORE INTO Contig (Contig_name, Contig_length, Annotation_tool) VALUES (?, ?, ?)", (contig_name, contig_length, annotation_tool))
         contig_id = get_contig_id(conn, contig_name)

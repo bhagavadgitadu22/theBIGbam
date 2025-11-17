@@ -197,7 +197,7 @@ def get_feature_data(cur, feature, contig_id, sample_id):
     return list_feature_dict
 
 ### Function to generate the bokeh plot
-def generate_bokeh_plot_per_sample(conn, list_features, contig_name, sample_name, subplot_size=130):
+def generate_bokeh_plot_per_sample(conn, list_features, contig_name, sample_name, xstart=None, xend=None, subplot_size=130):
     cur = conn.cursor()
 
     # Get contig characteristics
@@ -207,6 +207,10 @@ def generate_bokeh_plot_per_sample(conn, list_features, contig_name, sample_name
     # --- Main gene annotation plot ---
     # Build a SeqRecord from Contig_annotation entries for this contig
     shared_xrange = Range1d(-1000, locus_size+1000)
+    if xstart is not None and xend is not None:
+        shared_xrange.start = xstart
+        shared_xrange.end = xend
+
     annotation_fig = make_bokeh_genemap(conn, contig_id, locus_name, locus_size, annotation_tool, subplot_size, shared_xrange)
 
     # Get sample characteristics
@@ -219,7 +223,6 @@ def generate_bokeh_plot_per_sample(conn, list_features, contig_name, sample_name
 
     # --- Main gene annotation plot ---
     # Build a SeqRecord from Contig_annotation entries for this contig
-    shared_xrange = Range1d(-1000, locus_size+1000)
     annotation_fig = make_bokeh_genemap(conn, contig_id, locus_name, locus_size, annotation_tool, subplot_size, shared_xrange)
 
     # --- Add one subplot per feature requested ---

@@ -4,8 +4,8 @@ import sys
 # Define subplots characteristics
 def config_feature_subplot(subplot, module, plot_type, color, title, alpha=0.8, fill_alpha=0.4, size=1, help=""):    
     if plot_type == "bars":
-        alpha = 0.5
-        size = 5
+        alpha = 0.6
+        size = 1
     return {
         "subplot": subplot, 
         "module": module,
