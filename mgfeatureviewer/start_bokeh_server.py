@@ -9,9 +9,8 @@ from bokeh.models.widgets import Select, CheckboxGroup, HelpButton, Button, Radi
 from bokeh.models.plots import GridPlot
 
 # Import the plotting function from the repo
-from plotting_data_per_sample import generate_bokeh_plot_per_sample
-from plotting_data_all_samples import generate_bokeh_plot_all_samples
-from plotting_data_all_samples import generate_bokeh_plot_all_samples
+from .plotting_data_per_sample import generate_bokeh_plot_per_sample
+from .plotting_data_all_samples import generate_bokeh_plot_all_samples
 
 def build_controls(conn):
     """Query DB and return widgets and helper mappings."""
@@ -75,7 +74,7 @@ def build_controls(conn):
 def modify_doc_factory(db_path):
     """Return a modify_doc(doc) function to be used by Bokeh server application."""
     # Load the CSS
-    css_path = os.path.join(os.path.dirname(__file__), "static", "bokeh_styles.css")
+    css_path = os.path.join(os.path.dirname(__file__), "..", "static", "bokeh_styles.css")
     with open(css_path) as f:
         css_text = f.read()
     stylesheet = InlineStyleSheet(css=css_text)
@@ -439,5 +438,32 @@ def main():
     print(f"Bokeh server running at http://localhost:{args.port}/")
     server.io_loop.start()
 
+def add_serve_args(parser):
+    parser.add_argument("--db", required=True, help="Path to sqlite DB")
+    parser.add_argument("--port", type=int, default=5006, help="Port to serve Bokeh app")
+
+def run_serve(args):
+    modify_doc = modify_doc_factory(args.db)
+
+    try:
+        from bokeh.server.server import Server
+        from bokeh.application import Application
+        from bokeh.application.handlers.function import FunctionHandler
+    except Exception as e:
+        print("Bokeh server components not installed or unavailable:", e)
+        print("You can run this file with `bokeh serve --show start_bokeh_server.py --args --db <DB>` as alternative.")
+        return 1
+
+    app = Application(FunctionHandler(modify_doc))
+    server = Server({'/': app}, port=args.port)
+    server.start()
+    print(f"Bokeh server running at http://localhost:{args.port}/")
+    server.io_loop.start()
+    return 0
+
 if __name__ == "__main__":
-    main()
+    import argparse
+    parser = argparse.ArgumentParser()
+    add_serve_args(parser)
+    args = parser.parse_args()
+    raise SystemExit(run_serve(args))

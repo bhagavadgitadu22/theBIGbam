@@ -536,11 +536,8 @@ def calculating_all_features_parallel(list_modules, bam_files, db_path, min_cove
         pool.starmap(_process_single_sample, args_list)
     print("Finished all samples.", flush=True)
 
-### Main function
-def main():
-    # Parse command line arguments
-    print("Parsing arguments...", flush=True)
-    parser = argparse.ArgumentParser(description="Parse input files.")
+### Main function helpers (shared-args)
+def add_calculate_args(parser):
     parser.add_argument("-t", "--threads", required=True, help="Number of threads available")
     parser.add_argument("-g", "--genbank", required=True, help="Path to genbank file of all investigated contigs")
     parser.add_argument("-b", "--bam_files", required=True, help="Path to bam file or directory containing mapping files (BAM format)")
@@ -552,9 +549,9 @@ def main():
     parser.add_argument("--outlier_threshold", type=int, default=3, help="Points beyond mean+std*N are kept as outliers")
     parser.add_argument("--derivative_threshold", type=int, default=3, help="Points were the derivative is beyond mean+std*N are kept as outliers")
     parser.add_argument("--max_points", type=int, default=10000, help="Maximum number of points kept during compression")
-    args = parser.parse_args()
 
-    ### Checking genbank and mapping files are compatible... (sanity checks)
+def run_calculate_args(args):
+    # Sanity checks and preparation
     print("### Checking that genbank and mapping files are compatible...", flush=True)
     genbank_loci = set(rec.name for rec in SeqIO.parse(args.genbank, "genbank"))
     annotation_tool = args.annotation_tool
@@ -570,8 +567,6 @@ def main():
         sys.exit("ERROR: No BAM files found in the specified mapping path.")
 
     # Check that references in BAM headers match loci in GenBank
-    # If references in BAM not in GenBank -> ERROR
-    # If loci in GenBank not in BAM -> WARNING
     for bam_file in bam_files:
         try:
             with pysam.AlignmentFile(bam_file, "rb") as bam:
@@ -596,14 +591,8 @@ def main():
             )
     print("Sanity checks passed: No BAM contained unexpected reference names.", flush=True)
 
-    ### Parsing user parameters
-    # Getting list of features requested
-    # If starts in feature_list replace it by starts_plus, starts_minus, ends_plus, ends_minus
+    # Requested modules
     requested_modules = args.modules.split(",")
-
-    # TO-CONSIDER: implement subsampling
-    # No subsampling for a certain coverage depth per sample for now
-    # It would speed up calculation but coverage numbers would be less accurate
 
     # Parameters for compression
     min_coverage = args.min_coverage
@@ -612,29 +601,23 @@ def main():
     deriv_thresh = args.derivative_threshold
     max_points = args.max_points
 
-    # Number of cores to use for multithreading on samples
-    # TO-CONSIDER: implement also multithreading on contigs within each sample
     n_cores = int(args.threads)
 
-    ### Running generate_database.py to create database
+    # Running generate_database.py to create database
     db_path = args.db
 
-    # Must have a filename and end in .db
     directory, filename = os.path.split(db_path)
     if not filename or not filename.endswith(".db"):
         sys.exit(f"ERROR: Invalid database path '{db_path}'. Must provide a file ending in '.db'.")
-    # If a directory is provided, verify it exists
     if directory and not os.path.isdir(directory):
         sys.exit(f"ERROR: Directory '{directory}' does not exist. Please create it or choose a valid path.")
-    # Check that database file do not already exist
     if os.path.exists(db_path):
         sys.exit(f"ERROR: Database file '{db_path}' already exists. Please provide a new path to avoid overwriting.")
 
     subprocess.run([sys.executable, os.path.join(os.path.dirname(__file__), "generate_database.py"), db_path], check=True)
 
-    ### Saving genbank info into database
+    # Saving genbank info into database
     print("### Saving genbank info into database...", flush=True)
-    # Parse the provided GenBank file and save contig entries and feature annotations
     conn = sqlite3.connect(db_path)
     cur = conn.cursor()
 
@@ -642,22 +625,18 @@ def main():
     contig_count = 0
     feature_count = 0
     for rec in SeqIO.parse(args.genbank, "genbank"):
-        # Insert contig (or ignore if exists)
         contig_name = rec.name
         contig_length = len(rec.seq)
         cur.execute("INSERT OR IGNORE INTO Contig (Contig_name, Contig_length, Annotation_tool) VALUES (?, ?, ?)", (contig_name, contig_length, annotation_tool))
         contig_id = get_contig_id(conn, contig_name)
         contig_count += 1
 
-        # Collect feature rows to insert later in bulk
         for f in rec.features:
-            # only annotate typical features that have a location
             try:
-                start = int(f.location.start) + 1  # convert to 1-based
+                start = int(f.location.start) + 1
                 end = int(f.location.end)
                 strand_val = f.location.strand
             except Exception:
-                # skip features with no simple numeric location
                 continue
 
             ftype = f.type
@@ -677,9 +656,15 @@ def main():
 
     print(f"Saved {contig_count} contigs and {feature_count} annotations into database", flush=True)
 
-    ### Calculating values for all requested features from mapping files
     print("Calculating values for all requested features from mapping files...", flush=True)
     calculating_all_features_parallel(requested_modules, bam_files, db_path, min_coverage, step, z_thresh, deriv_thresh, max_points, n_cores)
+
+def main():
+    print("Parsing arguments...", flush=True)
+    parser = argparse.ArgumentParser(description="Parse input files.")
+    add_calculate_args(parser)
+    args = parser.parse_args()
+    run_calculate_args(args)
 
 if __name__ == "__main__":
     start_time = time.perf_counter()

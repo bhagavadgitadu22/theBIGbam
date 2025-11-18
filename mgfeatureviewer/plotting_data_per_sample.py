@@ -7,7 +7,7 @@ from bokeh.layouts import gridplot
 from bokeh.plotting import output_file, save, figure
 from dna_features_viewer import BiopythonTranslator
 
-import colors_for_genbank
+from . import colors_for_genbank
 
 ### Custom translator for coloring and labeling features (with DNAFeaturesViewer python library)
 class CustomTranslator(BiopythonTranslator):
@@ -271,31 +271,30 @@ def parse_requested_features(list_features):
     return(deduped_features)
 
 ### Main function
-def main():
-    # Parse command line arguments
-    print("Parsing arguments...", flush=True)
-    parser = argparse.ArgumentParser(description="Parse input files.")
+def add_plot_per_sample_args(parser):
     parser.add_argument("-d", "--db", required=True, help="Path to sqlite database file to store results")
     parser.add_argument("-v", "--variables", required=True, help="List of variables or full modules to compute (comma-separated) (options allowed for modules: coverage, phagetermini, assemblycheck)")
     parser.add_argument("--contig", required=True, help="Name of the contig to plot")
     parser.add_argument("--sample", required=True, help="Name of the sample to plot")
-    parser.add_argument("--html", required=False, default="MGFeaturesViewer_per_sample.html", help="Name for output html files. A bokeh server will be started if not provided")
+    parser.add_argument("--html", required=False, default="MGFeatureViewer_per_sample.html", help="Name for output html files. A bokeh server will be started if not provided")
     parser.add_argument("--subplot_height", required=False, default=130, help="Height of each subplot (in pixels)")
-    args = parser.parse_args()
 
-    # Path parameters
+
+def run_plot_per_sample(args):
     db_path = args.db
     list_features = args.variables.split(",")
     contig_name = args.contig
     sample_name = args.sample
     output_filename = args.html
-
-    # Optional plotting parameters
     subplot_size = int(args.subplot_height)
 
-    # Reading values from database and plotting
     print(f"Saving static HTML to {output_filename}...", flush=True)
     save_html_plot_per_sample(db_path, list_features, contig_name, sample_name, subplot_size, output_filename)
-    
+
+
 if __name__ == "__main__":
-    main()
+    import argparse
+    parser = argparse.ArgumentParser()
+    add_plot_per_sample_args(parser)
+    args = parser.parse_args()
+    run_plot_per_sample(args)

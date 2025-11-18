@@ -3,7 +3,7 @@ from bokeh.models import Range1d
 from bokeh.layouts import gridplot
 from bokeh.plotting import output_file, save
 
-from plotting_data_per_sample import get_contig_info, get_feature_data, make_bokeh_subplot, make_bokeh_genemap
+from .plotting_data_per_sample import get_contig_info, get_feature_data, make_bokeh_subplot, make_bokeh_genemap
 
 ### Function to generate the bokeh plot
 def generate_bokeh_plot_all_samples(conn, variable, contig_name, xstart=None, xend=None, subplot_size=130):
@@ -63,7 +63,7 @@ def main():
     parser.add_argument("-d", "--db", required=True, help="Path to sqlite database file to store results")
     parser.add_argument("-v", "--variable", required=True, help="Variable to compute (only one variable allowed)")
     parser.add_argument("--contig", required=True, help="Name of the contig to plot")
-    parser.add_argument("--html", required=False, default="MGFeaturesViewer_all_samples.html", help="Name for output html files. A bokeh server will be started if not provided")
+    parser.add_argument("--html", required=False, default="MGFeatureViewer_all_samples.html", help="Name for output html files. A bokeh server will be started if not provided")
     parser.add_argument("--subplot_height", required=False, default=130, help="Height of each subplot (in pixels)")
     args = parser.parse_args()
 
@@ -79,6 +79,27 @@ def main():
     # Reading values from database and plotting
     print(f"Saving static HTML to {output_filename}...", flush=True)
     save_html_plot_all_samples(db_path, variable, contig_name, subplot_size, output_filename)
-    
+
+def add_plot_all_args(parser):
+    parser.add_argument("-d", "--db", required=True, help="Path to sqlite database file to store results")
+    parser.add_argument("-v", "--variable", required=True, help="Variable to compute (only one variable allowed)")
+    parser.add_argument("--contig", required=True, help="Name of the contig to plot")
+    parser.add_argument("--html", required=False, default="MGFeatureViewer_all_samples.html", help="Name for output html files. A bokeh server will be started if not provided")
+    parser.add_argument("--subplot_height", required=False, default=130, help="Height of each subplot (in pixels)")
+
+def run_plot_all(args):
+    db_path = args.db
+    variable = args.variable
+    contig_name = args.contig
+    output_filename = args.html
+    subplot_size = int(args.subplot_height)
+
+    print(f"Saving static HTML to {output_filename}...", flush=True)
+    save_html_plot_all_samples(db_path, variable, contig_name, subplot_size, output_filename)
+
 if __name__ == "__main__":
-    main()
+    import argparse
+    parser = argparse.ArgumentParser()
+    add_plot_all_args(parser)
+    args = parser.parse_args()
+    run_plot_all(args)
