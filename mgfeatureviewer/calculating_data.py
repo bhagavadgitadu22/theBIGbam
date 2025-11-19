@@ -10,6 +10,12 @@ from functools import wraps
 from collections import defaultdict
 import sqlite3
 import subprocess
+from pathlib import Path
+
+try:
+    from . import slurm_utils
+except Exception:
+    slurm_utils = None
 
 ### Measuring time spent in each function
 function_times = defaultdict(float)
@@ -25,12 +31,86 @@ def track_time(func):
         return result
     return wrapper
 
-def print_timing_summary(bam_file):
-    print("\nTiming Summary for bam file", bam_file, flush=True)
-    total = sum(function_times.values())
-    for name, t in sorted(function_times.items(), key=lambda x: -x[1]):
-        print(f"{name:35s}: {t:.3f} s ({t/total*100:.1f}%)", flush=True)
-    print(f"Total tracked time: {total:.3f} s", flush=True)
+def create_temp_sample_db(temp_db_path: str):
+    """Create a lightweight temp DB for a single sample to avoid contention.
+    It contains two tables: TempPresences and TempFeatureValues.
+    """
+    conn = sqlite3.connect(temp_db_path)
+    cur = conn.cursor()
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS TempPresences (
+        Contig_name TEXT,
+        Sample_name TEXT,
+        Coverage_percentage REAL
+    )
+    """)
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS TempFeatureValues (
+        Variable_name TEXT,
+        Contig_name TEXT,
+        Sample_name TEXT,
+        Position INTEGER,
+        Value REAL
+    )
+    """)
+    conn.commit()
+    conn.close()
+
+
+def merge_temp_db_into_main(main_db_path: str, temp_db_path: str):
+    """Merge data from a temp sample DB into the main DB.
+    Assumptions:
+      - main DB already has Contig and Variable tables populated (from genbank step)
+      - temp DB contains TempPresences and TempFeatureValues
+    The function will:
+      - Insert missing Sample rows into main.Sample
+      - Map contig names to Contig_id using main.Contig
+      - For each Variable_name in TempFeatureValues, find Feature_table_name in main.Variable
+        and insert rows into that feature table mapping contig/sample names to ids.
+      - Insert TempPresences rows into main.Presences mapping contig/sample names to ids.
+    """
+    mconn = sqlite3.connect(main_db_path)
+    mcur = mconn.cursor()
+    # Attach temp DB
+    mcur.execute(f"ATTACH DATABASE ? AS src", (temp_db_path,))
+
+    # Insert Samples referenced in temp into main.Sample
+    mcur.execute("SELECT DISTINCT Sample_name FROM src.TempPresences")
+    sample_rows = mcur.fetchall()
+    mcur.execute("SELECT DISTINCT Sample_name FROM src.TempFeatureValues")
+    sample_rows += [r for r in mcur.fetchall() if r not in sample_rows]
+
+    for (sname,) in sample_rows:
+        if sname is None:
+            continue
+        mcur.execute("INSERT OR IGNORE INTO Sample (Sample_name) VALUES (?)", (sname,))
+
+    mconn.commit()
+
+    # Insert presences mapping contig and sample names to ids
+    mcur.execute("INSERT INTO Presences (Contig_id, Sample_id, Coverage_percentage) SELECT (SELECT Contig_id FROM Contig WHERE Contig_name=src.TempPresences.Contig_name), (SELECT Sample_id FROM Sample WHERE Sample_name=src.TempPresences.Sample_name), src.TempPresences.Coverage_percentage FROM src.TempPresences")
+    mconn.commit()
+
+    # For features, iterate distinct Variable_name and insert into corresponding tables
+    mcur.execute("SELECT DISTINCT Variable_name FROM src.TempFeatureValues")
+    vars_ = [r[0] for r in mcur.fetchall()]
+    for var in vars_:
+        # find feature table name in main.Variable
+        mcur.execute("SELECT Feature_table_name FROM Variable WHERE Variable_name=?", (var,))
+        row = mcur.fetchone()
+        if not row:
+            # Unknown variable -> skip
+            continue
+        feat_table = row[0]
+        # Build and execute insert: map contig/sample names to ids
+        sql = f"INSERT INTO {feat_table} (Contig_id, Sample_id, Position, Value) SELECT (SELECT Contig_id FROM Contig WHERE Contig_name=src.TempFeatureValues.Contig_name), (SELECT Sample_id FROM Sample WHERE Sample_name=src.TempFeatureValues.Sample_name), src.TempFeatureValues.Position, src.TempFeatureValues.Value FROM src.TempFeatureValues WHERE Variable_name=?"
+        mcur.execute(sql, (var,))
+        mconn.commit()
+
+    # Detach temp DB
+    mcur.execute("DETACH DATABASE src")
+    mconn.close()
+
 
 ### Find sequencing type from BAM file
 def find_sequencing_type_from_bam(bam_file, n_reads_check=100):
@@ -136,29 +216,47 @@ def add_sample(conn, sample_name):
     row = cur.fetchone()
     return row[0] if row else None
 
-def add_presence(conn, contig_id, sample_id, coverage_percentage):
+def add_presence(conn, contig_id=None, sample_id=None, coverage_percentage=None, *, contig_name=None, sample_name=None, temp_mode=False):
     cur = conn.cursor()
-    cur.execute("INSERT INTO Presences (Contig_id, Sample_id, Coverage_percentage) VALUES (?, ?, ?)", (contig_id, sample_id, coverage_percentage))
+    if temp_mode:
+        # write to TempPresences (contig_name, sample_name, coverage)
+        cur.execute("INSERT INTO TempPresences (Contig_name, Sample_name, Coverage_percentage) VALUES (?, ?, ?)", (contig_name, sample_name, coverage_percentage))
+    else:
+        cur.execute("INSERT INTO Presences (Contig_id, Sample_id, Coverage_percentage) VALUES (?, ?, ?)", (contig_id, sample_id, coverage_percentage))
     conn.commit()
 
-def compress_and_write_features(feature, feature_values, db_conn, sample_id, contig_id, ref_length, step, z_thresh, deriv_thresh, max_points):
+def compress_and_write_features(feature, feature_values, db_conn, sample_id=None, contig_id=None, ref_length=None, step=None, z_thresh=None, deriv_thresh=None, max_points=None, *, sample_name=None, contig_name=None, temp_mode=False):
     # Read variable metadata from DB instead of constants
     cur = db_conn.cursor()
 
-    cur.execute("SELECT Type, Feature_table_name FROM Variable WHERE Variable_name=?", (feature,))
-    row = cur.fetchone()
-    type_picked, feature_table = row
+    # When writing into a temp DB, we do not need feature_table resolution
+    if not temp_mode:
+        cur.execute("SELECT Type, Feature_table_name FROM Variable WHERE Variable_name=?", (feature,))
+        row = cur.fetchone()
+        type_picked, feature_table = row
+    else:
+        # For temp mode, we still need the variable Type to compress appropriately
+        cur.execute("SELECT Type FROM Variable WHERE Variable_name=?", (feature,))
+        row = cur.fetchone()
+        type_picked = row[0] if row else 'curve'
 
     # Compress the signal to limit points
     feature_compressed = compress_signal(type_picked, feature_values, ref_length, step, z_thresh, deriv_thresh, max_points)
 
     xs = feature_compressed.get("x", [])
     ys = feature_compressed.get("y", [])
-    to_insert = [(contig_id, sample_id, int(x), float(y)) for x, y in zip(xs, ys)]
 
-    if to_insert:
-        cur.executemany(f"INSERT INTO {feature_table} (Contig_id, Sample_id, Position, Value) VALUES (?, ?, ?, ?)", to_insert)
-        db_conn.commit()
+    if temp_mode:
+        # Insert into generic TempFeatureValues table for later merging
+        to_insert = [(feature, contig_name, sample_name, int(x), float(y)) for x, y in zip(xs, ys)]
+        if to_insert:
+            cur.executemany("INSERT INTO TempFeatureValues (Variable_name, Contig_name, Sample_name, Position, Value) VALUES (?, ?, ?, ?, ?)", to_insert)
+            db_conn.commit()
+    else:
+        to_insert = [(contig_id, sample_id, int(x), float(y)) for x, y in zip(xs, ys)]
+        if to_insert:
+            cur.executemany(f"INSERT INTO {feature_table} (Contig_id, Sample_id, Position, Value) VALUES (?, ?, ?, ?)", to_insert)
+            db_conn.commit()
 
 ### Functions of coverage module
 @njit
@@ -179,12 +277,12 @@ def calculate_coverage_numba(coverage, starts, ends, ref_length):
                 coverage[j] += 1
 
 @track_time
-def get_feature_coverage(ref_starts, ref_ends, ref_length, db_conn, sample_id, contig_id, step, z_thresh, deriv_thresh, max_points):
+def get_feature_coverage(ref_starts, ref_ends, ref_length, db_conn, sample_id=None, contig_id=None, step=None, z_thresh=None, deriv_thresh=None, max_points=None, *, sample_name=None, contig_name=None, temp_mode=False):
     coverage = np.zeros(ref_length, dtype=np.uint64)
     calculate_coverage_numba(coverage, ref_starts, ref_ends, ref_length)
 
     # Save into DB
-    compress_and_write_features("coverage", coverage, db_conn, sample_id, contig_id, ref_length, step, z_thresh, deriv_thresh, max_points)
+    compress_and_write_features("coverage", coverage, db_conn, sample_id, contig_id, ref_length, step, z_thresh, deriv_thresh, max_points, sample_name=sample_name, contig_name=contig_name, temp_mode=temp_mode)
 
 ### Functions of phagetermini module
 def starts_with_match(cigar, md, start):
@@ -238,7 +336,7 @@ def compute_final_starts_ends_and_tau(feature_dict, temporary_dict, sequencing_t
 
 @track_time
 def get_features_phagetermini(ref_starts, ref_ends, is_reverse, cigars, md_list, sequencing_type, ref_length, 
-                              db_conn, sample_id, contig_id, step, z_thresh, deriv_thresh, max_points):
+                              db_conn, sample_id=None, contig_id=None, step=None, z_thresh=None, deriv_thresh=None, max_points=None, *, sample_name=None, contig_name=None, temp_mode=False):
     features = ["coverage_reduced", "reads_starts", "reads_ends", "tau"]
     temporary_features = ["coverage_reduced", "start_plus", "start_minus", "end_plus", "end_minus"]
 
@@ -262,7 +360,7 @@ def get_features_phagetermini(ref_starts, ref_ends, is_reverse, cigars, md_list,
 
     # Save features into DB
     for feature in features:
-        compress_and_write_features(feature, feature_dict[feature], db_conn, sample_id, contig_id, ref_length, step, z_thresh, deriv_thresh, max_points)
+        compress_and_write_features(feature, feature_dict[feature], db_conn, sample_id, contig_id, ref_length, step, z_thresh, deriv_thresh, max_points, sample_name=sample_name, contig_name=contig_name, temp_mode=temp_mode)
 
 ### Functions of assemblycheck module
 @njit
@@ -332,7 +430,7 @@ def compute_final_lengths(sum_lengths, count_lengths):
 @track_time
 def get_features_assemblycheck(ref_starts, ref_ends, query_lengths, template_lengths, is_read1, is_proper_pair, 
                                cigars, has_md, md_list, md_lengths, sequencing_type, ref_length, 
-                               db_conn, sample_id, contig_id, step, z_thresh, deriv_thresh, max_points):
+                               db_conn, sample_id=None, contig_id=None, step=None, z_thresh=None, deriv_thresh=None, max_points=None, *, sample_name=None, contig_name=None, temp_mode=False):
     features = []
     temporary_features = []
 
@@ -391,7 +489,7 @@ def get_features_assemblycheck(ref_starts, ref_ends, query_lengths, template_len
 
     # --- Save features into DB ---
     for feature in features:
-        compress_and_write_features(feature, feature_dict[feature], db_conn, sample_id, contig_id, ref_length, step, z_thresh, deriv_thresh, max_points)
+        compress_and_write_features(feature, feature_dict[feature], db_conn, sample_id, contig_id, ref_length, step, z_thresh, deriv_thresh, max_points, sample_name=sample_name, contig_name=contig_name, temp_mode=temp_mode)
 
 ### Calculating features per contig per sample
 @track_time
@@ -454,8 +552,8 @@ def preprocess_reads(reads_mapped, modules):
     return (ref_starts, ref_ends, query_lengths, template_lengths, is_read1, is_proper_pair, is_paired, is_reverse, cigars, has_md, md_list, md_lengths)
 
 @track_time
-def calculating_features_per_contig_per_sample(module_list, bam_file, sequencing_type, ref_name, locus_size, db_conn, sample_id, contig_id, 
-                                               min_coverage, step, z_thresh, deriv_thresh, max_points):
+def calculating_features_per_contig_per_sample(module_list, bam_file, sequencing_type, ref_name, locus_size, db_conn, sample_id=None, contig_id=None, 
+                                               min_coverage=None, step=None, z_thresh=None, deriv_thresh=None, max_points=None, *, sample_name=None, contig_name=None, temp_mode=False):
     ### Save relevant info from bam file
     reads_mapped = bam_file.fetch(ref_name)
     (ref_starts, ref_ends, query_lengths, template_lengths,
@@ -482,18 +580,21 @@ def calculating_features_per_contig_per_sample(module_list, bam_file, sequencing
         # If not enough coverage skip this contig
         return None
     
-    # Add presence record
-    add_presence(db_conn, contig_id, sample_id, coverage_pct)
+    # Add presence record (either into main DB by id, or temp DB by names)
+    if temp_mode:
+        add_presence(db_conn, coverage_percentage=coverage_pct, contig_name=contig_name, sample_name=sample_name, temp_mode=True)
+    else:
+        add_presence(db_conn, contig_id=contig_id, sample_id=sample_id, coverage_percentage=coverage_pct)
 
     ### Calculate all features
     if {"coverage", "assemblycheck"}.intersection(module_list):
-        get_feature_coverage(ref_starts, ref_ends, locus_size, db_conn, sample_id, contig_id, step, z_thresh, deriv_thresh, max_points)
+        get_feature_coverage(ref_starts, ref_ends, locus_size, db_conn, sample_id, contig_id, step, z_thresh, deriv_thresh, max_points, sample_name=sample_name, contig_name=contig_name, temp_mode=temp_mode)
     if "phagetermini" in module_list:
         get_features_phagetermini(ref_starts, ref_ends, is_reverse, cigars, md_list, sequencing_type, locus_size, 
-                                  db_conn, sample_id, contig_id, step, z_thresh, deriv_thresh, max_points)
+                                  db_conn, sample_id, contig_id, step, z_thresh, deriv_thresh, max_points, sample_name=sample_name, contig_name=contig_name, temp_mode=temp_mode)
     if "assemblycheck" in module_list:
         get_features_assemblycheck(ref_starts, ref_ends, query_lengths, template_lengths, is_read1, is_proper_pair, cigars, has_md, md_list, md_lengths, 
-                                   sequencing_type, locus_size, db_conn, sample_id, contig_id, step, z_thresh, deriv_thresh, max_points)
+                                   sequencing_type, locus_size, db_conn, sample_id, contig_id, step, z_thresh, deriv_thresh, max_points, sample_name=sample_name, contig_name=contig_name, temp_mode=temp_mode)
 
 ### Distributing the calculation for all the contigs in the bam file
 @track_time
@@ -506,24 +607,134 @@ def calculating_features_per_sample(module_list, mapping_file, db_conn, min_cove
     sample_name = os.path.basename(mapping_file).replace(".bam", "")
     sequencing_type = find_sequencing_type_from_bam(mapping_file)
 
-    sample_id = add_sample(db_conn, sample_name)
-    for ref, length in zip(references, lengths):
-        contig_id = get_contig_id(db_conn, ref)
-        calculating_features_per_contig_per_sample(module_list, bam_file, sequencing_type, ref, length, db_conn, sample_id, contig_id, 
-                                                   min_coverage, step, z_thresh, deriv_thresh, max_points)
+    # Detect if db_conn is a temp DB by checking for TempFeatureValues table
+    cur = db_conn.cursor()
+    cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='TempFeatureValues'")
+    is_temp = cur.fetchone() is not None
+
+    if is_temp:
+        # temp DB: do not try to add sample/contig ids here. Write using names.
+        for ref, length in zip(references, lengths):
+            calculating_features_per_contig_per_sample(module_list, bam_file, sequencing_type, ref, length, db_conn, None, None,
+                                                       min_coverage, step, z_thresh, deriv_thresh, max_points, sample_name=sample_name, contig_name=ref, temp_mode=True)
+    else:
+        sample_id = add_sample(db_conn, sample_name)
+        for ref, length in zip(references, lengths):
+            contig_id = get_contig_id(db_conn, ref)
+            calculating_features_per_contig_per_sample(module_list, bam_file, sequencing_type, ref, length, db_conn, sample_id, contig_id, 
+                                                       min_coverage, step, z_thresh, deriv_thresh, max_points)
     bam_file.close()
 
 ### Distributing the calculation for all the bam files (samples)
-def _process_single_sample(list_modules, bam_file, db_path, min_coverage, step, z_thresh, deriv_thresh, max_points):
-    # Each worker opens its own DB connection
-    conn = sqlite3.connect(db_path)
-    try:
-        calculating_features_per_sample(list_modules, bam_file, conn, min_coverage, step, z_thresh, deriv_thresh, max_points)
-    finally:
-        conn.close()
+def _process_single_sample(list_modules, bam_file, db_path, min_coverage, step, z_thresh, deriv_thresh, max_points, n_contig_cores=None):
+    # Backwards-compatible: `bam_file` may be a path string or a path-like object.
+    bam_path = str(bam_file)
 
-    # Temporary debugging
-    print_timing_summary(bam_file)
+    # Reset timing counters for this sample so logs contain per-sample data only
+    function_times.clear()
+
+    # Prepare logfile path in same directory as the DB
+    db_p = Path(db_path)
+    log_path = db_p.parent / (db_p.stem + "_times.log")
+
+    # Each worker may optionally parallelize over contigs. This function can be
+    # called with an additional final argument `n_contig_cores` (int).
+    # If caller passed a tuple with an extra element (when invoked via starmap
+    # with extra arg), handle it gracefully. But in normal use callers should
+    # pass n_contig_cores as a keyword in Python invocations.
+    # Open the BAM to inspect contigs
+    bam = pysam.AlignmentFile(bam_path, "rb")
+    references = bam.references
+    lengths = [l // 2 for l in bam.lengths]
+
+    # Create a per-sample temp DB to avoid concurrent writers to the main DB
+    db_main = db_path
+    dbp = Path(db_main)
+    sample_name = os.path.basename(bam_path).replace('.bam', '')
+    temp_db = dbp.parent / f"{dbp.stem}_{sample_name}.temp.db"
+    create_temp_sample_db(str(temp_db))
+
+    # Open temp connection and run calculations (workers write into temp DB)
+    conn_temp = sqlite3.connect(str(temp_db))
+    # Copy Variable metadata from main DB into temp DB so compression can lookup Type
+    try:
+        with sqlite3.connect(db_path) as mconn:
+            mcur = mconn.cursor()
+            mcur.execute("SELECT Variable_name, Type FROM Variable")
+            vars_meta = mcur.fetchall()
+        tcur = conn_temp.cursor()
+        tcur.execute("CREATE TABLE IF NOT EXISTS Variable (Variable_name TEXT PRIMARY KEY, Type TEXT, Feature_table_name TEXT)")
+        if vars_meta:
+            rows_to_insert = [(v[0], v[1]) for v in vars_meta]
+            tcur.executemany("INSERT OR REPLACE INTO Variable (Variable_name, Type) VALUES (?, ?)", rows_to_insert)
+            conn_temp.commit()
+    except Exception:
+        # If copying fails, continue; compression will fall back to defaults
+        pass
+    try:
+        if not n_contig_cores or int(n_contig_cores) <= 1:
+            # sequential: delegate to calculating_features_per_sample which will detect temp DB and write by names
+            calculating_features_per_sample(list_modules, bam_path, conn_temp, min_coverage, step, z_thresh, deriv_thresh, max_points)
+        else:
+            # Parallelize contigs using a process Pool. Each worker will write into the shared temp DB (safe because each worker uses sqlite connection separately)
+            from multiprocessing import Pool as MPPool
+
+            def _process_single_contig_worker(args_tuple):
+                (modules, bam_p, ref_name, length_val, temp_db_p, samp_name, min_cov, stp, zt, dt, mp, log_p) = args_tuple
+                # Each worker keeps its own timing counters; after finishing the contig
+                # append a brief timing snapshot to the shared logfile.
+                conn_w = sqlite3.connect(temp_db_p)
+                try:
+                    bam_w = pysam.AlignmentFile(bam_p, "rb")
+                    try:
+                        seqtype = find_sequencing_type_from_bam(bam_p)
+                        # Reset local function timing counters for this worker
+                        function_times.clear()
+                        calculating_features_per_contig_per_sample(modules, bam_w, seqtype, ref_name, length_val, conn_w, None, None, min_cov, stp, zt, dt, mp, sample_name=samp_name, contig_name=ref_name, temp_mode=True)
+                        # Snapshot timings
+                        try:
+                            total_local = sum(function_times.values())
+                            with open(log_p, 'a', encoding='utf8') as fh:
+                                fh.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')}\tPID:{os.getpid()}\tSample:{samp_name}\tContig:{ref_name}\tTotal:{total_local:.3f}s\n")
+                                for nm, tv in sorted(function_times.items(), key=lambda x: -x[1]):
+                                    fh.write(f"\t{nm}: {tv:.3f}s\n")
+                        except Exception:
+                            pass
+                    finally:
+                        bam_w.close()
+                finally:
+                    conn_w.close()
+
+            # Build tasks for contig workers
+            tasks = []
+            for ref, length in zip(references, lengths):
+                tasks.append((list_modules, bam_path, ref, length, str(temp_db), sample_name, min_coverage, step, z_thresh, deriv_thresh, max_points, str(log_path)))
+
+            with MPPool(processes=min(int(n_contig_cores), max(1, len(tasks)))) as pool:
+                pool.map(_process_single_contig_worker, tasks)
+    finally:
+        conn_temp.close()
+
+    # Merge temp DB into main DB and remove temp DB
+    try:
+        merge_temp_db_into_main(db_main, str(temp_db))
+    except Exception as e:
+        print(f"Warning: failed to merge temp DB {temp_db} into main DB {db_main}: {e}")
+    try:
+        Path(temp_db).unlink()
+    except Exception:
+        pass
+
+    bam.close()
+    try:
+        with open(log_path, 'a', encoding='utf8') as fh:
+            fh.write(f"\n=== Sample: {sample_name} | BAM: {bam_path} | Time: {time.strftime('%Y-%m-%d %H:%M:%S')} ===\n")
+            total = sum(function_times.values())
+            fh.write(f"Total tracked time: {total:.3f} s\n")
+            for name, t in sorted(function_times.items(), key=lambda x: -x[1]):
+                fh.write(f"{name:35s}: {t:.3f} s ({t/total*100:.1f}%)\n")
+    except Exception:
+        pass
 
 def calculating_all_features_parallel(list_modules, bam_files, db_path, min_coverage, step, z_thresh, deriv_thresh, max_points, n_sample_cores=None):
     if n_sample_cores is None:
@@ -549,8 +760,26 @@ def add_calculate_args(parser):
     parser.add_argument("--outlier_threshold", type=int, default=3, help="Points beyond mean+std*N are kept as outliers")
     parser.add_argument("--derivative_threshold", type=int, default=3, help="Points were the derivative is beyond mean+std*N are kept as outliers")
     parser.add_argument("--max_points", type=int, default=10000, help="Maximum number of points kept during compression")
+    # Slurm integration (optional)
+    parser.add_argument("--use-slurm", action="store_true", help="Submit per-sample jobs via Slurm (sbatch) instead of running locally")
+    parser.add_argument("--max-concurrent", type=int, default=20, help="Maximum concurrent Slurm array tasks")
+    parser.add_argument("--threads-per-job", type=int, default=4, help="Number of threads to request per Slurm job (cpus-per-task)")
+    parser.add_argument("--sbatch-mem", type=str, default="8G", help="Memory per Slurm job (e.g. 8G)")
+    parser.add_argument("--sbatch-time", type=str, default="02:00:00", help="Time limit per Slurm job (HH:MM:SS)")
+    parser.add_argument("--parallelize_contigs", action="store_true", help="When running a sample job, parallelize over contigs inside the job")
+    # Hidden flag: internal mode to run only a single sample (used by Slurm-submitted jobs)
+    parser.add_argument("--run-sample", action="store_true", help=argparse.SUPPRESS)
 
 def run_calculate_args(args):
+    # If invoked in single-sample mode (used by Slurm jobs), simply process one bam
+    if getattr(args, "run_sample", False):
+        if not os.path.exists(args.db):
+            sys.exit(f"ERROR: Database '{args.db}' does not exist for single-sample run.")
+        requested_modules = args.modules.split(",")
+        n_contig_cores = int(args.threads) if getattr(args, 'threads', None) else None
+        _process_single_sample(requested_modules, args.bam_files, args.db, args.min_coverage, args.step, args.outlier_threshold, args.derivative_threshold, args.max_points, n_contig_cores)
+        return
+
     # Sanity checks and preparation
     print("### Checking that genbank and mapping files are compatible...", flush=True)
     genbank_loci = set(rec.name for rec in SeqIO.parse(args.genbank, "genbank"))
@@ -580,7 +809,7 @@ def run_calculate_args(args):
         if missing_in_genbank:
             raise ValueError(
                 f"ERROR: References in BAM file '{os.path.basename(bam_file)}' "
-                f"not found in GenBank:\n"
+                f"not found in GenBank: '{os.path.basename(args.genbank)}'\n"
                 f"{', '.join(sorted(missing_in_genbank))}"
             )
 
@@ -657,6 +886,36 @@ def run_calculate_args(args):
     print(f"Saved {contig_count} contigs and {feature_count} annotations into database", flush=True)
 
     print("Calculating values for all requested features from mapping files...", flush=True)
+    # If requested, submit per-sample Slurm jobs instead of running locally
+    if getattr(args, "use_slurm", False):
+        if slurm_utils is None:
+            sys.exit("ERROR: Slurm utilities not available in this installation.")
+
+        outdir = Path(db_path).parent or Path(".")
+        # Create a CSV listing bam files (one per row) so submit_array can iterate
+        csv_path = outdir / (Path(db_path).stem + "_bam_list.csv")
+        with open(csv_path, "w", newline="") as fh:
+            for bam in bam_files:
+                fh.write(f"{bam}\n")
+
+        # Build the module CLI string to run a single sample. $bam will be substituted by the array script.
+        # For Slurm runs we write per-sample temp DBs (to avoid contention) named by the bam basename.
+        db_dir = outdir
+        db_stem = Path(db_path).stem
+        # use $readbase (set by the array script) to create per-sample db
+        module_cli = (
+            f"{sys.executable} -m mgfeatureviewer.calculating_data --run-sample --threads {args.threads_per_job} --bam_files $bam --db {db_dir}/{db_stem}_$readbase.temp.db "
+            f"--modules {args.modules} --min_coverage {min_coverage} --step {step} --outlier_threshold {z_thresh} "
+            f"--derivative_threshold {deriv_thresh} --max_points {max_points} {'--parallelize_contigs' if args.parallelize_contigs else ''}"
+        )
+
+        jobid = slurm_utils.submit_array(csv_path, outdir, module_cli, array_size=len(bam_files), concurrency=args.max_concurrent,
+                                         cpus_per_task=args.threads_per_job, mem=args.sbatch_mem, time=args.sbatch_time, columns=["bam"])
+        print(f"Submitted Slurm array job {jobid} to process {len(bam_files)} samples (csv: {csv_path})", flush=True)
+        print("Note: Slurm tasks will write per-sample temp DBs named '<dbstem>_<readbase>.temp.db' in the DB directory. After jobs finish, run the provided merge helper to merge them into the main DB.")
+        return
+
+    # Otherwise run locally across samples
     calculating_all_features_parallel(requested_modules, bam_files, db_path, min_coverage, step, z_thresh, deriv_thresh, max_points, n_cores)
 
 def main():
@@ -666,8 +925,20 @@ def main():
     args = parser.parse_args()
     run_calculate_args(args)
 
+
+def merge_all_sample_dbs(main_db_path: str):
+    """Merge all per-sample temp DBs found next to `main_db_path` into the main DB.
+    This looks for files named '<main_stem>_*.temp.db' in the same directory.
+    """
+    main_p = Path(main_db_path)
+    pattern = f"{main_p.stem}_*.temp.db"
+    for f in main_p.parent.glob(pattern):
+        try:
+            print(f"Merging {f} into {main_db_path}")
+            merge_temp_db_into_main(main_db_path, str(f))
+            f.unlink()
+        except Exception as e:
+            print(f"Failed to merge {f}: {e}")
+
 if __name__ == "__main__":
-    start_time = time.perf_counter()
     main()
-    end_time = time.perf_counter()
-    print(f"\nTotal execution time: {end_time - start_time:.2f} seconds", flush=True)

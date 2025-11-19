@@ -1,0 +1,10 @@
+name: mgfeatureviewer
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - samtools
+  - minimap2
+  - pharokka
+  - bakta
+  - seqkit
