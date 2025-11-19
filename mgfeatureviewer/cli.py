@@ -159,11 +159,11 @@ def main(argv=None):
                 circular=bool(getattr(args, 'circular', False)),
                 output_dir=map_outdir,
                 threads=int(getattr(args, 'threads_per_job', 4)),
+                threads=int(getattr(args, 'threads_per_job', 4)),
                 use_slurm=bool(getattr(args, 'use_slurm', False)),
                 max_concurrent=int(getattr(args, 'max_concurrent', 20)),
-                threads_per_job=int(getattr(args, 'threads_per_job', 4)),
-                sbatch_mem=f"{getattr(args, 'mem_per_cpu', 8)}G",
-                sbatch_time=getattr(args, 'max_time', '02:00:00'),
+                max_time=getattr(args, 'max_time', '02:00:00'),
+                mem_per_cpu=f"{getattr(args, 'mem_per_cpu', 8)}G",
             )
             print(f"Starting mapping step (CSV={map_ns.csv}) -> outputs: {map_ns.output_dir}")
             print("Command args for mapping step:", dict(vars(map_ns)))
@@ -202,11 +202,11 @@ def main(argv=None):
                 outlier_threshold=3,
                 derivative_threshold=3,
                 max_points=10000,
+                threads=int(getattr(args, 'threads_per_job', 4)),
                 use_slurm=bool(getattr(args, 'use_slurm', False)),
                 max_concurrent=int(getattr(args, 'max_concurrent', 20)),
-                threads_per_job=int(getattr(args, 'threads_per_job', 4)),
-                sbatch_mem=f"{getattr(args, 'mem_per_cpu', 8)}G",
-                sbatch_time=getattr(args, 'max_time', '02:00:00'),
+                max_time=getattr(args, 'max_time', '02:00:00'),
+                mem_per_cpu=f"{getattr(args, 'mem_per_cpu', 8)}G",
                 parallelize_contigs=bool(getattr(args, 'parallelize_contigs', False)),
             )
             print(f"Starting calculation step (DB={calc_ns.db}) using genbank {calc_ns.genbank} and bams in {calc_ns.bam_files}")

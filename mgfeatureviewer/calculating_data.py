@@ -761,11 +761,11 @@ def add_calculate_args(parser):
     parser.add_argument("--derivative_threshold", type=int, default=3, help="Points were the derivative is beyond mean+std*N are kept as outliers")
     parser.add_argument("--max_points", type=int, default=10000, help="Maximum number of points kept during compression")
     # Slurm integration (optional)
+    parser.add_argument("--threads", type=int, default=4, help="Number of threads to request per Slurm job (cpus-per-task)")
     parser.add_argument("--use-slurm", action="store_true", help="Submit per-sample jobs via Slurm (sbatch) instead of running locally")
     parser.add_argument("--max-concurrent", type=int, default=20, help="Maximum concurrent Slurm array tasks")
-    parser.add_argument("--threads-per-job", type=int, default=4, help="Number of threads to request per Slurm job (cpus-per-task)")
-    parser.add_argument("--sbatch-mem", type=str, default="8G", help="Memory per Slurm job (e.g. 8G)")
-    parser.add_argument("--sbatch-time", type=str, default="02:00:00", help="Time limit per Slurm job (HH:MM:SS)")
+    parser.add_argument("--max-time", type=str, default="02:00:00", help="Time limit per Slurm job (HH:MM:SS)")
+    parser.add_argument("--mem-per-cpu", type=str, default="8G", help="Memory per Slurm job (e.g. 8G)")
     parser.add_argument("--parallelize_contigs", action="store_true", help="When running a sample job, parallelize over contigs inside the job")
     # Hidden flag: internal mode to run only a single sample (used by Slurm-submitted jobs)
     parser.add_argument("--run-sample", action="store_true", help=argparse.SUPPRESS)
@@ -910,7 +910,7 @@ def run_calculate_args(args):
         )
 
         jobid = slurm_utils.submit_array(csv_path, outdir, module_cli, array_size=len(bam_files), concurrency=args.max_concurrent,
-                                         cpus_per_task=args.threads_per_job, mem=args.sbatch_mem, time=args.sbatch_time, columns=["bam"])
+                                         cpus_per_task=args.threads, mem=args.mem_per_cpu, time=args.max_time, columns=["bam"])
         print(f"Submitted Slurm array job {jobid} to process {len(bam_files)} samples (csv: {csv_path})", flush=True)
         print("Note: Slurm tasks will write per-sample temp DBs named '<dbstem>_<readbase>.temp.db' in the DB directory. After jobs finish, run the provided merge helper to merge them into the main DB.")
         return

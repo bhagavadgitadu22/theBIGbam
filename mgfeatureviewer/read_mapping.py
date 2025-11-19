@@ -109,11 +109,11 @@ def add_mapping_all_args(parser):
     parser.add_argument('--output-dir', required=True, help='Directory to create and place outputs (must NOT exist)')
     parser.add_argument('--threads', type=int, default=4, help='Threads to pass to minimap2/samtools')
     # Slurm options
+    parser.add_argument('--threads', type=int, default=4, help='CPUs per Slurm job')
     parser.add_argument('--use-slurm', action='store_true', help='Dispatch mapping jobs via Slurm (sbatch)')
     parser.add_argument('--max-concurrent', type=int, default=20, help='Max concurrent Slurm array tasks')
-    parser.add_argument('--threads-per-job', type=int, default=4, help='CPUs per Slurm job')
-    parser.add_argument('--sbatch-mem', default='8G', help='Memory request for sbatch (e.g. 8G)')
-    parser.add_argument('--sbatch-time', default='02:00:00', help='Time request for sbatch (e.g. 02:00:00)')
+    parser.add_argument('--max-time', default='02:00:00', help='Time request for sbatch (e.g. 02:00:00)')
+    parser.add_argument('--mem-per-cpu', default='8G', help='Memory request for sbatch (e.g. 8G)')
 
 def run_mapping_all(args):
     csv_path = Path(args.csv)
@@ -196,10 +196,10 @@ def run_mapping_all(args):
         csv_path = Path(args.csv)
         outdir = Path(args.output_dir)
         array_size = len(rows)
+        cpus = int(getattr(args, 'threads', 4))
         concurrency = int(getattr(args, 'max_concurrent', 20))
-        cpus = int(getattr(args, 'threads_per_job', 4))
-        mem = getattr(args, 'sbatch_mem', '8G')
-        time_req = getattr(args, 'sbatch_time', '02:00:00')
+        time_req = getattr(args, 'max-time', '02:00:00')
+        mem = getattr(args, 'mem_per_cpu', '8G')
 
         # module_cli will be evaluated inside the bash script and should reference shell variables
         module_cli = f"{sys.executable} -m mgfeatureviewer.cli mapping-per-sample --read1 \"$read1\" --read2 \"$read2\" --assembly \"$assembly\" --sequencing-type \"$seqtype\" --threads {args.threads} --output \"$output\""
