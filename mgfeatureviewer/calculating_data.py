@@ -200,6 +200,8 @@ def starts_with_match(cigar, md, start):
 
     # Check MD tag for match at start/end
     # MD string: digits represent matches, letters/deletions mismatches
+    if len(md) == 0:
+        return False
     val = md[0] if start else md[-1]
     return val > 0
 
