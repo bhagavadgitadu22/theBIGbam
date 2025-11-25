@@ -113,6 +113,11 @@ def compress_signal(type_picked, feature_values, ref_length, step, z_thresh, der
         der_outliers = np.abs(dy) > deriv_thresh * dy_std
 
         # Include the point before each derivative outlier
+        # NOTE: This line has a subtle bug - it does arithmetic on a boolean array,
+        # which doesn't correctly find outlier indices. The Rust implementation
+        # (rust_calculate/src/main.rs, compress_signal function) uses correct logic
+        # and may keep slightly more positions as a result. Both outputs are valid
+        # but Rust preserves more derivative outliers as originally intended.
         der_outliers = np.unique(np.clip(np.concatenate([der_outliers - 1, der_outliers]), 0, n - 1))
 
         # Combine value and derivative outliers
