@@ -86,20 +86,21 @@ pub fn compress_signal(
         }
     };
 
-    // Apply max_points limit
+    // py:137-141 - Apply max_points limit if needed
     if keep_idx.len() > max_points {
-        let step_lim = keep_idx.len() / max_points;
-        keep_idx = keep_idx.into_iter().step_by(step_lim).collect();
+        let step_lim = keep_idx.len() / max_points;  // py:138
+        keep_idx = keep_idx.into_iter().step_by(step_lim).collect();  // py:139
         if let Some(&last) = keep_idx.last() {
             if last != n - 1 && n > 0 {
-                keep_idx.push(n - 1);
+                keep_idx.push(n - 1);  // py:140-141 - ensure last point included
             }
         }
     }
 
-    // Build output (1-indexed positions)
-    let xs: Vec<i32> = keep_idx.iter().map(|&i| (i + 1) as i32).collect();
-    let ys: Vec<f32> = keep_idx.iter().map(|&i| values[i] as f32).collect();
+    // py:144-145 - Build output: x = np.arange(1, ref_length+1)[keep_idx], y = feature_values[keep_idx]
+    // Positions are 1-indexed to match Python's np.arange(1, ref_length+1)
+    let xs: Vec<i32> = keep_idx.iter().map(|&i| (i + 1) as i32).collect();  // py:144
+    let ys: Vec<f32> = keep_idx.iter().map(|&i| values[i] as f32).collect();  // py:145
 
     (xs, ys)
 }

@@ -191,19 +191,22 @@ pub fn calculate_assemblycheck(
             }
         }
 
-        // Clippings - checking first/last CIGAR ops for soft/hard clips
+        // calculating_data.py:467-474 - Clippings from CIGAR ops
+        // Check first/last CIGAR ops for soft/hard clips
         if !read.cigar.is_empty() {
-            let (first_op, _) = read.cigar[0];
-            let (last_op, _) = read.cigar[read.cigar.len() - 1];
+            let (first_op, _) = read.cigar[0];       // py:469
+            let (last_op, _) = read.cigar[read.cigar.len() - 1];  // py:470
             let first_char = first_op as u8 as char;
             let last_char = last_op as u8 as char;
             let end = raw_end % ref_length;
 
+            // py:471-472 - Left clipping: first op is S(4) or H(5)
             if first_char == 'S' || first_char == 'H' {
-                left_clippings[start] += 1;
+                left_clippings[start] += 1;  // py:472
             }
+            // py:473-474 - Right clipping: last op is S(4) or H(5)
             if last_char == 'S' || last_char == 'H' {
-                right_clippings[if end > 0 { end - 1 } else { ref_length - 1 }] += 1;
+                right_clippings[if end > 0 { end - 1 } else { ref_length - 1 }] += 1;  // py:474
             }
         }
 
