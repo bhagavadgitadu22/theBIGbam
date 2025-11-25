@@ -3,6 +3,18 @@ name = "mgfeatureviewer_calc"
 version = "0.1.0"
 edition = "2021"
 
+[lib]
+name = "mgfeatureviewer_rs"
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "mgfeatureviewer_calc"
+path = "src/main.rs"
+
+[features]
+default = []
+python = ["pyo3", "numpy"]
+
 [dependencies]
 # BAM/SAM reading
 rust-htslib = "0.51"
@@ -32,6 +44,10 @@ walkdir = "2"
 
 # SQLite for metadata.db
 rusqlite = { version = "0.32", features = ["bundled"] }
+
+# PyO3 bindings (optional, enabled via "python" feature)
+pyo3 = { version = "0.23", features = ["extension-module", "anyhow"], optional = true }
+numpy = { version = "0.23", optional = true }
 
 [profile.release]
 lto = true

@@ -13,6 +13,14 @@ from collections import defaultdict
 import sqlite3
 import subprocess
 
+# Try to import Rust bindings for faster processing
+try:
+    import mgfeatureviewer_rs as _rust
+    HAS_RUST = True
+except ImportError:
+    HAS_RUST = False
+    _rust = None
+
 # Feature type mapping (replaces Variable table lookup during computation)
 FEATURE_TYPES = {
     "coverage": "curve",
@@ -706,7 +714,7 @@ def write_sample_parquet(features, presences, sample_name, output_dir):
         pq.write_table(presences_table, presences_path, compression='zstd')
 
 def _process_single_sample(list_modules, bam_file, output_dir, min_coverage, step, z_thresh, deriv_thresh, max_points):
-    """Process one sample: compute features and write Parquet files."""
+    """Process one sample: compute features and write Parquet files (pure Python)."""
     all_features, all_presences, sample_name = calculating_features_per_sample(
         list_modules, bam_file, min_coverage, step, z_thresh, deriv_thresh, max_points
     )
@@ -717,25 +725,99 @@ def _process_single_sample(list_modules, bam_file, output_dir, min_coverage, ste
     # Temporary debugging
     print_timing_summary(bam_file)
 
-def calculating_all_features_parallel(list_modules, bam_files, output_dir, min_coverage, step, z_thresh, deriv_thresh, max_points, n_sample_cores=None):
+
+def _update_sqlite_samples(output_dir, all_sample_presences):
+    """Update SQLite database with Sample and Presences tables.
+
+    Args:
+        output_dir: Path to output directory containing metadata.db
+        all_sample_presences: List of (sample_name, presences) where presences is
+                              a list of (contig_name, coverage_pct) tuples
+    """
+    db_path = os.path.join(output_dir, "metadata.db")
+    conn = sqlite3.connect(db_path)
+    cur = conn.cursor()
+
+    # Build contig name -> id mapping
+    cur.execute("SELECT Contig_name, Contig_id FROM Contig")
+    contig_name_to_id = {row[0]: row[1] for row in cur.fetchall()}
+
+    # Insert samples and presences
+    for sample_name, presences in all_sample_presences:
+        # Insert sample
+        cur.execute("INSERT INTO Sample (Sample_name) VALUES (?)", (sample_name,))
+        sample_id = cur.lastrowid
+
+        # Insert presences for this sample
+        for contig_name, coverage_pct in presences:
+            contig_id = contig_name_to_id.get(contig_name)
+            if contig_id is not None:
+                cur.execute(
+                    "INSERT INTO Presences (Contig_id, Sample_id, Coverage_percentage) VALUES (?, ?, ?)",
+                    (contig_id, sample_id, coverage_pct)
+                )
+
+    conn.commit()
+    conn.close()
+
+def calculating_all_features_parallel(list_modules, bam_files, output_dir, min_coverage, step, z_thresh, deriv_thresh, max_points, n_sample_cores=None, genbank_path=None, annotation_tool=""):
+    """Process all BAM files in parallel.
+
+    If genbank_path is provided and Rust bindings are available, uses the faster Rust implementation
+    with rayon parallelism and a single GenBank parse.
+    Otherwise falls back to pure Python.
+    """
     if n_sample_cores is None:
         n_sample_cores = max(1, cpu_count() - 1)
-    print(f"Using {n_sample_cores} cores to process {len(bam_files)} samples in parallel...", flush=True)
 
     # Create output directories
     os.makedirs(os.path.join(output_dir, 'features'), exist_ok=True)
     os.makedirs(os.path.join(output_dir, 'presences'), exist_ok=True)
 
-    # Sort BAM files by size (largest first) for better load balancing
-    # Large files start early, small files fill gaps at the end
-    bam_files_sorted = sorted(bam_files, key=lambda f: os.path.getsize(f), reverse=True)
+    # Use Rust if available and genbank_path is provided
+    if HAS_RUST and genbank_path is not None:
+        # Get parent directory of BAM files (assumes all in same directory)
+        bam_dir = os.path.dirname(bam_files[0]) if bam_files else ""
 
-    args_list = [(list_modules, bam, output_dir, min_coverage, step, z_thresh, deriv_thresh, max_points) for bam in bam_files_sorted]
+        print(f"Using Rust bindings to process {len(bam_files)} samples with rayon ({n_sample_cores} threads)...", flush=True)
 
-    # chunksize=1 ensures workers grab next task immediately when done
-    with Pool(processes=n_sample_cores) as pool:
-        list(pool.starmap(_process_single_sample, args_list, chunksize=1))
-    print("Finished all samples.", flush=True)
+        # Call the Rust function that handles everything: GenBank parsing, parallel BAM processing,
+        # progress bar, writing Parquet files, and updating SQLite directly
+        result = _rust.process_all_samples(
+            genbank_path=genbank_path,
+            bam_dir=bam_dir,
+            output_dir=output_dir,
+            modules=list_modules,
+            threads=n_sample_cores,
+            annotation_tool=annotation_tool,
+            min_coverage=float(min_coverage),
+            step=step,
+            z_thresh=float(z_thresh),
+            deriv_thresh=float(deriv_thresh),
+            max_points=max_points,
+        )
+
+        # Rust handles SQLite updates internally, just report results
+        total_time = result.get("total_time", 0.0)
+        samples_processed = result.get("samples_processed", 0)
+        samples_failed = result.get("samples_failed", 0)
+        print(f"Finished {samples_processed} samples in {total_time:.2f}s ({total_time/max(1, samples_processed):.2f}s per sample avg)", flush=True)
+        if samples_failed > 0:
+            print(f"Warning: {samples_failed} samples failed to process", flush=True)
+    else:
+        # Fall back to pure Python
+        if not HAS_RUST:
+            print("Note: Rust bindings not available, using pure Python (slower)", flush=True)
+        print(f"Using {n_sample_cores} cores to process {len(bam_files)} samples in parallel...", flush=True)
+
+        # Sort BAM files by size (largest first) for better load balancing
+        bam_files_sorted = sorted(bam_files, key=lambda f: os.path.getsize(f), reverse=True)
+        args_list = [(list_modules, bam, output_dir, min_coverage, step, z_thresh, deriv_thresh, max_points) for bam in bam_files_sorted]
+
+        # chunksize=1 ensures workers grab next task immediately when done
+        with Pool(processes=n_sample_cores) as pool:
+            list(pool.starmap(_process_single_sample, args_list, chunksize=1))
+        print("Finished all samples.", flush=True)
 
 ### Main function helpers (shared-args)
 def add_calculate_args(parser):
@@ -752,12 +834,7 @@ def add_calculate_args(parser):
     parser.add_argument("--max_points", type=int, default=10000, help="Maximum number of points kept during compression")
 
 def run_calculate_args(args):
-    # Sanity checks and preparation
-    print("### Checking that genbank and mapping files are compatible...", flush=True)
-    genbank_loci = set(rec.name for rec in SeqIO.parse(args.genbank, "genbank"))
     annotation_tool = args.annotation_tool
-    if not genbank_loci:
-        sys.exit("ERROR: No loci found in the provided GenBank file.")
 
     # Get list of BAM files
     if os.path.isdir(args.bam_files):
@@ -767,30 +844,37 @@ def run_calculate_args(args):
     if not bam_files:
         sys.exit("ERROR: No BAM files found in the specified mapping path.")
 
-    # Check that references in BAM headers match loci in GenBank
-    for bam_file in bam_files:
-        try:
-            with pysam.AlignmentFile(bam_file, "rb") as bam:
-                bam_refs = set(bam.references)
-        except Exception as e:
-            sys.exit(f"ERROR: Could not open BAM file '{bam_file}': {e}")
+    # When using Rust, skip Python validation - Rust handles everything including error checking
+    if not HAS_RUST:
+        # Pure Python path: validate GenBank and BAM compatibility
+        print("### Checking that genbank and mapping files are compatible...", flush=True)
+        genbank_loci = set(rec.name for rec in SeqIO.parse(args.genbank, "genbank"))
+        if not genbank_loci:
+            sys.exit("ERROR: No loci found in the provided GenBank file.")
 
-        missing_in_genbank = bam_refs - genbank_loci
-        missing_in_bam = genbank_loci - bam_refs
+        # Silence htslib warnings about index file timestamps
+        save_verbosity = pysam.set_verbosity(0)
 
-        if missing_in_genbank:
-            raise ValueError(
-                f"ERROR: References in BAM file '{os.path.basename(bam_file)}' "
-                f"not found in GenBank:\n"
-                f"{', '.join(sorted(missing_in_genbank))}"
-            )
+        for bam_file in bam_files:
+            try:
+                with pysam.AlignmentFile(bam_file, "rb") as bam:
+                    bam_refs = set(bam.references)
+            except Exception as e:
+                pysam.set_verbosity(save_verbosity)
+                sys.exit(f"ERROR: Could not open BAM file '{bam_file}': {e}")
 
-        if missing_in_bam:
-            print(
-                f"Warning: Some GenBank loci not present in BAM '{os.path.basename(bam_file)}': "
-                f"{', '.join(sorted(missing_in_bam))}"
-            )
-    print("Sanity checks passed: No BAM contained unexpected reference names.", flush=True)
+            missing_in_genbank = bam_refs - genbank_loci
+
+            if missing_in_genbank:
+                pysam.set_verbosity(save_verbosity)
+                raise ValueError(
+                    f"ERROR: References in BAM file '{os.path.basename(bam_file)}' "
+                    f"not found in GenBank:\n"
+                    f"{', '.join(sorted(missing_in_genbank))}"
+                )
+
+        pysam.set_verbosity(save_verbosity)
+        print("Sanity checks passed.", flush=True)
 
     # Requested modules
     requested_modules = args.modules.split(",")
@@ -808,54 +892,69 @@ def run_calculate_args(args):
     output_dir = args.output
     if os.path.exists(output_dir):
         sys.exit(f"ERROR: Output directory '{output_dir}' already exists. Please provide a new path to avoid overwriting.")
-    os.makedirs(output_dir)
 
-    # Create metadata database
-    db_path = os.path.join(output_dir, "metadata.db")
-    subprocess.run([sys.executable, os.path.join(os.path.dirname(__file__), "generate_database.py"), db_path], check=True)
+    # When Rust bindings are available, they handle everything: GenBank parsing, database creation,
+    # parallel BAM processing, and output writing. Skip Python's database setup in that case.
+    if HAS_RUST:
+        # Rust handles database creation and population internally
+        print("Calculating values for all requested features from mapping files...", flush=True)
+        calculating_all_features_parallel(
+            requested_modules, bam_files, output_dir, min_coverage, step, z_thresh, deriv_thresh, max_points, n_cores,
+            genbank_path=args.genbank, annotation_tool=annotation_tool
+        )
+    else:
+        # Pure Python path: create database and populate manually
+        os.makedirs(output_dir)
 
-    # Saving genbank info into database
-    print("### Saving genbank info into database...", flush=True)
-    conn = sqlite3.connect(db_path)
-    cur = conn.cursor()
+        # Create metadata database
+        db_path = os.path.join(output_dir, "metadata.db")
+        subprocess.run([sys.executable, os.path.join(os.path.dirname(__file__), "generate_database.py"), db_path], check=True)
 
-    seq_rows = []
-    contig_count = 0
-    feature_count = 0
-    for rec in SeqIO.parse(args.genbank, "genbank"):
-        contig_name = rec.name
-        contig_length = len(rec.seq)
-        cur.execute("INSERT OR IGNORE INTO Contig (Contig_name, Contig_length, Annotation_tool) VALUES (?, ?, ?)", (contig_name, contig_length, annotation_tool))
-        contig_id = get_contig_id(conn, contig_name)
-        contig_count += 1
+        # Saving genbank info into database
+        print("### Saving genbank info into database...", flush=True)
+        conn = sqlite3.connect(db_path)
+        cur = conn.cursor()
 
-        for f in rec.features:
-            try:
-                start = int(f.location.start) + 1
-                end = int(f.location.end)
-                strand_val = f.location.strand
-            except Exception:
-                continue
+        seq_rows = []
+        contig_count = 0
+        feature_count = 0
+        for rec in SeqIO.parse(args.genbank, "genbank"):
+            contig_name = rec.name
+            contig_length = len(rec.seq)
+            cur.execute("INSERT OR IGNORE INTO Contig (Contig_name, Contig_length, Annotation_tool) VALUES (?, ?, ?)", (contig_name, contig_length, annotation_tool))
+            contig_id = get_contig_id(conn, contig_name)
+            contig_count += 1
 
-            ftype = f.type
-            if not(ftype in {"source", "gene"}):
-                qualifiers = f.qualifiers if hasattr(f, 'qualifiers') else {}
-                product = qualifiers.get('product', [None])[0]
-                function = qualifiers.get('function', [None])[0]
-                phrog = qualifiers.get('phrog', [None])[0]
+            for f in rec.features:
+                try:
+                    start = int(f.location.start) + 1
+                    end = int(f.location.end)
+                    strand_val = f.location.strand
+                except Exception:
+                    continue
 
-                seq_rows.append((contig_id, start, end, strand_val, ftype, product, function, phrog))
-                feature_count += 1
+                ftype = f.type
+                if not(ftype in {"source", "gene"}):
+                    qualifiers = f.qualifiers if hasattr(f, 'qualifiers') else {}
+                    product = qualifiers.get('product', [None])[0]
+                    function = qualifiers.get('function', [None])[0]
+                    phrog = qualifiers.get('phrog', [None])[0]
 
-    if seq_rows:
-        cur.executemany("INSERT INTO Contig_annotation (Contig_id, Start, End, Strand, Type, Product, Function, Phrog) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", seq_rows)
-    conn.commit()
-    conn.close()
+                    seq_rows.append((contig_id, start, end, strand_val, ftype, product, function, phrog))
+                    feature_count += 1
 
-    print(f"Saved {contig_count} contigs and {feature_count} annotations into database", flush=True)
+        if seq_rows:
+            cur.executemany("INSERT INTO Contig_annotation (Contig_id, Start, End, Strand, Type, Product, Function, Phrog) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", seq_rows)
+        conn.commit()
+        conn.close()
 
-    print("Calculating values for all requested features from mapping files...", flush=True)
-    calculating_all_features_parallel(requested_modules, bam_files, output_dir, min_coverage, step, z_thresh, deriv_thresh, max_points, n_cores)
+        print(f"Saved {contig_count} contigs and {feature_count} annotations into database", flush=True)
+
+        print("Calculating values for all requested features from mapping files...", flush=True)
+        calculating_all_features_parallel(
+            requested_modules, bam_files, output_dir, min_coverage, step, z_thresh, deriv_thresh, max_points, n_cores,
+            genbank_path=args.genbank, annotation_tool=annotation_tool
+        )
 
     print(f"\nOutput written to: {output_dir}/", flush=True)
     print(f"  - metadata.db (contig/sample metadata)", flush=True)
