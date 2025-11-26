@@ -12,6 +12,12 @@ from functools import wraps
 from collections import defaultdict
 import sqlite3
 import subprocess
+from pathlib import Path
+
+try:
+    from . import slurm_utils
+except Exception:
+    slurm_utils = None
 
 # Try to import Rust bindings for faster processing
 try:
@@ -52,12 +58,86 @@ def track_time(func):
         return result
     return wrapper
 
-def print_timing_summary(bam_file):
-    print("\nTiming Summary for bam file", bam_file, flush=True)
-    total = sum(function_times.values())
-    for name, t in sorted(function_times.items(), key=lambda x: -x[1]):
-        print(f"{name:35s}: {t:.3f} s ({t/total*100:.1f}%)", flush=True)
-    print(f"Total tracked time: {total:.3f} s", flush=True)
+def create_temp_sample_db(temp_db_path: str):
+    """Create a lightweight temp DB for a single sample to avoid contention.
+    It contains two tables: TempPresences and TempFeatureValues.
+    """
+    conn = sqlite3.connect(temp_db_path)
+    cur = conn.cursor()
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS TempPresences (
+        Contig_name TEXT,
+        Sample_name TEXT,
+        Coverage_percentage REAL
+    )
+    """)
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS TempFeatureValues (
+        Variable_name TEXT,
+        Contig_name TEXT,
+        Sample_name TEXT,
+        Position INTEGER,
+        Value REAL
+    )
+    """)
+    conn.commit()
+    conn.close()
+
+
+def merge_temp_db_into_main(main_db_path: str, temp_db_path: str):
+    """Merge data from a temp sample DB into the main DB.
+    Assumptions:
+      - main DB already has Contig and Variable tables populated (from genbank step)
+      - temp DB contains TempPresences and TempFeatureValues
+    The function will:
+      - Insert missing Sample rows into main.Sample
+      - Map contig names to Contig_id using main.Contig
+      - For each Variable_name in TempFeatureValues, find Feature_table_name in main.Variable
+        and insert rows into that feature table mapping contig/sample names to ids.
+      - Insert TempPresences rows into main.Presences mapping contig/sample names to ids.
+    """
+    mconn = sqlite3.connect(main_db_path)
+    mcur = mconn.cursor()
+    # Attach temp DB
+    mcur.execute(f"ATTACH DATABASE ? AS src", (temp_db_path,))
+
+    # Insert Samples referenced in temp into main.Sample
+    mcur.execute("SELECT DISTINCT Sample_name FROM src.TempPresences")
+    sample_rows = mcur.fetchall()
+    mcur.execute("SELECT DISTINCT Sample_name FROM src.TempFeatureValues")
+    sample_rows += [r for r in mcur.fetchall() if r not in sample_rows]
+
+    for (sname,) in sample_rows:
+        if sname is None:
+            continue
+        mcur.execute("INSERT OR IGNORE INTO Sample (Sample_name) VALUES (?)", (sname,))
+
+    mconn.commit()
+
+    # Insert presences mapping contig and sample names to ids
+    mcur.execute("INSERT INTO Presences (Contig_id, Sample_id, Coverage_percentage) SELECT (SELECT Contig_id FROM Contig WHERE Contig_name=src.TempPresences.Contig_name), (SELECT Sample_id FROM Sample WHERE Sample_name=src.TempPresences.Sample_name), src.TempPresences.Coverage_percentage FROM src.TempPresences")
+    mconn.commit()
+
+    # For features, iterate distinct Variable_name and insert into corresponding tables
+    mcur.execute("SELECT DISTINCT Variable_name FROM src.TempFeatureValues")
+    vars_ = [r[0] for r in mcur.fetchall()]
+    for var in vars_:
+        # find feature table name in main.Variable
+        mcur.execute("SELECT Feature_table_name FROM Variable WHERE Variable_name=?", (var,))
+        row = mcur.fetchone()
+        if not row:
+            # Unknown variable -> skip
+            continue
+        feat_table = row[0]
+        # Build and execute insert: map contig/sample names to ids
+        sql = f"INSERT INTO {feat_table} (Contig_id, Sample_id, Position, Value) SELECT (SELECT Contig_id FROM Contig WHERE Contig_name=src.TempFeatureValues.Contig_name), (SELECT Sample_id FROM Sample WHERE Sample_name=src.TempFeatureValues.Sample_name), src.TempFeatureValues.Position, src.TempFeatureValues.Value FROM src.TempFeatureValues WHERE Variable_name=?"
+        mcur.execute(sql, (var,))
+        mconn.commit()
+
+    # Detach temp DB
+    mcur.execute("DETACH DATABASE src")
+    mconn.close()
+
 
 ### Find sequencing type from BAM file
 def find_sequencing_type_from_bam(bam_file, n_reads_check=100):
@@ -168,9 +248,13 @@ def add_sample(conn, sample_name):
     row = cur.fetchone()
     return row[0] if row else None
 
-def add_presence(conn, contig_id, sample_id, coverage_percentage):
+def add_presence(conn, contig_id=None, sample_id=None, coverage_percentage=None, *, contig_name=None, sample_name=None, temp_mode=False):
     cur = conn.cursor()
-    cur.execute("INSERT INTO Presences (Contig_id, Sample_id, Coverage_percentage) VALUES (?, ?, ?)", (contig_id, sample_id, coverage_percentage))
+    if temp_mode:
+        # write to TempPresences (contig_name, sample_name, coverage)
+        cur.execute("INSERT INTO TempPresences (Contig_name, Sample_name, Coverage_percentage) VALUES (?, ?, ?)", (contig_name, sample_name, coverage_percentage))
+    else:
+        cur.execute("INSERT INTO Presences (Contig_id, Sample_id, Coverage_percentage) VALUES (?, ?, ?)", (contig_id, sample_id, coverage_percentage))
     conn.commit()
 
 def compress_and_return_features(feature, feature_values, contig_name, ref_length, step, z_thresh, deriv_thresh, max_points):
@@ -722,8 +806,16 @@ def _process_single_sample(list_modules, bam_file, output_dir, min_coverage, ste
     # Write to Parquet (each worker writes its own files - no contention)
     write_sample_parquet(all_features, all_presences, sample_name, output_dir)
 
-    # Temporary debugging
-    print_timing_summary(bam_file)
+    bam.close()
+    try:
+        with open(log_path, 'a', encoding='utf8') as fh:
+            fh.write(f"\n=== Sample: {sample_name} | BAM: {bam_path} | Time: {time.strftime('%Y-%m-%d %H:%M:%S')} ===\n")
+            total = sum(function_times.values())
+            fh.write(f"Total tracked time: {total:.3f} s\n")
+            for name, t in sorted(function_times.items(), key=lambda x: -x[1]):
+                fh.write(f"{name:35s}: {t:.3f} s ({t/total*100:.1f}%)\n")
+    except Exception:
+        pass
 
 
 def _update_sqlite_samples(output_dir, all_sample_presences):
@@ -832,6 +924,15 @@ def add_calculate_args(parser):
     parser.add_argument("--outlier_threshold", type=int, default=3, help="Points beyond mean+std*N are kept as outliers")
     parser.add_argument("--derivative_threshold", type=int, default=3, help="Points were the derivative is beyond mean+std*N are kept as outliers")
     parser.add_argument("--max_points", type=int, default=10000, help="Maximum number of points kept during compression")
+    # Slurm integration (optional)
+    parser.add_argument("--threads", type=int, default=4, help="Number of threads to request per Slurm job (cpus-per-task)")
+    parser.add_argument("--use-slurm", action="store_true", help="Submit per-sample jobs via Slurm (sbatch) instead of running locally")
+    parser.add_argument("--max-concurrent", type=int, default=20, help="Maximum concurrent Slurm array tasks")
+    parser.add_argument("--max-time", type=str, default="02:00:00", help="Time limit per Slurm job (HH:MM:SS)")
+    parser.add_argument("--mem-per-cpu", type=str, default="8G", help="Memory per Slurm job (e.g. 8G)")
+    parser.add_argument("--parallelize_contigs", action="store_true", help="When running a sample job, parallelize over contigs inside the job")
+    # Hidden flag: internal mode to run only a single sample (used by Slurm-submitted jobs)
+    parser.add_argument("--run-sample", action="store_true", help=argparse.SUPPRESS)
 
 def run_calculate_args(args):
     annotation_tool = args.annotation_tool
@@ -968,8 +1069,20 @@ def main():
     args = parser.parse_args()
     run_calculate_args(args)
 
+
+def merge_all_sample_dbs(main_db_path: str):
+    """Merge all per-sample temp DBs found next to `main_db_path` into the main DB.
+    This looks for files named '<main_stem>_*.temp.db' in the same directory.
+    """
+    main_p = Path(main_db_path)
+    pattern = f"{main_p.stem}_*.temp.db"
+    for f in main_p.parent.glob(pattern):
+        try:
+            print(f"Merging {f} into {main_db_path}")
+            merge_temp_db_into_main(main_db_path, str(f))
+            f.unlink()
+        except Exception as e:
+            print(f"Failed to merge {f}: {e}")
+
 if __name__ == "__main__":
-    start_time = time.perf_counter()
     main()
-    end_time = time.perf_counter()
-    print(f"\nTotal execution time: {end_time - start_time:.2f} seconds", flush=True)

@@ -1,4 +1,16 @@
-# Test:
+# Installation:
+
+## Basic installation:
+
+## Additional dependencies regarding mapping:
+If you want to perform mapping using the internal scripts provided, you will need several tools installed on your path:
+- minimap2 and samtools for read mapping commands
+- seqkit and either pharokka or bakta for assembly annotation command
+An easy way is to use a conda environment
+
+mamba env create -f mgfeatureviewer_env.yaml
+conda activate mgfeatureviewer
+
 git clone https://github.com/bhagavadgitadu22/MGFeatureViewer
 cd MGFeatureViewer
 python -m pip install -e .
@@ -6,6 +18,9 @@ python -m pip install -e .
 mgfeatureviewer -h
 # or alternatively: python -m mgfeatureviewer.cli -h
 
+# Usage:
+
+## Basic use:
 mgfeatureviewer calculate -h
 mgfeatureviewer calculate -t 4 -g examples/inputs/HK97/HK97_GCF_000848825.1_pharokka.gbk -a pharokka -b examples/inputs/HK97 -m coverage,phagetermini,assemblycheck -d examples/outputs/HK97/HK97.db
 
@@ -17,6 +32,12 @@ mgfeatureviewer plot-all-samples -d examples/outputs/HK97/HK97.db -v "Coverage" 
 
 mgfeatureviewer serve --db examples/outputs/HK97/HK97.db --port 5006
 
+## Mapping scripts:
+You can start with a csv file containing 3 columns:
+read "1 file,read 2 file,fasta file"
+read2 file and fasta file are optional
+(write "read 1 file,,fasta file" if not read 2 file
+and "read 1 file, read 2 file," if not fasta file)
 
 # How to interpret the plots?
 
