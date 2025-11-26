@@ -6,16 +6,15 @@ use rayon::prelude::*;
 use rust_htslib::bam::{IndexedReader, Read as BamRead};
 use rust_htslib::htslib;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use walkdir::WalkDir;
 
 use crate::bam_reader::{detect_sequencing_type, process_reads_for_contig};
 use crate::compress::compress_signal;
-use crate::db::{create_metadata_db, update_sample_presences};
+use crate::db::{create_metadata_db, create_temp_sample_db, write_features_to_temp_db, write_presences_to_temp_db, merge_temp_db_into_main, finalize_db};
 use crate::features::{calculate_assemblycheck, calculate_coverage, calculate_phagetermini};
 use crate::genbank::parse_genbank;
-use crate::parquet::{write_features_parquet, write_presences_parquet};
 use crate::types::{get_plot_type, ContigInfo, FeaturePoint, PresenceData};
 
 /// Configuration for processing.
@@ -67,7 +66,6 @@ fn add_compressed_feature(
 }
 
 /// Process one BAM file (sample) and return all features.
-/// Python equivalent: `calculating_features_per_sample()` in calculating_data.py:651-673
 pub fn process_sample(
     bam_path: &Path,
     contigs: &[ContigInfo],
@@ -193,7 +191,7 @@ pub fn process_sample(
 pub fn run_all_samples(
     genbank_path: &Path,
     bam_dir: &Path,
-    output_dir: &Path,
+    output_db: &Path,
     modules: &[String],
     annotation_tool: &str,
     config: &ProcessConfig,
@@ -214,7 +212,7 @@ pub fn run_all_samples(
     eprintln!("Found {} contigs with {} annotations", contigs.len(), annotations.len());
 
     // Get BAM files
-    let bam_files: Vec<std::path::PathBuf> = if bam_dir.is_dir() {
+    let bam_files: Vec<PathBuf> = if bam_dir.is_dir() {
         WalkDir::new(bam_dir)
             .into_iter()
             .filter_map(|e| e.ok())
@@ -235,16 +233,18 @@ pub fn run_all_samples(
 
     eprintln!("Found {} BAM files\n", bam_files.len());
 
-    // Create output directories
-    fs::create_dir_all(output_dir)?;
-    fs::create_dir_all(output_dir.join("features"))?;
-    fs::create_dir_all(output_dir.join("presences"))?;
+    // Create parent directory if needed and temp directory for per-sample DBs
+    if let Some(parent) = output_db.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let temp_dir = output_db.with_extension("temp_dbs");
+    fs::create_dir_all(&temp_dir)?;
 
     std::thread::sleep(std::time::Duration::from_millis(50));
 
-    // Create metadata database
-    let db_path = output_dir.join("metadata.db");
-    create_metadata_db(&db_path, &contigs, &annotations)?;
+    // Create main database with schema
+    let db_path = output_db;
+    create_metadata_db(db_path, &contigs, &annotations)?;
 
     eprintln!("### Processing {} samples with {} threads", bam_files.len(), config.threads);
     eprintln!("Modules: {}\n", modules.join(", "));
@@ -262,8 +262,8 @@ pub fn run_all_samples(
     let completed_count = AtomicUsize::new(0);
     let total = bam_files.len();
 
-    // Process samples in parallel
-    let results: Vec<Result<(String, Vec<PresenceData>, f64)>> = bam_files
+    // Process samples in parallel - each writes to its own temp DB
+    let results: Vec<Result<(String, PathBuf, f64)>> = bam_files
         .par_iter()
         .map(|bam_path| {
             let sample_start = std::time::Instant::now();
@@ -272,21 +272,26 @@ pub fn run_all_samples(
 
             match result {
                 Ok((features, presences, sample_name)) => {
+                    // Create temp DB for this sample
+                    let temp_db_path = temp_dir.join(format!("{}.db", sample_name));
+                    let temp_conn = create_temp_sample_db(&temp_db_path)?;
+
+                    // Write features and presences to temp DB
                     if !features.is_empty() {
-                        let features_path = output_dir.join("features").join(format!("{}.parquet", sample_name));
-                        write_features_parquet(&features, &features_path)?;
+                        write_features_to_temp_db(&temp_conn, &features)?;
+                    }
+                    if !presences.is_empty() {
+                        write_presences_to_temp_db(&temp_conn, &sample_name, &presences)?;
                     }
 
-                    if !presences.is_empty() {
-                        let presences_path = output_dir.join("presences").join(format!("{}.parquet", sample_name));
-                        write_presences_parquet(&presences, &presences_path)?;
-                    }
+                    // Close temp DB connection
+                    drop(temp_conn);
 
                     let sample_time = sample_start.elapsed().as_secs_f64();
                     let done = completed_count.fetch_add(1, Ordering::SeqCst) + 1;
                     pb.set_message(format!("[{}/{}] {} ({:.2}s)", done, total, sample_name, sample_time));
                     pb.inc(1);
-                    Ok((sample_name, presences, sample_time))
+                    Ok((sample_name, temp_db_path, sample_time))
                 }
                 Err(e) => {
                     let sample_time = sample_start.elapsed().as_secs_f64();
@@ -301,9 +306,30 @@ pub fn run_all_samples(
 
     pb.finish_with_message("Done");
 
-    // Update SQLite with sample/presences
-    eprintln!("Updating metadata database...");
-    update_sample_presences(&db_path, &results, &contigs)?;
+    // Merge all temp DBs into main DB sequentially (avoids lock contention)
+    eprintln!("Merging sample data into database...");
+    let merge_pb = ProgressBar::new(results.len() as u64);
+    merge_pb.set_style(
+        ProgressStyle::with_template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} merging...")
+            .unwrap()
+            .progress_chars("=>-"),
+    );
+
+    for result in &results {
+        if let Ok((_, temp_db_path, _)) = result {
+            merge_temp_db_into_main(&db_path, temp_db_path, &contigs)?;
+            // Clean up temp DB
+            let _ = fs::remove_file(temp_db_path);
+        }
+        merge_pb.inc(1);
+    }
+    merge_pb.finish_with_message("Done");
+
+    // Clean up temp directory
+    let _ = fs::remove_dir(&temp_dir);
+
+    // Finalize database (checkpoint WAL)
+    finalize_db(&db_path)?;
 
     let elapsed = start_time.elapsed();
     let successful = results.iter().filter(|r| r.is_ok()).count();
@@ -317,10 +343,7 @@ pub fn run_all_samples(
     eprintln!("  Samples processed: {}/{}", successful, results.len());
     eprintln!("  Total time:        {:.2}s", elapsed.as_secs_f64());
     eprintln!();
-    eprintln!("  Output: {:?}", output_dir);
-    eprintln!("    - metadata.db");
-    eprintln!("    - features/*.parquet ({} files)", successful);
-    eprintln!("    - presences/*.parquet ({} files)", successful);
+    eprintln!("  Output: {:?}", output_db);
     eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 
     Ok(ProcessResult {

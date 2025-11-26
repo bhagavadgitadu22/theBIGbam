@@ -24,7 +24,6 @@ pub mod compress;
 pub mod db;
 pub mod features;
 pub mod genbank;
-pub mod parquet;
 pub mod processing;
 pub mod types;
 
@@ -55,7 +54,7 @@ mod python {
     /// Args:
     ///     genbank_path: Path to the GenBank annotation file
     ///     bam_dir: Path to directory containing BAM files (or single BAM file)
-    ///     output_dir: Output directory for results
+    ///     output_db: Output database file path (.db)
     ///     modules: List of modules to compute: "coverage", "phagetermini", "assemblycheck"
     ///     threads: Number of threads to use
     ///     annotation_tool: Annotation tool name (e.g., "pharokka")
@@ -71,12 +70,12 @@ mod python {
     ///         - "samples_failed": int
     ///         - "total_time": float (seconds)
     #[pyfunction]
-    #[pyo3(signature = (genbank_path, bam_dir, output_dir, modules, threads, annotation_tool="", min_coverage=50.0, step=50, z_thresh=3.0, deriv_thresh=3.0, max_points=10000))]
+    #[pyo3(signature = (genbank_path, bam_dir, output_db, modules, threads, annotation_tool="", min_coverage=50.0, step=50, z_thresh=3.0, deriv_thresh=3.0, max_points=10000))]
     fn process_all_samples<'py>(
         py: Python<'py>,
         genbank_path: &str,
         bam_dir: &str,
-        output_dir: &str,
+        output_db: &str,
         modules: Vec<String>,
         threads: usize,
         annotation_tool: &str,
@@ -102,7 +101,7 @@ mod python {
             run_all_samples(
                 Path::new(genbank_path),
                 Path::new(bam_dir),
-                Path::new(output_dir),
+                Path::new(output_db),
                 &modules,
                 annotation_tool,
                 &config,

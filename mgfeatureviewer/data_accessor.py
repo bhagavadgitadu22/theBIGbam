@@ -1,47 +1,35 @@
-"""Data accessor module supporting both SQLite (Python output) and DuckDB/Parquet (Rust output)."""
+"""Data accessor module for MGFeatureViewer - pure SQLite."""
 
-import os
 import sqlite3
 from pathlib import Path
-
-try:
-    import duckdb
-    HAS_DUCKDB = True
-except ImportError:
-    HAS_DUCKDB = False
 
 
 class DataAccessor:
     """Unified data accessor for MGFeatureViewer outputs.
 
     Supports both:
-    - Directory format (Rust output): metadata.db + features/*.parquet
-    - Single file format (Python output): single .db file with Feature_* tables
+    - Directory format: directory containing metadata.db
+    - Single file format: single .db file
+
+    All feature data is stored in Feature_* tables within the SQLite database.
     """
 
     def __init__(self, db_path: str):
         """Initialize the data accessor.
 
         Args:
-            db_path: Path to either a directory (Rust output) or .db file (Python output)
+            db_path: Path to either a directory (containing metadata.db) or .db file
         """
         self.db_path = Path(db_path)
 
         if self.db_path.is_dir():
-            # Rust output: directory with metadata.db and parquet files
-            self.mode = "parquet"
+            # Directory format: look for metadata.db inside
             self.sqlite_path = self.db_path / "metadata.db"
-            self.features_dir = self.db_path / "features"
             if not self.sqlite_path.exists():
                 raise FileNotFoundError(f"metadata.db not found in {self.db_path}")
-            if not HAS_DUCKDB:
-                raise ImportError("DuckDB is required to read Parquet files. Install with: pip install duckdb")
-            self.duckdb_conn = duckdb.connect()
         else:
-            # Python output: single SQLite file
-            self.mode = "sqlite"
+            # Single file format
             self.sqlite_path = self.db_path
-            self.duckdb_conn = None
 
         self.sqlite_conn = sqlite3.connect(str(self.sqlite_path))
 
@@ -57,8 +45,8 @@ class DataAccessor:
             feature: Feature subplot name (e.g., "Coverage", "Read lengths")
             contig_id: Contig ID from database
             sample_id: Sample ID from database
-            contig_name: Contig name (required for parquet mode)
-            sample_name: Sample name (required for parquet mode)
+            contig_name: Unused, kept for API compatibility
+            sample_name: Unused, kept for API compatibility
 
         Returns:
             List of feature dicts with x, y data and rendering info
@@ -87,43 +75,15 @@ class DataAccessor:
                 "y": []
             }
 
-            if self.mode == "sqlite":
-                # Original SQLite mode - query Feature_* table directly
-                cur.execute(
-                    f"SELECT Position, Value FROM {feature_table} "
-                    "WHERE Sample_id=? AND Contig_id=? ORDER BY Position",
-                    (sample_id, contig_id)
-                )
-                data_rows = cur.fetchall()
-                feature_dict["x"] = [r[0] for r in data_rows]
-                feature_dict["y"] = [r[1] for r in data_rows]
-            else:
-                # Parquet mode - query via DuckDB
-                if sample_name is None or contig_name is None:
-                    raise ValueError("sample_name and contig_name required for parquet mode")
-
-                parquet_file = self.features_dir / f"{sample_name}.parquet"
-                if not parquet_file.exists():
-                    # No data for this sample
-                    list_feature_dict.append(feature_dict)
-                    continue
-
-                # Convert Feature_table_name to feature name (strip "Feature_" prefix)
-                parquet_feature = feature_table.replace("Feature_", "")
-
-                query = f"""
-                    SELECT position, value
-                    FROM '{parquet_file}'
-                    WHERE contig_name = ? AND feature = ?
-                    ORDER BY position
-                """
-                try:
-                    result = self.duckdb_conn.execute(query, [contig_name, parquet_feature]).fetchall()
-                    feature_dict["x"] = [r[0] for r in result]
-                    feature_dict["y"] = [r[1] for r in result]
-                except Exception:
-                    # Feature not found in parquet - return empty
-                    pass
+            # Query Feature_* table directly
+            cur.execute(
+                f"SELECT Position, Value FROM {feature_table} "
+                "WHERE Sample_id=? AND Contig_id=? ORDER BY Position",
+                (sample_id, contig_id)
+            )
+            data_rows = cur.fetchall()
+            feature_dict["x"] = [r[0] for r in data_rows]
+            feature_dict["y"] = [r[1] for r in data_rows]
 
             list_feature_dict.append(feature_dict)
 
@@ -133,8 +93,6 @@ class DataAccessor:
         """Close database connections."""
         if self.sqlite_conn:
             self.sqlite_conn.close()
-        if self.duckdb_conn:
-            self.duckdb_conn.close()
 
     def __enter__(self):
         return self

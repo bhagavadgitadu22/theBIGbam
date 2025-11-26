@@ -10,7 +10,7 @@ except ImportError:
     _rust = None
 
 
-def calculating_all_features_parallel(list_modules, bam_files, output_dir, min_coverage, step, z_thresh, deriv_thresh, max_points, n_sample_cores=None, genbank_path=None, annotation_tool=""):
+def calculating_all_features_parallel(list_modules, bam_files, output_db, min_coverage, step, z_thresh, deriv_thresh, max_points, n_sample_cores=None, genbank_path=None, annotation_tool=""):
     """Process all BAM files in parallel using Rust bindings."""
     if not HAS_RUST:
         sys.exit("ERROR: Rust bindings (mgfeatureviewer_rs) are required but not available. Please install them first.")
@@ -18,21 +18,17 @@ def calculating_all_features_parallel(list_modules, bam_files, output_dir, min_c
     if n_sample_cores is None:
         n_sample_cores = max(1, cpu_count() - 1)
 
-    # Create output directories
-    os.makedirs(os.path.join(output_dir, 'features'), exist_ok=True)
-    os.makedirs(os.path.join(output_dir, 'presences'), exist_ok=True)
-
     # Get parent directory of BAM files (assumes all in same directory)
     bam_dir = os.path.dirname(bam_files[0]) if bam_files else ""
 
     print(f"Using Rust bindings to process {len(bam_files)} samples with rayon ({n_sample_cores} threads)...", flush=True)
 
     # Call the Rust function that handles everything: GenBank parsing, parallel BAM processing,
-    # progress bar, writing Parquet files, and updating SQLite directly
+    # and writing all data to SQLite
     result = _rust.process_all_samples(
         genbank_path=genbank_path,
         bam_dir=bam_dir,
-        output_dir=output_dir,
+        output_db=output_db,
         modules=list_modules,
         threads=n_sample_cores,
         annotation_tool=annotation_tool,
@@ -57,7 +53,7 @@ def add_calculate_args(parser):
     parser.add_argument("-g", "--genbank", required=True, help="Path to genbank file of all investigated contigs")
     parser.add_argument("-b", "--bam_files", required=True, help="Path to bam file or directory containing mapping files (BAM format)")
     parser.add_argument("-m", "--modules", required=True, help="List of modules to compute (comma-separated) (options allowed: coverage, phagetermini, assemblycheck)")
-    parser.add_argument("-o", "--output", required=True, help="Output directory for results (metadata.db + Parquet files)")
+    parser.add_argument("-o", "--output", required=True, help="Output database file path (.db)")
     parser.add_argument("-a", "--annotation_tool", default="", help="Optional: to color the contigs specify the annotation tool used (options allowed: pharokka)")
     parser.add_argument("--min_coverage", type=int, default=50, help="Minimum alignment-length coverage proportion for contig inclusion")
     parser.add_argument("--step", type=int, default=50, help="Step size for compression (keep every Nth point in addition to the outliers)")
@@ -88,22 +84,19 @@ def run_calculate_args(args):
 
     n_cores = int(args.threads)
 
-    # Setup output directory
-    output_dir = args.output
-    if os.path.exists(output_dir):
-        sys.exit(f"ERROR: Output directory '{output_dir}' already exists. Please provide a new path to avoid overwriting.")
+    # Setup output database path
+    output_db = args.output
+    if os.path.exists(output_db):
+        sys.exit(f"ERROR: Output file '{output_db}' already exists. Please provide a new path to avoid overwriting.")
 
     # Rust handles everything: GenBank parsing, database creation, parallel BAM processing, and output writing
     print("Calculating values for all requested features from mapping files...", flush=True)
     calculating_all_features_parallel(
-        requested_modules, bam_files, output_dir, min_coverage, step, z_thresh, deriv_thresh, max_points, n_cores,
+        requested_modules, bam_files, output_db, min_coverage, step, z_thresh, deriv_thresh, max_points, n_cores,
         genbank_path=args.genbank, annotation_tool=annotation_tool
     )
 
-    print(f"\nOutput written to: {output_dir}/", flush=True)
-    print(f"  - metadata.db (contig/sample metadata)", flush=True)
-    print(f"  - features/*.parquet (feature data)", flush=True)
-    print(f"  - presences/*.parquet (presence/absence data)", flush=True)
+    print(f"\nOutput written to: {output_db}", flush=True)
 
 def main():
     print("Parsing arguments...", flush=True)

@@ -141,11 +141,12 @@ def main(argv=None):
     if args.cmd == 'run-pipeline':
         # Run mapping -> annotation -> calculate sequentially
         try:
-            output_dir = args.output
-            output_dir_abs = os.path.abspath(output_dir)
+            output_db = args.output
+            output_db_abs = os.path.abspath(output_db)
+            output_dir = os.path.dirname(output_db_abs) or '.'
 
-            # Mapping outputs go into mgfeatureviewer_bams inside the output directory
-            map_outdir = os.path.join(output_dir_abs, 'bams')
+            # Mapping outputs go into a bams subdirectory
+            map_outdir = os.path.join(output_dir, 'bams')
 
             # Build mapping namespace expected by read_mapping.run_mapping_all
             map_ns = argparse.Namespace(
@@ -159,7 +160,7 @@ def main(argv=None):
             read_mapping.run_mapping_all(map_ns)
 
             # Annotation output target
-            anno_target = os.path.join(output_dir_abs, 'annotation.gbk')
+            anno_target = os.path.join(output_dir, 'annotation.gbk')
             anno_ns = argparse.Namespace(
                 csv=args.csv,
                 assembly=None,
@@ -176,13 +177,13 @@ def main(argv=None):
             if not os.path.exists(anno_target):
                 raise FileNotFoundError(f"Annotation output not found at expected location: {anno_target}")
 
-            # Calculation namespace
+            # Calculation namespace - output is now a .db file
             calc_ns = argparse.Namespace(
                 threads=args.threads,
                 genbank=anno_target,
                 bam_files=map_outdir,
                 modules=args.modules,
-                output=output_dir_abs,
+                output=output_db_abs,
                 annotation_tool=args.annotation_tool,
                 min_coverage=50,
                 step=50,

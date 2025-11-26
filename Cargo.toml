@@ -19,10 +19,6 @@ python = ["pyo3", "numpy"]
 # BAM/SAM reading
 rust-htslib = "0.51"
 
-# Parquet/Arrow output
-arrow = { version = "53", features = ["prettyprint"] }
-parquet = { version = "53", features = ["arrow", "zstd"] }
-
 # Parallelism
 rayon = "1.10"
 
