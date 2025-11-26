@@ -21,21 +21,42 @@ pub enum PlotType {
     Bars,
 }
 
-/// Configuration for a feature type.
-pub struct FeatureConfig {
+/// Variable configuration for database and plotting.
+pub struct VariableConfig {
+    pub name: &'static str,
+    pub subplot: &'static str,
+    pub module: &'static str,
     pub plot_type: PlotType,
+    pub color: &'static str,
+    pub alpha: f64,
+    pub fill_alpha: f64,
+    pub size: f64,
+    pub title: &'static str,
 }
 
-/// Get feature configuration (plot type).
-/// Python equivalent: `FEATURE_TYPES` dict in calculating_data.py:17-31
-pub fn get_feature_config(feature: &str) -> FeatureConfig {
-    // calculating_data.py:17-31 - FEATURE_TYPES dict
-    // Maps feature names to "curve" or "bars" plot type
-    let plot_type = match feature {
-        "coverage" | "coverage_reduced" | "read_lengths" | "insert_sizes" => PlotType::Curve,  // py:18-19, 24-25
-        _ => PlotType::Bars,  // py:20-23, 26-31 (reads_starts, reads_ends, tau, bad_orientations, clippings, indels, mismatches)
-    };
-    FeatureConfig { plot_type }
+/// All variable configurations - single source of truth.
+pub const VARIABLES: &[VariableConfig] = &[
+    VariableConfig { name: "coverage", subplot: "Coverage", module: "Coverage", plot_type: PlotType::Curve, color: "#333333", alpha: 0.8, fill_alpha: 0.4, size: 1.0, title: "Coverage depth" },
+    VariableConfig { name: "coverage_reduced", subplot: "Coverage reduced", module: "Phage termini", plot_type: PlotType::Curve, color: "#00c53b", alpha: 0.8, fill_alpha: 0.4, size: 1.0, title: "Coverage reduced" },
+    VariableConfig { name: "reads_starts", subplot: "Reads termini", module: "Phage termini", plot_type: PlotType::Bars, color: "#215732", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Read Starts" },
+    VariableConfig { name: "reads_ends", subplot: "Reads termini", module: "Phage termini", plot_type: PlotType::Bars, color: "#6cc24a", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Read Ends" },
+    VariableConfig { name: "tau", subplot: "Tau", module: "Phage termini", plot_type: PlotType::Bars, color: "#44883e", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Tau" },
+    VariableConfig { name: "read_lengths", subplot: "Read lengths", module: "Assembly check", plot_type: PlotType::Curve, color: "#ed8b00", alpha: 0.8, fill_alpha: 0.4, size: 1.0, title: "Read Lengths" },
+    VariableConfig { name: "insert_sizes", subplot: "Insert sizes", module: "Assembly check", plot_type: PlotType::Curve, color: "#ed8b00", alpha: 0.8, fill_alpha: 0.4, size: 1.0, title: "Insert Sizes" },
+    VariableConfig { name: "bad_orientations", subplot: "Bad orientations", module: "Assembly check", plot_type: PlotType::Bars, color: "#c94009", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Bad Orientations" },
+    VariableConfig { name: "left_clippings", subplot: "Clippings", module: "Assembly check", plot_type: PlotType::Bars, color: "#7f0091", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Left Clippings" },
+    VariableConfig { name: "right_clippings", subplot: "Clippings", module: "Assembly check", plot_type: PlotType::Bars, color: "#8e43e7", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Right Clippings" },
+    VariableConfig { name: "insertions", subplot: "Indels", module: "Assembly check", plot_type: PlotType::Bars, color: "#e50001", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Insertions" },
+    VariableConfig { name: "deletions", subplot: "Indels", module: "Assembly check", plot_type: PlotType::Bars, color: "#97011a", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Deletions" },
+    VariableConfig { name: "mismatches", subplot: "Mismatches", module: "Assembly check", plot_type: PlotType::Bars, color: "#5a0f0b", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Mismatches" },
+];
+
+/// Get plot type for a feature.
+pub fn get_plot_type(feature: &str) -> PlotType {
+    VARIABLES.iter()
+        .find(|v| v.name == feature)
+        .map(|v| v.plot_type)
+        .unwrap_or(PlotType::Bars)
 }
 
 /// Information about a contig from the GenBank file.

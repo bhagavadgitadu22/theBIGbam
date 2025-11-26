@@ -7,7 +7,7 @@ use rusqlite::Connection;
 use std::collections::HashMap;
 use std::path::Path;
 
-use crate::types::{ContigInfo, FeatureAnnotation, PresenceData};
+use crate::types::{ContigInfo, FeatureAnnotation, PlotType, PresenceData, VARIABLES};
 
 /// Create metadata SQLite database with schema and initial data.
 pub fn create_metadata_db(
@@ -110,29 +110,14 @@ pub fn create_metadata_db(
     }
     conn.execute("COMMIT", [])?;
 
-    // Insert default variables (matching Python)
-    let variables = [
-        ("coverage", "Coverage", "Coverage", "curve", "#333333", 0.8, 0.4, 1.0, "Coverage depth", ""),
-        ("coverage_reduced", "Coverage reduced", "Phage termini", "curve", "#00c53b", 0.8, 0.4, 1.0, "Coverage reduced", ""),
-        ("reads_starts", "Reads termini", "Phage termini", "bars", "#215732", 0.6, 0.4, 1.0, "Read Starts", ""),
-        ("reads_ends", "Reads termini", "Phage termini", "bars", "#6cc24a", 0.6, 0.4, 1.0, "Read Ends", ""),
-        ("tau", "Tau", "Phage termini", "bars", "#44883e", 0.6, 0.4, 1.0, "Tau", ""),
-        ("read_lengths", "Read lengths", "Assembly check", "curve", "#ed8b00", 0.8, 0.4, 1.0, "Read Lengths", ""),
-        ("insert_sizes", "Insert sizes", "Assembly check", "curve", "#ed8b00", 0.8, 0.4, 1.0, "Insert Sizes", ""),
-        ("bad_orientations", "Bad orientations", "Assembly check", "bars", "#c94009", 0.6, 0.4, 1.0, "Bad Orientations", ""),
-        ("left_clippings", "Clippings", "Assembly check", "bars", "#7f0091", 0.6, 0.4, 1.0, "Left Clippings", ""),
-        ("right_clippings", "Clippings", "Assembly check", "bars", "#8e43e7", 0.6, 0.4, 1.0, "Right Clippings", ""),
-        ("insertions", "Indels", "Assembly check", "bars", "#e50001", 0.6, 0.4, 1.0, "Insertions", ""),
-        ("deletions", "Indels", "Assembly check", "bars", "#97011a", 0.6, 0.4, 1.0, "Deletions", ""),
-        ("mismatches", "Mismatches", "Assembly check", "bars", "#5a0f0b", 0.6, 0.4, 1.0, "Mismatches", ""),
-    ];
-
-    for (name, subplot, module, vtype, color, alpha, fill_alpha, size, title, help) in variables {
-        let table_name = format!("Feature_{}", name);
+    // Insert default variables from centralized config
+    for v in VARIABLES {
+        let vtype = match v.plot_type { PlotType::Curve => "curve", PlotType::Bars => "bars" };
+        let table_name = format!("Feature_{}", v.name);
         conn.execute(
             "INSERT INTO Variable (Variable_name, Subplot, Module, Type, Color, Alpha, Fill_alpha, Size, Title, Help, Feature_table_name)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-            rusqlite::params![name, subplot, module, vtype, color, alpha, fill_alpha, size, title, help, table_name],
+            rusqlite::params![v.name, v.subplot, v.module, vtype, v.color, v.alpha, v.fill_alpha, v.size, v.title, "", table_name],
         )?;
     }
 

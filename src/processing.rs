@@ -16,7 +16,7 @@ use crate::db::{create_metadata_db, update_sample_presences};
 use crate::features::{calculate_assemblycheck, calculate_coverage, calculate_phagetermini};
 use crate::genbank::parse_genbank;
 use crate::parquet::{write_features_parquet, write_presences_parquet};
-use crate::types::{get_feature_config, ContigInfo, FeaturePoint, PresenceData};
+use crate::types::{get_plot_type, ContigInfo, FeaturePoint, PresenceData};
 
 /// Configuration for processing.
 pub struct ProcessConfig {
@@ -46,6 +46,24 @@ pub struct ProcessResult {
     pub samples_processed: usize,
     pub samples_failed: usize,
     pub total_time_secs: f64,
+}
+
+/// Compress and add feature points to the output vector.
+fn add_compressed_feature(
+    values: &[f64],
+    feature: &str,
+    contig_name: &str,
+    config: &ProcessConfig,
+    output: &mut Vec<FeaturePoint>,
+) {
+    let plot_type = get_plot_type(feature);
+    let (xs, ys) = compress_signal(values, plot_type, config.step, config.z_thresh, config.deriv_thresh, config.max_points);
+    output.extend(xs.into_iter().zip(ys).map(|(x, y)| FeaturePoint {
+        contig_name: contig_name.to_string(),
+        feature: feature.to_string(),
+        position: x,
+        value: y,
+    }));
 }
 
 /// Process one BAM file (sample) and return all features.
@@ -111,16 +129,7 @@ pub fn process_sample(
         if modules.contains(&"coverage".to_string()) || modules.contains(&"assemblycheck".to_string()) {
             let coverage = calculate_coverage(&reads, ref_length);
             let values: Vec<f64> = coverage.iter().map(|&x| x as f64).collect();
-            let cfg = get_feature_config("coverage");
-            let (xs, ys) = compress_signal(&values, cfg.plot_type, config.step, config.z_thresh, config.deriv_thresh, config.max_points);
-            for (x, y) in xs.into_iter().zip(ys) {
-                all_features.push(FeaturePoint {
-                    contig_name: contig.name.clone(),
-                    feature: "coverage".to_string(),
-                    position: x,
-                    value: y,
-                });
-            }
+            add_compressed_feature(&values, "coverage", &contig.name, config, &mut all_features);
         }
 
         // Phagetermini
@@ -130,41 +139,20 @@ pub fn process_sample(
             for feature_name in ["coverage_reduced", "reads_starts", "reads_ends"] {
                 if let Some(data) = pt_features.get(feature_name) {
                     let values: Vec<f64> = data.iter().map(|&x| x as f64).collect();
-                    let cfg = get_feature_config(feature_name);
-                    let (xs, ys) = compress_signal(&values, cfg.plot_type, config.step, config.z_thresh, config.deriv_thresh, config.max_points);
-                    for (x, y) in xs.into_iter().zip(ys) {
-                        all_features.push(FeaturePoint {
-                            contig_name: contig.name.clone(),
-                            feature: feature_name.to_string(),
-                            position: x,
-                            value: y,
-                        });
-                    }
+                    add_compressed_feature(&values, feature_name, &contig.name, config, &mut all_features);
                 }
             }
 
-            // Tau
+            // Tau (derived: (starts + ends) / coverage_reduced)
             if let (Some(cov_red), Some(starts), Some(ends)) = (
                 pt_features.get("coverage_reduced"),
                 pt_features.get("reads_starts"),
                 pt_features.get("reads_ends"),
             ) {
-                let tau: Vec<f64> = cov_red
-                    .iter()
-                    .zip(starts)
-                    .zip(ends)
+                let tau: Vec<f64> = cov_red.iter().zip(starts).zip(ends)
                     .map(|((&c, &s), &e)| if c > 0 { (s + e) as f64 / c as f64 } else { 0.0 })
                     .collect();
-                let cfg = get_feature_config("tau");
-                let (xs, ys) = compress_signal(&tau, cfg.plot_type, config.step, config.z_thresh, config.deriv_thresh, config.max_points);
-                for (x, y) in xs.into_iter().zip(ys) {
-                    all_features.push(FeaturePoint {
-                        contig_name: contig.name.clone(),
-                        feature: "tau".to_string(),
-                        position: x,
-                        value: y,
-                    });
-                }
+                add_compressed_feature(&tau, "tau", &contig.name, config, &mut all_features);
             }
         }
 
@@ -175,61 +163,24 @@ pub fn process_sample(
             for feature_name in ["left_clippings", "right_clippings", "insertions", "deletions", "mismatches", "bad_orientations"] {
                 if let Some(data) = ac_features.get(feature_name) {
                     let values: Vec<f64> = data.iter().map(|&x| x as f64).collect();
-                    let cfg = get_feature_config(feature_name);
-                    let (xs, ys) = compress_signal(&values, cfg.plot_type, config.step, config.z_thresh, config.deriv_thresh, config.max_points);
-                    for (x, y) in xs.into_iter().zip(ys) {
-                        all_features.push(FeaturePoint {
-                            contig_name: contig.name.clone(),
-                            feature: feature_name.to_string(),
-                            position: x,
-                            value: y,
-                        });
-                    }
+                    add_compressed_feature(&values, feature_name, &contig.name, config, &mut all_features);
                 }
             }
 
-            // Read lengths (long reads)
-            if let (Some(sum_rl), Some(count_rl)) = (
-                ac_features.get("sum_read_lengths"),
-                ac_features.get("count_read_lengths"),
-            ) {
-                let values: Vec<f64> = sum_rl
-                    .iter()
-                    .zip(count_rl)
+            // Read lengths (derived: sum / count, for long reads)
+            if let (Some(sum_rl), Some(count_rl)) = (ac_features.get("sum_read_lengths"), ac_features.get("count_read_lengths")) {
+                let values: Vec<f64> = sum_rl.iter().zip(count_rl)
                     .map(|(&s, &c)| if c > 0 { s as f64 / c as f64 } else { 0.0 })
                     .collect();
-                let cfg = get_feature_config("read_lengths");
-                let (xs, ys) = compress_signal(&values, cfg.plot_type, config.step, config.z_thresh, config.deriv_thresh, config.max_points);
-                for (x, y) in xs.into_iter().zip(ys) {
-                    all_features.push(FeaturePoint {
-                        contig_name: contig.name.clone(),
-                        feature: "read_lengths".to_string(),
-                        position: x,
-                        value: y,
-                    });
-                }
+                add_compressed_feature(&values, "read_lengths", &contig.name, config, &mut all_features);
             }
 
-            // Insert sizes (short-paired)
-            if let (Some(sum_is), Some(count_is)) = (
-                ac_features.get("sum_insert_sizes"),
-                ac_features.get("count_insert_sizes"),
-            ) {
-                let values: Vec<f64> = sum_is
-                    .iter()
-                    .zip(count_is)
+            // Insert sizes (derived: sum / count, for short-paired reads)
+            if let (Some(sum_is), Some(count_is)) = (ac_features.get("sum_insert_sizes"), ac_features.get("count_insert_sizes")) {
+                let values: Vec<f64> = sum_is.iter().zip(count_is)
                     .map(|(&s, &c)| if c > 0 { s as f64 / c as f64 } else { 0.0 })
                     .collect();
-                let cfg = get_feature_config("insert_sizes");
-                let (xs, ys) = compress_signal(&values, cfg.plot_type, config.step, config.z_thresh, config.deriv_thresh, config.max_points);
-                for (x, y) in xs.into_iter().zip(ys) {
-                    all_features.push(FeaturePoint {
-                        contig_name: contig.name.clone(),
-                        feature: "insert_sizes".to_string(),
-                        position: x,
-                        value: y,
-                    });
-                }
+                add_compressed_feature(&values, "insert_sizes", &contig.name, config, &mut all_features);
             }
         }
     }
