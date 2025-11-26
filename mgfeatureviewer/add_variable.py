@@ -2,7 +2,23 @@ import sqlite3
 import csv
 import re
 
-from .generate_database import config_feature_subplot
+
+def config_feature_subplot(subplot, module, plot_type, color, title, alpha=0.8, fill_alpha=0.4, size=1, help=""):
+    """Configure feature subplot parameters."""
+    if plot_type == "bars":
+        alpha = 0.6
+        size = 1
+    return {
+        "subplot": subplot,
+        "module": module,
+        "type": plot_type,
+        "color": color,
+        "alpha": alpha,
+        "fill_alpha": fill_alpha,
+        "size": size,
+        "title": title,
+        "help": help
+    }
 
 
 def add_add_variable_args(parser):

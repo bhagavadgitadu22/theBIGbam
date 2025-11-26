@@ -58,14 +58,9 @@ def build_argparser():
     sp.add_argument('--meta', action='store_true', help='Pass --meta to annotator if the combined assembly contain contigs from several organisms')
     # Inputs for calculate step
     sp.add_argument('--modules', required=True, help='Comma-separated modules for calculation (coverage,phagetermini,assemblycheck)')
-    sp.add_argument('--db', required=True, help='Path to sqlite DB file to create for calculation (must NOT exist)')
+    sp.add_argument('--output', required=True, help='Output directory for calculation results (must NOT exist)')
     # Parallelization options
-    sp.add_argument('--threads', type=int, default=4, help='Available CPUs (or CPUs per Slurm job if using Slurm)')
-    sp.add_argument('--use-slurm', action='store_true', help='Dispatch mapping and calculation tasks as Slurm array (per-sample)')
-    sp.add_argument('--max-concurrent', type=int, default=20, help='Maximal number of concurrent Slurm tasks')
-    sp.add_argument('--max-time', default='02:00:00', help='Maximum time per Slurm job')
-    sp.add_argument('--mem-per-cpu', type=int, default=8, help='Memory per CPU for Slurm jobs (in GB)')
-    sp.add_argument('--parallelize-contigs', action='store_true', help='When running calculation per-sample, parallelize contigs inside the job')
+    sp.add_argument('--threads', type=int, default=4, help='Number of threads for parallel processing')
 
     # calculate
     sp = sub.add_parser('calculate', help=SCRIPTS['calculate'])
@@ -144,13 +139,13 @@ def main(argv=None):
             return 2
 
     if args.cmd == 'run-pipeline':
-        # Use the simple, user-provided run-pipeline args.
+        # Run mapping -> annotation -> calculate sequentially
         try:
-            db_path = args.db
-            db_dir = os.path.abspath(os.path.dirname(db_path)) or os.getcwd()
+            output_dir = args.output
+            output_dir_abs = os.path.abspath(output_dir)
 
-            # Mapping outputs go into mgfeatureviewer_bams inside the DB directory
-            map_outdir = os.path.join(db_dir, 'mgfeatureviewer_bams')
+            # Mapping outputs go into mgfeatureviewer_bams inside the output directory
+            map_outdir = os.path.join(output_dir_abs, 'bams')
 
             # Build mapping namespace expected by read_mapping.run_mapping_all
             map_ns = argparse.Namespace(
@@ -158,59 +153,44 @@ def main(argv=None):
                 assembly=None,
                 circular=bool(getattr(args, 'circular', False)),
                 output_dir=map_outdir,
-                threads=int(getattr(args, 'threads_per_job', 4)),
-                threads=int(getattr(args, 'threads_per_job', 4)),
-                use_slurm=bool(getattr(args, 'use_slurm', False)),
-                max_concurrent=int(getattr(args, 'max_concurrent', 20)),
-                max_time=getattr(args, 'max_time', '02:00:00'),
-                mem_per_cpu=f"{getattr(args, 'mem_per_cpu', 8)}G",
+                threads=args.threads,
             )
             print(f"Starting mapping step (CSV={map_ns.csv}) -> outputs: {map_ns.output_dir}")
-            print("Command args for mapping step:", dict(vars(map_ns)))
-            #read_mapping.run_mapping_all(map_ns)
+            read_mapping.run_mapping_all(map_ns)
 
-            # Annotation output target: place file in DB directory. Use .gbk target name;
-            # assembly_annotation will copy whatever bakta/pharokka produced into this path.
-            anno_target = os.path.join(db_dir, 'annotation_output.gbk')
+            # Annotation output target
+            anno_target = os.path.join(output_dir_abs, 'annotation.gbk')
             anno_ns = argparse.Namespace(
                 csv=args.csv,
                 assembly=None,
                 annotation_tool=args.annotation_tool,
                 annotation_db=args.annotation_db,
                 meta=bool(getattr(args, 'meta', False)),
-                threads=int(getattr(args, 'threads_per_job', 4)),
+                threads=args.threads,
                 genbank=anno_target,
             )
             print(f"Starting annotation step (annotation_tool={anno_ns.annotation_tool}) -> output: {anno_ns.genbank}")
-            print("Command args for annotation step:", dict(vars(anno_ns)))
-            #assembly_annotation.run_annotation(anno_ns)
+            assembly_annotation.run_annotation(anno_ns)
 
-            # Ensure annotation output exists (assembly_annotation should have created it)
+            # Ensure annotation output exists
             if not os.path.exists(anno_target):
                 raise FileNotFoundError(f"Annotation output not found at expected location: {anno_target}")
 
-            # Calculation namespace: point to the annotation file and the mapping BAM directory
+            # Calculation namespace
             calc_ns = argparse.Namespace(
-                threads=int(getattr(args, 'threads_per_job', 4)),
+                threads=args.threads,
                 genbank=anno_target,
                 bam_files=map_outdir,
                 modules=args.modules,
-                db=db_path,
+                output=output_dir_abs,
                 annotation_tool=args.annotation_tool,
                 min_coverage=50,
                 step=50,
                 outlier_threshold=3,
                 derivative_threshold=3,
                 max_points=10000,
-                threads=int(getattr(args, 'threads_per_job', 4)),
-                use_slurm=bool(getattr(args, 'use_slurm', False)),
-                max_concurrent=int(getattr(args, 'max_concurrent', 20)),
-                max_time=getattr(args, 'max_time', '02:00:00'),
-                mem_per_cpu=f"{getattr(args, 'mem_per_cpu', 8)}G",
-                parallelize_contigs=bool(getattr(args, 'parallelize_contigs', False)),
             )
-            print(f"Starting calculation step (DB={calc_ns.db}) using genbank {calc_ns.genbank} and bams in {calc_ns.bam_files}")
-            print("Command args for calculation step:", dict(vars(calc_ns)))
+            print(f"Starting calculation step -> output: {calc_ns.output}")
             calculating_data.run_calculate_args(calc_ns)
             return 0
         except Exception as e:

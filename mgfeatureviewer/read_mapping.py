@@ -5,8 +5,6 @@ import tempfile
 import argparse
 import csv
 from typing import Optional
-import sys
-from mgfeatureviewer import slurm_utils
 
 from Bio import SeqIO
 
@@ -108,12 +106,6 @@ def add_mapping_all_args(parser):
     parser.add_argument('--circular', action='store_true', help='Treat assemblies as circular (double sequences)')
     parser.add_argument('--output-dir', required=True, help='Directory to create and place outputs (must NOT exist)')
     parser.add_argument('--threads', type=int, default=4, help='Threads to pass to minimap2/samtools')
-    # Slurm options
-    parser.add_argument('--threads', type=int, default=4, help='CPUs per Slurm job')
-    parser.add_argument('--use-slurm', action='store_true', help='Dispatch mapping jobs via Slurm (sbatch)')
-    parser.add_argument('--max-concurrent', type=int, default=20, help='Max concurrent Slurm array tasks')
-    parser.add_argument('--max-time', default='02:00:00', help='Time request for sbatch (e.g. 02:00:00)')
-    parser.add_argument('--mem-per-cpu', default='8G', help='Memory request for sbatch (e.g. 8G)')
 
 def run_mapping_all(args):
     csv_path = Path(args.csv)
@@ -180,35 +172,8 @@ def run_mapping_all(args):
 
         print(f"Processing row {i}: {read1p} -> assembly {assembly_to_use} (seqtype={seqtype}) -> {desired_bam}")
 
-        if getattr(args, 'use_slurm', False):
-            # Submit as a Slurm job array (one array covering all rows). We will build a single array submission
-            # outside the loop — so do nothing per-row here. Fallthrough to array submission below.
-            continue
-
         # Local execution
         map_with_minimap2(args.threads, assembly_to_use, seqtype, read1p, read2p, desired_bam, circular=getattr(args, 'circular', False))
-
-    # If Slurm requested, submit an array job for all rows
-    if getattr(args, 'use_slurm', False):
-        if not slurm_utils.has_slurm():
-            raise EnvironmentError("Slurm requested via --use-slurm but 'sbatch' not found on PATH")
-
-        csv_path = Path(args.csv)
-        outdir = Path(args.output_dir)
-        array_size = len(rows)
-        cpus = int(getattr(args, 'threads', 4))
-        concurrency = int(getattr(args, 'max_concurrent', 20))
-        time_req = getattr(args, 'max-time', '02:00:00')
-        mem = getattr(args, 'mem_per_cpu', '8G')
-
-        # module_cli will be evaluated inside the bash script and should reference shell variables
-        module_cli = f"{sys.executable} -m mgfeatureviewer.cli mapping-per-sample --read1 \"$read1\" --read2 \"$read2\" --assembly \"$assembly\" --sequencing-type \"$seqtype\" --threads {args.threads} --output \"$output\""
-        if getattr(args, 'circular', False):
-            module_cli += ' --circular'
-
-        jobid = slurm_utils.submit_array(csv_path, outdir, module_cli, array_size=array_size, concurrency=concurrency, cpus_per_task=cpus, mem=mem, time=time_req)
-        print(f"Submitted Slurm array job {jobid} for {array_size} mapping tasks")
-        return 0
 
     print("All rows processed")
     return 0
