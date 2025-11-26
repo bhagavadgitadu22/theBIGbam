@@ -93,6 +93,10 @@ struct Args {
     /// Maximum points after compression
     #[arg(long, default_value = "10000")]
     max_points: usize,
+
+    /// Use Python-compatible compression (replicates derivative outlier bug for comparison)
+    #[arg(long, default_value = "false")]
+    python_compat: bool,
 }
 
 fn main() -> Result<()> {
@@ -113,6 +117,7 @@ fn main() -> Result<()> {
         z_thresh: args.outlier_threshold,
         deriv_thresh: args.derivative_threshold,
         max_points: args.max_points,
+        python_compat: args.python_compat,
     };
 
     // Call the shared processing function

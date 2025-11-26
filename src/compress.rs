@@ -7,7 +7,9 @@ use crate::types::PlotType;
 
 /// Compress signal for storage (subsampling + outlier detection).
 /// Python equivalent: `compress_signal()` in calculating_data.py:91-145
-/// NOTE: Rust correctly identifies derivative outliers; Python has a bug (see PYTHON_COMPARISON.md)
+///
+/// If `python_compat` is true, replicates the Python bug where derivative outlier
+/// detection uses boolean arithmetic instead of indices, resulting in fewer kept points.
 pub fn compress_signal(
     values: &[f64],
     plot_type: PlotType,
@@ -15,6 +17,7 @@ pub fn compress_signal(
     z_thresh: f64,
     deriv_thresh: f64,
     max_points: usize,
+    python_compat: bool,
 ) -> (Vec<i32>, Vec<f32>) {
     // calculating_data.py:91-140 - compress_signal()
     let n = values.len();  // py:99
@@ -23,19 +26,15 @@ pub fn compress_signal(
     }
 
     // py:102-103 - Calculate mean and std
-    let mean: f64 = (values.iter().sum::<f64>() / n as f64 * 1e9).round() / 1e9;  // py:102 np.mean()
+    let mean: f64 = values.iter().sum::<f64>() / n as f64;  // py:102 np.mean()
     let variance: f64 = values.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / n as f64;
-    let std = (variance.sqrt().max(1e-9) * 1e9).round() / 1e9;  // py:103 np.std()
+    let std = variance.sqrt().max(1e-9);  // py:103 np.std() or 1e-9
 
     // py:104 - Find value outliers: np.abs(feature_values - y_mean) > z_thresh * y_std
     let val_outliers: Vec<usize> = values
         .iter()
         .enumerate()
-        .filter(|(_, &v)| {
-            let z = ((v - mean).abs() * 1e6).round() / 1e6;
-            let thresh = (z_thresh * std * 1e6).round() / 1e6;
-            z > thresh
-        })
+        .filter(|(_, &v)| (v - mean).abs() > z_thresh * std)
         .map(|(i, _)| i)
         .collect();
 
@@ -50,25 +49,49 @@ pub fn compress_signal(
                 derivatives[i] = values[i] - values[i - 1];  // py:111 np.diff()
             }
             let deriv_std = {
-                let deriv_mean: f64 = (derivatives.iter().sum::<f64>() / n as f64 * 1e9).round() / 1e9;
+                let deriv_mean: f64 = derivatives.iter().sum::<f64>() / n as f64;
                 let deriv_var: f64 = derivatives.iter().map(|x| (x - deriv_mean).powi(2)).sum::<f64>() / n as f64;
-                (deriv_var.sqrt().max(1e-9) * 1e9).round() / 1e9  // py:112 np.std(dy)
+                deriv_var.sqrt().max(1e-9)  // py:112 np.std(dy) or 1e-9
             };
 
             // py:113 - der_outliers = np.abs(dy) > deriv_thresh * dy_std
-            // NOTE: Rust correctly keeps positions i-1 and i for each outlier
-            // Python py:116 has a bug with boolean array arithmetic (see PYTHON_COMPARISON.md)
-            let deriv_outliers: Vec<usize> = derivatives
-                .iter()
-                .enumerate()
-                .filter(|(_, &d)| {
-                    let z = (d.abs() * 1e6).round() / 1e6;
-                    let thresh = (deriv_thresh * deriv_std * 1e6).round() / 1e6;
-                    z > thresh
-                })
-                .flat_map(|(i, _)| if i > 0 { vec![i - 1, i] } else { vec![i] })  // correct behavior
-                .filter(|&i| i < n)
-                .collect();
+            let deriv_outliers: Vec<usize> = if python_compat {
+                // Replicate Python bug: boolean array arithmetic
+                // Python does: np.concatenate([der_outliers - 1, der_outliers])
+                // where der_outliers is boolean, so True-1=0, False-1=-1 (clipped to 0)
+                // This effectively loses most derivative outlier positions
+                let bools: Vec<bool> = derivatives
+                    .iter()
+                    .map(|&d| d.abs() > deriv_thresh * deriv_std)
+                    .collect();
+
+                // Simulate: np.concatenate([bools - 1, bools]) then clip to [0, n-1]
+                let mut indices: Vec<i64> = Vec::with_capacity(bools.len() * 2);
+                for &b in &bools {
+                    indices.push(if b { 0 } else { -1 });  // True-1=0, False-1=-1
+                }
+                for &b in &bools {
+                    indices.push(if b { 1 } else { 0 });   // True=1, False=0
+                }
+
+                // Clip to [0, n-1] and unique
+                let mut result: Vec<usize> = indices
+                    .into_iter()
+                    .map(|i| i.max(0).min((n - 1) as i64) as usize)
+                    .collect();
+                result.sort_unstable();
+                result.dedup();
+                result
+            } else {
+                // Correct behavior: keep positions i-1 and i for each derivative outlier
+                derivatives
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, &d)| d.abs() > deriv_thresh * deriv_std)
+                    .flat_map(|(i, _)| if i > 0 { vec![i - 1, i] } else { vec![i] })
+                    .filter(|&i| i < n)
+                    .collect()
+            };
 
             // py:123-128 - Combine indices: merge_sorted_unique()
             regular.extend(val_outliers);   // py:124-125

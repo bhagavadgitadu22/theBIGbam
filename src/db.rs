@@ -11,10 +11,12 @@ use std::path::Path;
 use crate::types::{ContigInfo, FeatureAnnotation, FeaturePoint, PlotType, PresenceData, VARIABLES};
 
 /// Create the main SQLite database with schema and initial data.
+/// If `create_indexes` is false, skip creating indexes (for Python compatibility).
 pub fn create_metadata_db(
     db_path: &Path,
     contigs: &[ContigInfo],
     annotations: &[FeatureAnnotation],
+    create_indexes: bool,
 ) -> Result<()> {
     let conn = Connection::open(db_path)?;
 
@@ -52,10 +54,12 @@ pub fn create_metadata_db(
         [],
     )?;
 
-    conn.execute(
-        "CREATE INDEX idx_presences_contig_sample ON Presences(Contig_id, Sample_id)",
-        [],
-    )?;
+    if create_indexes {
+        conn.execute(
+            "CREATE INDEX idx_presences_contig_sample ON Presences(Contig_id, Sample_id)",
+            [],
+        )?;
+    }
 
     conn.execute(
         "CREATE TABLE Contig_annotation (
@@ -150,14 +154,16 @@ pub fn create_metadata_db(
             [],
         )?;
 
-        // Create index for fast lookups
-        conn.execute(
-            &format!(
-                "CREATE INDEX idx_{}_lookup ON {}(Sample_id, Contig_id)",
-                v.name, table_name
-            ),
-            [],
-        )?;
+        // Create index for fast lookups (skip for Python compatibility)
+        if create_indexes {
+            conn.execute(
+                &format!(
+                    "CREATE INDEX idx_{}_lookup ON {}(Sample_id, Contig_id)",
+                    v.name, table_name
+                ),
+                [],
+            )?;
+        }
     }
 
     Ok(())

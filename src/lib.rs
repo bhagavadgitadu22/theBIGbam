@@ -70,7 +70,7 @@ mod python {
     ///         - "samples_failed": int
     ///         - "total_time": float (seconds)
     #[pyfunction]
-    #[pyo3(signature = (genbank_path, bam_dir, output_db, modules, threads, annotation_tool="", min_coverage=50.0, step=50, z_thresh=3.0, deriv_thresh=3.0, max_points=10000))]
+    #[pyo3(signature = (genbank_path, bam_dir, output_db, modules, threads, annotation_tool="", min_coverage=50.0, step=50, z_thresh=3.0, deriv_thresh=3.0, max_points=10000, python_compat=false))]
     fn process_all_samples<'py>(
         py: Python<'py>,
         genbank_path: &str,
@@ -84,6 +84,7 @@ mod python {
         z_thresh: f64,
         deriv_thresh: f64,
         max_points: usize,
+        python_compat: bool,
     ) -> PyResult<Bound<'py, PyDict>> {
         use crate::processing::{run_all_samples, ProcessConfig};
 
@@ -94,6 +95,7 @@ mod python {
             z_thresh,
             deriv_thresh,
             max_points,
+            python_compat,
         };
 
         // Release the GIL and call the shared processing function

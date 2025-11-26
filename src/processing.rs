@@ -28,6 +28,8 @@ pub struct ProcessConfig {
     pub z_thresh: f64,
     pub deriv_thresh: f64,
     pub max_points: usize,
+    /// If true, replicate Python's buggy derivative outlier detection for comparison
+    pub python_compat: bool,
 }
 
 impl Default for ProcessConfig {
@@ -39,6 +41,7 @@ impl Default for ProcessConfig {
             z_thresh: 3.0,
             deriv_thresh: 3.0,
             max_points: 10000,
+            python_compat: false,
         }
     }
 }
@@ -59,7 +62,7 @@ fn add_compressed_feature(
     output: &mut Vec<FeaturePoint>,
 ) {
     let plot_type = get_plot_type(feature);
-    let (xs, ys) = compress_signal(values, plot_type, config.step, config.z_thresh, config.deriv_thresh, config.max_points);
+    let (xs, ys) = compress_signal(values, plot_type, config.step, config.z_thresh, config.deriv_thresh, config.max_points, config.python_compat);
     output.extend(xs.into_iter().zip(ys).map(|(x, y)| FeaturePoint {
         contig_name: contig_name.to_string(),
         feature: feature.to_string(),
@@ -90,16 +93,23 @@ pub fn process_sample(
     let mut all_features = Vec::new();
     let mut all_presences = Vec::new();
 
-    for contig in contigs {
-        let tid = bam.header().tid(contig.name.as_bytes());
-        let ref_length = if let Some(tid) = tid {
-            let bam_length = bam.header().target_len(tid).unwrap_or(contig.length as u64) as usize;
-            bam_length / 2
-        } else {
-            contig.length
+    // Iterate over BAM header references (like Python does) instead of GenBank contigs
+    // This ensures we only process contigs that are in the BAM file
+    let header = bam.header().clone();
+    let n_refs = header.target_count();
+
+    for tid in 0..n_refs {
+        let ref_name = std::str::from_utf8(header.tid2name(tid)).unwrap_or("");
+        let bam_length = header.target_len(tid).unwrap_or(0) as usize;
+        let ref_length = bam_length / 2;  // py: lengths = [l // 2 for l in bam.lengths]
+
+        // Skip if this contig is not in our GenBank contigs list
+        let contig = match contigs.iter().find(|c| c.name == ref_name) {
+            Some(c) => c,
+            None => continue,
         };
 
-        let reads = process_reads_for_contig(&mut bam, &contig.name, ref_length, modules, seq_type)?;
+        let reads = process_reads_for_contig(&mut bam, ref_name, ref_length, modules, seq_type)?;
 
         if reads.is_empty() {
             continue;
@@ -245,9 +255,9 @@ pub fn run_all_samples(
 
     std::thread::sleep(std::time::Duration::from_millis(50));
 
-    // Create main database with schema
+    // Create main database with schema (skip indexes in python_compat mode)
     let db_path = output_db;
-    create_metadata_db(db_path, &contigs, &annotations)?;
+    create_metadata_db(db_path, &contigs, &annotations, !config.python_compat)?;
 
     eprintln!("### Processing {} samples with {} threads", bam_files.len(), config.threads);
     eprintln!("Modules: {}\n", modules.join(", "));
