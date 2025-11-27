@@ -18,10 +18,8 @@
 //! | Rust Function                    | Python Function                              | Line  |
 //! |----------------------------------|----------------------------------------------|-------|
 //! | `detect_sequencing_type`         | `find_sequencing_type_from_bam`              | ~55   |
-//! | `process_reads_for_contig`       | `preprocess_reads`                           | ~497  |
-//! | `calculate_coverage`             | `calculate_coverage_numba`                   | ~182  |
-//! | `calculate_phagetermini`         | `get_features_phagetermini`                  | ~283  |
-//! | `calculate_assemblycheck`        | `get_features_assemblycheck`                 | ~410  |
+//! | `process_contig_streaming`       | `preprocess_reads` + feature calc            | ~497+ |
+//! | `process_read`                   | Coverage, phagetermini, assemblycheck calcs  | ~182+ |
 //! | `compress_signal`                | `compress_signal`                            | ~91   |
 //! | `process_sample`                 | `calculating_features_per_sample`            | ~651  |
 //!

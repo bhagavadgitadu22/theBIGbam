@@ -3,12 +3,12 @@
 //! This module handles creating and updating the SQLite database.
 //! Uses WAL mode and temp-DB-per-sample pattern to avoid lock contention.
 
-use anyhow::Result;
-use rusqlite::{Connection, params};
+use anyhow::{Context, Result};
+use rusqlite::{params, Connection};
 use std::collections::HashMap;
 use std::path::Path;
 
-use crate::types::{ContigInfo, FeatureAnnotation, FeaturePoint, PlotType, PresenceData, VARIABLES};
+use crate::types::{feature_table_name, ContigInfo, FeatureAnnotation, FeaturePoint, PresenceData, VARIABLES};
 
 /// Create the main SQLite database with schema and initial data.
 /// If `create_indexes` is false, skip creating indexes (for Python compatibility).
@@ -18,12 +18,30 @@ pub fn create_metadata_db(
     annotations: &[FeatureAnnotation],
     create_indexes: bool,
 ) -> Result<()> {
-    let conn = Connection::open(db_path)?;
+    let conn = Connection::open(db_path)
+        .with_context(|| format!("Failed to create database: {}", db_path.display()))?;
 
     // Enable WAL mode for better concurrent read performance
-    conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")?;
+    conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")
+        .context("Failed to set database pragmas")?;
 
     // Create core tables
+    create_core_tables(&conn, create_indexes)?;
+
+    // Insert contigs
+    insert_contigs(&conn, contigs)?;
+
+    // Insert annotations
+    insert_annotations(&conn, annotations)?;
+
+    // Insert variables and create feature tables
+    create_variable_tables(&conn, create_indexes)?;
+
+    Ok(())
+}
+
+/// Create core database tables.
+fn create_core_tables(conn: &Connection, create_indexes: bool) -> Result<()> {
     conn.execute(
         "CREATE TABLE Contig (
             Contig_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -32,7 +50,8 @@ pub fn create_metadata_db(
             Annotation_tool TEXT
         )",
         [],
-    )?;
+    )
+    .context("Failed to create Contig table")?;
 
     conn.execute(
         "CREATE TABLE Sample (
@@ -40,7 +59,8 @@ pub fn create_metadata_db(
             Sample_name TEXT UNIQUE
         )",
         [],
-    )?;
+    )
+    .context("Failed to create Sample table")?;
 
     conn.execute(
         "CREATE TABLE Presences (
@@ -52,13 +72,15 @@ pub fn create_metadata_db(
             FOREIGN KEY(Sample_id) REFERENCES Sample(Sample_id)
         )",
         [],
-    )?;
+    )
+    .context("Failed to create Presences table")?;
 
     if create_indexes {
         conn.execute(
             "CREATE INDEX idx_presences_contig_sample ON Presences(Contig_id, Sample_id)",
             [],
-        )?;
+        )
+        .context("Failed to create Presences index")?;
     }
 
     conn.execute(
@@ -75,7 +97,8 @@ pub fn create_metadata_db(
             FOREIGN KEY(Contig_id) REFERENCES Contig(Contig_id)
         )",
         [],
-    )?;
+    )
+    .context("Failed to create Contig_annotation table")?;
 
     conn.execute(
         "CREATE TABLE Variable (
@@ -93,52 +116,87 @@ pub fn create_metadata_db(
             Feature_table_name TEXT
         )",
         [],
-    )?;
+    )
+    .context("Failed to create Variable table")?;
 
-    // Insert contigs
-    {
-        let mut stmt = conn.prepare(
-            "INSERT INTO Contig (Contig_name, Contig_length, Annotation_tool) VALUES (?1, ?2, ?3)"
-        )?;
-        for contig in contigs {
-            stmt.execute(params![&contig.name, contig.length as i64, &contig.annotation_tool])?;
-        }
+    Ok(())
+}
+
+/// Insert contigs into the database.
+fn insert_contigs(conn: &Connection, contigs: &[ContigInfo]) -> Result<()> {
+    let mut stmt = conn
+        .prepare("INSERT INTO Contig (Contig_name, Contig_length, Annotation_tool) VALUES (?1, ?2, ?3)")
+        .context("Failed to prepare contig insert")?;
+
+    for contig in contigs {
+        stmt.execute(params![
+            &contig.name,
+            contig.length as i64,
+            &contig.annotation_tool
+        ])
+        .with_context(|| format!("Failed to insert contig: {}", contig.name))?;
     }
 
-    // Insert annotations in a transaction
-    conn.execute("BEGIN TRANSACTION", [])?;
-    {
-        let mut stmt = conn.prepare(
+    Ok(())
+}
+
+/// Insert annotations into the database.
+fn insert_annotations(conn: &Connection, annotations: &[FeatureAnnotation]) -> Result<()> {
+    conn.execute("BEGIN TRANSACTION", [])
+        .context("Failed to begin annotation transaction")?;
+
+    let mut stmt = conn
+        .prepare(
             "INSERT INTO Contig_annotation (Contig_id, Start, End, Strand, Type, Product, Function, Phrog)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"
-        )?;
-        for ann in annotations {
-            stmt.execute(params![
-                ann.contig_id,
-                ann.start,
-                ann.end,
-                ann.strand,
-                &ann.feature_type,
-                &ann.product,
-                &ann.function,
-                &ann.phrog,
-            ])?;
-        }
-    }
-    conn.execute("COMMIT", [])?;
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        )
+        .context("Failed to prepare annotation insert")?;
 
-    // Insert variables and create Feature_* tables
+    for ann in annotations {
+        stmt.execute(params![
+            ann.contig_id,
+            ann.start,
+            ann.end,
+            ann.strand,
+            &ann.feature_type,
+            &ann.product,
+            &ann.function,
+            &ann.phrog,
+        ])
+        .context("Failed to insert annotation")?;
+    }
+
+    conn.execute("COMMIT", [])
+        .context("Failed to commit annotation transaction")?;
+
+    Ok(())
+}
+
+/// Create Variable entries and Feature_* tables.
+fn create_variable_tables(conn: &Connection, create_indexes: bool) -> Result<()> {
     for v in VARIABLES {
-        let vtype = match v.plot_type { PlotType::Curve => "curve", PlotType::Bars => "bars" };
-        let table_name = format!("Feature_{}", v.name);
+        let table_name = feature_table_name(v.name);
 
         conn.execute(
             "INSERT INTO Variable (Variable_name, Subplot, Module, Type, Color, Alpha, Fill_alpha, Size, Title, Help, Feature_table_name)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-            params![v.name, v.subplot, v.module, vtype, v.color, v.alpha, v.fill_alpha, v.size, v.title, "", &table_name],
-        )?;
+            params![
+                v.name,
+                v.subplot,
+                v.module,
+                v.plot_type.as_str(),
+                v.color,
+                v.alpha,
+                v.fill_alpha,
+                v.size,
+                v.title,
+                "",
+                &table_name
+            ],
+        )
+        .with_context(|| format!("Failed to insert variable: {}", v.name))?;
 
-        // Create the Feature_* table for this variable
+        // Create the Feature_* table
         conn.execute(
             &format!(
                 "CREATE TABLE {} (
@@ -149,12 +207,13 @@ pub fn create_metadata_db(
                     Value REAL,
                     FOREIGN KEY(Contig_id) REFERENCES Contig(Contig_id),
                     FOREIGN KEY(Sample_id) REFERENCES Sample(Sample_id)
-                )", table_name
+                )",
+                table_name
             ),
             [],
-        )?;
+        )
+        .with_context(|| format!("Failed to create table: {}", table_name))?;
 
-        // Create index for fast lookups (skip for Python compatibility)
         if create_indexes {
             conn.execute(
                 &format!(
@@ -162,7 +221,8 @@ pub fn create_metadata_db(
                     v.name, table_name
                 ),
                 [],
-            )?;
+            )
+            .with_context(|| format!("Failed to create index for: {}", table_name))?;
         }
     }
 
@@ -170,11 +230,12 @@ pub fn create_metadata_db(
 }
 
 /// Create a temporary per-sample database to avoid lock contention.
-/// Each parallel worker writes to its own temp DB.
 pub fn create_temp_sample_db(temp_db_path: &Path) -> Result<Connection> {
-    let conn = Connection::open(temp_db_path)?;
+    let conn = Connection::open(temp_db_path)
+        .with_context(|| format!("Failed to create temp DB: {}", temp_db_path.display()))?;
 
-    conn.execute_batch("PRAGMA journal_mode=OFF; PRAGMA synchronous=OFF;")?;
+    conn.execute_batch("PRAGMA journal_mode=OFF; PRAGMA synchronous=OFF;")
+        .context("Failed to set temp DB pragmas")?;
 
     conn.execute(
         "CREATE TABLE TempPresences (
@@ -183,7 +244,8 @@ pub fn create_temp_sample_db(temp_db_path: &Path) -> Result<Connection> {
             Coverage_percentage REAL
         )",
         [],
-    )?;
+    )
+    .context("Failed to create TempPresences table")?;
 
     conn.execute(
         "CREATE TABLE TempFeatures (
@@ -193,26 +255,29 @@ pub fn create_temp_sample_db(temp_db_path: &Path) -> Result<Connection> {
             Value REAL
         )",
         [],
-    )?;
+    )
+    .context("Failed to create TempFeatures table")?;
 
     Ok(conn)
 }
 
-/// Write features to a temp database (no locking issues).
-pub fn write_features_to_temp_db(
-    conn: &Connection,
-    features: &[FeaturePoint],
-) -> Result<()> {
-    conn.execute("BEGIN TRANSACTION", [])?;
-    {
-        let mut stmt = conn.prepare(
-            "INSERT INTO TempFeatures (Variable_name, Contig_name, Position, Value) VALUES (?1, ?2, ?3, ?4)"
-        )?;
-        for f in features {
-            stmt.execute(params![&f.feature, &f.contig_name, f.position, f.value])?;
-        }
+/// Write features to a temp database.
+pub fn write_features_to_temp_db(conn: &Connection, features: &[FeaturePoint]) -> Result<()> {
+    conn.execute("BEGIN TRANSACTION", [])
+        .context("Failed to begin feature transaction")?;
+
+    let mut stmt = conn
+        .prepare("INSERT INTO TempFeatures (Variable_name, Contig_name, Position, Value) VALUES (?1, ?2, ?3, ?4)")
+        .context("Failed to prepare feature insert")?;
+
+    for f in features {
+        stmt.execute(params![&f.feature, &f.contig_name, f.position, f.value])
+            .context("Failed to insert feature")?;
     }
-    conn.execute("COMMIT", [])?;
+
+    conn.execute("COMMIT", [])
+        .context("Failed to commit feature transaction")?;
+
     Ok(())
 }
 
@@ -222,23 +287,26 @@ pub fn write_presences_to_temp_db(
     sample_name: &str,
     presences: &[PresenceData],
 ) -> Result<()> {
-    let mut stmt = conn.prepare(
-        "INSERT INTO TempPresences (Contig_name, Sample_name, Coverage_percentage) VALUES (?1, ?2, ?3)"
-    )?;
+    let mut stmt = conn
+        .prepare("INSERT INTO TempPresences (Contig_name, Sample_name, Coverage_percentage) VALUES (?1, ?2, ?3)")
+        .context("Failed to prepare presence insert")?;
+
     for p in presences {
-        stmt.execute(params![&p.contig_name, sample_name, p.coverage_pct])?;
+        stmt.execute(params![&p.contig_name, sample_name, p.coverage_pct])
+            .context("Failed to insert presence")?;
     }
+
     Ok(())
 }
 
 /// Merge a temp sample DB into the main database.
-/// This is called sequentially after all parallel workers complete.
 pub fn merge_temp_db_into_main(
     main_db_path: &Path,
     temp_db_path: &Path,
     contigs: &[ContigInfo],
 ) -> Result<()> {
-    let conn = Connection::open(main_db_path)?;
+    let conn = Connection::open(main_db_path)
+        .with_context(|| format!("Failed to open main DB: {}", main_db_path.display()))?;
 
     // Build contig name -> id mapping
     let contig_name_to_id: HashMap<String, i64> = contigs
@@ -248,20 +316,30 @@ pub fn merge_temp_db_into_main(
         .collect();
 
     // Attach temp DB
-    conn.execute("ATTACH DATABASE ?1 AS src", [temp_db_path.to_str().unwrap()])?;
+    let temp_path_str = temp_db_path
+        .to_str()
+        .context("Invalid temp DB path encoding")?;
+    conn.execute("ATTACH DATABASE ?1 AS src", [temp_path_str])
+        .context("Failed to attach temp DB")?;
 
-    // Get distinct sample names from temp DB and insert into main
+    // Get sample names from temp DB
     let sample_names: Vec<String> = {
-        let mut stmt = conn.prepare("SELECT DISTINCT Sample_name FROM src.TempPresences")?;
+        let mut stmt = conn
+            .prepare("SELECT DISTINCT Sample_name FROM src.TempPresences")
+            .context("Failed to query sample names")?;
         let rows = stmt.query_map([], |row| row.get(0))?;
         rows.filter_map(|r| r.ok()).collect()
     };
 
-    conn.execute("BEGIN TRANSACTION", [])?;
+    conn.execute("BEGIN TRANSACTION", [])
+        .context("Failed to begin merge transaction")?;
 
+    // Insert samples
     for sample_name in &sample_names {
-        // Insert sample (get or create)
-        conn.execute("INSERT OR IGNORE INTO Sample (Sample_name) VALUES (?1)", [sample_name])?;
+        conn.execute(
+            "INSERT OR IGNORE INTO Sample (Sample_name) VALUES (?1)",
+            [sample_name],
+        )?;
     }
 
     // Get sample_id mapping
@@ -272,35 +350,66 @@ pub fn merge_temp_db_into_main(
     };
 
     // Insert presences
-    {
-        let mut stmt = conn.prepare(
-            "INSERT INTO Presences (Contig_id, Sample_id, Coverage_percentage) VALUES (?1, ?2, ?3)"
-        )?;
+    merge_presences(&conn, &contig_name_to_id, &sample_name_to_id)?;
 
-        let presences: Vec<(String, String, f32)> = {
-            let mut pstmt = conn.prepare("SELECT Contig_name, Sample_name, Coverage_percentage FROM src.TempPresences")?;
-            let rows = pstmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
-            rows.filter_map(|r| r.ok()).collect()
-        };
+    // Insert features
+    merge_features(&conn, &contig_name_to_id, &sample_name_to_id, &sample_names)?;
 
-        for (contig_name, sample_name, coverage_pct) in presences {
-            if let (Some(&contig_id), Some(&sample_id)) = (
-                contig_name_to_id.get(&contig_name),
-                sample_name_to_id.get(&sample_name),
-            ) {
-                stmt.execute(params![contig_id, sample_id, coverage_pct])?;
-            }
+    conn.execute("COMMIT", [])
+        .context("Failed to commit merge transaction")?;
+    conn.execute("DETACH DATABASE src", [])
+        .context("Failed to detach temp DB")?;
+
+    Ok(())
+}
+
+/// Merge presences from temp DB.
+fn merge_presences(
+    conn: &Connection,
+    contig_name_to_id: &HashMap<String, i64>,
+    sample_name_to_id: &HashMap<String, i64>,
+) -> Result<()> {
+    let mut insert_stmt = conn.prepare(
+        "INSERT INTO Presences (Contig_id, Sample_id, Coverage_percentage) VALUES (?1, ?2, ?3)",
+    )?;
+
+    let presences: Vec<(String, String, f32)> = {
+        let mut stmt =
+            conn.prepare("SELECT Contig_name, Sample_name, Coverage_percentage FROM src.TempPresences")?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+        rows.filter_map(|r| r.ok()).collect()
+    };
+
+    for (contig_name, sample_name, coverage_pct) in presences {
+        if let (Some(&contig_id), Some(&sample_id)) = (
+            contig_name_to_id.get(&contig_name),
+            sample_name_to_id.get(&sample_name),
+        ) {
+            insert_stmt.execute(params![contig_id, sample_id, coverage_pct])?;
         }
     }
 
-    // Insert features into their respective Feature_* tables
-    for v in VARIABLES {
-        let table_name = format!("Feature_{}", v.name);
+    Ok(())
+}
 
-        // Get features for this variable from temp DB
+/// Merge features from temp DB into feature tables.
+fn merge_features(
+    conn: &Connection,
+    contig_name_to_id: &HashMap<String, i64>,
+    sample_name_to_id: &HashMap<String, i64>,
+    sample_names: &[String],
+) -> Result<()> {
+    let sample_id = sample_names
+        .first()
+        .and_then(|name| sample_name_to_id.get(name).copied())
+        .unwrap_or(1);
+
+    for v in VARIABLES {
+        let table_name = feature_table_name(v.name);
+
         let features: Vec<(String, i32, f32)> = {
             let mut stmt = conn.prepare(
-                "SELECT Contig_name, Position, Value FROM src.TempFeatures WHERE Variable_name = ?1"
+                "SELECT Contig_name, Position, Value FROM src.TempFeatures WHERE Variable_name = ?1",
             )?;
             let rows = stmt.query_map([v.name], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
             rows.filter_map(|r| r.ok()).collect()
@@ -310,13 +419,10 @@ pub fn merge_temp_db_into_main(
             continue;
         }
 
-        // Insert into feature table - need sample_id from the presences
-        // All features in this temp DB belong to the same sample
-        let sample_id = sample_name_to_id.get(&sample_names[0]).copied().unwrap_or(1);
-
-        let mut stmt = conn.prepare(
-            &format!("INSERT INTO {} (Contig_id, Sample_id, Position, Value) VALUES (?1, ?2, ?3, ?4)", table_name)
-        )?;
+        let mut stmt = conn.prepare(&format!(
+            "INSERT INTO {} (Contig_id, Sample_id, Position, Value) VALUES (?1, ?2, ?3, ?4)",
+            table_name
+        ))?;
 
         for (contig_name, position, value) in features {
             if let Some(&contig_id) = contig_name_to_id.get(&contig_name) {
@@ -325,16 +431,16 @@ pub fn merge_temp_db_into_main(
         }
     }
 
-    conn.execute("COMMIT", [])?;
-    conn.execute("DETACH DATABASE src", [])?;
-
     Ok(())
 }
 
 /// Finalize the database after all samples are processed.
-/// Runs VACUUM and switches back to normal journal mode for reads.
 pub fn finalize_db(db_path: &Path) -> Result<()> {
-    let conn = Connection::open(db_path)?;
-    conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+    let conn = Connection::open(db_path)
+        .with_context(|| format!("Failed to open DB for finalization: {}", db_path.display()))?;
+
+    conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+        .context("Failed to checkpoint WAL")?;
+
     Ok(())
 }

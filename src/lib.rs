@@ -20,6 +20,8 @@
 //! ```
 
 pub mod bam_reader;
+pub mod cigar;
+pub mod circular;
 pub mod compress;
 pub mod db;
 pub mod features;
@@ -28,12 +30,17 @@ pub mod processing;
 pub mod types;
 
 // Re-export main types for library users
-pub use bam_reader::{detect_sequencing_type, process_reads_for_contig};
+pub use bam_reader::{detect_sequencing_type, process_contig_streaming};
+pub use cigar::{Cigar, CigarElement, CigarOp, MdTag};
+pub use circular::CircularArray;
 pub use compress::compress_signal;
-pub use features::{calculate_assemblycheck, calculate_coverage, calculate_phagetermini};
+pub use features::{process_read, FeatureArrays, ModuleFlags};
 pub use genbank::parse_genbank;
 pub use processing::{process_sample, run_all_samples, ProcessConfig, ProcessResult};
-pub use types::{ContigInfo, FeaturePoint, PlotType, PresenceData, ReadData, SequencingType};
+pub use types::{
+    mean_std, ContigInfo, FeaturePoint, PlotType, PresenceData, SequencingType,
+    ASSEMBLYCHECK_FEATURES, PHAGETERMINI_FEATURES, VARIABLES,
+};
 
 // ============================================================================
 // PyO3 Python Bindings
