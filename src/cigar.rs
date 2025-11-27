@@ -183,40 +183,62 @@ impl<'a> MdTag<'a> {
         }
     }
 
-    /// Count total mismatches.
-    pub fn count_mismatches(&self, ref_start: usize, ref_length: usize) -> Vec<usize> {
-        let mut positions = Vec::new();
-        let mut ref_pos = ref_start;
-        let mut i = 0;
+    /// Iterate over mismatch positions (normalized to ref_length).
+    pub fn mismatch_positions_normalized(
+        &self,
+        ref_start: usize,
+        ref_length: usize,
+    ) -> MdMismatchNormalizedIter<'_> {
+        MdMismatchNormalizedIter {
+            bytes: self.bytes,
+            pos: 0,
+            ref_pos: ref_start,
+            ref_length,
+        }
+    }
+}
 
-        while i < self.bytes.len() {
-            let c = self.bytes[i];
+/// Iterator over normalized mismatch positions in an MD tag.
+pub struct MdMismatchNormalizedIter<'a> {
+    bytes: &'a [u8],
+    pos: usize,
+    ref_pos: usize,
+    ref_length: usize,
+}
+
+impl<'a> Iterator for MdMismatchNormalizedIter<'a> {
+    type Item = usize;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        while self.pos < self.bytes.len() {
+            let c = self.bytes[self.pos];
+
             if c.is_ascii_digit() {
                 // Parse number and advance ref_pos
                 let mut num = 0usize;
-                while i < self.bytes.len() && self.bytes[i].is_ascii_digit() {
-                    num = num * 10 + (self.bytes[i] - b'0') as usize;
-                    i += 1;
+                while self.pos < self.bytes.len() && self.bytes[self.pos].is_ascii_digit() {
+                    num = num * 10 + (self.bytes[self.pos] - b'0') as usize;
+                    self.pos += 1;
                 }
-                ref_pos += num;
+                self.ref_pos += num;
             } else if c == b'^' {
-                // Deletion marker: skip bases
-                i += 1;
-                while i < self.bytes.len() && self.bytes[i].is_ascii_uppercase() {
-                    ref_pos += 1;
-                    i += 1;
+                // Deletion: skip the deletion bases
+                self.pos += 1;
+                while self.pos < self.bytes.len() && self.bytes[self.pos].is_ascii_uppercase() {
+                    self.ref_pos += 1;
+                    self.pos += 1;
                 }
             } else if c.is_ascii_uppercase() {
-                // Mismatch: record position
-                positions.push(ref_pos % ref_length);
-                ref_pos += 1;
-                i += 1;
+                // Mismatch found
+                let result = self.ref_pos % self.ref_length;
+                self.ref_pos += 1;
+                self.pos += 1;
+                return Some(result);
             } else {
-                i += 1;
+                self.pos += 1;
             }
         }
-
-        positions
+        None
     }
 }
 
@@ -283,5 +305,57 @@ pub fn has_match_at_position(cigar: &Cigar, md: Option<&[u8]>, at_start: bool) -
         }
         Some(_) => false, // Empty MD tag
         None => false,    // No MD tag
+    }
+}
+
+// ============================================================================
+// Raw CIGAR helpers (zero-allocation)
+// ============================================================================
+
+/// Check if raw CIGAR starts/ends with a match (no clipping/insertion).
+#[inline]
+pub fn raw_cigar_starts_with_match(cigar: &[(u32, u32)], at_start: bool) -> bool {
+    let elem = if at_start { cigar.first() } else { cigar.last() };
+    match elem {
+        Some(&(op, _)) => {
+            let c = op as u8 as char;
+            // Not clipping (S/H) and not insertion (I)
+            !matches!(c, 'S' | 'H' | 'I')
+        }
+        None => false,
+    }
+}
+
+/// Check if first/last element of raw CIGAR is clipping.
+#[inline]
+pub fn raw_cigar_is_clipping(op: u32) -> bool {
+    let c = op as u8 as char;
+    matches!(c, 'S' | 'H')
+}
+
+/// Check if CIGAR op consumes reference.
+#[inline]
+pub fn raw_cigar_consumes_ref(op: u32) -> bool {
+    let c = op as u8 as char;
+    matches!(c, 'M' | 'D' | 'N' | '=' | 'X')
+}
+
+/// Check if a read starts/ends with match using raw CIGAR and MD tag (zero-allocation).
+#[inline]
+pub fn raw_has_match_at_position(cigar: &[(u32, u32)], md: Option<&[u8]>, at_start: bool) -> bool {
+    if !raw_cigar_starts_with_match(cigar, at_start) {
+        return false;
+    }
+
+    match md {
+        Some(bytes) if !bytes.is_empty() => {
+            let md_tag = MdTag::new(bytes);
+            if at_start {
+                md_tag.has_match_at_start()
+            } else {
+                md_tag.has_match_at_end()
+            }
+        }
+        _ => false,
     }
 }

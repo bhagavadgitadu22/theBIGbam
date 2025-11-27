@@ -69,6 +69,9 @@ pub fn process_contig_streaming(
     let need_md = flags.needs_md();
     let mut has_reads = false;
 
+    // Reusable buffer to avoid per-read allocations
+    let mut cigar_buf: Vec<(u32, u32)> = Vec::with_capacity(16);
+
     // Process reads directly from BAM - no intermediate storage
     for result in bam.records() {
         let record = match result {
@@ -82,17 +85,15 @@ pub fn process_contig_streaming(
 
         has_reads = true;
 
-        // Extract CIGAR - use SmallVec-like approach with stack allocation for small CIGARs
+        // Extract CIGAR into reusable buffer
         let cigar_view = record.cigar();
-        let cigar: Vec<(u32, u32)> = cigar_view
-            .iter()
-            .map(|c| (c.char() as u32, c.len()))
-            .collect();
+        cigar_buf.clear();
+        cigar_buf.extend(cigar_view.iter().map(|c| (c.char() as u32, c.len())));
 
-        // Extract MD tag only if needed
-        let md_tag: Option<Vec<u8>> = if need_md {
+        // Extract MD tag - borrow directly without allocation
+        let md_tag: Option<&[u8]> = if need_md {
             record.aux(b"MD").ok().and_then(|aux| match aux {
-                rust_htslib::bam::record::Aux::String(s) => Some(s.as_bytes().to_vec()),
+                rust_htslib::bam::record::Aux::String(s) => Some(s.as_bytes()),
                 _ => None,
             })
         } else {
@@ -109,8 +110,8 @@ pub fn process_contig_streaming(
             record.is_first_in_template(),
             record.is_proper_pair(),
             record.is_reverse(),
-            &cigar,
-            md_tag.as_deref(),
+            &cigar_buf,
+            md_tag,
             seq_type,
             flags,
         );
