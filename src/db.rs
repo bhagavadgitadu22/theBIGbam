@@ -1,7 +1,54 @@
 //! SQLite database operations.
 //!
-//! This module handles creating and updating the SQLite database.
-//! Uses WAL mode and temp-DB-per-sample pattern to avoid lock contention.
+//! # Overview
+//!
+//! This module handles creating and updating the SQLite database that stores
+//! all computed features. The database schema includes:
+//! - `Contig`: Contig metadata (name, length, annotation tool)
+//! - `Sample`: Sample names from BAM files
+//! - `Presences`: Coverage percentage per contig per sample
+//! - `Contig_annotation`: Gene annotations from GenBank
+//! - `Variable`: Feature metadata (name, type, table name)
+//! - Feature tables: One table per feature type (coverage, tau, etc.)
+//!
+//! # Python Equivalent
+//!
+//! This module corresponds to the database functions in `calculating_data.py`:
+//! ```python
+//! # Python: create_temp_sample_db() - per-sample temp database
+//! def create_temp_sample_db(temp_db_path: str):
+//!     conn = sqlite3.connect(temp_db_path)
+//!     cur.execute("CREATE TABLE TempPresences (...)")
+//!     cur.execute("CREATE TABLE TempFeatureValues (...)")
+//!
+//! # Python: merge_temp_db_into_main() - merge temp into main DB
+//! def merge_temp_db_into_main(main_db_path: str, temp_db_path: str):
+//!     mcur.execute("ATTACH DATABASE ? AS src", (temp_db_path,))
+//!     mcur.execute("INSERT INTO Presences ... FROM src.TempPresences")
+//!     # ... merge feature values
+//! ```
+//!
+//! # Architecture
+//!
+//! ## Temp DB Pattern
+//! To avoid write contention when processing samples in parallel, each sample
+//! writes to its own temporary database. After processing completes, temp DBs
+//! are merged into the main database by a dedicated thread.
+//!
+//! ## WAL Mode
+//! The database uses SQLite's WAL (Write-Ahead Logging) mode for better
+//! concurrent read performance during the merge phase.
+//!
+//! # Rust Concepts
+//!
+//! ## rusqlite
+//! The `rusqlite` crate provides SQLite bindings. `Connection::open()` creates
+//! a connection, and `conn.execute()` runs SQL statements.
+//!
+//! ## Error Handling with Context
+//! `.context("message")` from `anyhow` adds context to errors, making debugging
+//! easier. If a database operation fails, the error message includes what
+//! operation was being attempted.
 
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection};

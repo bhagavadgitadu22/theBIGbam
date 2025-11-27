@@ -1,6 +1,37 @@
 //! GenBank file parsing functions.
 //!
-//! This module handles parsing GenBank files to extract contig and annotation information.
+//! # Overview
+//!
+//! This module parses GenBank files to extract:
+//! - Contig information (name, length)
+//! - Gene annotations (start, end, strand, product, function, phrog)
+//!
+//! GenBank is a standard flat-file format for annotated nucleotide sequences.
+//! Each record contains a sequence with associated features like CDS, tRNA, etc.
+//!
+//! # Python Equivalent
+//!
+//! This module corresponds to the GenBank parsing in `calculating_data.py`:
+//! ```python
+//! # Python: Uses BioPython's SeqIO
+//! from Bio import SeqIO
+//!
+//! for rec in SeqIO.parse(args.genbank, "genbank"):
+//!     contig_name = rec.name
+//!     contig_length = len(rec.seq)
+//!
+//!     for f in rec.features:
+//!         start = int(f.location.start) + 1
+//!         end = int(f.location.end)
+//!         strand_val = f.location.strand
+//!         ftype = f.type
+//!         # ... extract qualifiers
+//! ```
+//!
+//! # Rust Implementation
+//!
+//! Uses the `gb_io` crate for GenBank parsing, which is pure Rust and
+//! faster than BioPython for large files.
 
 use anyhow::{Context, Result};
 use gb_io::reader::SeqReader;
