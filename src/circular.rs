@@ -23,6 +23,12 @@ pub trait CircularArray<T> {
     /// Increment values in a circular range [start, end] (inclusive).
     fn increment_circular_inclusive(&mut self, start: usize, end: usize, delta: T);
 
+    /// Increment values in a non-circular range [start, end).
+    fn increment_range(&mut self, start: usize, end: usize, delta: T);
+
+    /// Increment values in a non-circular range [start, end] (inclusive).
+    fn increment_range_inclusive(&mut self, start: usize, end: usize, delta: T);
+
     /// Iterate over positions in a circular range [start, end).
     fn circular_range(&self, start: usize, end: usize) -> CircularRangeIter;
 }
@@ -69,6 +75,22 @@ where
             for pos in 0..=end.min(len.saturating_sub(1)) {
                 self[pos] += delta;
             }
+        }
+    }
+
+    /// Increment positions in range [start, end) without wrap-around.
+    #[inline]
+    fn increment_range(&mut self, start: usize, end: usize, delta: T) {
+        for pos in start..end {
+            self[pos] += delta;
+        }
+    }
+
+    /// Increment positions in range [start, end] (inclusive) without wrap-around.
+    #[inline]
+    fn increment_range_inclusive(&mut self, start: usize, end: usize, delta: T) {
+        for pos in start..=end {
+            self[pos] += delta;
         }
     }
 

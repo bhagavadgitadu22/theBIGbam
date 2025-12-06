@@ -181,70 +181,17 @@ def get_feature_data(cur, feature, contig_id, sample_id, accessor=None, contig_n
     """Get feature data for plotting.
 
     Args:
-        cur: SQLite cursor (used for SQLite-only mode or metadata queries)
+        cur: SQLite cursor (unused, kept for compatibility)
         feature: Feature name to query
         contig_id: Contig ID
         sample_id: Sample ID
-        accessor: Optional DataAccessor for parquet mode
-        contig_name: Contig name (required for parquet mode)
-        sample_name: Sample name (required for parquet mode)
+        accessor: DataAccessor instance
+        contig_name: Contig name
+        sample_name: Sample name
     """
-    # If accessor provided, use it (supports both SQLite and Parquet)
-    if accessor is not None:
-        return accessor.get_feature_data(feature, contig_id, sample_id, contig_name, sample_name)
-
-    # Legacy SQLite-only mode
-    list_feature_dict = []
-
-    # Query Variable table to get rendering info and feature table name
-    cur.execute("SELECT Type, Color, Alpha, Fill_alpha, Size, Title, Feature_table_name FROM Variable WHERE Subplot=?", (feature,))
-    rows = cur.fetchall()
-
-    for row in rows:
-        feature_dict = {}
-
-        type_picked, color, alpha, fill_alpha, size, title, feature_table = row
-        feature_dict["type"] = type_picked
-        feature_dict["color"] = color
-        feature_dict["alpha"] = alpha
-        feature_dict["fill_alpha"] = fill_alpha
-        feature_dict["size"] = size
-        feature_dict["title"] = title
-        feature_dict["x"] = []
-        feature_dict["y"] = []
-
-        # Query feature table for this sample and contig (RLE format: First_position, Last_position, Value)
-        cur.execute(f"SELECT First_position, Last_position, Value FROM {feature_table} WHERE Sample_id=? AND Contig_id=? ORDER BY First_position", (sample_id, contig_id))
-        rows = cur.fetchall()
-        
-        # Expand RLE runs into individual points for plotting
-        x_coords = []
-        y_coords = []
-        for first_pos, last_pos, value in rows:
-            if type_picked == "bars":
-                # For bars: expand to all positions in the run
-                # (vbar draws one bar per x-coordinate)
-                for pos in range(first_pos, last_pos + 1):
-                    x_coords.append(pos)
-                    y_coords.append(value)
-            else:
-                # For curves: only need start and end points
-                # (line rendering will connect them)
-                if first_pos == last_pos:
-                    x_coords.append(first_pos)
-                    y_coords.append(value)
-                else:
-                    x_coords.extend([first_pos, last_pos])
-                    y_coords.extend([value, value])
-        
-        feature_dict["x"] = x_coords
-        feature_dict["y"] = y_coords
-        
-        # Only append if we have actual data points
-        if x_coords:
-            list_feature_dict.append(feature_dict)
-
-    return list_feature_dict
+    if accessor is None:
+        raise ValueError("accessor parameter is required")
+    return accessor.get_feature_data(feature, contig_id, sample_id, contig_name, sample_name)
 
 ### Function to generate the bokeh plot
 def generate_bokeh_plot_per_sample(conn, list_features, contig_name, sample_name, xstart=None, xend=None, subplot_size=130, accessor=None):
@@ -283,61 +230,32 @@ def generate_bokeh_plot_per_sample(conn, list_features, contig_name, sample_name
     sample_id, sample_name = row
     print(f"Sample {sample_name} validated.", flush=True)
 
-    # --- Main gene annotation plot ---
-    # Build a SeqRecord from Contig_annotation entries for this contig
-    annotation_fig = make_bokeh_genemap(conn, contig_id, locus_name, locus_size, annotation_tool, subplot_size, shared_xrange)
-
     # --- Add one subplot per feature requested ---
     # Requested features are variables like 'coverage', 'reads_starts', etc.
     subplots = []
     requested_features = parse_requested_features(list_features)
-    
-    print(f"DEBUG: Requested features after parsing: {requested_features}", flush=True)
 
     for feature in requested_features:
         try:
-            print(f"DEBUG: Processing feature '{feature}'...", flush=True)
             list_feature_dict = get_feature_data(cur, feature, contig_id, sample_id,
                                                  accessor=accessor, contig_name=contig_name, sample_name=sample_name)
-            print(f"DEBUG: Feature '{feature}' returned {len(list_feature_dict)} feature dicts", flush=True)
-            for i, fd in enumerate(list_feature_dict):
-                print(f"DEBUG:   Dict {i}: x has {len(fd['x'])} points, y has {len(fd['y'])} points", flush=True)
             
-            if not list_feature_dict or all(len(vals["x"]) == 0 for vals in list_feature_dict):
-                print(f"Warning: No data found for feature '{feature}' in sample '{sample_name}', contig '{contig_name}'", flush=True)
+            if not list_feature_dict:
                 continue
 
             subplot_feature = make_bokeh_subplot(list_feature_dict, subplot_size, shared_xrange)
             if subplot_feature is not None:
                 subplots.append(subplot_feature)
-                print(f"DEBUG: Feature '{feature}' subplot created successfully", flush=True)
-            else:
-                print(f"DEBUG: Feature '{feature}' make_bokeh_subplot returned None", flush=True)
         except Exception as e:
             print(f"Error processing feature '{feature}': {e}", flush=True)
-            import traceback
-            traceback.print_exc()
             continue
-    
-    print(f"DEBUG: Total subplots created: {len(subplots)}", flush=True)
 
     # --- Combine all figures in a single grid with one shared toolbar ---
-    # If no subplots with data, just show annotation
-    print(f"DEBUG: Creating grid with annotation + {len(subplots)} subplots", flush=True)
     if not subplots:
-        print(f"Warning: No data available for any requested features in sample '{sample_name}', contig '{contig_name}'", flush=True)
         grid = gridplot([[annotation_fig]], merge_tools=True, sizing_mode='stretch_width')
     else:
         all_plots = [annotation_fig] + subplots
-        print(f"DEBUG: all_plots list has {len(all_plots)} plots", flush=True)
-        try:
-            grid = gridplot([[p] for p in all_plots], merge_tools=True, sizing_mode='stretch_width')
-            print(f"DEBUG: Grid created successfully", flush=True)
-        except Exception as e:
-            print(f"ERROR creating gridplot: {e}", flush=True)
-            import traceback
-            traceback.print_exc()
-            raise
+        grid = gridplot([[p] for p in all_plots], merge_tools=True, sizing_mode='stretch_width')
 
     return grid
 

@@ -359,6 +359,7 @@ pub fn process_read(
     md_tag: Option<&[u8]>,
     seq_type: SequencingType,
     flags: ModuleFlags,
+    circular: bool,
 ) {
     // -------------------------------------------------------------------------
     // Calculate positions
@@ -368,8 +369,11 @@ pub fn process_read(
     let raw_end = ref_end as usize;
 
     // For circular genomes, positions can exceed ref_length. Use modulo to wrap.
-    let start = raw_start % ref_length;
-    let end = raw_end % ref_length;
+    let (start, end) = if circular {
+        (raw_start % ref_length, raw_end % ref_length)
+    } else {
+        (raw_start, raw_end)
+    };
 
     // -------------------------------------------------------------------------
     // Update coverage bitmap
@@ -385,14 +389,26 @@ pub fn process_read(
     // -------------------------------------------------------------------------
     if flags.coverage {
         // increment_circular handles wrap-around for circular genomes
-        arrays.coverage.increment_circular(start, end, 1);
+        if circular {
+            arrays.coverage.increment_circular(start, end, 1);
+        } else {
+            arrays.coverage.increment_range(start, end, 1);
+        }
         
         // Track secondary and supplementary reads separately
         if is_secondary {
-            arrays.secondary_reads.increment_circular(start, end, 1);
+            if circular {
+                arrays.secondary_reads.increment_circular(start, end, 1);
+            } else {
+                arrays.secondary_reads.increment_range(start, end, 1);
+            }
         }
         if is_supplementary {
-            arrays.supplementary_reads.increment_circular(start, end, 1);
+            if circular {
+                arrays.supplementary_reads.increment_circular(start, end, 1);
+            } else {
+                arrays.supplementary_reads.increment_range(start, end, 1);
+            }
         }
     }
 
@@ -411,7 +427,11 @@ pub fn process_read(
         // Only count "clean" reads for phage termini detection
         if start_matches && end_matches {
             // Update coverage_reduced (clean coverage)
-            arrays.coverage_reduced.increment_circular_inclusive(start, end, 1);
+            if circular {
+                arrays.coverage_reduced.increment_circular_inclusive(start, end, 1);
+            } else {
+                arrays.coverage_reduced.increment_range_inclusive(start, end, 1);
+            }
 
             // Track start/end positions by strand
             // We separate strands here; they're combined in finalize_strands()

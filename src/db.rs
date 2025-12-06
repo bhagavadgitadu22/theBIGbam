@@ -240,6 +240,9 @@ fn create_variable_tables(conn: &Connection, create_indexes: bool) -> Result<()>
 
 /// Create a temporary per-sample database to avoid lock contention.
 pub fn create_temp_sample_db(temp_db_path: &Path) -> Result<Connection> {
+    // Remove existing temp DB if it exists
+    let _ = std::fs::remove_file(temp_db_path);
+    
     let conn = Connection::open(temp_db_path)
         .with_context(|| format!("Failed to create temp DB: {}", temp_db_path.display()))?;
 

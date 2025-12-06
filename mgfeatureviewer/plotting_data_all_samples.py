@@ -47,8 +47,7 @@ def generate_bokeh_plot_all_samples(conn, variable, contig_name, xstart=None, xe
         try:
             list_feature_dict = get_feature_data(cur, variable, contig_id, sample_id,
                                                  accessor=accessor, contig_name=contig_name, sample_name=sample_name)
-            if not list_feature_dict or all(len(vals["x"]) == 0 for vals in list_feature_dict):
-                print(f"Warning: No data found for variable '{variable}' in sample '{sample_name}', contig '{contig_name}'", flush=True)
+            if not list_feature_dict:
                 continue
 
             subplot_feature = make_bokeh_subplot(list_feature_dict, subplot_size, shared_xrange, sample_title=sample_name)
@@ -56,14 +55,10 @@ def generate_bokeh_plot_all_samples(conn, variable, contig_name, xstart=None, xe
                 subplots.append(subplot_feature)
         except Exception as e:
             print(f"Error processing variable '{variable}' for sample '{sample_name}': {e}", flush=True)
-            import traceback
-            traceback.print_exc()
             continue
 
     # --- Combine all figures in a single grid with one shared toolbar ---
-    # If no subplots with data, just show annotation
     if not subplots:
-        print(f"Warning: No data available for variable '{variable}' in any sample for contig '{contig_name}'", flush=True)
         grid = gridplot([[annotation_fig]], merge_tools=True, sizing_mode='stretch_width')
     else:
         all_plots = [annotation_fig] + subplots

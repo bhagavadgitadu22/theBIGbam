@@ -409,14 +409,11 @@ def modify_doc_factory(db_path):
                 print(f"[start_bokeh_server] Generating plot for sample={sample}, contig={contig}, features={requested_features}")
                 grid = generate_bokeh_plot_per_sample(conn, requested_features, contig, sample, xstart=xstart, xend=xend, accessor=accessor)
 
-            print(f"[start_bokeh_server] Grid object created, type={type(grid)}", flush=True)
             main_placeholder.children = [grid]
-            print(f"[start_bokeh_server] Plot updated successfully", flush=True)
 
         except Exception as e:
-            print(f"[start_bokeh_server] Exception in apply_clicked: {e}", flush=True)
             tb = traceback.format_exc()
-            print(tb, flush=True)
+            print(f"[start_bokeh_server] Exception: {tb}", flush=True)
             main_placeholder.children = [Div(text=f"<pre>Error building plot:\n{tb}</pre>")]
 
     apply_button.on_click(lambda: apply_clicked())

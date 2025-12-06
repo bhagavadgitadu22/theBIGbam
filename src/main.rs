@@ -79,6 +79,10 @@ struct Args {
     /// Relative tolerance for RLE compression (e.g., 0.1 = 10% change threshold)
     #[arg(long, default_value = "0.1")]
     compress_ratio: f64,
+
+    /// Circular genome flag: set if assembly was doubled during mapping (enables modulo logic)
+    #[arg(long, default_value = "false")]
+    circular: bool,
 }
 
 fn main() -> Result<()> {
@@ -96,6 +100,7 @@ fn main() -> Result<()> {
         threads: args.threads,
         min_coverage: args.min_coverage,
         compress_ratio: args.compress_ratio,
+        circular: args.circular,
     };
 
     // Call the shared processing function

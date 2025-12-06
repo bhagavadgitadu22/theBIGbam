@@ -84,6 +84,7 @@ pub fn process_contig_streaming(
     ref_length: usize,
     seq_type: SequencingType,
     flags: ModuleFlags,
+    circular: bool,
 ) -> Result<Option<FeatureArrays>> {
     // -------------------------------------------------------------------------
     // Step 1: Check if this contig exists in the BAM file
@@ -142,6 +143,7 @@ pub fn process_contig_streaming(
             md_tag,
             seq_type,
             flags,
+            circular,
         );
     }
 

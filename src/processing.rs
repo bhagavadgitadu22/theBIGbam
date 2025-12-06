@@ -39,6 +39,8 @@ pub struct ProcessConfig {
     pub min_coverage: f64,
     /// Relative tolerance for RLE compression (e.g., 0.1 = 10% change threshold)
     pub compress_ratio: f64,
+    /// Circular genome flag: if true, assembly was doubled during mapping (enables modulo logic)
+    pub circular: bool,
 }
 
 impl Default for ProcessConfig {
@@ -47,6 +49,7 @@ impl Default for ProcessConfig {
             threads: 1,
             min_coverage: 50.0,
             compress_ratio: 0.1,  // 10% change threshold
+            circular: false,
         }
     }
 }
@@ -276,7 +279,14 @@ pub fn process_sample(
             let contig = contigs.iter().find(|c| c.name == ref_name)?;
 
             // Process contig using streaming - single pass over reads
-            let arrays = process_contig_streaming(&mut bam, &ref_name, ref_length, seq_type, flags).ok()??;
+            let arrays = match process_contig_streaming(&mut bam, &ref_name, ref_length, seq_type, flags, config.circular) {
+                Ok(Some(arrays)) => arrays,
+                Ok(None) => return None,
+                Err(e) => {
+                    eprintln!("Error processing contig {} in {}: {}", ref_name, bam_path.display(), e);
+                    return None;
+                }
+            };
 
             // Check coverage percentage
             let coverage_pct = arrays.coverage_percentage();
@@ -494,32 +504,43 @@ fn process_single_sample(
         Ok((features, presences, sample_name)) => {
             let temp_db_path = temp_dir.join(format!("{}.db", sample_name));
 
-            if let Ok(temp_conn) = create_temp_sample_db(&temp_db_path) {
-                let write_failed = (!features.is_empty()
-                    && write_features_to_temp_db(&temp_conn, &features).is_err())
-                    || (!presences.is_empty()
-                        && write_presences_to_temp_db(&temp_conn, &sample_name, &presences).is_err());
-
-                if write_failed {
+            let temp_conn = match create_temp_sample_db(&temp_db_path) {
+                Ok(conn) => conn,
+                Err(e) => {
+                    eprintln!("\nError creating temp DB for {}: {}", sample_name, e);
                     failed_count.fetch_add(1, Ordering::SeqCst);
                     return;
                 }
+            };
 
-                drop(temp_conn);
-                
-                // Add temp DB path to collection for later merging
-                temp_db_paths.lock().unwrap().push(temp_db_path);
-            } else {
-                failed_count.fetch_add(1, Ordering::SeqCst);
-                return;
+            if !features.is_empty() {
+                if let Err(e) = write_features_to_temp_db(&temp_conn, &features) {
+                    eprintln!("\nError writing features for {}: {}", sample_name, e);
+                    failed_count.fetch_add(1, Ordering::SeqCst);
+                    return;
+                }
             }
+
+            if !presences.is_empty() {
+                if let Err(e) = write_presences_to_temp_db(&temp_conn, &sample_name, &presences) {
+                    eprintln!("\nError writing presences for {}: {}", sample_name, e);
+                    failed_count.fetch_add(1, Ordering::SeqCst);
+                    return;
+                }
+            }
+
+            drop(temp_conn);
+            
+            // Add temp DB path to collection for later merging
+            temp_db_paths.lock().unwrap().push(temp_db_path);
 
             let sample_time = sample_start.elapsed().as_secs_f64();
             let done = completed_count.fetch_add(1, Ordering::SeqCst) + 1;
             process_pb.set_message(format!("[{}/{}] {} ({:.2}s)", done, total, sample_name, sample_time));
             process_pb.inc(1);
         }
-        Err(_) => {
+        Err(e) => {
+            eprintln!("\nError processing {}: {}", bam_path.display(), e);
             let sample_time = sample_start.elapsed().as_secs_f64();
             let done = completed_count.fetch_add(1, Ordering::SeqCst) + 1;
             failed_count.fetch_add(1, Ordering::SeqCst);
