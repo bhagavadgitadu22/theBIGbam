@@ -277,8 +277,8 @@ pub fn process_sample(
 
             // Process contig using streaming - single pass over reads
             // Early coverage check happens inside process_contig_streaming
-            let arrays = match process_contig_streaming(&mut bam, &ref_name, ref_length, seq_type, flags, config.circular, config.min_coverage) {
-                Ok(Some(arrays)) => arrays,
+            let (arrays, coverage_pct) = match process_contig_streaming(&mut bam, &ref_name, ref_length, seq_type, flags, config.circular, config.min_coverage) {
+                Ok(Some(result)) => result,
                 Ok(None) => return None,
                 Err(e) => {
                     eprintln!("Error processing contig {} in {}: {}", ref_name, bam_path.display(), e);
@@ -286,9 +286,7 @@ pub fn process_sample(
                 }
             };
 
-            // Coverage already checked in process_contig_streaming
-            let coverage_pct = arrays.coverage_percentage();
-
+            // Coverage already checked and returned from process_contig_streaming
             let presence = PresenceData {
                 contig_name: contig.name.clone(),
                 coverage_pct: coverage_pct as f32,

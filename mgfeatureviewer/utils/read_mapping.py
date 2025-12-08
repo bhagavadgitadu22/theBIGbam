@@ -26,7 +26,7 @@ def add_mapping_per_sample_args(parser):
 
 def run_mapping_per_sample(args):
     read2 = Path(args.read2) if getattr(args, 'read2', None) else None
-    return map_with_minimap2(
+    return map_with_mapper(
         args.threads,
         Path(args.assembly),
         args.sequencing_type,
@@ -36,13 +36,13 @@ def run_mapping_per_sample(args):
         circular=bool(getattr(args, 'circular', False)),
     ) or 0
 
-def map_with_minimap2(threads: int, assembly_file: Path, sequencing_type: str, read1: Path,
+def map_with_mapper(threads: int, assembly_file: Path, sequencing_type: str, read1: Path,
                       read2: Optional[Path], output_file: Path, circular: bool = False) -> None:
-    """Run minimap2 + samtools pipeline and produce final indexed BAM at `output_file`.
+    """Run mapper + samtools pipeline and produce final indexed BAM at `output_file`.
 
     This function expects `minimap2` and `samtools` to be on PATH.
     """
-    for exe in ("minimap2", "samtools"):
+    for exe in ("minimap2", "bwa-mem2", "samtools"):
         if shutil.which(exe) is None:
             raise FileNotFoundError(f"Required executable not found on PATH: {exe}")
 
@@ -66,31 +66,24 @@ def map_with_minimap2(threads: int, assembly_file: Path, sequencing_type: str, r
         # minimap2 options for map-ont
         # default mode -> no particular options needed
         if sequencing_type == "long":
-            minimap2_cmd = [
+            mapper_cmd = [
                 "minimap2", "-ax", "map-ont", "-t", str(threads), str(work_assembly), str(read1)
             ]
         else:
-            # just removed --secondary=no to keep secondary alignments
-            #minimap2_cmd = [
-            #    "minimap2", "-a", "-k21", "-w11", "--sr", "--frag=yes", "-A2", "-B8", 
-            #    "-O12,32", "-E2,1", "-r100", "-p.5", "-N20", "-f1000,5000", "-n2", 
-            #    "-m25", "-s40", "-g100", "-2K50m", "--heap-sort=yes", 
-            #    "-t", str(threads), str(work_assembly), str(read1)
-            #]
-            minimap2_cmd = [
-                "minimap2", "-ax", "sr", "-t", str(threads), str(work_assembly), str(read1)
-            ]
-        
-        if read2:
-            minimap2_cmd.append(str(read2))
+            bwa_index_cmd = ["bwa-mem2", "index", str(work_assembly)]
+            subprocess.run(bwa_index_cmd, check=True)
+
+            mapper_cmd = ["bwa-mem2", "mem", "-t", str(threads), str(work_assembly), str(read1)]
+            if read2:
+                mapper_cmd.append(str(read2))
 
         sorted_bam = Path(tempfile.mkstemp(prefix=output_file.stem + "_sorted_", suffix=".bam")[1])
         temp_files.append(sorted_bam)
 
-        # Pipe: minimap2 | samtools view -bS -F 4 | samtools sort -o sorted_bam
+        # Pipe: mapper | samtools view -bS -F 4 | samtools sort -o sorted_bam
         view_cmd = ["samtools", "view", "-@", str(threads), "-F", "4", "-bS", "-"]
         sort_cmd = ["samtools", "sort", "-@", str(threads), "-o", str(sorted_bam), "-"]
-        p1 = subprocess.Popen(minimap2_cmd, stdout=subprocess.PIPE)
+        p1 = subprocess.Popen(mapper_cmd, stdout=subprocess.PIPE)
         p2 = subprocess.Popen(view_cmd, stdin=p1.stdout, stdout=subprocess.PIPE)
         # Close p1.stdout in parent to allow p1 to receive SIGPIPE if p2 exits
         p1.stdout.close()
@@ -194,7 +187,7 @@ def run_mapping_all(args):
         print(f"Processing row {i}: {read1p} -> assembly {assembly_to_use} (seqtype={seqtype}) -> {desired_bam}")
 
         # Local execution
-        map_with_minimap2(args.threads, assembly_to_use, seqtype_to_use, read1p, read2p, desired_bam, circular=getattr(args, 'circular', False))
+        map_with_mapper(args.threads, assembly_to_use, seqtype_to_use, read1p, read2p, desired_bam, circular=getattr(args, 'circular', False))
 
     print("All rows processed")
     return 0
@@ -205,4 +198,4 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Map reads with minimap2 and produce MD-tagged indexed BAM")
     add_mapping_per_sample_args(parser)
     args = parser.parse_args()
-    map_with_minimap2(args.threads, Path(args.assembly), args.sequencing_type, Path(args.read1), Path(args.read2) if args.read2 else None, Path(args.output_file), args.circular)
+    map_with_mapper(args.threads, Path(args.assembly), args.sequencing_type, Path(args.read1), Path(args.read2) if args.read2 else None, Path(args.output_file), args.circular)

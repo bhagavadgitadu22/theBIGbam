@@ -86,7 +86,7 @@ pub fn process_contig_streaming(
     flags: ModuleFlags,
     circular: bool,
     min_coverage: f64,
-) -> Result<Option<FeatureArrays>> {
+) -> Result<Option<(FeatureArrays, f64)>> {
     // -------------------------------------------------------------------------
     // Step 1: Check if this contig exists in the BAM file
     // -------------------------------------------------------------------------
@@ -169,5 +169,5 @@ pub fn process_contig_streaming(
         arrays.finalize_strands(seq_type);
     }
 
-    Ok(Some(arrays))
+    Ok(Some((arrays, coverage_pct)))
 }
