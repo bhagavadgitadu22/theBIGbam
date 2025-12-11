@@ -5,7 +5,7 @@ import traceback
 
 from bokeh.layouts import column, row
 from bokeh.models import Div, InlineStyleSheet, Tooltip, CustomJS
-from bokeh.models.widgets import AutocompleteInput, CheckboxGroup, HelpButton, Button, RadioButtonGroup, CheckboxButtonGroup, Toggle
+from bokeh.models.widgets import AutocompleteInput, CheckboxGroup, HelpButton, Button, RadioButtonGroup, CheckboxButtonGroup, Toggle, RangeSlider
 from bokeh.models.plots import GridPlot
 
 # Import the plotting function from the repo
@@ -21,7 +21,7 @@ def build_controls(conn):
     contigs = [r[0] for r in cur.fetchall()]
     contig_select = AutocompleteInput(value=contigs[0] if len(contigs) == 1 else "", 
                                       completions=contigs, 
-                                      min_characters=1,
+                                      min_characters=0,
                                       case_sensitive=False,
                                       restrict=False,
                                       max_completions=20,
@@ -33,7 +33,7 @@ def build_controls(conn):
     samples = [r[0] for r in cur.fetchall()]
     sample_select = AutocompleteInput(value=samples[0] if len(samples) == 1 else "", 
                                       completions=samples,
-                                      min_characters=1,
+                                      min_characters=0,
                                       case_sensitive=False,
                                       restrict=False,
                                       max_completions=20,
@@ -126,12 +126,25 @@ def modify_doc_factory(db_path):
         sample_to_contigs.setdefault(sample_name, set()).add(contig_name)
         contig_to_samples.setdefault(contig_name, set()).add(sample_name)
 
+    # Build contig lengths mapping for length filtering
+    length_cur = conn.cursor()
+    length_cur.execute('SELECT Contig_name, Contig_length FROM Contig')
+    contig_lengths = {name: length for name, length in length_cur.fetchall()}
+    min_len = min(contig_lengths.values()) if contig_lengths else 0
+    max_len = max(contig_lengths.values()) if contig_lengths else 100000
+
     # Keep original full lists so we can restore when filters are off
     orig_contigs = list(widgets['contigs'])
     orig_samples = list(widgets['samples'])
 
     contigs_title = Div(text="<b>Contig</b>")
     filter_contigs = CheckboxGroup(labels=["Only show contigs present with selected sample"], active=[])
+
+    # Length filter slider (only if multiple contigs)
+    length_slider = None
+    if len(contig_lengths) > 1:
+        length_slider = RangeSlider(start=min_len, end=max_len, value=(min_len, max_len), 
+                                    step=1, title="Contig Length")
 
     samples_title = Div(text="<b>Sample</b>")
     filter_samples = CheckboxGroup(labels=["Only show samples present with selected contig"], active=[])
@@ -144,6 +157,11 @@ def modify_doc_factory(db_path):
             completions = [c for c in orig_contigs if c in allowed]
         else:
             completions = list(orig_contigs)
+
+        # Apply length filter
+        if length_slider is not None:
+            min_length, max_length = length_slider.value
+            completions = [c for c in completions if min_length <= contig_lengths.get(c, 0) <= max_length]
 
         widgets['contig_select'].completions = completions
         if widgets['contig_select'].value not in completions:
@@ -160,6 +178,12 @@ def modify_doc_factory(db_path):
         widgets['sample_select'].completions = completions
         if widgets['sample_select'].value not in completions:
             widgets['sample_select'].value = completions[0] if completions else ""
+
+    # Wire up filter callbacks
+    filter_contigs.on_change('active', lambda attr, old, new: refresh_contig_options())
+    filter_samples.on_change('active', lambda attr, old, new: refresh_sample_options())
+    if length_slider is not None:
+        length_slider.on_change('value', lambda attr, old, new: refresh_contig_options())
 
     # Global lock for toggles when enforcing single-variable mode
     global_toggle_lock = {'locked': False}
@@ -227,6 +251,9 @@ def modify_doc_factory(db_path):
             # hide sample filter as well
             filter_samples.active = []
             filter_samples.visible = False
+            # Hide entire filtering section in All-samples view
+            filtering_header.visible = False
+            filtering_content.visible = False
             # hide module checkboxes but keep module titles
             for mw in widgets['module_widgets']:
                 if mw is not None:
@@ -238,6 +265,9 @@ def modify_doc_factory(db_path):
         else:
             filter_contigs.visible = True
             filter_samples.visible = True
+            # Show filtering section in One-sample view
+            filtering_header.visible = True
+            filtering_content.visible = True
             # show module checkboxes again
             for mw in widgets['module_widgets']:
                 if mw is not None:
@@ -275,15 +305,35 @@ def modify_doc_factory(db_path):
     # Wire up select/filter interactions
     widgets['sample_select'].on_change('value', lambda attr, old, new: refresh_contig_options())
     widgets['contig_select'].on_change('value', lambda attr, old, new: refresh_sample_options())
-    filter_contigs.on_change('active', lambda attr, old, new: refresh_contig_options())
-    filter_samples.on_change('active', lambda attr, old, new: refresh_sample_options())
 
-    # Gene map visibility toggle (above variables)
-    genemap_title = Div(text="<b>Gene Map</b>")
-    show_genemap = CheckboxGroup(labels=["Show gene map"], active=[0])
+    # Helper function to create collapsible section toggle callbacks
+    def make_toggle_callback(btn, content):
+        def callback():
+            content.visible = not content.visible
+            if content.visible:
+                btn.label = "▼"
+            else:
+                btn.label = "▶"
+        return callback
+
+    # Create collapsible Filtering section
+    filtering_toggle_btn = Button(label="▼", width=20, height=20, button_type="primary", align="center", margin=0, stylesheets=[stylesheet])
+    filtering_toggle_btn.styles = {'padding': '0px', 'line-height': '20px'}
+    filtering_title = Div(text="<b>Filtering</b>", align="center")
+    filtering_header = row(filtering_toggle_btn, filtering_title, sizing_mode="stretch_width", align="center")
+    filtering_children = [filter_contigs]
+    if length_slider is not None:
+        filtering_children.append(length_slider)
+    filtering_children.append(filter_samples)
+    filtering_content = column(
+        *filtering_children,
+        visible=True, sizing_mode="stretch_width"
+    )
+    filtering_toggle_btn.on_click(make_toggle_callback(filtering_toggle_btn, filtering_content))
 
     variables_title = Div(text="<b>Variables</b>")
-    controls_children = [instructions, views_title, views, contigs_title, widgets['contig_select'], filter_contigs, samples_title, widgets['sample_select'], filter_samples, genemap_title, show_genemap, variables_title]
+    show_genemap = CheckboxGroup(labels=["Show gene map"], active=[0])
+    controls_children = [instructions, views_title, views, samples_title, widgets['sample_select'], contigs_title, widgets['contig_select'], filtering_header, filtering_content, variables_title, show_genemap]
     
     # Store toggle buttons and content containers for collapsible sections
     module_toggles = []
@@ -298,7 +348,9 @@ def modify_doc_factory(db_path):
         help_btn = widgets['helps_widgets'][i]
 
         # Create a small toggle button for collapsible section (just the arrow)
-        toggle_btn = Button(label="▼", width=30, button_type="light", align="center")
+        # Start with modules folded (collapsed)
+        toggle_btn = Button(label="▶", width=20, height=20, button_type="primary", align="center", margin=0, stylesheets=[stylesheet])
+        toggle_btn.styles = {'padding': '0px', 'line-height': '20px'}
         module_toggles.append(toggle_btn)
 
         # Build two header variants: one with the checkbox (shows module name as label)
@@ -339,23 +391,15 @@ def modify_doc_factory(db_path):
             header_with_title.append(hdr)
 
         # Add the module's CheckboxButtonGroup for variables (this will be collapsible)
+        # Start with modules folded (collapsed)
         cbg = widgets['variables_widgets'][i]
+        cbg.visible = False
         module_contents.append(cbg)
         controls_children.append(cbg)
 
     # Add callbacks for collapsible sections
     for i, toggle_btn in enumerate(module_toggles):
         content = module_contents[i]
-        
-        def make_toggle_callback(btn, content):
-            def callback():
-                content.visible = not content.visible
-                if content.visible:
-                    btn.label = "▼"
-                else:
-                    btn.label = "▶"
-            return callback
-        
         toggle_btn.on_click(make_toggle_callback(toggle_btn, content))
 
     apply_button = Button(label="Apply", button_type="primary", align="center")

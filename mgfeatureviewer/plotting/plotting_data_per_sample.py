@@ -2,7 +2,7 @@ import argparse, sqlite3
 from Bio.Seq import Seq
 from Bio.SeqRecord import SeqRecord
 from Bio.SeqFeature import SeqFeature, FeatureLocation
-from bokeh.models import Range1d, ColumnDataSource, HoverTool, WheelZoomTool
+from bokeh.models import Range1d, ColumnDataSource, HoverTool, WheelZoomTool, NumeralTickFormatter
 from bokeh.layouts import gridplot
 from bokeh.plotting import output_file, save, figure
 from dna_features_viewer import BiopythonTranslator
@@ -106,9 +106,12 @@ def make_bokeh_genemap(conn, contig_id, locus_name, locus_size, annotation_tool,
     annotation_fig = graphic_record.plot_with_bokeh(figure_width=30, figure_height=40)
     annotation_fig.height = subplot_size
 
+    # Disable scientific notation on x-axis
+    annotation_fig.xaxis.formatter = NumeralTickFormatter(format="0,0")
+
     wheel = WheelZoomTool(dimensions='width')  # only x-axis
     annotation_fig.add_tools(wheel)
-    # Don't set active_scroll here - will be set when merging with subplots
+    annotation_fig.toolbar.active_scroll = wheel
 
     annotation_fig.x_range = shared_xrange
 
@@ -121,6 +124,9 @@ def make_bokeh_subplot(feature_dict, height, x_range, sample_title=None, feature
         x_range=x_range,
         tools="xpan,reset,save"
     )
+    
+    # Disable scientific notation on x-axis
+    p.xaxis.formatter = NumeralTickFormatter(format="0,0")
     
     # Check if we have data to plot
     has_data = feature_dict and any(len(vals["x"]) > 0 for vals in feature_dict)
@@ -218,7 +224,7 @@ def make_bokeh_subplot(feature_dict, height, x_range, sample_title=None, feature
     if len(feature_dict) > 1:
         p.legend.click_policy="hide"
 
-    wheel = WheelZoomTool(dimensions='width')  # or dimensions='both' for full zoom
+    wheel = WheelZoomTool(dimensions='width')
     p.add_tools(wheel)
     p.toolbar.active_scroll = wheel
 

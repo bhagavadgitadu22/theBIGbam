@@ -3,3 +3,8 @@
     padding: 15px;
     min-width: 350px;
 }
+
+.bk-btn {
+    padding: 0px !important;
+    line-height: 1.0 !important;
+}
