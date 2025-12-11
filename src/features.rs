@@ -109,13 +109,6 @@ pub struct FeatureArrays {
     end_plus: Vec<u64>,
     /// Read ends on the reverse (-) strand
     end_minus: Vec<u64>,
-
-    // -------------------------------------------------------------------------
-    // Internal: Coverage percentage tracking
-    // -------------------------------------------------------------------------
-    /// Boolean bitmap: true if position has at least 1x coverage.
-    /// Used to calculate what percentage of the genome is covered.
-    covered: Vec<bool>,
 }
 
 impl FeatureArrays {
@@ -151,7 +144,6 @@ impl FeatureArrays {
             start_minus: vec![0u64; ref_length],
             end_plus: vec![0u64; ref_length],
             end_minus: vec![0u64; ref_length],
-            covered: vec![false; ref_length],
         }
     }
 
@@ -168,11 +160,11 @@ impl FeatureArrays {
     ///
     /// # Rust Concept - Iterator chain:
     /// `.iter().filter(...).count()` is like Python's:
-    /// `sum(1 for x in self.covered if x)`
+    /// `sum(1 for x in self.primary_reads if x > 0)`
     #[inline]
     pub fn coverage_percentage(&self) -> f64 {
-        // Count how many positions have coverage
-        let covered_bp = self.covered.iter().filter(|&&x| x).count();
+        // Count how many positions have at least 1 primary read
+        let covered_bp = self.primary_reads.iter().filter(|&&x| x > 0).count();
         // Convert to percentage
         (covered_bp as f64 / self.ref_length() as f64) * 100.0
     }
@@ -368,21 +360,10 @@ pub fn process_read(
     let raw_start = ref_start as usize;
     let raw_end = ref_end as usize;
 
-    // For circular genomes, positions can exceed ref_length. Use modulo to wrap.
-    let (start, end) = if circular {
-        (raw_start % ref_length, raw_end % ref_length)
-    } else {
-        (raw_start, raw_end)
-    };
-
-    // -------------------------------------------------------------------------
-    // Update coverage bitmap
-    // -------------------------------------------------------------------------
-    // Track which positions have any coverage (for coverage percentage calculation).
-    // We use slice.fill() which is optimized and often uses SIMD instructions.
-    let cov_start = raw_start.min(ref_length);
-    let cov_end = raw_end.min(ref_length);
-    arrays.covered[cov_start..cov_end].fill(true);
+    // For circular genomes with doubled references, always apply modulo for array bounds.
+    // Keep raw_end for increment_circular to detect wrapping correctly.
+    let start = raw_start % ref_length;
+    let end = if circular { raw_end } else { raw_end.min(ref_length) };
 
     // -------------------------------------------------------------------------
     // Coverage module: primary mappings only
@@ -426,20 +407,23 @@ pub fn process_read(
         // Only count "clean" primary reads for phage termini detection
         if start_matches && end_matches {
             // Update coverage_reduced (clean coverage from primary mappings only)
+            // Note: end is exclusive (one past last position), so use non-inclusive increment
             if circular {
-                arrays.coverage_reduced.increment_circular_inclusive(start, end, 1);
+                arrays.coverage_reduced.increment_circular(start, end, 1);
             } else {
-                arrays.coverage_reduced.increment_range_inclusive(start, end, 1);
+                arrays.coverage_reduced.increment_range(start, end, 1);
             }
 
             // Track start/end positions by strand
             // We separate strands here; they're combined in finalize_strands()
+            // Note: 'end' is exclusive, so the actual last position is end-1
+            let end_pos = if end > 0 { end - 1 } else { 0 };
             if is_reverse {
                 arrays.start_minus[start] += 1;
-                arrays.end_minus[end] += 1;
+                arrays.end_minus[end_pos] += 1;
             } else {
                 arrays.start_plus[start] += 1;
-                arrays.end_plus[end] += 1;
+                arrays.end_plus[end_pos] += 1;
             }
         }
     }

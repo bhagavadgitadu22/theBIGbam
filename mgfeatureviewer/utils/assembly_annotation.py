@@ -7,8 +7,8 @@ from Bio import SeqIO
 from typing import Optional
 
 def add_annotation_args(parser):
-    parser.add_argument('--csv', required=True, help='CSV file with columns: assembly_file,read1,read2,sequencing_type')
-    parser.add_argument('-a', '--assembly', help='Assembly file to use for all rows (overrides CSV field)')
+    parser.add_argument('--csv', help='CSV file with columns: assembly_file,read1,read2,sequencing_type')
+    parser.add_argument('-a', '--assembly', help='Assembly file to use (overrides CSV if both provided)')
     parser.add_argument('--annotation_tool', required=True, choices=['pharokka', 'bakta'], help='Annotation tool to run')
     parser.add_argument('--annotation_db', required=True, help='Annotation tool database path/identifier (passed to pharokka/bakta via --db)')
     parser.add_argument('--meta', action='store_true', help='Pass --meta flag to the annotator')
@@ -35,8 +35,8 @@ def _collect_assembly_paths_from_csv(csv_path: Path) -> List[Path]:
         cols = [c.strip() for c in r]
         if not cols:
             continue
-        # assembly is first column
-        a = cols[0]
+        # assembly is last column
+        a = cols[3]
         if a:
             assemblies.append(Path(a))
     return assemblies
@@ -117,13 +117,16 @@ def _run_bakta(combined_fasta: Path, out_dir: Path, threads: int, db: Optional[s
     return gbks[0]
 
 def run_annotation(args):
-    csv_path = Path(args.csv)
-    if not csv_path.exists():
-        raise FileNotFoundError(f'CSV not found: {csv_path}')
-
-    assemblies = _collect_assembly_paths_from_csv(csv_path)
+    # Priority: use --assembly if provided, otherwise CSV
     if getattr(args, 'assembly', None):
         assemblies = [Path(args.assembly)]
+        if not assemblies[0].exists():
+            raise FileNotFoundError(f'Assembly file not found: {assemblies[0]}')
+    else:
+        csv_path = Path(args.csv)
+        if not csv_path.exists():
+            raise FileNotFoundError(f'CSV not found: {csv_path}')
+        assemblies = _collect_assembly_paths_from_csv(csv_path)
 
     assemblies = _dereplicate_by_basename(assemblies)
 

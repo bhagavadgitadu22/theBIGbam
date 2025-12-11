@@ -116,6 +116,7 @@ pub fn process_contig_streaming(
 
         has_reads = true;
 
+        // Parse CIGAR string and MD tag (if needed)
         let cigar_view = record.cigar();
         cigar_buf.clear();
         cigar_buf.extend(cigar_view.iter().map(|c| (c.char() as u32, c.len())));

@@ -83,13 +83,13 @@ def build_argparser():
     # Common mapping args (shared between both mapping modes)
     sp.add_argument('-r2', '--read2', help='Read2 file (optional, for paired-end reads)')
     sp.add_argument('-a', '--assembly', required=True, help='Reference assembly (fasta file)')
-    sp.add_argument('-s', '--sequencing-type', required=True, choices=['long', 'short'], help='Sequencing type')
+    sp.add_argument('-s', '--sequencing_type', required=True, choices=['long', 'short'], help='Sequencing type')
     sp.add_argument('--circular', action='store_true', help='Treat assemblies as circular')
     sp.add_argument('-t', '--threads', type=int, default=4, help='Number of threads (default: 4)')
     
     # Annotation inputs
-    sp.add_argument('--annotation-tool', required=True, choices=['pharokka', 'bakta'], help='Annotation tool')
-    sp.add_argument('--annotation-db', required=True, help='Annotation database path')
+    sp.add_argument('--annotation_tool', required=True, choices=['pharokka', 'bakta'], help='Annotation tool')
+    sp.add_argument('--annotation_db', required=True, help='Annotation database path')
     sp.add_argument('--meta', action='store_true', help='Pass --meta to annotator for multi-organism assemblies')
     
     # Calculation inputs
@@ -148,8 +148,7 @@ def main(argv=None):
     if args.cmd == 'run-pipeline':
         # Run mapping -> annotation -> calculate sequentially
         try:
-            output_db_abs = os.path.abspath(args.output)
-            output_dir = os.path.dirname(output_db_abs) or '.'
+            output_dir = os.path.abspath(args.output)
             os.makedirs(output_dir, exist_ok=True)
             
             # Mapping outputs go into a bams subdirectory
@@ -218,10 +217,11 @@ def main(argv=None):
                 compress_ratio=args.compress_ratio,
                 circular=args.circular,
             )
+
             print(f"[3/3] Calculate: modules={args.modules} -> {final_db}")
             calculating_data.run_calculate_args(calc_ns)
             
-            print(f"\n✓ Pipeline complete! Output: {final_db}")
+            print(f"\nPipeline complete! Output: {final_db}")
             return 0
         except Exception as e:
             print(f"Pipeline error: {e}")

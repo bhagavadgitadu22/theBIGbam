@@ -42,7 +42,7 @@ def map_with_mapper(threads: int, assembly_file: Path, sequencing_type: str, rea
 
     This function expects `minimap2` and `samtools` to be on PATH.
     """
-    for exe in ("minimap2", "bwa-mem2", "samtools"):
+    for exe in ("minimap2", "samtools"):
         if shutil.which(exe) is None:
             raise FileNotFoundError(f"Required executable not found on PATH: {exe}")
 
@@ -70,10 +70,16 @@ def map_with_mapper(threads: int, assembly_file: Path, sequencing_type: str, rea
                 "minimap2", "-ax", "map-ont", "-t", str(threads), str(work_assembly), str(read1)
             ]
         else:
-            bwa_index_cmd = ["bwa-mem2", "index", str(work_assembly)]
-            subprocess.run(bwa_index_cmd, check=True)
-
-            mapper_cmd = ["bwa-mem2", "mem", "-t", str(threads), str(work_assembly), str(read1)]
+            # just removed secondary=no to keep secondary alignments for short reads
+            mapper_cmd = [
+                "minimap2",  "-ax", "sr", "-k21", "-w11", "--sr", "--frag=yes", "-A2", "-B8", "-O12,32", "-E2,1", "-r100", "-p.5", "-N20", "-f1000,5000", "-n2", "-m25", "-s40", "-g100", "-2K50m", "--heap-sort=yes", "--secondary=yes", "-t", str(threads), str(work_assembly), str(read1)
+            ]
+            #mapper_cmd = [
+            #    "minimap2", "-ax", "sr", "-t", str(threads), str(work_assembly), str(read1)
+            #]
+            #bwa_index_cmd = ["bwa-mem2", "index", str(work_assembly)]
+            #subprocess.run(bwa_index_cmd, check=True)
+            #mapper_cmd = ["bwa-mem2", "mem", "-t", str(threads), str(work_assembly), str(read1)]
             if read2:
                 mapper_cmd.append(str(read2))
 
@@ -83,6 +89,10 @@ def map_with_mapper(threads: int, assembly_file: Path, sequencing_type: str, rea
         # Pipe: mapper | samtools view -bS -F 4 | samtools sort -o sorted_bam
         view_cmd = ["samtools", "view", "-@", str(threads), "-F", "4", "-bS", "-"]
         sort_cmd = ["samtools", "sort", "-@", str(threads), "-o", str(sorted_bam), "-"]
+        print("COMMAND_MAP:", " ".join(mapper_cmd), flush=True)
+        print("COMMAND_VIEW:", " ".join(view_cmd), flush=True)
+        print("COMMAND_SORT:", " ".join(sort_cmd), flush=True)
+
         p1 = subprocess.Popen(mapper_cmd, stdout=subprocess.PIPE)
         p2 = subprocess.Popen(view_cmd, stdin=p1.stdout, stdout=subprocess.PIPE)
         # Close p1.stdout in parent to allow p1 to receive SIGPIPE if p2 exits
@@ -113,7 +123,7 @@ def map_with_mapper(threads: int, assembly_file: Path, sequencing_type: str, rea
 def add_mapping_all_args(parser):
     parser.add_argument('--csv', required=True, help='CSV file with comma-separated columns: read1,read2,sequencing_type,assembly_file')
     parser.add_argument('-a', '--assembly', help='Assembly file to use for all rows (overrides CSV field; optional)')
-    parser.add_argument('-s', '--sequencing-type', choices=['long', 'short'], help='Sequencing type: use "long" or "short"')
+    parser.add_argument('-s', '--sequencing_type', choices=['long', 'short'], help='Sequencing type: use "long" or "short"')
     parser.add_argument('--circular', action='store_true', help='Concatenate each contig to itself during the mapping to circularize it')
     parser.add_argument('-o', '--output-dir', required=True, help='Directory to create and place outputs (must NOT exist)')
     parser.add_argument('-t', '--threads', type=int, default=4, help='Threads to pass to minimap2 and samtools (default: 4)')

@@ -37,5 +37,7 @@ features = ["python"]
 module-name = "mgfeatureviewer_rs"
 # Explicitly include the Python package
 python-packages = ["mgfeatureviewer"]
+# Include static files in the package
+include = ["static/*"]
 # Strip debug symbols
 strip = true

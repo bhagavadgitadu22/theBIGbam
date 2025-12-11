@@ -42,19 +42,32 @@ where
     T: AddAssign + Copy,
 {
     /// Increment positions in range [start, end), handling wrap-around.
+    /// Start should already be modulo'd, but end can exceed len for wrapped reads.
     #[inline]
     fn increment_circular(&mut self, start: usize, end: usize, delta: T) {
-        if start <= end {
-            // Normal case: [start, end)
+        let len = self.len();
+        let end_mod = end % len;
+        
+        if end <= len {
+            // Normal case: no wrapping, end within bounds
             for pos in start..end {
                 self[pos] += delta;
             }
-        } else {
-            // Wrap-around case: read spans the origin
-            for pos in start..self.len() {
+        } else if start < end_mod {
+            // Wrapped: read spans origin (e.g., start=19800, end=39732 → end_mod=0)
+            // This shouldn't happen with our logic, but handle it safely
+            for pos in start..len {
                 self[pos] += delta;
             }
-            for pos in 0..end {
+            for pos in 0..end_mod {
+                self[pos] += delta;
+            }
+        } else {
+            // Read wraps around (start > end_mod)
+            for pos in start..len {
+                self[pos] += delta;
+            }
+            for pos in 0..end_mod {
                 self[pos] += delta;
             }
         }

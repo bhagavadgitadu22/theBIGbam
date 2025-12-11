@@ -77,5 +77,6 @@ mgfeatureviewer run-pipeline \
   --annotation_tool pharokka \
   --annotation_db ${DB_DIR} \
   -m coverage,phagetermini,assemblycheck \
+  --circular \
   -o examples/outputs/HK97/pipeline_multi_sample
 ```
