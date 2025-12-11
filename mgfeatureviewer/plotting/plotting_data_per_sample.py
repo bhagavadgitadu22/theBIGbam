@@ -10,7 +10,7 @@ from dna_features_viewer import BiopythonTranslator
 ### Custom translator for coloring and labeling features (with DNAFeaturesViewer python library)
 # Define function-to-color mapping
 # Use the color scheme from pharokka
-PHAROKKA_COLORS = {
+PHAROKKA_CDS_COLORS = {
     "vfdb_card": "#FF0000",
     "unknown function": "#AAAAAA",
     "other": "#4deeea",
@@ -24,26 +24,43 @@ PHAROKKA_COLORS = {
     "connector": "#5A5A5A",
 }
 
+# From https://github.com/oschwengers/bakta/blob/d6443639958750c3bece5822e84978271d1a4dc7/bakta/plot.py#L40
+BAKTA_TYPE_COLORS = {
+    'CDS': '#cccccc',
+    'tRNA': '#b2df8a',
+    'tmRNA': '#b2df8a',
+    'rRNA': '#fb8072',
+    'ncRNA': '#fdb462'
+}
+
 class CustomTranslator(BiopythonTranslator):
     def compute_feature_color(self, feature):
-        if feature.qualifiers.get("annotation_tool", []) == "pharokka":
+        type_feature = feature.type
 
-            # Get the function field safely
-            function = feature.qualifiers.get("function")
-            if isinstance(function, list):  # Biopython often stores qualifiers as lists
-                function = function[0] if function else None
+        if type_feature == "CDS":
+            if feature.qualifiers.get("annotation_tool", []) == "pharokka":
+                # Get the function field safely
+                function = feature.qualifiers.get("function")
+                if isinstance(function, list):  # Biopython often stores qualifiers as lists
+                    function = function[0] if function else None
 
-            if not isinstance(function, str):  # Missing or wrong type
-                return "#AAAAAA"
+                if not isinstance(function, str):  # Missing or wrong type
+                    return "#cccccc"
 
-            function = function.lower()
+                function = function.lower()
 
-            color_scheme = PHAROKKA_COLORS
-            for key, color in color_scheme.items():
-                if key in function:
-                    return color
-
-        return "#AAAAAA"
+                color_scheme = PHAROKKA_CDS_COLORS
+                for key, color in color_scheme.items():
+                    if key in function:
+                        return color
+            
+            return "#cccccc"
+        
+        elif type_feature != "CDS":
+            if type_feature not in BAKTA_TYPE_COLORS:
+                print("Unknown type of feature:" , type_feature, flush=True)
+                return "#000000"
+            return BAKTA_TYPE_COLORS.get(type_feature, "#cccccc")
 
     def compute_feature_label(self, feature):
         return None  # fallback to None if missing or invalid
