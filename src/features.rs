@@ -6,7 +6,7 @@
 //! All features are calculated in a single pass through the BAM reads for efficiency.
 
 use crate::cigar::{raw_cigar_consumes_ref, raw_cigar_is_clipping, raw_has_match_at_position, MdTag};
-use crate::circular::CircularArray;
+use crate::circular::{increment_circular, increment_range};
 use crate::types::{FeatureMap, SequencingType};
 
 // ============================================================================
@@ -363,7 +363,7 @@ pub fn process_read(
     // For circular genomes with doubled references, always apply modulo for array bounds.
     // Keep raw_end for increment_circular to detect wrapping correctly.
     let start = raw_start % ref_length;
-    let end = if circular { raw_end } else { raw_end.min(ref_length) };
+    let end = raw_end;
 
     // -------------------------------------------------------------------------
     // Coverage module: primary mappings only
@@ -372,22 +372,22 @@ pub fn process_read(
         // Track secondary and supplementary reads separately
         if is_secondary {
             if circular {
-                arrays.secondary_reads.increment_circular(start, end, 1);
+                increment_circular(&mut arrays.secondary_reads, start, end, 1);
             } else {
-                arrays.secondary_reads.increment_range(start, end, 1);
+                increment_range(&mut arrays.secondary_reads, start, end, 1);
             }
         } else if is_supplementary {
             if circular {
-                arrays.supplementary_reads.increment_circular(start, end, 1);
+                increment_circular(&mut arrays.supplementary_reads, start, end, 1);
             } else {
-                arrays.supplementary_reads.increment_range(start, end, 1);
+                increment_range(&mut arrays.supplementary_reads, start, end, 1);
             }
         } else {
             // Only count primary mappings in main coverage
             if circular {
-                arrays.primary_reads.increment_circular(start, end, 1);
+                increment_circular(&mut arrays.primary_reads, start, end, 1);
             } else {
-                arrays.primary_reads.increment_range(start, end, 1);
+                increment_range(&mut arrays.primary_reads, start, end, 1);
             }
         }
     }
@@ -409,9 +409,9 @@ pub fn process_read(
             // Update coverage_reduced (clean coverage from primary mappings only)
             // Note: end is exclusive (one past last position), so use non-inclusive increment
             if circular {
-                arrays.coverage_reduced.increment_circular(start, end, 1);
+                increment_circular(&mut arrays.coverage_reduced, start, end, 1);
             } else {
-                arrays.coverage_reduced.increment_range(start, end, 1);
+                increment_range(&mut arrays.coverage_reduced, start, end, 1);
             }
 
             // Track start/end positions by strand
