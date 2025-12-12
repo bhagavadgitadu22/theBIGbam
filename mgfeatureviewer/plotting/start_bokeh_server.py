@@ -365,16 +365,23 @@ def modify_doc_factory(db_path):
     def on_view_change(attr, old, new):
         is_all = (new == 1)  # True means All samples
         
+        # Lock callbacks during view change to prevent cascading updates
+        global_toggle_lock['locked'] = True
+        
         # Toggle Sample section
+        separator_samples.visible = not is_all
         sample_header.visible = not is_all
         sample_content.visible = not is_all
         filter_samples.visible = not is_all
         widgets['sample_select'].visible = not is_all
 
-        # Toggle Contig section
-        contig_header.visible = not is_all
-        contig_content.visible = not is_all
+        # Contig section: keep visible but hide filter checkbox and per-variable filtering in All samples mode
+        # separator_contigs always visible
+        # contig_header always visible
+        # contig_content always visible
         filter_contigs.visible = not is_all
+        per_variable_title.visible = not is_all
+        variable_filters_column.visible = not is_all
         
         if is_all:
             filter_contigs.active = []
@@ -407,6 +414,9 @@ def modify_doc_factory(db_path):
                 # Module with checkbox: toggle between headers
                 hdr_cb.visible = not is_all
                 hdr_title.visible = is_all
+        
+        # Unlock callbacks
+        global_toggle_lock['locked'] = False
         
         # Only refresh when switching to One-sample (not needed for All-samples)
         if not is_all:
@@ -512,7 +522,12 @@ def modify_doc_factory(db_path):
     variables_title = Div(text="<b>Variables</b>")
     show_genemap = CheckboxGroup(labels=["Show gene map"], active=[0])
 
-    controls_children = [instructions, views_title, views, sample_header, sample_content, widgets['sample_select'], contig_header, contig_content, widgets['contig_select'], variables_title, show_genemap]
+    # Create visual separators (horizontal lines) using background color
+    separator_samples = Div(text="", height=1, width=350, styles={'background-color': '#333', 'margin': '10px 0'})
+    separator_contigs = Div(text="", height=1, width=350, styles={'background-color': '#333', 'margin': '10px 0'})
+    separator_variables = Div(text="", height=1, width=350, styles={'background-color': '#333', 'margin': '10px 0'})
+
+    controls_children = [instructions, views_title, views, separator_samples, sample_header, sample_content, widgets['sample_select'], separator_contigs, contig_header, contig_content, widgets['contig_select'], separator_variables, variables_title, show_genemap]
     
     # Store toggle buttons and content containers for collapsible sections
     module_toggles = []

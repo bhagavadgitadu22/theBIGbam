@@ -43,8 +43,7 @@ def generate_bokeh_plot_all_samples(conn, variable, contig_name, xstart=None, xe
     subplots = []
     for sample_id, sample_name in zip(sample_ids, sample_names):
         try:
-            list_feature_dict = get_feature_data(cur, variable, contig_id, sample_id,
-                                                 contig_name=contig_name, sample_name=sample_name)
+            list_feature_dict = get_feature_data(cur, variable, contig_id, sample_id)
             if not list_feature_dict:
                 continue
 
