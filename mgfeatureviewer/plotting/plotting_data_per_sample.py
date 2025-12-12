@@ -2,7 +2,7 @@ import argparse, sqlite3
 from Bio.Seq import Seq
 from Bio.SeqRecord import SeqRecord
 from Bio.SeqFeature import SeqFeature, FeatureLocation
-from bokeh.models import Range1d, ColumnDataSource, HoverTool, WheelZoomTool, NumeralTickFormatter
+from bokeh.models import Range1d, ColumnDataSource, HoverTool, WheelZoomTool, NumeralTickFormatter, Label
 from bokeh.layouts import gridplot
 from bokeh.plotting import output_file, save, figure
 from dna_features_viewer import BiopythonTranslator
@@ -129,77 +129,75 @@ def make_bokeh_subplot(feature_dict, height, x_range, sample_title=None, feature
     p.xaxis.formatter = NumeralTickFormatter(format="0,0")
     
     # Check if we have data to plot
-    has_data = feature_dict and any(len(vals["x"]) > 0 for vals in feature_dict)
-    
+    # You need one dataset of the subplots to have at least one non-zero points
+    has_data = bool(feature_dict) and any(
+        any(y > 0 for y in d["y"]) for d in feature_dict
+    )
+    title = ""
     if not has_data:
-        # No data: create empty subplot with message
-        if feature_name:
-            p.yaxis.axis_label = f"{feature_name} (no data)"
-        else:
-            p.yaxis.axis_label = "(no data)"
-        p.yaxis.axis_label_text_font_size = "10pt"
-        p.yaxis.axis_label_standoff = 0
-        p.y_range.start = 0
-        p.y_range.end = 1
-        p.toolbar.logo = None
-        p.xgrid.visible = False
-        p.ygrid.grid_line_alpha = 0.2
-        p.outline_line_color = None
-        p.min_border_left = 40
-        p.min_border_right = 10
-        return p
-            
-    for data_feature in feature_dict:
-        xx = data_feature["x"]
-        yy = data_feature["y"]
-        
-        # Warn if dataset is very large (can cause browser issues)
-        if len(xx) > 100000:
-            print(f"Warning: Large dataset ({len(xx)} points) may cause browser rendering issues. Consider using a smaller region or higher compression ratio.", flush=True)
-        
-        type_picked = data_feature["type"]
-        color = data_feature["color"]
-        alpha = data_feature["alpha"]
-        fill_alpha = data_feature["fill_alpha"]
-        size = data_feature["size"]
-        
-        title = data_feature["title"]
-        if sample_title:
-            title = f"{sample_title} {title}"
-
+        xx = []
+        yy = []
+        title = f"{feature_name} has no data" if feature_name else "No data"
         source = ColumnDataSource(data=dict(x=xx, y=yy))
+        p.varea(
+            x='x',
+            y1=0,
+            y2='y',
+            source=source,
+            legend_label = title
+        )
+    else:      
+        for data_feature in feature_dict:
+            xx = data_feature["x"]
+            yy = data_feature["y"]
+            
+            # Warn if dataset is very large (can cause browser issues)
+            if len(xx) > 100000:
+                print(f"Warning: Large dataset ({len(xx)} points) may cause browser rendering issues. Consider using a smaller region or higher compression ratio.", flush=True)
+            
+            type_picked = data_feature["type"]
+            color = data_feature["color"]
+            alpha = data_feature["alpha"]
+            fill_alpha = data_feature["fill_alpha"]
+            size = data_feature["size"]
+            
+            title = data_feature["title"]
+            if sample_title:
+                title = f"{sample_title} {title}"
 
-        # Part specific to the type of subplot
-        if type_picked == "curve":
-            p.varea(
-                x='x',
-                y1=0,
-                y2='y',
-                source=source,
-                fill_color=color,
-                fill_alpha=fill_alpha,
-                legend_label = title
-            )
-            p.line(
-                x='x',
-                y='y',
-                source=source,
-                line_color=color,
-                line_alpha=alpha,
-                line_width=size,
-                legend_label = title
-            )
-        elif type_picked == "bars":
-            p.vbar(
-                x='x',
-                bottom=0,
-                top='y',
-                source=source,
-                color=color,
-                alpha=alpha,
-                width=size,
-                legend_label = title
-            )
+            source = ColumnDataSource(data=dict(x=xx, y=yy))
+
+            # Part specific to the type of subplot
+            if type_picked == "curve":
+                p.varea(
+                    x='x',
+                    y1=0,
+                    y2='y',
+                    source=source,
+                    fill_color=color,
+                    fill_alpha=fill_alpha,
+                    legend_label = title
+                )
+                p.line(
+                    x='x',
+                    y='y',
+                    source=source,
+                    line_color=color,
+                    line_alpha=alpha,
+                    line_width=size,
+                    legend_label = title
+                )
+            elif type_picked == "bars":
+                p.vbar(
+                    x='x',
+                    bottom=0,
+                    top='y',
+                    source=source,
+                    color=color,
+                    alpha=alpha,
+                    width=size,
+                    legend_label = title
+                )
 
     # Add hover
     hover = HoverTool(tooltips=[("Position", "@x"), ("Number", "@y")], mode='vline')
@@ -231,7 +229,7 @@ def make_bokeh_subplot(feature_dict, height, x_range, sample_title=None, feature
     return p
 
 ### Function to get features of one variable
-def get_feature_data(cur, feature, contig_id, sample_id, contig_name=None, sample_name=None):
+def get_feature_data(cur, feature, contig_id, sample_id):
     """Get feature data for plotting.
 
     Args:
@@ -250,6 +248,8 @@ def get_feature_data(cur, feature, contig_id, sample_id, contig_name=None, sampl
     )
     rows = cur.fetchall()
 
+    # list_feature_dict has several elements if multiple variables share the same subplot
+    # example the clippings (right vs left)
     list_feature_dict = []
     for row in rows:
         type_picked, color, alpha, fill_alpha, size, title, feature_table = row
@@ -342,8 +342,7 @@ def generate_bokeh_plot_per_sample(conn, list_features, contig_name, sample_name
 
     for feature in requested_features:
         try:
-            list_feature_dict = get_feature_data(cur, feature, contig_id, sample_id,
-                                                 contig_name=contig_name, sample_name=sample_name)
+            list_feature_dict = get_feature_data(cur, feature, contig_id, sample_id)
             # Always create subplot, even if empty
             subplot_feature = make_bokeh_subplot(list_feature_dict, subplot_size, shared_xrange, feature_name=feature)
             subplots.append(subplot_feature)

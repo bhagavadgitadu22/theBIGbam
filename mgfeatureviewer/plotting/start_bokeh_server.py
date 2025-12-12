@@ -166,7 +166,7 @@ def modify_doc_factory(db_path):
     # Length filter slider (only if multiple contigs)
     length_slider = None
     if len(contig_lengths) > 1:
-        length_slider = RangeSlider(start=min_len, end=max_len, value=(min_len, max_len), step=1, title="Contig Length")
+        length_slider = RangeSlider(start=min_len, end=max_len, value=(min_len, max_len), step=1, title="Contig length")
 
     # Initialize variable_filter_rows list early so it's available in filter functions
     variable_filter_rows = []
@@ -199,7 +199,7 @@ def modify_doc_factory(db_path):
             
             # Query Summary table for contigs matching this filter
             filter_cur = conn.cursor()
-            if comparison == "with more points than":
+            if comparison == ">":
                 filter_cur.execute("""
                     SELECT DISTINCT Contig.Contig_name 
                     FROM Summary
@@ -207,7 +207,7 @@ def modify_doc_factory(db_path):
                     JOIN Variable ON Summary.Variable_id = Variable.Variable_id
                     WHERE Variable.Variable_name = ? AND Summary.Row_count > ?
                 """, (var_name, threshold))
-            else:  # "with less points than"
+            else:  # "<"
                 filter_cur.execute("""
                     SELECT DISTINCT Contig.Contig_name 
                     FROM Summary
@@ -234,8 +234,8 @@ def modify_doc_factory(db_path):
             comparison = filter_row.children[1].value
             threshold_str = filter_row.children[2].value
             
-            # Skip invalid filters
-            if not var_name or not threshold_str:
+            # Skip invalid filters - only apply if variable name is valid and exists
+            if not var_name or not threshold_str or var_name not in widgets['variables']:
                 continue
             
             try:
@@ -248,7 +248,7 @@ def modify_doc_factory(db_path):
             
             # Query Summary table for samples matching this filter
             filter_cur = conn.cursor()
-            if comparison == "with more points than":
+            if comparison == ">":
                 filter_cur.execute("""
                     SELECT DISTINCT Sample.Sample_name 
                     FROM Summary
@@ -256,7 +256,7 @@ def modify_doc_factory(db_path):
                     JOIN Variable ON Summary.Variable_id = Variable.Variable_id
                     WHERE Variable.Variable_name = ? AND Summary.Row_count > ?
                 """, (var_name, threshold))
-            else:  # "with less points than"
+            else:  # "<"
                 filter_cur.execute("""
                     SELECT DISTINCT Sample.Sample_name 
                     FROM Summary
@@ -369,6 +369,7 @@ def modify_doc_factory(db_path):
         sample_header.visible = not is_all
         sample_content.visible = not is_all
         filter_samples.visible = not is_all
+        widgets['sample_select'].visible = not is_all
 
         # Toggle Contig section
         contig_header.visible = not is_all
@@ -428,7 +429,7 @@ def modify_doc_factory(db_path):
         contig_children.append(length_slider)
     
     # Add "Per variable" filtering subsection
-    per_variable_title = Div(text="Per variable")
+    per_variable_title = Div(text="Per variable:")
     
     # Store all variable filter rows for dynamic management (already initialized above)
     variable_filters_column = column(sizing_mode="stretch_width")
