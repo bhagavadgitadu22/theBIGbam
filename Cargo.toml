@@ -7,21 +7,16 @@ edition = "2021"
 name = "mgfeatureviewer_rs"
 crate-type = ["cdylib", "rlib"]
 
-[[bin]]
-name = "mgfeatureviewer_calc"
-path = "src/main.rs"
+# Binary removed - use Python CLI instead: mgfeatureviewer calculate ...
+# (Python CLI calls Rust via PyO3 bindings, avoiding duplicate argument parsing)
 
 [features]
 default = []
-python = ["pyo3", "numpy"]
+python = ["pyo3"]
 
 [dependencies]
 # BAM/SAM reading
 rust-htslib = "0.51"
-
-# Parquet/Arrow output
-arrow = { version = "53", features = ["prettyprint"] }
-parquet = { version = "53", features = ["arrow", "zstd"] }
 
 # Parallelism
 rayon = "1.10"
@@ -29,7 +24,7 @@ rayon = "1.10"
 # CLI
 clap = { version = "4", features = ["derive"] }
 
-# GenBank parsing - use newer version
+# GenBank parsing
 gb-io = "0.9"
 
 # Error handling
@@ -47,7 +42,6 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 
 # PyO3 bindings (optional, enabled via "python" feature)
 pyo3 = { version = "0.23", features = ["extension-module", "anyhow"], optional = true }
-numpy = { version = "0.23", optional = true }
 
 [profile.release]
 lto = true

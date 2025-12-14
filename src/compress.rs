@@ -1,106 +1,278 @@
-//! Signal compression functions.
+//! Adaptive Run-Length Encoding (RLE) compression for genomic feature data.
 //!
-//! This module handles compressing feature signals for efficient storage.
-//! Python equivalent: `compress_signal()` in calculating_data.py:91-145
+//! Compresses signals by grouping consecutive positions with similar values into runs.
+//! - **Curves**: Uses adaptive RLE with self-referential threshold (compress_ratio * run_value).
+//! - **Bars**: Filters positions where `value > coverage * compress_ratio`. Consecutive 
+//!   significant positions are grouped into runs with average values.
 
 use crate::types::PlotType;
 
-/// Compress signal for storage (subsampling + outlier detection).
-/// Python equivalent: `compress_signal()` in calculating_data.py:91-145
-/// NOTE: Rust correctly identifies derivative outliers; Python has a bug (see PYTHON_COMPARISON.md)
-pub fn compress_signal(
+// ============================================================================
+// RUN STRUCTURE
+// ============================================================================
+
+/// A run of consecutive positions with similar values.
+#[derive(Debug, Clone)]
+pub struct Run {
+    /// First position in the run (1-indexed for database compatibility)
+    pub start_pos: i32,
+    /// Last position in the run (1-indexed, inclusive)
+    pub end_pos: i32,
+    /// The value for this run
+    pub value: f32,
+}
+
+// ============================================================================
+// MAIN COMPRESSION FUNCTION
+// ============================================================================
+
+/// Compress signal using adaptive run-length encoding.
+///
+/// # Algorithm
+/// 1. Start first run with position 0 and its value
+/// 2. For each subsequent position:
+///    - If |value - current_run_value| <= compress_ratio * |current_run_value|, extend run
+///    - Otherwise, close current run and start new one
+/// 3. Return runs as (start_pos, end_pos, value) tuples
+///
+/// Compress signal using adaptive RLE with optional coverage reference.
+///
+/// # Parameters
+/// - `values`: The signal to compress (e.g., coverage at each position)
+/// - `reference`: Optional reference signal (e.g., coverage for bar plots). Use None for curves.
+/// - `plot_type`: Curve (self-referential RLE) or Bars (threshold filtering)
+/// - `compress_ratio`: Relative tolerance (e.g., 10 for 10% change threshold)
+///
+/// # Algorithm
+/// - **Curves** (reference=None): Adaptive RLE. Compresses based on value changes.
+/// - **Bars** (reference=Some): Threshold filtering. Saves positions where `value > coverage * compress_ratio`.
+///   Consecutive significant positions are grouped into runs with average values.
+///
+/// # Example
+/// ```
+/// coverage =     [1000, 1000, 1000, 50,  50,  1000, 1000]
+/// mismatches =   [5,    5,    5,    5,   5,   5,    5]
+/// compress_ratio = 0.1
+///
+/// Position 1-3: 5 <= 0.1*1000 → filtered (insignificant)
+/// Position 4-5: 5 > 0.1*50 → saved as run (significant at low coverage)
+/// Position 6-7: 5 <= 0.1*1000 → filtered (insignificant)
+/// ```
+pub fn compress_signal_with_reference(
     values: &[f64],
+    reference: Option<&[f64]>,
     plot_type: PlotType,
-    step: usize,
-    z_thresh: f64,
-    deriv_thresh: f64,
-    max_points: usize,
-) -> (Vec<i32>, Vec<f32>) {
-    // calculating_data.py:91-140 - compress_signal()
-    let n = values.len();  // py:99
+    mut curve_ratio: f64,
+    mut bar_ratio: f64,
+) -> Vec<Run> {
+    let n = values.len();
     if n == 0 {
-        return (Vec::new(), Vec::new());
+        return Vec::new();
     }
 
-    // py:102-103 - Calculate mean and std
-    let mean: f64 = (values.iter().sum::<f64>() / n as f64 * 1e9).round() / 1e9;  // py:102 np.mean()
-    let variance: f64 = values.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / n as f64;
-    let std = (variance.sqrt().max(1e-9) * 1e9).round() / 1e9;  // py:103 np.std()
+    let mut runs = Vec::new();
 
-    // py:104 - Find value outliers: np.abs(feature_values - y_mean) > z_thresh * y_std
-    let val_outliers: Vec<usize> = values
-        .iter()
-        .enumerate()
-        .filter(|(_, &v)| {
-            let z = ((v - mean).abs() * 1e6).round() / 1e6;
-            let thresh = (z_thresh * std * 1e6).round() / 1e6;
-            z > thresh
-        })
-        .map(|(i, _)| i)
-        .collect();
-
-    let mut keep_idx: Vec<usize> = match plot_type {
-        PlotType::Curve => {
-            // py:107-108 - Regular subsampling: np.arange(0, n, step)
-            let mut regular: Vec<usize> = (0..n).step_by(step).collect();
-
-            // py:110-113 - Derivative outliers
-            let mut derivatives = vec![0.0f64; n];
-            for i in 1..n {
-                derivatives[i] = values[i] - values[i - 1];  // py:111 np.diff()
+    // For bars with reference: save positions where value > coverage * bar_ratio
+    curve_ratio *= 0.01; // Convert percentage to fraction
+    bar_ratio *= 0.01;   // Convert percentage to fraction
+    if matches!(plot_type, PlotType::Bars) && reference.is_some() {
+        let coverage = reference.unwrap();
+        let mut i = 0;
+        while i < n {
+            let val = values[i];
+            let threshold = coverage[i] * bar_ratio;
+            
+            if val > threshold {
+                // Found a significant position - check if consecutive positions also qualify
+                let run_start = i;
+                let mut run_sum = val;
+                let mut run_count = 1;
+                
+                // Extend run while consecutive positions are also significant
+                while i + 1 < n {
+                    let next_val = values[i + 1];
+                    let next_threshold = coverage[i + 1] * bar_ratio;
+                    if next_val > next_threshold {
+                        i += 1;
+                        run_sum += next_val;
+                        run_count += 1;
+                    } else {
+                        break;
+                    }
+                }
+                
+                // Save the run with average value
+                runs.push(Run {
+                    start_pos: (run_start + 1) as i32,
+                    end_pos: (i + 1) as i32,
+                    value: (run_sum / run_count as f64) as f32,
+                });
             }
-            let deriv_std = {
-                let deriv_mean: f64 = (derivatives.iter().sum::<f64>() / n as f64 * 1e9).round() / 1e9;
-                let deriv_var: f64 = derivatives.iter().map(|x| (x - deriv_mean).powi(2)).sum::<f64>() / n as f64;
-                (deriv_var.sqrt().max(1e-9) * 1e9).round() / 1e9  // py:112 np.std(dy)
-            };
-
-            // py:113 - der_outliers = np.abs(dy) > deriv_thresh * dy_std
-            // NOTE: Rust correctly keeps positions i-1 and i for each outlier
-            // Python py:116 has a bug with boolean array arithmetic (see PYTHON_COMPARISON.md)
-            let deriv_outliers: Vec<usize> = derivatives
-                .iter()
-                .enumerate()
-                .filter(|(_, &d)| {
-                    let z = (d.abs() * 1e6).round() / 1e6;
-                    let thresh = (deriv_thresh * deriv_std * 1e6).round() / 1e6;
-                    z > thresh
-                })
-                .flat_map(|(i, _)| if i > 0 { vec![i - 1, i] } else { vec![i] })  // correct behavior
-                .filter(|&i| i < n)
-                .collect();
-
-            // py:123-128 - Combine indices: merge_sorted_unique()
-            regular.extend(val_outliers);   // py:124-125
-            regular.extend(deriv_outliers);
-            if n > 0 {
-                regular.push(n - 1);  // py:122-123 - always include last point
-            }
-            regular.sort_unstable();
-            regular.dedup();
-            regular
+            i += 1;
         }
-        PlotType::Bars => {
-            // py:126-127 - For bars: only keep value outliers
-            val_outliers
-        }
-    };
+        return runs;
+    }
 
-    // py:137-141 - Apply max_points limit if needed
-    if keep_idx.len() > max_points {
-        let step_lim = keep_idx.len() / max_points;  // py:138
-        keep_idx = keep_idx.into_iter().step_by(step_lim).collect();  // py:139
-        if let Some(&last) = keep_idx.last() {
-            if last != n - 1 && n > 0 {
-                keep_idx.push(n - 1);  // py:140-141 - ensure last point included
-            }
+    // For curves: use adaptive RLE compression
+    let mut run_start = 0;
+    let mut run_value = values[0];
+    let mut run_sum = values[0];
+    let mut run_count = 1;
+
+    for i in 1..n {
+        let val = values[i];
+        
+        // Self-referential threshold for curves
+        let threshold = if run_value.abs() < 1e-9 {
+            curve_ratio
+        } else {
+            curve_ratio * run_value.abs()
+        };
+
+        if (val - run_value).abs() <= threshold {
+            // Extend current run
+            run_sum += val;
+            run_count += 1;
+            run_value = run_sum / run_count as f64;
+        } else {
+            // Close current run and save it
+            runs.push(Run {
+                start_pos: (run_start + 1) as i32,
+                end_pos: (run_start + run_count) as i32,
+                value: run_value as f32,
+            });
+
+            // Start new run
+            run_start = i;
+            run_value = val;
+            run_sum = val;
+            run_count = 1;
         }
     }
 
-    // py:144-145 - Build output: x = np.arange(1, ref_length+1)[keep_idx], y = feature_values[keep_idx]
-    // Positions are 1-indexed to match Python's np.arange(1, ref_length+1)
-    let xs: Vec<i32> = keep_idx.iter().map(|&i| (i + 1) as i32).collect();  // py:144
-    let ys: Vec<f32> = keep_idx.iter().map(|&i| values[i] as f32).collect();  // py:145
+    // Save the last run
+    runs.push(Run {
+        start_pos: (run_start + 1) as i32,
+        end_pos: (run_start + run_count) as i32,
+        value: run_value as f32,
+    });
 
-    (xs, ys)
+    runs
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_adaptive_rle_simple() {
+        // Test case from the documentation example
+        let values = vec![100.0, 102.0, 98.0, 200.0, 205.0, 95.0, 100.0];
+        let curve_ratio = 10.0; // 10% tolerance
+        let bar_ratio = 10.0; // 10% tolerance
+        
+        let runs = compress_signal_with_reference(&values, None, PlotType::Curve, curve_ratio, bar_ratio);
+        
+        // Expected runs (approximately):
+        // Run 1: positions 1-3, value ~100
+        // Run 2: positions 4-5, value ~202.5
+        // Run 3: positions 6-7, value ~97.5
+        assert_eq!(runs.len(), 3);
+        
+        assert_eq!(runs[0].start_pos, 1);
+        assert_eq!(runs[0].end_pos, 3);
+        assert!((runs[0].value - 100.0).abs() < 5.0); // ~100
+        
+        assert_eq!(runs[1].start_pos, 4);
+        assert_eq!(runs[1].end_pos, 5);
+        assert!((runs[1].value - 202.5).abs() < 5.0); // ~202.5
+        
+        assert_eq!(runs[2].start_pos, 6);
+        assert_eq!(runs[2].end_pos, 7);
+        assert!((runs[2].value - 97.5).abs() < 5.0); // ~97.5
+    }
+
+    #[test]
+    fn test_adaptive_rle_constant() {
+        // All values the same - should produce one run
+        let values = vec![50.0; 1000];
+        let curve_ratio = 10.0;
+        let bar_ratio = 10.0;
+        
+        let runs = compress_signal_with_reference(&values, None, PlotType::Curve, curve_ratio, bar_ratio);
+        
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].start_pos, 1);
+        assert_eq!(runs[0].end_pos, 1000);
+        assert_eq!(runs[0].value, 50.0);
+    }
+
+    #[test]
+    fn test_adaptive_rle_spike() {
+        // Constant with a spike - spike should be its own run
+        let values = vec![100.0, 100.0, 500.0, 100.0, 100.0];
+        let curve_ratio = 10.0;
+        let bar_ratio = 10.0;
+        
+        let runs = compress_signal_with_reference(&values, None, PlotType::Curve, curve_ratio, bar_ratio);
+        
+        // Should have 3 runs: [1-2], [3], [4-5]
+        assert_eq!(runs.len(), 3);
+        
+        assert_eq!(runs[0].start_pos, 1);
+        assert_eq!(runs[0].end_pos, 2);
+        
+        assert_eq!(runs[1].start_pos, 3);
+        assert_eq!(runs[1].end_pos, 3); // Singleton run
+        assert_eq!(runs[1].value, 500.0);
+        
+        assert_eq!(runs[2].start_pos, 4);
+        assert_eq!(runs[2].end_pos, 5);
+    }
+
+    #[test]
+    fn test_adaptive_rle_empty() {
+        let values: Vec<f64> = vec![];
+        let curve_ratio = 10.0;
+        let bar_ratio = 10.0;
+        
+        let runs = compress_signal_with_reference(&values, None, PlotType::Curve, curve_ratio, bar_ratio);
+        assert_eq!(runs.len(), 0);
+    }
+
+    #[test]
+    fn test_context_aware_bars() {
+        // Test bar threshold filtering with coverage reference
+        // Scenario: constant mismatches (5) but varying coverage
+        let coverage = vec![1000.0, 1000.0, 1000.0, 50.0, 50.0, 1000.0, 1000.0];
+        let mismatches = vec![5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0];
+        let curve_ratio = 10.0; // 10% threshold
+        let bar_ratio = 10.0;
+        
+        // Positions 0-2: 5 <= 0.1*1000 (100) → filtered out (insignificant at high coverage)
+        // Positions 3-4: 5 > 0.1*50 (5) → saved as run (significant at low coverage!)
+        // Positions 5-6: 5 <= 0.1*1000 (100) → filtered out (back to insignificant)
+        
+        let runs = compress_signal_with_reference(&mismatches, Some(&coverage), PlotType::Bars, curve_ratio, bar_ratio);
+        
+        // Should have only 1 run: the low-coverage spike (others filtered out)
+        assert_eq!(runs.len(), 1);
+        
+        assert_eq!(runs[0].start_pos, 4);
+        assert_eq!(runs[0].end_pos, 5);
+        assert_eq!(runs[0].value, 5.0);
+    }
+
+    #[test]
+    fn test_bars_without_reference_fallback() {
+        // Test that bars without reference fall back to curve-like behavior
+        let values = vec![5.0, 5.0, 50.0, 50.0, 5.0];
+        let curve_ratio = 10.0;
+        let bar_ratio = 10.0;
+        
+        let runs = compress_signal_with_reference(&values, None, PlotType::Bars, curve_ratio, bar_ratio);
+        
+        // Should create runs based on value changes (10x jump)
+        assert!(runs.len() >= 2); // At least spike separated
+    }
 }

@@ -1,47 +1,23 @@
-//! # MGFeatureViewer Rust Calculator
+//! # MGFeatureViewer Rust Calculator - DEPRECATED
 //!
-//! This is a 1:1 Rust port of the Python calculation code in `mgfeatureviewer/calculating_data.py`.
-//! It produces identical output values, with one minor difference noted below.
+//! **⚠️ This standalone Rust CLI is deprecated and no longer built.**
 //!
-//! ## Module Structure
+//! Use the Python CLI instead:
+//!     mgfeatureviewer calculate -g assembly.gbk -b bams/ -m coverage -o output.db
 //!
-//! - `types.rs`      - All structs and enums
-//! - `bam_reader.rs` - BAM file reading and sequencing type detection
-//! - `features.rs`   - Feature calculations (coverage, phagetermini, assemblycheck)
-//! - `compress.rs`   - Signal compression for storage
-//! - `db.rs`         - SQLite database operations
-//! - `parquet.rs`    - Parquet file writing
-//! - `genbank.rs`    - GenBank file parsing
-//! - `processing.rs` - Shared processing logic for CLI and Python bindings
+//! This file is kept for reference/debugging but is not compiled into a binary.
+//! The Python CLI (`mgfeatureviewer calculate`) calls the same Rust code via PyO3 bindings.
 //!
-//! ## Function Mapping (Rust → Python)
+//! ## Why deprecated?
+//! - Duplicate argument parsing (this file vs. calculating_data.py)
+//! - Maintenance burden - every parameter change needed updating in 2 places
+//! - Python CLI provides unified interface for all commands (calculate, plot, serve, etc.)
 //!
-//! | Rust Function                    | Python Function                              | Line  |
-//! |----------------------------------|----------------------------------------------|-------|
-//! | `detect_sequencing_type`         | `find_sequencing_type_from_bam`              | ~55   |
-//! | `process_reads_for_contig`       | `preprocess_reads`                           | ~497  |
-//! | `calculate_coverage`             | `calculate_coverage_numba`                   | ~182  |
-//! | `calculate_phagetermini`         | `get_features_phagetermini`                  | ~283  |
-//! | `calculate_assemblycheck`        | `get_features_assemblycheck`                 | ~410  |
-//! | `compress_signal`                | `compress_signal`                            | ~91   |
-//! | `process_sample`                 | `calculating_features_per_sample`            | ~651  |
-//!
-//! ## Known Difference: Derivative Outlier Detection
-//!
-//! The Python `compress_signal` function (line ~116) has a subtle bug in derivative outlier
-//! detection where it performs arithmetic on a boolean array. This causes Python to keep
-//! fewer positions after compression. The Rust implementation correctly identifies derivative
-//! outliers, so it may keep slightly more positions. **All values at common positions are
-//! identical** - Rust just preserves more data points as originally intended.
-//!
-//! ## Verification
-//!
-//! Run `python compare_values_only.py <sqlite_db> <parquet_dir>` to verify outputs match:
-//! - All 11 features tested across all samples
-//! - 100% exact match at common positions (0 difference)
-//! - Metadata tables match exactly
-//!
-//! See also: `PYTHON_COMPARISON.md` for side-by-side code examples.
+//! ## For developers
+//! If you need to test Rust code directly without Python, you can temporarily re-enable
+//! the binary in Cargo.toml by uncommenting the [[bin]] section.
+
+#![allow(dead_code)]
 
 use anyhow::Result;
 use clap::Parser;
@@ -69,7 +45,7 @@ struct Args {
     #[arg(short = 'm', long)]
     modules: String,
 
-    /// Output directory
+    /// Output database file (.db)
     #[arg(short = 'o', long)]
     output: PathBuf,
 
@@ -77,33 +53,25 @@ struct Args {
     #[arg(short = 'a', long, default_value = "")]
     annotation_tool: String,
 
-    /// Minimum coverage percentage for contig inclusion
+    /// Minimum alignment-length coverage proportion for contig inclusion (default 50%% change threshold)
     #[arg(long, default_value = "50")]
     min_coverage: f64,
 
-    /// Step size for compression
-    #[arg(long, default_value = "50")]
-    step: usize,
+    /// RLE compression ratio (default 10%% change threshold)
+    #[arg(long, default_value = "10")]
+    compress_ratio: f64,
 
-    /// Z-score threshold for outliers
-    #[arg(long, default_value = "3.0")]
-    outlier_threshold: f64,
-
-    /// Derivative threshold for outliers
-    #[arg(long, default_value = "3.0")]
-    derivative_threshold: f64,
-
-    /// Maximum points after compression
-    #[arg(long, default_value = "10000")]
-    max_points: usize,
+    /// Circular genome flag: set if assembly was doubled during mapping (enables modulo logic)
+    #[arg(long, default_value = "false")]
+    circular: bool,
 }
 
 fn main() -> Result<()> {
     let args = Args::parse();
 
-    // Check output directory doesn't exist
+    // Check output file doesn't exist
     if args.output.exists() {
-        anyhow::bail!("Output directory already exists: {:?}", args.output);
+        anyhow::bail!("Output file already exists: {:?}", args.output);
     }
 
     // Parse modules
@@ -112,10 +80,8 @@ fn main() -> Result<()> {
     let config = ProcessConfig {
         threads: args.threads,
         min_coverage: args.min_coverage,
-        step: args.step,
-        z_thresh: args.outlier_threshold,
-        deriv_thresh: args.derivative_threshold,
-        max_points: args.max_points,
+        compress_ratio: args.compress_ratio,
+        circular: args.circular,
     };
 
     // Call the shared processing function
@@ -126,6 +92,7 @@ fn main() -> Result<()> {
         &modules,
         &args.annotation_tool,
         &config,
+        true,  // create_indexes
     )?;
 
     if result.samples_failed > 0 {

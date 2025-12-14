@@ -3,24 +3,16 @@ import os
 import sys
 
 # Import command modules so we can share arg definitions and run functions
-from mgfeatureviewer import (
-    assembly_annotation,
-    calculating_data,
-    add_variable,
-    plotting_data_per_sample,
-    plotting_data_all_samples,
-    read_mapping,
-    start_bokeh_server,
+from mgfeatureviewer.utils import (
+    read_mapping, assembly_annotation
 )
+from mgfeatureviewer.database import add_variable, calculating_data
+from mgfeatureviewer.plotting import plotting_data_all_samples, plotting_data_per_sample, start_bokeh_server
 
 # Path helpers
 BASE_DIR = os.path.dirname(__file__)
 
 SCRIPTS = {
-    'mapping-per-sample': 'Map reads for a single sample (one CSV row)',
-    'mapping-all-samples': 'Map reads for multiple samples listed in a CSV',
-    'annotate-assemblies': 'Combine assemblies and run an annotator (pharokka/bakta)',
-
     'calculate': "Run feature calculations over BAMs",
     'add-variable': "Add an external variable from CSV to DB",
 
@@ -30,12 +22,44 @@ SCRIPTS = {
 
     'list-variables': 'List variables and metadata from DB',
     'list-samples': 'List samples from DB',
-    'list-contigs': 'List contigs from DB'
+    'list-contigs': 'List contigs from DB',
+
+    'mapping-per-sample': 'Map reads for a single sample (one CSV row)',
+    'mapping-all-samples': 'Map reads for multiple samples listed in a CSV',
+    'annotate-assemblies': 'Combine assemblies and run an annotator (pharokka/bakta)'
 }
 
 def build_argparser():
     p = argparse.ArgumentParser(prog="mgfeatureviewer", description="MGFeatureViewer command-line front-end")
     sub = p.add_subparsers(dest="cmd", required=True)
+
+    # modify database commands
+    sp = sub.add_parser('calculate', help=SCRIPTS['calculate'])
+    calculating_data.add_calculate_args(sp)
+
+    sp = sub.add_parser('add-variable', help=SCRIPTS['add-variable'])
+    add_variable.add_add_variable_args(sp)
+
+    # plotting commands
+    sp = sub.add_parser('plot-per-sample', help=SCRIPTS['plot-per-sample'])
+    plotting_data_per_sample.add_plot_per_sample_args(sp)
+
+    sp = sub.add_parser('plot-all-samples', help=SCRIPTS['plot-all-samples'])
+    plotting_data_all_samples.add_plot_all_args(sp)
+
+    sp = sub.add_parser('serve', help=SCRIPTS['serve'])
+    start_bokeh_server.add_serve_args(sp)
+
+    # database inspection
+    sp = sub.add_parser('list-variables', help=SCRIPTS['list-variables'])
+    sp.add_argument('-d', '--db', required=True)
+    sp.add_argument('--detailed', action='store_true', help='Enable detailed output')
+
+    sp = sub.add_parser('list-samples', help=SCRIPTS['list-samples'])
+    sp.add_argument('-d', '--db', required=True)
+
+    sp = sub.add_parser('list-contigs', help=SCRIPTS['list-contigs'])
+    sp.add_argument('-d', '--db', required=True)
 
     # mapping commands (use shared add_*_args functions from mapping modules)
     sp = sub.add_parser('mapping-per-sample', help=SCRIPTS['mapping-per-sample'])
@@ -47,56 +71,35 @@ def build_argparser():
     sp = sub.add_parser('annotate-assemblies', help=SCRIPTS['annotate-assemblies'])
     assembly_annotation.add_annotation_args(sp)
 
-    # Pipeline macro: mapping -> annotation -> calculate
-    sp = sub.add_parser('run-pipeline', help='Run mapping-all-samples, annotate-assemblies, then calculate sequentially')
-    # Inputs for mapping step
-    sp.add_argument('--csv', required=True, help='CSV for mapping (assembly,read1,read2,sequencing_type)')
+    # pipeline macro: mapping -> annotation -> calculate
+    # Reuses argument definitions from subcommands to avoid duplication
+    sp = sub.add_parser('run-pipeline', help='Run mapping, annotation, and calculation in sequence')
+    
+    # Mapping inputs - add both per-sample and all-samples args, make csv/read1 mutually exclusive
+    mapping_group = sp.add_mutually_exclusive_group(required=True)
+    mapping_group.add_argument('--csv', help='CSV file for mapping multiple samples (uses mapping-all-samples logic)')
+    mapping_group.add_argument('-r1', '--read1', help='Read1 file for single-sample mapping (uses mapping-per-sample logic)')
+    
+    # Common mapping args (shared between both mapping modes)
+    sp.add_argument('-r2', '--read2', help='Read2 file (optional, for paired-end reads)')
+    sp.add_argument('-a', '--assembly', required=True, help='Reference assembly (fasta file)')
+    sp.add_argument('-s', '--sequencing_type', required=True, choices=['long', 'short'], help='Sequencing type')
     sp.add_argument('--circular', action='store_true', help='Treat assemblies as circular')
-    # Inputs for annotation step
-    sp.add_argument('--annotation-tool', required=True, choices=['pharokka', 'bakta'], help='Annotation tool to run')
-    sp.add_argument('--annotation-db', required=True, help='Annotation tool DB identifier/path')
-    sp.add_argument('--meta', action='store_true', help='Pass --meta to annotator if the combined assembly contain contigs from several organisms')
-    # Inputs for calculate step
-    sp.add_argument('--modules', required=True, help='Comma-separated modules for calculation (coverage,phagetermini,assemblycheck)')
-    sp.add_argument('--db', required=True, help='Path to sqlite DB file to create for calculation (must NOT exist)')
-    # Parallelization options
-    sp.add_argument('--threads', type=int, default=4, help='Available CPUs (or CPUs per Slurm job if using Slurm)')
-    sp.add_argument('--use-slurm', action='store_true', help='Dispatch mapping and calculation tasks as Slurm array (per-sample)')
-    sp.add_argument('--max-concurrent', type=int, default=20, help='Maximal number of concurrent Slurm tasks')
-    sp.add_argument('--max-time', default='02:00:00', help='Maximum time per Slurm job')
-    sp.add_argument('--mem-per-cpu', type=int, default=8, help='Memory per CPU for Slurm jobs (in GB)')
-    sp.add_argument('--parallelize-contigs', action='store_true', help='When running calculation per-sample, parallelize contigs inside the job')
-
-    # calculate
-    sp = sub.add_parser('calculate', help=SCRIPTS['calculate'])
-    calculating_data.add_calculate_args(sp)
-
-    # add-variable
-    sp = sub.add_parser('add-variable', help=SCRIPTS['add-variable'])
-    add_variable.add_add_variable_args(sp)
-
-    # plot-per-sample
-    sp = sub.add_parser('plot-per-sample', help=SCRIPTS['plot-per-sample'])
-    plotting_data_per_sample.add_plot_per_sample_args(sp)
-
-    # plot-all-samples
-    sp = sub.add_parser('plot-all-samples', help=SCRIPTS['plot-all-samples'])
-    plotting_data_all_samples.add_plot_all_args(sp)
-
-    # serve
-    sp = sub.add_parser('serve', help=SCRIPTS['serve'])
-    start_bokeh_server.add_serve_args(sp)
-
-    # Database inspection (kept simple)
-    sp = sub.add_parser('list-variables', help=SCRIPTS['list-variables'])
-    sp.add_argument('-d', '--db', required=True)
-    sp.add_argument('--detailed', action='store_true', help='Enable detailed output')
-
-    sp = sub.add_parser('list-samples', help=SCRIPTS['list-samples'])
-    sp.add_argument('-d', '--db', required=True)
-
-    sp = sub.add_parser('list-contigs', help=SCRIPTS['list-contigs'])
-    sp.add_argument('-d', '--db', required=True)
+    sp.add_argument('-t', '--threads', type=int, default=4, help='Number of threads (default: 4)')
+    
+    # Annotation inputs
+    sp.add_argument('--annotation_tool', required=True, choices=['pharokka', 'bakta'], help='Annotation tool')
+    sp.add_argument('--annotation_db', required=True, help='Annotation database path')
+    sp.add_argument('--meta', action='store_true', help='Pass --meta to annotator for multi-organism assemblies')
+    
+    # Calculation inputs
+    sp.add_argument('-m', '--modules', required=True, help='Comma-separated modules (coverage,phagetermini,assemblycheck)')
+    sp.add_argument('--min_coverage', type=int, default=50, help='Minimum coverage for contig inclusion (default: 50%%)')
+    sp.add_argument('--curve_ratio', type=float, default=10, help='Compression ratio for curve plots (default: 10%%)')
+    sp.add_argument('--bar_ratio', type=float, default=10, help='Compression ratio for bar plots (default: 10%%)')
+    
+    # Output
+    sp.add_argument('-o', '--output', required=True, help='Output directory (must NOT exist)')
 
     return p
 
@@ -104,6 +107,10 @@ def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
     parser = build_argparser()
     args, extras = parser.parse_known_args(argv)
+
+    # Warn about unused arguments
+    if extras:
+        print(f"Warning: Unknown/unused arguments provided: {' '.join(extras)}", file=sys.stderr)
 
     # Dispatch to module run functions (shared-args approach)
     if args.cmd == 'calculate':
@@ -144,81 +151,93 @@ def main(argv=None):
             return 2
 
     if args.cmd == 'run-pipeline':
-        # Use the simple, user-provided run-pipeline args.
+        # Run mapping -> annotation -> calculate sequentially
         try:
-            db_path = args.db
-            db_dir = os.path.abspath(os.path.dirname(db_path)) or os.getcwd()
+            output_dir = os.path.abspath(args.output)
+            os.makedirs(output_dir, exist_ok=True)
+            
+            # Mapping outputs go into a bams subdirectory
+            map_outdir = os.path.join(output_dir, 'bams')
 
-            # Mapping outputs go into mgfeatureviewer_bams inside the DB directory
-            map_outdir = os.path.join(db_dir, 'mgfeatureviewer_bams')
+            # Determine if single-sample or multi-sample mapping
+            if args.csv:
+                # Multi-sample mapping using CSV
+                map_ns = argparse.Namespace(
+                    csv=args.csv,
+                    assembly=args.assembly,
+                    sequencing_type=args.sequencing_type,
+                    circular=args.circular,
+                    output_dir=map_outdir,
+                    threads=args.threads,
+                )
+                print(f"[1/3] Mapping: multiple samples from CSV -> {map_outdir}")
+                read_mapping.run_mapping_all(map_ns)
+            else:
+                # Single-sample mapping using read1/read2
+                if not args.read1:
+                    raise ValueError("Either --csv or --read1 must be provided")
+                
+                os.makedirs(map_outdir, exist_ok=True)
+                output_bam = os.path.join(map_outdir, f"{os.path.basename(args.assembly).split('.')[0]}.bam")
+                
+                map_ns = argparse.Namespace(
+                    read1=args.read1,
+                    read2=args.read2,
+                    assembly=args.assembly,
+                    sequencing_type=args.sequencing_type,
+                    circular=args.circular,
+                    output=output_bam,
+                    threads=args.threads,
+                )
+                print(f"[1/3] Mapping: single sample -> {output_bam}")
+                read_mapping.run_mapping_per_sample(map_ns)
 
-            # Build mapping namespace expected by read_mapping.run_mapping_all
-            map_ns = argparse.Namespace(
-                csv=args.csv,
-                assembly=None,
-                circular=bool(getattr(args, 'circular', False)),
-                output_dir=map_outdir,
-                threads=int(getattr(args, 'threads_per_job', 4)),
-                use_slurm=bool(getattr(args, 'use_slurm', False)),
-                max_concurrent=int(getattr(args, 'max_concurrent', 20)),
-                max_time=getattr(args, 'max_time', '02:00:00'),
-                mem_per_cpu=f"{getattr(args, 'mem_per_cpu', 8)}G",
-            )
-            print(f"Starting mapping step (CSV={map_ns.csv}) -> outputs: {map_ns.output_dir}")
-            print("Command args for mapping step:", dict(vars(map_ns)))
-            #read_mapping.run_mapping_all(map_ns)
-
-            # Annotation output target: place file in DB directory. Use .gbk target name;
-            # assembly_annotation will copy whatever bakta/pharokka produced into this path.
-            anno_target = os.path.join(db_dir, 'annotation_output.gbk')
+            # Annotation step
+            anno_target = os.path.join(output_dir, 'annotation.gbk')
             anno_ns = argparse.Namespace(
-                csv=args.csv,
-                assembly=None,
+                csv=args.csv if args.csv else None,
+                assembly=args.assembly if not args.csv else None,
                 annotation_tool=args.annotation_tool,
                 annotation_db=args.annotation_db,
-                meta=bool(getattr(args, 'meta', False)),
-                threads=int(getattr(args, 'threads_per_job', 4)),
+                meta=args.meta,
+                threads=args.threads,
                 genbank=anno_target,
             )
-            print(f"Starting annotation step (annotation_tool={anno_ns.annotation_tool}) -> output: {anno_ns.genbank}")
-            print("Command args for annotation step:", dict(vars(anno_ns)))
-            #assembly_annotation.run_annotation(anno_ns)
+            print(f"[2/3] Annotation: {args.annotation_tool} -> {anno_target}")
+            assembly_annotation.run_annotation(anno_ns)
 
-            # Ensure annotation output exists (assembly_annotation should have created it)
             if not os.path.exists(anno_target):
-                raise FileNotFoundError(f"Annotation output not found at expected location: {anno_target}")
+                raise FileNotFoundError(f"Annotation failed: {anno_target} not created")
 
-            # Calculation namespace: point to the annotation file and the mapping BAM directory
+            # Calculate step - use actual database path as output
+            final_db = os.path.join(output_dir, 'features.db')
             calc_ns = argparse.Namespace(
+                threads=args.threads,
                 genbank=anno_target,
                 bam_files=map_outdir,
                 modules=args.modules,
-                db=db_path,
+                output=final_db,
                 annotation_tool=args.annotation_tool,
-                min_coverage=50,
-                step=50,
-                outlier_threshold=3,
-                derivative_threshold=3,
-                max_points=10000,
-                threads=int(getattr(args, 'threads_per_job', 4)),
-                use_slurm=bool(getattr(args, 'use_slurm', False)),
-                max_concurrent=int(getattr(args, 'max_concurrent', 20)),
-                max_time=getattr(args, 'max_time', '02:00:00'),
-                mem_per_cpu=f"{getattr(args, 'mem_per_cpu', 8)}G",
-                parallelize_contigs=bool(getattr(args, 'parallelize_contigs', False)),
+                min_coverage=args.min_coverage,
+                compress_ratio=args.compress_ratio,
+                circular=args.circular,
             )
-            print(f"Starting calculation step (DB={calc_ns.db}) using genbank {calc_ns.genbank} and bams in {calc_ns.bam_files}")
-            print("Command args for calculation step:", dict(vars(calc_ns)))
+
+            print(f"[3/3] Calculate: modules={args.modules} -> {final_db}")
             calculating_data.run_calculate_args(calc_ns)
+            
+            print(f"\nPipeline complete! Output: {final_db}")
             return 0
         except Exception as e:
             print(f"Pipeline error: {e}")
+            import traceback
+            traceback.print_exc()
             return 2
 
     # DB inspection commands (call into package functions)
     if args.cmd == 'list-variables':
         try:
-            from mgfeatureviewer import database_getters
+            from mgfeatureviewer.database import database_getters
             database_getters.list_variables(args.db, args.detailed)
             return 0
         except Exception as e:
@@ -227,7 +246,7 @@ def main(argv=None):
 
     if args.cmd == 'list-samples':
         try:
-            from mgfeatureviewer import database_getters
+            from mgfeatureviewer.database import database_getters
             database_getters.list_samples(args.db)
             return 0
         except Exception as e:
@@ -236,7 +255,7 @@ def main(argv=None):
 
     if args.cmd == 'list-contigs':
         try:
-            from mgfeatureviewer import database_getters
+            from mgfeatureviewer.database import database_getters
             database_getters.list_contigs(args.db)
             return 0
         except Exception as e:
