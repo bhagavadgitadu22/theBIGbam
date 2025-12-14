@@ -5,6 +5,7 @@ import traceback
 
 from bokeh.layouts import column, row
 from bokeh.models import Div, InlineStyleSheet, Tooltip
+from bokeh.models.callbacks import CustomJS
 from bokeh.models.widgets import AutocompleteInput, CheckboxGroup, HelpButton, Button, RadioButtonGroup, CheckboxButtonGroup, RangeSlider, Select, TextInput
 from bokeh.models.plots import GridPlot
 
@@ -21,6 +22,8 @@ def build_controls(conn):
     rows = cur.fetchall()
     contigs = [r[0] for r in rows]
     contig_lengths = {r[0]: r[1] for r in rows}  # Dictionary mapping contig_name -> length
+    
+    # If only one contig, pre-fill and disable the field
     contig_select = AutocompleteInput(value=contigs[0] if len(contigs) == 1 else "", 
                                       completions=contigs, 
                                       min_characters=0,
@@ -28,11 +31,16 @@ def build_controls(conn):
                                       restrict=False,
                                       max_completions=20,
                                       placeholder="Type to search contigs...",
-                                      sizing_mode="stretch_width")
+                                      sizing_mode="stretch_width",
+                                      disabled=len(contigs) == 1)
+    if len(contigs) == 1:
+        contig_select.styles = {'background-color': '#e0e0e0'}
 
     # Widget Selector for Samples (autocomplete with max 20 suggestions)
     cur.execute("SELECT Sample_name FROM Sample ORDER BY Sample_name")
     samples = [r[0] for r in cur.fetchall()]
+    
+    # If only one sample, pre-fill and disable the field
     sample_select = AutocompleteInput(value=samples[0] if len(samples) == 1 else "", 
                                       completions=samples,
                                       min_characters=0,
@@ -40,7 +48,10 @@ def build_controls(conn):
                                       restrict=False,
                                       max_completions=20,
                                       placeholder="Type to search samples...",
-                                      sizing_mode="stretch_width")
+                                      sizing_mode="stretch_width",
+                                      disabled=len(samples) == 1)
+    if len(samples) == 1:
+        sample_select.styles = {'background-color': '#e0e0e0'}
     
     # Build presence mappings: sample -> contigs and contig -> samples
     cur.execute("""
@@ -103,7 +114,9 @@ def build_controls(conn):
         'contigs': contigs,
         'contig_lengths': contig_lengths,
         'samples': samples,
-        'variables': variables
+        'variables': variables,
+        'contig_originally_disabled': len(contigs) == 1,
+        'sample_originally_disabled': len(samples) == 1
     }
     return widgets
 
@@ -202,13 +215,23 @@ def modify_doc_factory(db_path):
         
         return allowed_samples
     
-    def update_widget_completions(widget, completions):
-        """Update widget completions and auto-fill if only one option."""
+    def update_widget_completions(widget, completions, originally_disabled=False):
+        """Update widget completions. Auto-fill and disable when filtering reduces to 1 option."""
         widget.completions = completions
+        
         if len(completions) == 1:
+            # Only one option after filtering: fill it, disable, and gray background
             widget.value = completions[0]
-        elif widget.value not in completions:
-            widget.value = ""
+            widget.disabled = True
+            widget.styles = {'background-color': '#e0e0e0'}
+        else:
+            # Multiple options: re-enable (unless originally disabled), restore normal background
+            if not originally_disabled:
+                widget.disabled = False
+                widget.styles = {}
+            # Clear value if it's not in the new completions
+            if widget.value not in completions:
+                widget.value = ""
     
     def refresh_contig_options():
         # Start with presence filter if active
@@ -229,7 +252,7 @@ def modify_doc_factory(db_path):
             var_allowed = get_variable_filtered_contigs()
             completions = [c for c in completions if c in var_allowed]
 
-        update_widget_completions(widgets['contig_select'], completions)
+        update_widget_completions(widgets['contig_select'], completions, widgets['contig_originally_disabled'])
 
     def refresh_sample_options():
         # Start with presence filter if active
@@ -245,7 +268,7 @@ def modify_doc_factory(db_path):
             var_allowed = get_variable_filtered_samples()
             completions = [s for s in completions if s in var_allowed]
 
-        update_widget_completions(widgets['sample_select'], completions)
+        update_widget_completions(widgets['sample_select'], completions, widgets['sample_originally_disabled'])
 
     ## Views function
     # Enforce single-variable selection when in "All samples" view
@@ -372,7 +395,8 @@ def modify_doc_factory(db_path):
         )
         
         plus_btn = Button(label="+", width=30, height=30)
-        minus_btn = Button(label="−", width=30, height=30, visible=len(variable_filter_rows) > 0)
+        # len(variable_filter_rows)>0 to make - button invisible initially
+        minus_btn = Button(label="−", width=30, height=30, visible=len(variable_filter_rows)>0)
         
         filter_row = row(var_input, comparison_select, threshold_input, plus_btn, minus_btn, sizing_mode="stretch_width")
         
@@ -383,9 +407,6 @@ def modify_doc_factory(db_path):
             # Make minus buttons visible when there's more than one row
             for row_widget in variable_filter_rows:
                 row_widget.children[-1].visible = True  # Last child is minus button
-            # Refresh options based on new filters
-            refresh_contig_options()
-            refresh_sample_options()
         
         def remove_row_callback():
             if filter_row in variable_filter_rows:
@@ -394,6 +415,7 @@ def modify_doc_factory(db_path):
                 # Hide minus buttons if only one row remains
                 if len(variable_filter_rows) == 1:
                     variable_filter_rows[0].children[-1].visible = False
+                    
                 # Refresh options after removing filter
                 refresh_contig_options()
                 refresh_sample_options()
@@ -401,11 +423,16 @@ def modify_doc_factory(db_path):
         plus_btn.on_click(add_row_callback)
         minus_btn.on_click(remove_row_callback)
         
-        # Refresh on value changes
-        var_input.on_change('value', lambda attr, old, new: (refresh_contig_options(), refresh_sample_options()))
-        comparison_select.on_change('value', lambda attr, old, new: (refresh_contig_options(), refresh_sample_options()))
-        threshold_input.on_change('value', lambda attr, old, new: (refresh_contig_options(), refresh_sample_options()))
+        # Create a shared callback that refreshes both contig and sample options
+        def refresh_on_filter_change(attr, old, new):
+            refresh_contig_options()
+            refresh_sample_options()
         
+        # Attach to all three inputs
+        var_input.on_change('value', refresh_on_filter_change)
+        comparison_select.on_change('value', refresh_on_filter_change)
+        threshold_input.on_change('value', refresh_on_filter_change)
+
         return filter_row
     
     ## Apply button function
@@ -551,7 +578,6 @@ def modify_doc_factory(db_path):
     
     contig_children.append(per_variable_header)
     contig_children.append(variable_filters_column)
-    
     contig_content = column(
         *contig_children,
         visible=True, sizing_mode="stretch_width"
@@ -695,7 +721,7 @@ def modify_doc_factory(db_path):
     controls_column = column(*controls_children, width=350, sizing_mode="stretch_height", spacing=0)
     controls_column.css_classes = ["left-col"]
 
-    main_placeholder = column(Div(text="<i>No plot yet. Select options and click Apply.</i>"), sizing_mode="stretch_both")
+    main_placeholder = column(Div(text="<i>No plot yet. Select one sample, one contig and at least one variable in \"One sample\" mode or one contig and one variable in \"All samples\" mode and click Apply.</i>"), sizing_mode="stretch_both")
 
     # Wrap everything in a Flex container
     layout = row(controls_column, main_placeholder, sizing_mode="stretch_both", spacing = 0)

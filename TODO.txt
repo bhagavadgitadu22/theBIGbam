@@ -1,0 +1,5 @@
+small bug per-variable 
+-> if i click directly on Contig field list of contigs is not actualised
+
+sometimes autocomplete for Contig field (and others?) do not work at first use 
+but work after clicking away and coming back -> do you know what is going one?
