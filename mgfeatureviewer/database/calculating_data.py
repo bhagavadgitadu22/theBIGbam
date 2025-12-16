@@ -10,7 +10,7 @@ except ImportError:
     _rust = None
 
 
-def calculating_all_features_parallel(list_modules, bam_files, output_db, min_coverage, curve_ratio, bar_ratio, circular=False, n_sample_cores=None, genbank_path=None, annotation_tool=""):
+def calculating_all_features_parallel(list_modules, bam_files, output_db, min_coverage, curve_ratio, bar_ratio, circular=False, n_sample_cores=None, sequencing_type=None, genbank_path=None, annotation_tool=""):
     """Process all BAM files in parallel using Rust bindings."""
     if not HAS_RUST:
         sys.exit("ERROR: Rust bindings (mgfeatureviewer_rs) are required but not available. Please install them first.")
@@ -27,6 +27,7 @@ def calculating_all_features_parallel(list_modules, bam_files, output_db, min_co
             output_db=output_db,
             modules=list_modules,
             threads=n_sample_cores,
+            sequencing_type=sequencing_type,
             annotation_tool=annotation_tool,
             min_coverage=float(min_coverage),
             curve_ratio=float(curve_ratio),
@@ -60,6 +61,7 @@ def add_calculate_args(parser):
     parser.add_argument("-m", "--modules", required=True, help="List of modules to compute (comma-separated) (options allowed: coverage, phagetermini, assemblycheck)")
     parser.add_argument("-o", "--output", required=True, help="Output database file path (.db)")
     parser.add_argument("--annotation_tool", default="", help="Optional: to color the contigs specify the annotation tool used (options allowed: pharokka)")
+    parser.add_argument('-s', '--sequencing_type', choices=['long', 'paired-short', 'single-short'], help='Sequencing type (long or short allowed)')
     parser.add_argument("--min_coverage", type=int, default=50, help="Minimum alignment-length coverage proportion for contig inclusion (default 50%% change threshold)")
     parser.add_argument('--curve_ratio', type=float, default=50, help='Compression ratio for curve plots (default: 50%%)')
     parser.add_argument('--bar_ratio', type=float, default=10, help='Compression ratio for bar plots (default: 10%%)')
@@ -93,7 +95,7 @@ def run_calculate_args(args):
     print("Calculating values for all requested features from mapping files...", flush=True)
     calculating_all_features_parallel(
         requested_modules, bam_files, output_db, min_coverage, curve_ratio, bar_ratio, circular, n_cores,
-        genbank_path=genbank_path, annotation_tool=annotation_tool if genbank_path else ""
+        sequencing_type=args.sequencing_type, genbank_path=genbank_path, annotation_tool=annotation_tool if genbank_path else ""
     )
 
     print(f"\nOutput written to: {output_db}", flush=True)

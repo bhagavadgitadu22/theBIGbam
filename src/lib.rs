@@ -83,6 +83,7 @@ mod python {
         output_db: &str,
         modules: Vec<String>,
         threads: usize,
+        sequencing_type: &str,
         annotation_tool: &str,
         min_coverage: f64,
         curve_ratio: f64,
@@ -91,7 +92,18 @@ mod python {
         create_indexes: bool,
     ) -> PyResult<Bound<'py, PyDict>> {
         use crate::processing::{run_all_samples, ProcessConfig};
+        use crate::bam_reader::detect_sequencing_type;
         use std::path::PathBuf;
+
+        // Parse sequencing type or fall back to auto-detection from first BAM
+        let seq_type = if let Some(st) = ProcessConfig::parse_sequencing_type(sequencing_type) {
+            st
+        } else {
+            // Auto-detect from first BAM file if not provided or invalid
+            let first_bam = PathBuf::from(&bam_files[0]);
+            detect_sequencing_type(&first_bam)
+                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("Failed to detect sequencing type: {}", e)))?
+        };
 
         let config = ProcessConfig {
             threads,
@@ -99,6 +111,7 @@ mod python {
             curve_ratio,
             bar_ratio,
             circular,
+            sequencing_type: seq_type,
         };
 
         // Convert string paths to PathBuf

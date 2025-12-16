@@ -65,22 +65,52 @@ def build_controls(conn):
         sample_to_contigs.setdefault(sample_name, set()).add(contig_name)
         contig_to_samples.setdefault(contig_name, set()).add(sample_name)
 
-    # Modules and variables
-    cur.execute("SELECT DISTINCT Variable_name FROM Variable")
-    variables = [r[0] for r in cur.fetchall()]
+    # Modules and variables - only show those with data in database
+    # First, identify which feature tables have at least one row with non-zero value
+    cur.execute("SELECT DISTINCT Feature_table_name FROM Variable")
+    feature_tables = [r[0] for r in cur.fetchall()]
+    
+    tables_with_data = set()
+    for table_name in feature_tables:
+        try:
+            # Check if table has any rows with non-zero values (not just any rows)
+            cur.execute(f"SELECT COUNT(*) FROM {table_name} WHERE Value > 0")
+            count = cur.fetchone()[0]
+            if count > 0:
+                tables_with_data.add(table_name)
+        except Exception:
+            # Table might not exist, skip it
+            continue
+    
+    # Get variables that have data (their feature table has rows)
+    cur.execute("SELECT DISTINCT Variable_name, Feature_table_name FROM Variable")
+    variables = [r[0] for r in cur.fetchall() if r[1] in tables_with_data]
 
-    cur.execute("SELECT DISTINCT Module FROM Variable")
+    # Get modules that have at least one variable with data
+    cur.execute("SELECT DISTINCT Module FROM Variable WHERE Feature_table_name IN ({})".format(
+        ','.join('?' * len(tables_with_data))
+    ), tuple(tables_with_data))
     modules = [r[0] for r in cur.fetchall()]
 
-    # For each module get variables
+    # For each module get variables (only those with data)
     module_names = []
     module_widgets = []
     variables_widgets = []
     helps_widgets = []
     for module in modules:
-        module_names.append(module)
-        cur.execute("SELECT DISTINCT Subplot, Help FROM Variable WHERE Module=?", (module,))
+        cur.execute(
+            "SELECT DISTINCT Subplot, Help FROM Variable WHERE Module=? AND Feature_table_name IN ({})".format(
+                ','.join('?' * len(tables_with_data))
+            ), 
+            (module,) + tuple(tables_with_data)
+        )
         variables_checkbox = [r[0] for r in cur.fetchall()]
+        
+        # Skip this module if no variables with data
+        if not variables_checkbox:
+            continue
+        
+        module_names.append(module)
 
         if len(variables_checkbox) > 1:
             module_checkbox = CheckboxGroup(labels=[module], active=[])
@@ -94,7 +124,12 @@ def build_controls(conn):
 
         # Consolidate help texts for the module into a single HelpButton attached to module title
         combined_help = ""
-        cur.execute("SELECT DISTINCT Subplot, Title, Help FROM Variable WHERE Module=?", (module,))
+        cur.execute(
+            "SELECT DISTINCT Subplot, Title, Help FROM Variable WHERE Module=? AND Feature_table_name IN ({})".format(
+                ','.join('?' * len(tables_with_data))
+            ),
+            (module,) + tuple(tables_with_data)
+        )
         records = cur.fetchall()
         for subplot, title, help_text in records:
             if help_text is None or not help_text.strip():
@@ -220,6 +255,48 @@ def modify_doc_factory(db_path):
         
         return allowed_samples
     
+    def get_variable_filtered_contigs_any_sample():
+        """Apply variable-based filters to get contigs where at least one sample meets criteria.
+        
+        Used in All samples view to suggest contigs that have sufficient data in at least one sample.
+        """
+        if not variable_filter_rows:
+            return set(orig_contigs)
+        
+        allowed_contigs = set(orig_contigs)
+        
+        for filter_row in variable_filter_rows:
+            var_name = filter_row.children[0].value
+            comparison = filter_row.children[1].value
+            threshold_str = filter_row.children[2].value
+            
+            # Skip invalid filters
+            if not var_name or not threshold_str or var_name not in widgets['variables']:
+                continue
+            
+            try:
+                threshold = int(threshold_str)
+                if threshold < 0:
+                    continue
+            except ValueError:
+                continue
+            
+            # Query Summary for contigs where at least one sample meets the threshold
+            operator = ">" if comparison == ">" else "<"
+            query = f"""
+                SELECT DISTINCT Contig.Contig_name 
+                FROM Summary
+                JOIN Contig ON Summary.Contig_id = Contig.Contig_id
+                JOIN Variable ON Summary.Variable_id = Variable.Variable_id
+                WHERE Variable.Variable_name = ? AND Summary.Row_count {operator} ?
+            """
+            cur = conn.cursor()
+            cur.execute(query, (var_name, threshold))
+            matching = {row[0] for row in cur.fetchall()}
+            allowed_contigs &= matching  # AND logic: all filters must match
+        
+        return allowed_contigs
+    
     def update_widget_completions(widget, completions, originally_disabled=False):
         """Update widget completions. Auto-fill and disable when filtering reduces to 1 option."""
         widget.completions = completions
@@ -252,9 +329,14 @@ def modify_doc_factory(db_path):
             min_length, max_length = length_slider.value
             completions = [c for c in completions if min_length <= widgets['contig_lengths'].get(c, 0) <= max_length]
         
-        # Apply variable-based filters (only in "Per sample" view)
+        # Apply variable-based filters
         if views.active == 0:
+            # "One sample" view: filter contigs based on selected sample's data
             var_allowed = get_variable_filtered_contigs()
+            completions = [c for c in completions if c in var_allowed]
+        else:
+            # "All samples" view: filter contigs where at least one sample has sufficient data
+            var_allowed = get_variable_filtered_contigs_any_sample()
             completions = [c for c in completions if c in var_allowed]
 
         update_widget_completions(widgets['contig_select'], completions, widgets['contig_originally_disabled'])
@@ -268,7 +350,7 @@ def modify_doc_factory(db_path):
         else:
             completions = list(orig_samples)
         
-        # Apply variable-based filters (only in "Per sample" view)
+        # Apply variable-based filters (only in "One sample" view)
         if views.active == 0:
             var_allowed = get_variable_filtered_samples()
             completions = [s for s in completions if s in var_allowed]
@@ -325,13 +407,13 @@ def modify_doc_factory(db_path):
         filter_samples.visible = not is_all
         widgets['sample_select'].visible = not is_all
 
-        # Contig section: keep visible but hide filter checkbox and per-variable filtering in All samples mode
+        # Contig section: keep visible but hide filter checkbox in All samples mode
         # separator_contigs always visible
         # contig_header always visible
         # contig_content always visible
+        # per_variable_header always visible
+        # variable_filters_column always visible
         filter_contigs.visible = not is_all
-        per_variable_header.visible = not is_all
-        variable_filters_column.visible = not is_all
         
         if is_all:
             filter_contigs.active = []
@@ -369,8 +451,8 @@ def modify_doc_factory(db_path):
         global_toggle_lock['locked'] = False
         
         # Refresh options after view change
-        # In "All samples": clears presence and per-variable filters, keeps only length filter
-        # In "Per sample": applies all filters including presence and per-variable
+        # In "All samples": apply length filter and per-variable filter (where any sample meets criteria)
+        # In "One sample": apply all filters including presence and per-variable (for selected sample)
         refresh_contig_options()
         if not is_all:
             refresh_sample_options()
@@ -566,7 +648,7 @@ def modify_doc_factory(db_path):
         contig_children.append(length_slider)
     
     # Add "Per variable" filtering subsection
-    combined_help = "Only suggest contigs where more (>) or less (<) than a specified number of points exist for the variable in the selected sample"
+    combined_help = "Filter by number of data points for a variable.\n\nOne sample view: Only suggest contigs where more (>) or less (<) than threshold points exist for the variable in the selected sample.\n\nAll samples view: Only suggest contigs where at least one sample has more (>) or less (<) than threshold points for the variable."
     tooltip = Tooltip(content=combined_help, position="right")
     help_per_variable = HelpButton(tooltip=tooltip, width=20, height=20, align="center", button_type="light", stylesheets=[stylesheet])
     per_variable_title = Div(text="Per variable:")
@@ -644,15 +726,19 @@ def modify_doc_factory(db_path):
         else:
             # No module checkbox exists: show plain title (with help if available)
             module_title_div = Div(text=f"{module_name}", align="center")
-            if help_btn is not None:
-                hdr = row(toggle_btn, module_title_div, help_btn, sizing_mode="stretch_width", align="center")
+
+            if help_tooltip is not None:
+                help_btn_title = HelpButton(tooltip=help_tooltip, width=20, height=20, align="center", button_type="light", stylesheets=[stylesheet])
+                hdr_title = row(toggle_btn, module_title_div, help_btn_title, sizing_mode="stretch_width", align="center")
             else:
-                hdr = row(toggle_btn, module_title_div, sizing_mode="stretch_width", align="center")
-            hdr.visible = True
-            controls_variables.append(hdr)
+                hdr_title = row(toggle_btn, module_title_div, sizing_mode="stretch_width", align="center")
+
+            # Single-variable modules always show title (no checkbox variant)
+            hdr_title.visible = True
+            controls_variables.append(hdr_title)
             
             module_header_with_checkbox.append(None)
-            module_header_with_title.append(hdr)
+            module_header_with_title.append(hdr_title)
 
         # Add the module's CheckboxButtonGroup for variables (this will be collapsible)
         # Start with modules folded (collapsed)

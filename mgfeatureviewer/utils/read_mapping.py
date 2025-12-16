@@ -19,7 +19,7 @@ def add_mapping_per_sample_args(parser):
     parser.add_argument('-r1', '--read1', required=True, help='Read1 (fastq/fastq.gz)')
     parser.add_argument('-r2', '--read2', help='Read2 (fastq/fastq.gz; optional)')
     parser.add_argument('-a', '--assembly', required=True, help='Reference assembly to map against (fasta file)')
-    parser.add_argument('--sequencing-type', required=True, choices=['long', 'short'], help='Sequencing type: use "long" or "short"')
+    parser.add_argument('--sequencing-type', required=True, choices=['long', 'paired-short', 'single-short'], help='Sequencing type: use "long" or "short"')
     parser.add_argument('--circular', action='store_true', help='Concatenate each contig to itself during the mapping to circularize it')
     parser.add_argument('-o', '--output', required=True, help='Output BAM path (will be written)')
     parser.add_argument('-t', '--threads', type=int, default=4, help='Threads to pass to minimap2 and samtools (default: 4)')

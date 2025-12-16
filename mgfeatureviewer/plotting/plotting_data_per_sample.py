@@ -130,22 +130,10 @@ def make_bokeh_subplot(feature_dict, height, x_range, sample_title=None, feature
     
     # Check if we have data to plot
     # You need one dataset of the subplots to have at least one non-zero points
-    has_data = bool(feature_dict) and any(
-        any(y > 0 for y in d["y"]) for d in feature_dict
-    )
+    has_data = bool(feature_dict) and any(any(y > 0 for y in d["y"]) for d in feature_dict)
     title = ""
     if not has_data:
-        xx = []
-        yy = []
-        title = f"{feature_name} has no data" if feature_name else "No data"
-        source = ColumnDataSource(data=dict(x=xx, y=yy))
-        p.varea(
-            x='x',
-            y1=0,
-            y2='y',
-            source=source,
-            legend_label = title
-        )
+        return None
     else:      
         for data_feature in feature_dict:
             xx = data_feature["x"]
@@ -165,7 +153,17 @@ def make_bokeh_subplot(feature_dict, height, x_range, sample_title=None, feature
             if sample_title:
                 title = f"{sample_title} {title}"
 
-            source = ColumnDataSource(data=dict(x=xx, y=yy))
+            # Prepare data for ColumnDataSource
+            data_dict = dict(x=xx, y=yy)
+            
+            # Add statistics if available
+            has_stats = data_feature.get("has_stats", False)
+            if has_stats:
+                data_dict["mean"] = data_feature["mean"]
+                data_dict["median"] = data_feature["median"]
+                data_dict["std"] = data_feature["std"]
+            
+            source = ColumnDataSource(data=data_dict)
 
             # Part specific to the type of subplot
             if type_picked == "curve":
@@ -199,8 +197,21 @@ def make_bokeh_subplot(feature_dict, height, x_range, sample_title=None, feature
                     legend_label = title
                 )
 
-    # Add hover
-    hover = HoverTool(tooltips=[("Position", "@x"), ("Number", "@y")], mode='vline')
+    # Add hover with conditional tooltips based on whether statistics are available
+    # Check if any feature in feature_dict has statistics
+    has_any_stats = any(d.get("has_stats", False) for d in feature_dict)
+    if has_any_stats:
+        tooltips = [
+            ("Position", "@x"),
+            ("Value", "@y"),
+            ("Mean", "@mean{0.00}"),
+            ("Median", "@median{0.00}"),
+            ("Std", "@std{0.00}")
+        ]
+    else:
+        tooltips = [("Position", "@x"), ("Value", "@y")]
+    
+    hover = HoverTool(tooltips=tooltips, mode='vline')
     p.add_tools(hover)
 
     # A clean style like your matplotlib setup
@@ -264,34 +275,72 @@ def get_feature_data(cur, feature, contig_id, sample_id):
             "y": []
         }
 
-        # Query Feature_* table (RLE format: First_position, Last_position, Value)
-        cur.execute(
-            f"SELECT First_position, Last_position, Value FROM {feature_table} "
-            "WHERE Sample_id=? AND Contig_id=? ORDER BY First_position",
-            (sample_id, contig_id)
-        )
+        # Check if this feature has statistics columns
+        features_with_stats = ["left_clippings", "right_clippings", "insertions"]
+        has_stats = feature_table in [f"Feature_{f}" for f in features_with_stats]
+
+        # Query Feature_* table (RLE format: First_position, Last_position, Value, and optionally Mean, Median, Std)
+        if has_stats:
+            cur.execute(
+                f"SELECT First_position, Last_position, Value, Mean, Median, Std FROM {feature_table} "
+                "WHERE Sample_id=? AND Contig_id=? ORDER BY First_position",
+                (sample_id, contig_id)
+            )
+        else:
+            cur.execute(
+                f"SELECT First_position, Last_position, Value FROM {feature_table} "
+                "WHERE Sample_id=? AND Contig_id=? ORDER BY First_position",
+                (sample_id, contig_id)
+            )
         data_rows = cur.fetchall()
         
         # Expand RLE runs into individual points for plotting
         x_coords = []
         y_coords = []
-        for first_pos, last_pos, value in data_rows:
+        mean_coords = []
+        median_coords = []
+        std_coords = []
+        
+        for row in data_rows:
+            if has_stats:
+                first_pos, last_pos, value, mean, median, std = row
+            else:
+                first_pos, last_pos, value = row
+                mean = median = std = None
+            
             if type_picked == "bars":
                 # For bars: expand to all positions in the run
                 for pos in range(first_pos, last_pos + 1):
                     x_coords.append(pos)
                     y_coords.append(value)
+                    if has_stats:
+                        mean_coords.append(mean)
+                        median_coords.append(median)
+                        std_coords.append(std)
             else:
                 # For curves: only need start and end points
                 if first_pos == last_pos:
                     x_coords.append(first_pos)
                     y_coords.append(value)
+                    if has_stats:
+                        mean_coords.append(mean)
+                        median_coords.append(median)
+                        std_coords.append(std)
                 else:
                     x_coords.extend([first_pos, last_pos])
                     y_coords.extend([value, value])
+                    if has_stats:
+                        mean_coords.extend([mean, mean])
+                        median_coords.extend([median, median])
+                        std_coords.extend([std, std])
         
         feature_dict["x"] = x_coords
         feature_dict["y"] = y_coords
+        feature_dict["has_stats"] = has_stats
+        if has_stats:
+            feature_dict["mean"] = mean_coords
+            feature_dict["median"] = median_coords
+            feature_dict["std"] = std_coords
 
         # Only append if we have actual data points
         if x_coords:
@@ -343,14 +392,11 @@ def generate_bokeh_plot_per_sample(conn, list_features, contig_name, sample_name
     for feature in requested_features:
         try:
             list_feature_dict = get_feature_data(cur, feature, contig_id, sample_id)
-            # Always create subplot, even if empty
             subplot_feature = make_bokeh_subplot(list_feature_dict, subplot_size, shared_xrange, feature_name=feature)
-            subplots.append(subplot_feature)
+            if subplot_feature is not None:
+                subplots.append(subplot_feature)
         except Exception as e:
             print(f"Error processing feature '{feature}': {e}", flush=True)
-            # Create empty subplot with error message
-            subplot_feature = make_bokeh_subplot([], subplot_size, shared_xrange, feature_name=f"{feature} (error)")
-            subplots.append(subplot_feature)
 
     # --- Combine all figures in a single grid with one shared toolbar ---
     if annotation_fig:

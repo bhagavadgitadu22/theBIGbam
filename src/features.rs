@@ -8,6 +8,7 @@
 use crate::cigar::{raw_cigar_consumes_ref, raw_cigar_is_clipping, raw_has_match_at_position, MdTag};
 use crate::circular::{increment_circular, increment_range};
 use crate::types::{FeatureMap, SequencingType};
+use std::collections::HashMap;
 
 // ============================================================================
 // Feature Arrays - Central Data Structure
@@ -60,15 +61,15 @@ pub struct FeatureArrays {
     // -------------------------------------------------------------------------
     // Assemblycheck Module
     // -------------------------------------------------------------------------
-    /// Reads with soft/hard clipping at their 5' end.
+    /// Lengths of soft/hard clippings at their 5' end (one entry per clipped read).
     /// High values may indicate assembly breakpoints or structural variants.
-    pub left_clippings: Vec<u64>,
+    pub left_clipping_lengths: Vec<Vec<u32>>,
 
-    /// Reads with soft/hard clipping at their 3' end.
-    pub right_clippings: Vec<u64>,
+    /// Lengths of soft/hard clippings at their 3' end (one entry per clipped read).
+    pub right_clipping_lengths: Vec<Vec<u32>>,
 
-    /// Insertion events from CIGAR (sequence in read but not in reference).
-    pub insertions: Vec<u64>,
+    /// Lengths of insertion events from CIGAR (one entry per insertion).
+    pub insertion_lengths: Vec<Vec<u32>>,
 
     /// Deletion events from CIGAR (sequence in reference but not in read).
     pub deletions: Vec<u64>,
@@ -136,9 +137,9 @@ impl FeatureArrays {
             coverage_reduced: vec![0u64; ref_length],
             reads_starts: vec![0u64; ref_length],
             reads_ends: vec![0u64; ref_length],
-            left_clippings: vec![0u64; ref_length],
-            right_clippings: vec![0u64; ref_length],
-            insertions: vec![0u64; ref_length],
+            left_clipping_lengths: vec![Vec::new(); ref_length],
+            right_clipping_lengths: vec![Vec::new(); ref_length],
+            insertion_lengths: vec![Vec::new(); ref_length],
             deletions: vec![0u64; ref_length],
             mismatches: vec![0u64; ref_length],
             sum_read_lengths: vec![0u64; ref_length],
@@ -222,16 +223,90 @@ impl FeatureArrays {
         results
     }
 
+    /// Compute count of clipping/insertion events at each position.
+    fn compute_counts(lengths: &[Vec<u32>]) -> Vec<u64> {
+        lengths.iter().map(|v| v.len() as u64).collect()
+    }
+
+    /// Compute mean length at each position (0 if no events).
+    fn compute_means(lengths: &[Vec<u32>]) -> Vec<u64> {
+        lengths.iter().map(|v| {
+            if v.is_empty() {
+                0
+            } else {
+                let sum: u64 = v.iter().map(|&x| x as u64).sum();
+                sum / v.len() as u64
+            }
+        }).collect()
+    }
+
+    /// Compute median length at each position (0 if no events).
+    fn compute_medians(lengths: &[Vec<u32>]) -> Vec<u64> {
+        lengths.iter().map(|v| {
+            if v.is_empty() {
+                0
+            } else {
+                let mut sorted = v.clone();
+                sorted.sort_unstable();
+                sorted[sorted.len() / 2] as u64
+            }
+        }).collect()
+    }
+
+    /// Compute standard deviation at each position (0 if no events).
+    fn compute_std_devs(lengths: &[Vec<u32>]) -> Vec<u64> {
+        lengths.iter().map(|v| {
+            if v.len() <= 1 {
+                0
+            } else {
+                let mean = v.iter().map(|&x| x as f64).sum::<f64>() / v.len() as f64;
+                let variance = v.iter()
+                    .map(|&x| {
+                        let diff = x as f64 - mean;
+                        diff * diff
+                    })
+                    .sum::<f64>() / v.len() as f64;
+                variance.sqrt() as u64
+            }
+        }).collect()
+    }
+
     /// Convert to FeatureMap for assemblycheck features.
     ///
     /// Only includes features relevant to the sequencing type:
     /// - Long reads: includes read_lengths
-    /// - Paired reads: includes insert_sizes and bad_orientations
-    pub fn to_assemblycheck_map(&self, seq_type: SequencingType) -> FeatureMap {
+    /// - Paired reads: includes insert_sizes, mate orientation data
+    /// 
+    /// Returns a tuple: (FeatureMap with counts, statistics for clippings/insertions)
+    pub fn to_assemblycheck_data(&self, seq_type: SequencingType) -> (
+        FeatureMap,
+        HashMap<String, (Vec<u64>, Vec<u64>, Vec<u64>)> // mean, median, std
+    ) {
         let mut results = FeatureMap::with_capacity(10);
-        results.insert("left_clippings".to_string(), self.left_clippings.clone());
-        results.insert("right_clippings".to_string(), self.right_clippings.clone());
-        results.insert("insertions".to_string(), self.insertions.clone());
+        let mut stats = HashMap::new();
+        
+        // Clipping and insertion with statistics
+        results.insert("left_clippings".to_string(), Self::compute_counts(&self.left_clipping_lengths));
+        stats.insert("left_clippings".to_string(), (
+            Self::compute_means(&self.left_clipping_lengths),
+            Self::compute_medians(&self.left_clipping_lengths),
+            Self::compute_std_devs(&self.left_clipping_lengths),
+        ));
+        
+        results.insert("right_clippings".to_string(), Self::compute_counts(&self.right_clipping_lengths));
+        stats.insert("right_clippings".to_string(), (
+            Self::compute_means(&self.right_clipping_lengths),
+            Self::compute_medians(&self.right_clipping_lengths),
+            Self::compute_std_devs(&self.right_clipping_lengths),
+        ));
+        
+        results.insert("insertions".to_string(), Self::compute_counts(&self.insertion_lengths));
+        stats.insert("insertions".to_string(), (
+            Self::compute_means(&self.insertion_lengths),
+            Self::compute_medians(&self.insertion_lengths),
+            Self::compute_std_devs(&self.insertion_lengths),
+        ));
+        
         results.insert("deletions".to_string(), self.deletions.clone());
         results.insert("mismatches".to_string(), self.mismatches.clone());
 
@@ -245,12 +320,12 @@ impl FeatureArrays {
         if seq_type.is_short_paired() {
             results.insert("sum_insert_sizes".to_string(), self.sum_insert_sizes.clone());
             results.insert("count_insert_sizes".to_string(), self.count_insert_sizes.clone());
-            results.insert("non-inward_pairs".to_string(), self.non_inward_pairs.clone());
+            results.insert("non_inward_pairs".to_string(), self.non_inward_pairs.clone());
             results.insert("mate_not_mapped".to_string(), self.mate_not_mapped.clone());
             results.insert("mate_on_another_contig".to_string(), self.mate_on_another_contig.clone());
         }
 
-        results
+        (results, stats)
     }
 }
 
@@ -532,13 +607,13 @@ pub fn process_read(
         // Check first and last CIGAR operations for soft/hard clips
         if !cigar_raw.is_empty() {
             // Check first operation
-            if let Some(&(op, _)) = cigar_raw.first() {
+            if let Some(&(op, len)) = cigar_raw.first() {
                 if raw_cigar_is_clipping(op) {
-                    arrays.left_clippings[start] += 1;
+                    arrays.left_clipping_lengths[start].push(len);
                 }
             }
             // Check last operation
-            if let Some(&(op, _)) = cigar_raw.last() {
+            if let Some(&(op, len)) = cigar_raw.last() {
                 if raw_cigar_is_clipping(op) {
                     // End position is where the clip happens
                     // (subtract 1 because end is exclusive)
@@ -548,7 +623,7 @@ pub fn process_read(
                     } else { 
                         ref_length - 1 
                     };
-                    arrays.right_clippings[clip_pos] += 1;
+                    arrays.right_clipping_lengths[clip_pos].push(len);
                 }
             }
         }
@@ -562,7 +637,7 @@ pub fn process_read(
                 'I' => {
                     // Insertion: extra sequence in read, not in reference
                     // Record at current reference position
-                    arrays.insertions[ref_pos % ref_length] += 1;
+                    arrays.insertion_lengths[ref_pos % ref_length].push(len);
                     // Insertions don't consume reference (ref_pos stays same)
                 }
                 'D' => {

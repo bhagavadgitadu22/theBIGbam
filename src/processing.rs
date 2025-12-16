@@ -28,7 +28,7 @@ use crate::db::{
 use crate::features::{FeatureArrays, ModuleFlags};
 use crate::genbank::parse_genbank;
 use crate::types::{
-    get_plot_type, ContigInfo, FeaturePoint, PlotType, PresenceData, ASSEMBLYCHECK_FEATURES
+    get_plot_type, ContigInfo, FeaturePoint, PlotType, PresenceData, SequencingType
 };
 
 /// Configuration for processing.
@@ -41,6 +41,21 @@ pub struct ProcessConfig {
     pub bar_ratio: f64,
     /// Circular genome flag: if true, assembly was doubled during mapping (enables modulo logic)
     pub circular: bool,
+    /// Sequencing type: determines which features to calculate
+    pub sequencing_type: SequencingType,
+}
+
+impl ProcessConfig {
+    /// Parse sequencing type string into SequencingType enum.
+    /// If empty or invalid, falls back to auto-detection from BAM file.
+    pub fn parse_sequencing_type(seq_type_str: &str) -> Option<SequencingType> {
+        match seq_type_str.to_lowercase().as_str() {
+            "long" => Some(SequencingType::Long),
+            "paired-short" => Some(SequencingType::ShortPaired),
+            "single-short" => Some(SequencingType::ShortSingle),
+            _ => None,
+        }
+    }
 }
 
 /// Result of processing all samples.
@@ -85,6 +100,57 @@ fn add_compressed_feature_with_reference(
         start_pos: run.start_pos,
         end_pos: run.end_pos,
         value: run.value,
+        mean: None,
+        median: None,
+        std: None,
+    }));
+}
+
+/// Compress and add feature points with statistics (for clippings/insertions).
+///
+/// Includes mean, median, and standard deviation from the length vectors.
+#[inline]
+fn add_compressed_feature_with_stats(
+    counts: &[f64],
+    means: &[f64],
+    medians: &[f64],
+    stds: &[f64],
+    reference: Option<&[f64]>,
+    feature: &str,
+    contig_name: &str,
+    config: &ProcessConfig,
+    output: &mut Vec<FeaturePoint>,
+) {
+    let plot_type = get_plot_type(feature);
+    let runs = compress_signal_with_reference(counts, reference, plot_type, config.curve_ratio, config.bar_ratio);
+
+    output.extend(runs.into_iter().map(|run| {
+        // For the run's position range, compute average statistics
+        let start_idx = (run.start_pos - 1) as usize;
+        let end_idx = run.end_pos as usize;
+        
+        let (mean_val, median_val, std_val) = if start_idx < means.len() {
+            let range_mean: f64 = means[start_idx..end_idx.min(means.len())].iter().sum::<f64>() 
+                / (end_idx - start_idx) as f64;
+            let range_median: f64 = medians[start_idx..end_idx.min(medians.len())].iter().sum::<f64>() 
+                / (end_idx - start_idx) as f64;
+            let range_std: f64 = stds[start_idx..end_idx.min(stds.len())].iter().sum::<f64>() 
+                / (end_idx - start_idx) as f64;
+            (Some(range_mean as f32), Some(range_median as f32), Some(range_std as f32))
+        } else {
+            (None, None, None)
+        };
+
+        FeaturePoint {
+            contig_name: contig_name.to_string(),
+            feature: feature.to_string(),
+            start_pos: run.start_pos,
+            end_pos: run.end_pos,
+            value: run.value,
+            mean: mean_val,
+            median: median_val,
+            std: std_val,
+        }
     }));
 }
 
@@ -94,9 +160,9 @@ fn add_features_from_arrays(
     contig_name: &str,
     config: &ProcessConfig,
     flags: ModuleFlags,
-    seq_type: crate::types::SequencingType,
     output: &mut Vec<FeaturePoint>,
 ) {
+    let seq_type = config.sequencing_type;
     // Coverage (always compress self-referentially)
     let primary_reads_f64: Vec<f64> = arrays.primary_reads.iter().map(|&x| x as f64).collect();
     if flags.coverage {
@@ -141,6 +207,9 @@ fn add_features_from_arrays(
             start_pos: run.start_pos,
             end_pos: run.end_pos,
             value: run.value,
+            mean: None,
+            median: None,
+            std: None,
         }));
         
         output.extend(reads_ends_runs.iter().map(|run| FeaturePoint {
@@ -149,6 +218,9 @@ fn add_features_from_arrays(
             start_pos: run.start_pos,
             end_pos: run.end_pos,
             value: run.value,
+            mean: None,
+            median: None,
+            std: None,
         }));
 
         // Tau: calculate tau values directly for positions where reads_starts or reads_ends were saved
@@ -179,25 +251,84 @@ fn add_features_from_arrays(
                     start_pos: run.start_pos,
                     end_pos: run.end_pos,
                     value: tau_value as f32,
+                    mean: None,
+                    median: None,
+                    std: None,
                 });
             }
         }
     }
 
-    // Assemblycheck features (all bars, use main coverage as reference)
+    // Assemblycheck features
     if flags.assemblycheck {
-        for &feature_name in ASSEMBLYCHECK_FEATURES {
-            let data = match feature_name {
-                "left_clippings" => &arrays.left_clippings,
-                "right_clippings" => &arrays.right_clippings,
-                "insertions" => &arrays.insertions,
-                "deletions" => &arrays.deletions,
-                "mismatches" => &arrays.mismatches,
-                "bad_orientations" => &arrays.bad_orientations,
-                _ => continue,
-            };
-            let values: Vec<f64> = data.iter().map(|&x| x as f64).collect();
-            add_compressed_feature_with_reference(&values, Some(&primary_reads_f64), feature_name, contig_name, config, output);
+        // Clippings and insertions with statistics
+        let left_clip_counts: Vec<f64> = arrays.left_clipping_lengths.iter().map(|v| v.len() as f64).collect();
+        let left_clip_means: Vec<f64> = arrays.left_clipping_lengths.iter().map(|v| {
+            if v.is_empty() { 0.0 } else { v.iter().map(|&x| x as f64).sum::<f64>() / v.len() as f64 }
+        }).collect();
+        let left_clip_medians: Vec<f64> = arrays.left_clipping_lengths.iter().map(|v| {
+            if v.is_empty() { 0.0 } else { let mut s = v.clone(); s.sort_unstable(); s[s.len()/2] as f64 }
+        }).collect();
+        let left_clip_stds: Vec<f64> = arrays.left_clipping_lengths.iter().map(|v| {
+            if v.len() <= 1 { 0.0 } else {
+                let mean = v.iter().map(|&x| x as f64).sum::<f64>() / v.len() as f64;
+                let var = v.iter().map(|&x| { let d = x as f64 - mean; d*d }).sum::<f64>() / v.len() as f64;
+                var.sqrt()
+            }
+        }).collect();
+        add_compressed_feature_with_stats(&left_clip_counts, &left_clip_means, &left_clip_medians, &left_clip_stds,
+            Some(&primary_reads_f64), "left_clippings", contig_name, config, output);
+
+        let right_clip_counts: Vec<f64> = arrays.right_clipping_lengths.iter().map(|v| v.len() as f64).collect();
+        let right_clip_means: Vec<f64> = arrays.right_clipping_lengths.iter().map(|v| {
+            if v.is_empty() { 0.0 } else { v.iter().map(|&x| x as f64).sum::<f64>() / v.len() as f64 }
+        }).collect();
+        let right_clip_medians: Vec<f64> = arrays.right_clipping_lengths.iter().map(|v| {
+            if v.is_empty() { 0.0 } else { let mut s = v.clone(); s.sort_unstable(); s[s.len()/2] as f64 }
+        }).collect();
+        let right_clip_stds: Vec<f64> = arrays.right_clipping_lengths.iter().map(|v| {
+            if v.len() <= 1 { 0.0 } else {
+                let mean = v.iter().map(|&x| x as f64).sum::<f64>() / v.len() as f64;
+                let var = v.iter().map(|&x| { let d = x as f64 - mean; d*d }).sum::<f64>() / v.len() as f64;
+                var.sqrt()
+            }
+        }).collect();
+        add_compressed_feature_with_stats(&right_clip_counts, &right_clip_means, &right_clip_medians, &right_clip_stds,
+            Some(&primary_reads_f64), "right_clippings", contig_name, config, output);
+
+        let insertion_counts: Vec<f64> = arrays.insertion_lengths.iter().map(|v| v.len() as f64).collect();
+        let insertion_means: Vec<f64> = arrays.insertion_lengths.iter().map(|v| {
+            if v.is_empty() { 0.0 } else { v.iter().map(|&x| x as f64).sum::<f64>() / v.len() as f64 }
+        }).collect();
+        let insertion_medians: Vec<f64> = arrays.insertion_lengths.iter().map(|v| {
+            if v.is_empty() { 0.0 } else { let mut s = v.clone(); s.sort_unstable(); s[s.len()/2] as f64 }
+        }).collect();
+        let insertion_stds: Vec<f64> = arrays.insertion_lengths.iter().map(|v| {
+            if v.len() <= 1 { 0.0 } else {
+                let mean = v.iter().map(|&x| x as f64).sum::<f64>() / v.len() as f64;
+                let var = v.iter().map(|&x| { let d = x as f64 - mean; d*d }).sum::<f64>() / v.len() as f64;
+                var.sqrt()
+            }
+        }).collect();
+        add_compressed_feature_with_stats(&insertion_counts, &insertion_means, &insertion_medians, &insertion_stds,
+            Some(&primary_reads_f64), "insertions", contig_name, config, output);
+
+        // Other assembly check features (no statistics)
+        let deletions_f64: Vec<f64> = arrays.deletions.iter().map(|&x| x as f64).collect();
+        add_compressed_feature_with_reference(&deletions_f64, Some(&primary_reads_f64), "deletions", contig_name, config, output);
+        
+        let mismatches_f64: Vec<f64> = arrays.mismatches.iter().map(|&x| x as f64).collect();
+        add_compressed_feature_with_reference(&mismatches_f64, Some(&primary_reads_f64), "mismatches", contig_name, config, output);
+        
+        if seq_type.is_short_paired() {
+            let non_inward_f64: Vec<f64> = arrays.non_inward_pairs.iter().map(|&x| x as f64).collect();
+            add_compressed_feature_with_reference(&non_inward_f64, Some(&primary_reads_f64), "non_inward_pairs", contig_name, config, output);
+            
+            let mate_unmapped_f64: Vec<f64> = arrays.mate_not_mapped.iter().map(|&x| x as f64).collect();
+            add_compressed_feature_with_reference(&mate_unmapped_f64, Some(&primary_reads_f64), "mate_not_mapped", contig_name, config, output);
+            
+            let mate_other_contig_f64: Vec<f64> = arrays.mate_on_another_contig.iter().map(|&x| x as f64).collect();
+            add_compressed_feature_with_reference(&mate_other_contig_f64, Some(&primary_reads_f64), "mate_on_another_contig", contig_name, config, output);
         }
 
         // Read lengths (curve for long reads, self-referential)
@@ -238,7 +369,6 @@ pub fn process_sample(
         .to_string_lossy()
         .replace("_with_MD", "");
 
-    let seq_type = detect_sequencing_type(bam_path)?;
     let flags = ModuleFlags::from_modules(modules);
 
     // Get number of reference sequences using temporary reader
@@ -270,7 +400,7 @@ pub fn process_sample(
 
             // Process contig using streaming - single pass over reads
             // Early coverage check happens inside process_contig_streaming
-            let (arrays, coverage_pct) = match process_contig_streaming(&mut bam, &ref_name, ref_length, seq_type, flags, config.circular, config.min_coverage) {
+            let (arrays, coverage_pct) = match process_contig_streaming(&mut bam, &ref_name, ref_length, config.sequencing_type, flags, config.circular, config.min_coverage) {
                 Ok(Some(result)) => result,
                 Ok(None) => return None,
                 Err(e) => {
@@ -287,7 +417,7 @@ pub fn process_sample(
 
             // Calculate features for this contig
             let mut features = Vec::new();
-            add_features_from_arrays(&arrays, &ref_name, config, flags, seq_type, &mut features);
+            add_features_from_arrays(&arrays, &ref_name, config, flags, &mut features);
 
             Some((features, presence))
         })

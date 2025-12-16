@@ -188,7 +188,7 @@ pub const VARIABLES: &[VariableConfig] = &[
 
     // Per read metrics (paired-reads)
     VariableConfig { name: "insert_sizes", subplot: "Insert sizes", module: "Paired-read metrics", plot_type: PlotType::Curve, color: "#ed8b00", alpha: 0.8, fill_alpha: 0.4, size: 1.0, title: "Insert Sizes", help: None },
-    VariableConfig { name: "non-inward_pairs", subplot: "Non-inward pairs", module: "Paired-read metrics", plot_type: PlotType::Bars, color: "#c94009", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Non-inward pairs", help: None },
+    VariableConfig { name: "non_inward_pairs", subplot: "Non-inward pairs", module: "Paired-read metrics", plot_type: PlotType::Bars, color: "#c94009", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Non-inward pairs", help: None },
     VariableConfig { name: "mate_not_nmapped", subplot: "Mate not mapped", module: "Paired-read metrics", plot_type: PlotType::Bars, color: "#302DD2", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Missing mates", help: None },
     VariableConfig { name: "mate_on_another_contig", subplot: "Mate on another contig", module: "Paired-read metrics", plot_type: PlotType::Bars, color: "#CFD22D", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Missing mates", help: None },
     
@@ -221,12 +221,12 @@ pub const PHAGETERMINI_FEATURES: &[&str] = &["coverage_reduced", "reads_starts",
 /// Feature names calculated by the assemblycheck module.
 ///
 /// These help identify potential assembly errors:
-/// - `left_clippings`: Soft/hard clips at read starts (potential breakpoints)
-/// - `right_clippings`: Soft/hard clips at read ends
-/// - `insertions`: Insertion events from CIGAR
+/// - `left_clippings`: Count of soft/hard clips at read starts (with Mean/Median/Std columns)
+/// - `right_clippings`: Count of soft/hard clips at read ends (with Mean/Median/Std columns)
+/// - `insertions`: Count of insertion events from CIGAR (with Mean/Median/Std columns)
 /// - `deletions`: Deletion events from CIGAR
 /// - `mismatches`: Base mismatches from MD tag
-/// - `non-inward_pairs`: Mates on same contig but not properly oriented (for paired reads)
+/// - `non_inward_pairs`: Mates on same contig but not properly oriented (for paired reads)
 /// - `mate_not_mapped`: Mate is unmapped (for paired reads)
 /// - `mate_on_another_contig`: Mate mapped to different contig (for paired reads)
 pub const ASSEMBLYCHECK_FEATURES: &[&str] = &[
@@ -235,7 +235,7 @@ pub const ASSEMBLYCHECK_FEATURES: &[&str] = &[
     "insertions",
     "deletions",
     "mismatches",
-    "non-inward_pairs",
+    "non_inward_pairs",
     "mate_not_mapped",
     "mate_on_another_contig",
 ];
@@ -386,6 +386,12 @@ pub struct FeaturePoint {
     pub end_pos: i32,
     /// The value for this run
     pub value: f32,
+    /// Optional mean (for clipping/insertion statistics)
+    pub mean: Option<f32>,
+    /// Optional median (for clipping/insertion statistics)
+    pub median: Option<f32>,
+    /// Optional standard deviation (for clipping/insertion statistics)
+    pub std: Option<f32>,
 }
 
 /// Records whether a contig was detected in a sample.

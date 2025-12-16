@@ -206,6 +206,9 @@ fn insert_annotations(conn: &Connection, annotations: &[FeatureAnnotation]) -> R
 
 /// Create Variable entries and Feature_* tables.
 fn create_variable_tables(conn: &Connection, create_indexes: bool) -> Result<()> {
+    // Features that need statistics columns
+    let features_with_stats = ["left_clippings", "right_clippings", "insertions"];
+
     for v in VARIABLES {
         let table_name = feature_table_name(v.name);
 
@@ -228,9 +231,26 @@ fn create_variable_tables(conn: &Connection, create_indexes: bool) -> Result<()>
         )
         .with_context(|| format!("Failed to insert variable: {}", v.name))?;
 
-        // Create the Feature_* table
-        conn.execute(
-            &format!(
+        // Create the Feature_* table with or without statistics columns
+        let table_sql = if features_with_stats.contains(&v.name) {
+            format!(
+                "CREATE TABLE {} (
+                    Feature_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    Contig_id INTEGER,
+                    Sample_id INTEGER,
+                    First_position INTEGER,
+                    Last_position INTEGER,
+                    Value REAL,
+                    Mean REAL,
+                    Median REAL,
+                    Std REAL,
+                    FOREIGN KEY(Contig_id) REFERENCES Contig(Contig_id),
+                    FOREIGN KEY(Sample_id) REFERENCES Sample(Sample_id)
+                )",
+                table_name
+            )
+        } else {
+            format!(
                 "CREATE TABLE {} (
                     Feature_id INTEGER PRIMARY KEY AUTOINCREMENT,
                     Contig_id INTEGER,
@@ -242,10 +262,11 @@ fn create_variable_tables(conn: &Connection, create_indexes: bool) -> Result<()>
                     FOREIGN KEY(Sample_id) REFERENCES Sample(Sample_id)
                 )",
                 table_name
-            ),
-            [],
-        )
-        .with_context(|| format!("Failed to create table: {}", table_name))?;
+            )
+        };
+
+        conn.execute(&table_sql, [])
+            .with_context(|| format!("Failed to create table: {}", table_name))?;
 
         if create_indexes {
             conn.execute(
@@ -289,7 +310,10 @@ pub fn create_temp_sample_db(temp_db_path: &Path) -> Result<Connection> {
             Contig_name TEXT,
             First_position INTEGER,
             Last_position INTEGER,
-            Value REAL
+            Value REAL,
+            Mean REAL,
+            Median REAL,
+            Std REAL
         )",
         [],
     )
@@ -304,12 +328,21 @@ pub fn write_features_to_temp_db(conn: &Connection, features: &[FeaturePoint]) -
         .context("Failed to begin feature transaction")?;
 
     let mut stmt = conn
-        .prepare("INSERT INTO TempFeatures (Variable_name, Contig_name, First_position, Last_position, Value) VALUES (?1, ?2, ?3, ?4, ?5)")
+        .prepare("INSERT INTO TempFeatures (Variable_name, Contig_name, First_position, Last_position, Value, Mean, Median, Std) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)")
         .context("Failed to prepare feature insert")?;
 
     for f in features {
-        stmt.execute(params![&f.feature, &f.contig_name, f.start_pos, f.end_pos, f.value])
-            .context("Failed to insert feature")?;
+        stmt.execute(params![
+            &f.feature,
+            &f.contig_name,
+            f.start_pos,
+            f.end_pos,
+            f.value,
+            f.mean,
+            f.median,
+            f.std
+        ])
+        .context("Failed to insert feature")?;
     }
 
     conn.execute("COMMIT", [])
@@ -452,14 +485,18 @@ fn merge_features(
         "INSERT INTO Summary (Contig_id, Sample_id, Variable_id, Row_count) VALUES (?1, ?2, ?3, ?4)"
     )?;
 
+    // Features that have statistics columns
+    let features_with_stats = ["left_clippings", "right_clippings", "insertions"];
+
     for v in VARIABLES {
         let table_name = feature_table_name(v.name);
+        let has_stats = features_with_stats.contains(&v.name);
 
-        let features: Vec<(String, i32, i32, f32)> = {
+        let features: Vec<(String, i32, i32, f32, Option<f32>, Option<f32>, Option<f32>)> = {
             let mut stmt = conn.prepare(
-                "SELECT Contig_name, First_position, Last_position, Value FROM src.TempFeatures WHERE Variable_name = ?1",
+                "SELECT Contig_name, First_position, Last_position, Value, Mean, Median, Std FROM src.TempFeatures WHERE Variable_name = ?1",
             )?;
-            let rows = stmt.query_map([v.name], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))?;
+            let rows = stmt.query_map([v.name], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?)))?;
             rows.filter_map(|r| r.ok()).collect()
         };
 
@@ -470,15 +507,30 @@ fn merge_features(
         // Track row counts per contig for summary
         let mut contig_row_counts: HashMap<i64, usize> = HashMap::new();
 
-        let mut stmt = conn.prepare(&format!(
-            "INSERT INTO {} (Contig_id, Sample_id, First_position, Last_position, Value) VALUES (?1, ?2, ?3, ?4, ?5)",
-            table_name
-        ))?;
+        // Use appropriate INSERT statement based on whether feature has statistics
+        if has_stats {
+            let mut stmt = conn.prepare(&format!(
+                "INSERT INTO {} (Contig_id, Sample_id, First_position, Last_position, Value, Mean, Median, Std) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                table_name
+            ))?;
 
-        for (contig_name, first_pos, last_pos, value) in features {
-            if let Some(&contig_id) = contig_name_to_id.get(&contig_name) {
-                stmt.execute(params![contig_id, sample_id, first_pos, last_pos, value])?;
-                *contig_row_counts.entry(contig_id).or_insert(0) += 1;
+            for (contig_name, first_pos, last_pos, value, mean, median, std) in features {
+                if let Some(&contig_id) = contig_name_to_id.get(&contig_name) {
+                    stmt.execute(params![contig_id, sample_id, first_pos, last_pos, value, mean, median, std])?;
+                    *contig_row_counts.entry(contig_id).or_insert(0) += 1;
+                }
+            }
+        } else {
+            let mut stmt = conn.prepare(&format!(
+                "INSERT INTO {} (Contig_id, Sample_id, First_position, Last_position, Value) VALUES (?1, ?2, ?3, ?4, ?5)",
+                table_name
+            ))?;
+
+            for (contig_name, first_pos, last_pos, value, _, _, _) in features {
+                if let Some(&contig_id) = contig_name_to_id.get(&contig_name) {
+                    stmt.execute(params![contig_id, sample_id, first_pos, last_pos, value])?;
+                    *contig_row_counts.entry(contig_id).or_insert(0) += 1;
+                }
             }
         }
 
