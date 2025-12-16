@@ -95,7 +95,7 @@ def build_argparser():
     # Calculation inputs
     sp.add_argument('-m', '--modules', required=True, help='Comma-separated modules (coverage,phagetermini,assemblycheck)')
     sp.add_argument('--min_coverage', type=int, default=50, help='Minimum coverage for contig inclusion (default: 50%%)')
-    sp.add_argument('--curve_ratio', type=float, default=10, help='Compression ratio for curve plots (default: 10%%)')
+    sp.add_argument('--curve_ratio', type=float, default=50, help='Compression ratio for curve plots (default: 50%%)')
     sp.add_argument('--bar_ratio', type=float, default=10, help='Compression ratio for bar plots (default: 10%%)')
     
     # Output

@@ -91,9 +91,15 @@ pub struct FeatureArrays {
     /// Count of proper pairs at each position (denominator for insert size average).
     pub count_insert_sizes: Vec<u64>,
 
-    /// Reads where mates have unexpected orientation (not proper pairs).
+    /// Reads where mates are on the same contig but not in proper inward orientation.
     /// High values may indicate structural rearrangements.
-    pub bad_orientations: Vec<u64>,
+    pub non_inward_pairs: Vec<u64>,
+
+    /// Reads where the mate is not mapped at all.
+    pub mate_not_mapped: Vec<u64>,
+
+    /// Reads where the mate is mapped to a different contig.
+    pub mate_on_another_contig: Vec<u64>,
 
     // -------------------------------------------------------------------------
     // Internal: Strand-specific tracking for phagetermini
@@ -139,7 +145,9 @@ impl FeatureArrays {
             count_read_lengths: vec![0u64; ref_length],
             sum_insert_sizes: vec![0u64; ref_length],
             count_insert_sizes: vec![0u64; ref_length],
-            bad_orientations: vec![0u64; ref_length],
+            non_inward_pairs: vec![0u64; ref_length],
+            mate_not_mapped: vec![0u64; ref_length],
+            mate_on_another_contig: vec![0u64; ref_length],
             start_plus: vec![0u64; ref_length],
             start_minus: vec![0u64; ref_length],
             end_plus: vec![0u64; ref_length],
@@ -237,7 +245,9 @@ impl FeatureArrays {
         if seq_type.is_short_paired() {
             results.insert("sum_insert_sizes".to_string(), self.sum_insert_sizes.clone());
             results.insert("count_insert_sizes".to_string(), self.count_insert_sizes.clone());
-            results.insert("bad_orientations".to_string(), self.bad_orientations.clone());
+            results.insert("non-inward_pairs".to_string(), self.non_inward_pairs.clone());
+            results.insert("mate_not_mapped".to_string(), self.mate_not_mapped.clone());
+            results.insert("mate_on_another_contig".to_string(), self.mate_on_another_contig.clone());
         }
 
         results
@@ -317,10 +327,15 @@ impl ModuleFlags {
 /// * `is_read1` - True if this is read1 of a pair
 /// * `is_proper_pair` - True if mates are properly oriented
 /// * `is_reverse` - True if read is on reverse strand
+/// * `is_secondary` - True if this is a secondary alignment
+/// * `is_supplementary` - True if this is a supplementary alignment
+/// * `mate_unmapped` - True if the mate is not mapped
+/// * `mate_other_contig` - True if the mate is mapped to a different contig
 /// * `cigar_raw` - CIGAR operations as (operation_char, length) tuples
 /// * `md_tag` - Optional MD tag bytes for mismatch detection
 /// * `seq_type` - Sequencing type (affects which features to calculate)
 /// * `flags` - Which modules are enabled
+/// * `circular` - True if genome is circular (affects position calculations)
 ///
 /// # Performance Optimizations
 ///
@@ -347,6 +362,8 @@ pub fn process_read(
     is_reverse: bool,
     is_secondary: bool,
     is_supplementary: bool,
+    mate_unmapped: bool,
+    mate_other_contig: bool,
     cigar_raw: &[(u32, u32)],
     md_tag: Option<&[u8]>,
     seq_type: SequencingType,
@@ -459,45 +476,53 @@ pub fn process_read(
             }
         }
 
-        // --- Insert sizes and bad orientations (short paired only) ---
+        // --- Insert sizes and mate orientation issues (short paired only) ---
         if seq_type.is_short_paired() {
             // Only track insert size for read1 with valid template length
             // (read2 would double-count the same fragment)
             let track_insert = is_read1 && template_length > 0;
             let tl = template_length as u64;
-            let bad_orient = !is_proper_pair;
+            
+            // Classify mate issues
+            let non_inward = !is_proper_pair && !mate_unmapped && !mate_other_contig;
+            let mate_unmapped_flag = mate_unmapped;
+            let mate_other_contig_flag = mate_other_contig;
 
-            // OPTIMIZATION: Hoist conditions outside loop and combine updates
-            // This creates 4 versions of the loop, but each one is tight
+            // OPTIMIZATION: Separate non-wrapping and wrapping paths
             if raw_end <= ref_length {
                 // Non-wrapping fast path
-                if track_insert && bad_orient {
-                    for p in raw_start..raw_end {
-                        arrays.sum_insert_sizes[p] += tl;
-                        arrays.count_insert_sizes[p] += 1;
-                        arrays.bad_orientations[p] += 1;
-                    }
-                } else if track_insert {
-                    for p in raw_start..raw_end {
+                for p in raw_start..raw_end {
+                    if track_insert {
                         arrays.sum_insert_sizes[p] += tl;
                         arrays.count_insert_sizes[p] += 1;
                     }
-                } else if bad_orient {
-                    for p in raw_start..raw_end {
-                        arrays.bad_orientations[p] += 1;
+                    if non_inward {
+                        arrays.non_inward_pairs[p] += 1;
+                    }
+                    if mate_unmapped_flag {
+                        arrays.mate_not_mapped[p] += 1;
+                    }
+                    if mate_other_contig_flag {
+                        arrays.mate_on_another_contig[p] += 1;
                     }
                 }
-                // If neither track_insert nor bad_orient, nothing to do
             } else {
-                // Wrapping case
+                // Wrapping case - only non_inward_pairs needs circular handling
+                // mate_not_mapped and mate_on_another_contig are position-independent issues
                 for pos in raw_start..raw_end {
                     let p = pos % ref_length;
                     if track_insert {
                         arrays.sum_insert_sizes[p] += tl;
                         arrays.count_insert_sizes[p] += 1;
                     }
-                    if bad_orient {
-                        arrays.bad_orientations[p] += 1;
+                    if non_inward {
+                        arrays.non_inward_pairs[p] += 1;
+                    }
+                    if mate_unmapped_flag {
+                        arrays.mate_not_mapped[p] += 1;
+                    }
+                    if mate_other_contig_flag {
+                        arrays.mate_on_another_contig[p] += 1;
                     }
                 }
             }

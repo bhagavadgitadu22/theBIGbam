@@ -52,6 +52,8 @@ This is the core of the MGFeatureViewer pipeline. It takes a genbank file contai
 
 If your mappings were performed in circular mode, do not forget to specify the --circular flag as described in the [the preprocessing section](docs/PREPROCESSING.md).
 
+TODO: beware that you need index files .bai for each bam file
+
 #### Features computed
 
 MGFeatureViewer performs fast Rust-based computations on your BAM files to extract values corresponding to the features you request. Three types of features can currently be computed:

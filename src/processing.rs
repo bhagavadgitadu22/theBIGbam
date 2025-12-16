@@ -48,6 +48,8 @@ pub struct ProcessResult {
     pub samples_processed: usize,
     pub samples_failed: usize,
     pub total_time_secs: f64,
+    pub processing_time_secs: f64,
+    pub writing_time_secs: f64,
 }
 
 /// Compress and add feature points to the output vector.
@@ -469,8 +471,10 @@ fn process_samples_parallel(
     });
 
     process_pb.finish_with_message("Done");
+    let processing_time = start_time.elapsed();
 
     // Merge all temp DBs sequentially (fast operation, not a bottleneck)
+    let merge_start = std::time::Instant::now();
     let temp_paths = temp_db_paths.lock().unwrap();
     for temp_db_path in temp_paths.iter() {
         let sample_name = temp_db_path
@@ -493,6 +497,7 @@ fn process_samples_parallel(
     let _ = fs::remove_dir(temp_dir);
     merge_pb.finish_with_message("Done");
 
+    let writing_time = merge_start.elapsed();
     let elapsed = start_time.elapsed();
     let failed = failed_count.load(Ordering::SeqCst);
 
@@ -500,6 +505,8 @@ fn process_samples_parallel(
         samples_processed: total - failed,
         samples_failed: failed,
         total_time_secs: elapsed.as_secs_f64(),
+        processing_time_secs: processing_time.as_secs_f64(),
+        writing_time_secs: writing_time.as_secs_f64(),
     })
 }
 

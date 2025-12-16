@@ -29,6 +29,10 @@ rustc --version
 cargo --version
 ```
 
+TODO: if not works possibly you need rustup default stable from the MGFeatureViewer root?
+sudo apt install -y clang libclang-dev
+module load llvm was enough to make it work for me
+
 ### Step 2: Install Python 3.9+
 
 Check if you have Python installed:

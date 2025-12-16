@@ -43,7 +43,13 @@ def calculating_all_features_parallel(list_modules, bam_files, output_db, min_co
     total_time = result.get("total_time", 0.0)
     samples_processed = result.get("samples_processed", 0)
     samples_failed = result.get("samples_failed", 0)
+    processing_time = result.get("processing_time", 0.0)
+    writing_time = result.get("writing_time", 0.0)
     print(f"Finished {samples_processed} samples in {total_time:.2f}s ({total_time/max(1, samples_processed):.2f}s per sample avg)", flush=True)
+    if total_time > 0:
+        processing_pct = (processing_time / total_time) * 100
+        writing_pct = (writing_time / total_time) * 100
+        print(f"{processing_pct:.1f}% of time spent calculating and {writing_pct:.1f}% writing the database", flush=True)
     if samples_failed > 0:
         print(f"Warning: {samples_failed} samples failed to process", flush=True)
 
@@ -55,7 +61,7 @@ def add_calculate_args(parser):
     parser.add_argument("-o", "--output", required=True, help="Output database file path (.db)")
     parser.add_argument("--annotation_tool", default="", help="Optional: to color the contigs specify the annotation tool used (options allowed: pharokka)")
     parser.add_argument("--min_coverage", type=int, default=50, help="Minimum alignment-length coverage proportion for contig inclusion (default 50%% change threshold)")
-    parser.add_argument('--curve_ratio', type=float, default=10, help='Compression ratio for curve plots (default: 10%%)')
+    parser.add_argument('--curve_ratio', type=float, default=50, help='Compression ratio for curve plots (default: 50%%)')
     parser.add_argument('--bar_ratio', type=float, default=10, help='Compression ratio for bar plots (default: 10%%)')
     parser.add_argument("--circular", action="store_true", help="Set if assembly was doubled during mapping (enables modulo logic)")
 

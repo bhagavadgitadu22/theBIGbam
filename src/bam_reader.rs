@@ -169,6 +169,8 @@ pub fn process_contig_streaming(
             record.is_reverse(),
             record.is_secondary(),
             record.is_supplementary(),
+            record.is_mate_unmapped(),
+            record.tid() != record.mtid(),
             &cigar_buf,
             md_tag,
             seq_type,
