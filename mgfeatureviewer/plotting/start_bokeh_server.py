@@ -175,28 +175,49 @@ def modify_doc_factory(db_path):
         return callback
     
     ## Helper functions to refresh completions based on filters
-    def query_summary_filtered_items(entity_type, var_name, comparison, threshold):
+    def query_summary_filtered_items(entity_type, var_name, comparison, threshold, filter_type="#Points"):
         """Query Summary table for filtered contig or sample names.
         
         Args:
             entity_type: "Contig" or "Sample"
             var_name: Variable name to filter by
             comparison: ">" or "<"
-            threshold: Row count threshold
+            threshold: Row count or max value threshold
+            filter_type: "#Points" for row count or "Max" for maximum value
         
         Returns:
             Set of matching entity names
         """
-        operator = ">" if comparison == ">" else "<"
-        query = f"""
-            SELECT DISTINCT {entity_type}.{entity_type}_name 
-            FROM Summary
-            JOIN {entity_type} ON Summary.{entity_type}_id = {entity_type}.{entity_type}_id
-            JOIN Variable ON Summary.Variable_id = Variable.Variable_id
-            WHERE Variable.Variable_name = ? AND Summary.Row_count {operator} ?
-        """
         cur = conn.cursor()
-        cur.execute(query, (var_name, threshold))
+        operator = ">" if comparison == ">" else "<"
+        
+        if filter_type == "#Points":
+            # Original behavior: filter by number of data points (Row_count)
+            query = f"""
+                SELECT DISTINCT {entity_type}.{entity_type}_name 
+                FROM Summary
+                JOIN {entity_type} ON Summary.{entity_type}_id = {entity_type}.{entity_type}_id
+                JOIN Variable ON Summary.Variable_id = Variable.Variable_id
+                WHERE Variable.Variable_name = ? AND Summary.Row_count {operator} ?
+            """
+            cur.execute(query, (var_name, threshold))
+        else:  # filter_type == "Max"
+            # New behavior: filter by maximum value in the feature table
+            # Get the feature table name for this variable
+            cur.execute("SELECT Feature_table_name FROM Variable WHERE Variable_name = ? LIMIT 1", (var_name,))
+            result = cur.fetchone()
+            if not result:
+                return set()
+            
+            feature_table = result[0]
+            query = f"""
+                SELECT DISTINCT {entity_type}.{entity_type}_name
+                FROM {feature_table} ft
+                JOIN {entity_type} ON ft.{entity_type}_id = {entity_type}.{entity_type}_id
+                WHERE ft.Value {operator} ?
+            """
+            cur.execute(query, (threshold,))
+        
         return {row[0] for row in cur.fetchall()}
     
     def get_variable_filtered_contigs():
@@ -207,22 +228,23 @@ def modify_doc_factory(db_path):
         allowed_contigs = set(orig_contigs)
         
         for filter_row in variable_filter_rows:
-            var_name = filter_row.children[0].value
-            comparison = filter_row.children[1].value
-            threshold_str = filter_row.children[2].value
+            filter_type = filter_row.children[0].value  # "#Points" or "Max"
+            var_name = filter_row.children[1].value
+            comparison = filter_row.children[2].value
+            threshold_str = filter_row.children[3].value
             
             # Skip invalid filters - only apply if variable name is valid and exists
             if not var_name or not threshold_str or var_name not in widgets['variables']:
                 continue
             
             try:
-                threshold = int(threshold_str)
+                threshold = int(threshold_str) if filter_type == "#Points" else float(threshold_str)
                 if threshold < 0:
                     continue
             except ValueError:
                 continue
             
-            matching = query_summary_filtered_items("Contig", var_name, comparison, threshold)
+            matching = query_summary_filtered_items("Contig", var_name, comparison, threshold, filter_type)
             allowed_contigs &= matching  # AND logic: all filters must match
         
         return allowed_contigs
@@ -235,22 +257,23 @@ def modify_doc_factory(db_path):
         allowed_samples = set(orig_samples)
         
         for filter_row in variable_filter_rows:
-            var_name = filter_row.children[0].value
-            comparison = filter_row.children[1].value
-            threshold_str = filter_row.children[2].value
+            filter_type = filter_row.children[0].value  # "#Points" or "Max"
+            var_name = filter_row.children[1].value
+            comparison = filter_row.children[2].value
+            threshold_str = filter_row.children[3].value
             
             # Skip invalid filters - only apply if variable name is valid and exists
             if not var_name or not threshold_str or var_name not in widgets['variables']:
                 continue
             
             try:
-                threshold = int(threshold_str)
+                threshold = int(threshold_str) if filter_type == "#Points" else float(threshold_str)
                 if threshold < 0:
                     continue
             except ValueError:
                 continue
             
-            matching = query_summary_filtered_items("Sample", var_name, comparison, threshold)
+            matching = query_summary_filtered_items("Sample", var_name, comparison, threshold, filter_type)
             allowed_samples &= matching  # AND logic: all filters must match
         
         return allowed_samples
@@ -266,32 +289,51 @@ def modify_doc_factory(db_path):
         allowed_contigs = set(orig_contigs)
         
         for filter_row in variable_filter_rows:
-            var_name = filter_row.children[0].value
-            comparison = filter_row.children[1].value
-            threshold_str = filter_row.children[2].value
+            filter_type = filter_row.children[0].value  # "#Points" or "Max"
+            var_name = filter_row.children[1].value
+            comparison = filter_row.children[2].value
+            threshold_str = filter_row.children[3].value
             
             # Skip invalid filters
             if not var_name or not threshold_str or var_name not in widgets['variables']:
                 continue
             
             try:
-                threshold = int(threshold_str)
+                threshold = int(threshold_str) if filter_type == "#Points" else float(threshold_str)
                 if threshold < 0:
                     continue
             except ValueError:
                 continue
             
-            # Query Summary for contigs where at least one sample meets the threshold
-            operator = ">" if comparison == ">" else "<"
-            query = f"""
-                SELECT DISTINCT Contig.Contig_name 
-                FROM Summary
-                JOIN Contig ON Summary.Contig_id = Contig.Contig_id
-                JOIN Variable ON Summary.Variable_id = Variable.Variable_id
-                WHERE Variable.Variable_name = ? AND Summary.Row_count {operator} ?
-            """
             cur = conn.cursor()
-            cur.execute(query, (var_name, threshold))
+            operator = ">" if comparison == ">" else "<"
+            
+            if filter_type == "#Points":
+                # Query Summary for contigs where at least one sample meets the threshold
+                query = f"""
+                    SELECT DISTINCT Contig.Contig_name 
+                    FROM Summary
+                    JOIN Contig ON Summary.Contig_id = Contig.Contig_id
+                    JOIN Variable ON Summary.Variable_id = Variable.Variable_id
+                    WHERE Variable.Variable_name = ? AND Summary.Row_count {operator} ?
+                """
+                cur.execute(query, (var_name, threshold))
+            else:  # filter_type == "Max"
+                # Query feature table for contigs where value exceeds threshold
+                cur.execute("SELECT Feature_table_name FROM Variable WHERE Variable_name = ? LIMIT 1", (var_name,))
+                result = cur.fetchone()
+                if not result:
+                    continue
+                
+                feature_table = result[0]
+                query = f"""
+                    SELECT DISTINCT Contig.Contig_name
+                    FROM {feature_table} ft
+                    JOIN Contig ON ft.Contig_id = Contig.Contig_id
+                    WHERE ft.Value {operator} ?
+                """
+                cur.execute(query, (threshold,))
+            
             matching = {row[0] for row in cur.fetchall()}
             allowed_contigs &= matching  # AND logic: all filters must match
         
@@ -459,6 +501,12 @@ def modify_doc_factory(db_path):
 
     def create_variable_filter_row():
         """Create a new row of variable filter widgets."""
+        type_select = Select(
+            options=["#Points", "Max"],
+            value="#Points",
+            width=70
+        )
+
         var_input = AutocompleteInput(
             completions=widgets['variables'],
             placeholder="Select variable...",
@@ -478,14 +526,27 @@ def modify_doc_factory(db_path):
         threshold_input = TextInput(
             value="0",
             placeholder="Threshold",
-            width=60
+            width=50
         )
         
         plus_btn = Button(label="+", width=30, height=30)
         # len(variable_filter_rows)>0 to make - button invisible initially
         minus_btn = Button(label="−", width=30, height=30, visible=len(variable_filter_rows)>0)
         
-        filter_row = row(var_input, comparison_select, threshold_input, plus_btn, minus_btn, sizing_mode="stretch_width")
+        filter_row = row(type_select, var_input, comparison_select, threshold_input, \
+                         plus_btn, minus_btn, sizing_mode="stretch_width")
+        filter_row.stylesheets = [stylesheet]
+        
+        # Adjust margins for better spacing
+        # (top, right, bottom, left)
+        children = filter_row.children
+        for i, w in enumerate(children):
+            if i == 0:
+                # leftmost: keep left margin
+                w.margin = (0, 0, 0, 5)
+            else:
+                # middle widgets: no horizontal margin
+                w.margin = (0, 0, 0, 0)
         
         def add_row_callback():
             new_row = create_variable_filter_row()
@@ -516,6 +577,7 @@ def modify_doc_factory(db_path):
             refresh_sample_options()
         
         # Attach to all three inputs
+        type_select.on_change('value', refresh_on_filter_change)
         var_input.on_change('value', refresh_on_filter_change)
         comparison_select.on_change('value', refresh_on_filter_change)
         threshold_input.on_change('value', refresh_on_filter_change)
@@ -648,7 +710,7 @@ def modify_doc_factory(db_path):
         contig_children.append(length_slider)
     
     # Add "Per variable" filtering subsection
-    combined_help = "Filter by number of data points for a variable.\n\nOne sample view: Only suggest contigs where more (>) or less (<) than threshold points exist for the variable in the selected sample.\n\nAll samples view: Only suggest contigs where at least one sample has more (>) or less (<) than threshold points for the variable."
+    combined_help = "Filter by variable characteristics.\n\n#Points: Filter by number of data points.\n  - One sample view: Show contigs where more/less than threshold points exist for the variable in selected sample\n  - All samples view: Show contigs where at least one sample has more/less than threshold points\n\nMax: Filter by maximum value.\n  - One sample view: Show contigs where the variable reaches above/below threshold value in selected sample\n  - All samples view: Show contigs where the variable reaches above/below threshold value in at least one sample"
     tooltip = Tooltip(content=combined_help, position="right")
     help_per_variable = HelpButton(tooltip=tooltip, width=20, height=20, align="center", button_type="light", stylesheets=[stylesheet])
     per_variable_title = Div(text="Per variable:")

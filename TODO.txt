@@ -6,3 +6,5 @@ but work after clicking away and coming back -> do you know what is going one?
 
 it takes place to put plots with no_data available and time to remove them
 -> should i not plot them in the first place?
+
+Remove right margin on + or - button of per-variable filter
