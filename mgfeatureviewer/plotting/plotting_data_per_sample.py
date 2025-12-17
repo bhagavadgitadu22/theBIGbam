@@ -156,6 +156,12 @@ def make_bokeh_subplot(feature_dict, height, x_range, sample_title=None, feature
             # Prepare data for ColumnDataSource
             data_dict = dict(x=xx, y=yy)
             
+            # Add width for bars if available
+            if type_picked == "bars" and "width" in data_feature:
+                data_dict["width"] = data_feature["width"]
+                data_dict["first_pos"] = data_feature["first_pos"]
+                data_dict["last_pos"] = data_feature["last_pos"]
+            
             # Add statistics if available
             has_stats = data_feature.get("has_stats", False)
             if has_stats:
@@ -186,6 +192,9 @@ def make_bokeh_subplot(feature_dict, height, x_range, sample_title=None, feature
                     legend_label = title
                 )
             elif type_picked == "bars":
+                # Use width from data if available (for RLE spans), otherwise use size parameter
+                # Pass column name (no '@') for variable width per bar, or scalar for uniform width
+                bar_width = 'width' if "width" in data_dict else size
                 p.vbar(
                     x='x',
                     bottom=0,
@@ -193,23 +202,38 @@ def make_bokeh_subplot(feature_dict, height, x_range, sample_title=None, feature
                     source=source,
                     color=color,
                     alpha=alpha,
-                    width=size,
+                    width=bar_width,
                     legend_label = title
                 )
 
     # Add hover with conditional tooltips based on whether statistics are available
-    # Check if any feature in feature_dict has statistics
+    # Check if any feature in feature_dict has statistics or variable width
     has_any_stats = any(d.get("has_stats", False) for d in feature_dict)
-    if has_any_stats:
+    has_variable_width = any("width" in d for d in feature_dict)
+    
+    if has_variable_width:
+        # For bars with spans, show first and last position
         tooltips = [
-            ("Position", "@x"),
-            ("Value", "@y"),
-            ("Mean", "@mean{0.00}"),
-            ("Median", "@median{0.00}"),
-            ("Std", "@std{0.00}")
+            ("First position", "@first_pos{0,0}"),
+            ("Last position", "@last_pos{0,0}"),
+            ("Value", "@y{0.0}")
+        ]
+        if has_any_stats:
+            tooltips.extend([
+                ("Mean", "@mean{0.0}"),
+                ("Median", "@median{0.0}"),
+                ("Std", "@std{0.0}")
+            ])
+    elif has_any_stats:
+        tooltips = [
+            ("Position", "@x{0,0}"),
+            ("Value", "@y{0.0}"),
+            ("Mean", "@mean{0.0}"),
+            ("Median", "@median{0.0}"),
+            ("Std", "@std{0.0}")
         ]
     else:
-        tooltips = [("Position", "@x"), ("Value", "@y")]
+        tooltips = [("Position", "@x{0,0}"), ("Value", "@y{0.0}")]
     
     hover = HoverTool(tooltips=tooltips, mode='vline')
     p.add_tools(hover)
@@ -301,6 +325,11 @@ def get_feature_data(cur, feature, contig_id, sample_id):
         median_coords = []
         std_coords = []
         
+        # Store widths for bars (needed for plotting spans)
+        width_coords = []
+        first_pos_coords = []
+        last_pos_coords = []
+        
         for row in data_rows:
             if has_stats:
                 first_pos, last_pos, value, mean, median, std = row
@@ -309,14 +338,18 @@ def get_feature_data(cur, feature, contig_id, sample_id):
                 mean = median = std = None
             
             if type_picked == "bars":
-                # For bars: expand to all positions in the run
-                for pos in range(first_pos, last_pos + 1):
-                    x_coords.append(pos)
-                    y_coords.append(value)
-                    if has_stats:
-                        mean_coords.append(mean)
-                        median_coords.append(median)
-                        std_coords.append(std)
+                # For bars: use midpoint as x position and calculate width
+                midpoint = (first_pos + last_pos) / 2.0
+                width = last_pos - first_pos + 1
+                x_coords.append(midpoint)
+                y_coords.append(value)
+                width_coords.append(width)
+                first_pos_coords.append(first_pos)
+                last_pos_coords.append(last_pos)
+                if has_stats:
+                    mean_coords.append(mean)
+                    median_coords.append(median)
+                    std_coords.append(std)
             else:
                 # For curves: only need start and end points
                 if first_pos == last_pos:
@@ -337,6 +370,10 @@ def get_feature_data(cur, feature, contig_id, sample_id):
         feature_dict["x"] = x_coords
         feature_dict["y"] = y_coords
         feature_dict["has_stats"] = has_stats
+        if type_picked == "bars":
+            feature_dict["width"] = width_coords
+            feature_dict["first_pos"] = first_pos_coords
+            feature_dict["last_pos"] = last_pos_coords
         if has_stats:
             feature_dict["mean"] = mean_coords
             feature_dict["median"] = median_coords

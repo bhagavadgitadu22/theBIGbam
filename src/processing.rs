@@ -19,7 +19,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
 
-use crate::bam_reader::{detect_sequencing_type, process_contig_streaming};
+use crate::bam_reader::process_contig_streaming;
 use crate::compress::compress_signal_with_reference;
 use crate::db::{
     create_metadata_db, create_temp_sample_db, finalize_db, merge_temp_db_into_main,
@@ -30,6 +30,35 @@ use crate::genbank::parse_genbank;
 use crate::types::{
     get_plot_type, ContigInfo, FeaturePoint, PlotType, PresenceData, SequencingType
 };
+
+/// Merge consecutive runs with identical values (0% tolerance RLE).
+/// 
+/// Applied to features that should be constant along entire reads (deletions, mate flags).
+/// Only merges runs that are BOTH adjacent (end+1 == start) AND have the same value.
+#[inline]
+fn merge_identical_runs(runs: Vec<crate::compress::Run>) -> Vec<crate::compress::Run> {
+    if runs.is_empty() {
+        return runs;
+    }
+    
+    let mut merged = Vec::new();
+    let mut current = runs[0].clone();
+    
+    for run in runs.into_iter().skip(1) {
+        // Only merge if runs are adjacent AND have the same value
+        if current.end_pos + 1 == run.start_pos && (run.value - current.value).abs() < f32::EPSILON {
+            // Adjacent runs with same value: extend the current run
+            current.end_pos = run.end_pos;
+        } else {
+            // Either not adjacent or different value: push current and start new
+            merged.push(current);
+            current = run;
+        }
+    }
+    merged.push(current);
+    
+    merged
+}
 
 /// Configuration for processing.
 #[derive(Clone)]
@@ -185,10 +214,149 @@ fn add_features_from_arrays(
         add_compressed_feature(&supplementary_reads_f64, "supplementary_reads", contig_name, config, output);
     }
 
+    // Assemblycheck features
+    if flags.assemblycheck {
+        // Clippings and insertions with statistics
+        let left_clip_counts: Vec<f64> = arrays.left_clipping_lengths.iter().map(|v| v.len() as f64).collect();
+        let left_clip_means: Vec<f64> = arrays.left_clipping_lengths.iter().map(|v| {
+            if v.is_empty() { 0.0 } else { v.iter().map(|&x| x as f64).sum::<f64>() / v.len() as f64 }
+        }).collect();
+        let left_clip_medians: Vec<f64> = arrays.left_clipping_lengths.iter().map(|v| {
+            if v.is_empty() { 0.0 } else { let mut s = v.clone(); s.sort_unstable(); s[s.len()/2] as f64 }
+        }).collect();
+        let left_clip_stds: Vec<f64> = arrays.left_clipping_lengths.iter().map(|v| {
+            if v.len() <= 1 { 0.0 } else {
+                let mean = v.iter().map(|&x| x as f64).sum::<f64>() / v.len() as f64;
+                let var = v.iter().map(|&x| { let d = x as f64 - mean; d*d }).sum::<f64>() / v.len() as f64;
+                var.sqrt()
+            }
+        }).collect();
+        add_compressed_feature_with_stats(&left_clip_counts, &left_clip_means, &left_clip_medians, &left_clip_stds,
+            Some(&primary_reads_f64), "left_clippings", contig_name, config, output);
+
+        let right_clip_counts: Vec<f64> = arrays.right_clipping_lengths.iter().map(|v| v.len() as f64).collect();
+        let right_clip_means: Vec<f64> = arrays.right_clipping_lengths.iter().map(|v| {
+            if v.is_empty() { 0.0 } else { v.iter().map(|&x| x as f64).sum::<f64>() / v.len() as f64 }
+        }).collect();
+        let right_clip_medians: Vec<f64> = arrays.right_clipping_lengths.iter().map(|v| {
+            if v.is_empty() { 0.0 } else { let mut s = v.clone(); s.sort_unstable(); s[s.len()/2] as f64 }
+        }).collect();
+        let right_clip_stds: Vec<f64> = arrays.right_clipping_lengths.iter().map(|v| {
+            if v.len() <= 1 { 0.0 } else {
+                let mean = v.iter().map(|&x| x as f64).sum::<f64>() / v.len() as f64;
+                let var = v.iter().map(|&x| { let d = x as f64 - mean; d*d }).sum::<f64>() / v.len() as f64;
+                var.sqrt()
+            }
+        }).collect();
+        add_compressed_feature_with_stats(&right_clip_counts, &right_clip_means, &right_clip_medians, &right_clip_stds,
+            Some(&primary_reads_f64), "right_clippings", contig_name, config, output);
+
+        let insertion_counts: Vec<f64> = arrays.insertion_lengths.iter().map(|v| v.len() as f64).collect();
+        let insertion_means: Vec<f64> = arrays.insertion_lengths.iter().map(|v| {
+            if v.is_empty() { 0.0 } else { v.iter().map(|&x| x as f64).sum::<f64>() / v.len() as f64 }
+        }).collect();
+        let insertion_medians: Vec<f64> = arrays.insertion_lengths.iter().map(|v| {
+            if v.is_empty() { 0.0 } else { let mut s = v.clone(); s.sort_unstable(); s[s.len()/2] as f64 }
+        }).collect();
+        let insertion_stds: Vec<f64> = arrays.insertion_lengths.iter().map(|v| {
+            if v.len() <= 1 { 0.0 } else {
+                let mean = v.iter().map(|&x| x as f64).sum::<f64>() / v.len() as f64;
+                let var = v.iter().map(|&x| { let d = x as f64 - mean; d*d }).sum::<f64>() / v.len() as f64;
+                var.sqrt()
+            }
+        }).collect();
+        add_compressed_feature_with_stats(&insertion_counts, &insertion_means, &insertion_medians, &insertion_stds,
+            Some(&primary_reads_f64), "insertions", contig_name, config, output);
+
+        // Other assembly check features (no statistics)
+        // Apply two-stage compression: first with coverage reference, then merge identical runs
+        let deletions_f64: Vec<f64> = arrays.deletions.iter().map(|&x| x as f64).collect();
+        let deletions_runs = compress_signal_with_reference(&deletions_f64, Some(&primary_reads_f64), PlotType::Bars, config.curve_ratio, config.bar_ratio);
+        let deletions_runs_merged = merge_identical_runs(deletions_runs);
+        output.extend(deletions_runs_merged.into_iter().map(|run| FeaturePoint {
+            contig_name: contig_name.to_string(),
+            feature: "deletions".to_string(),
+            start_pos: run.start_pos,
+            end_pos: run.end_pos,
+            value: run.value,
+            mean: None,
+            median: None,
+            std: None,
+        }));
+        
+        let mismatches_f64: Vec<f64> = arrays.mismatches.iter().map(|&x| x as f64).collect();
+        add_compressed_feature_with_reference(&mismatches_f64, Some(&primary_reads_f64), "mismatches", contig_name, config, output);
+        
+        if seq_type.is_short_paired() {
+            let non_inward_f64: Vec<f64> = arrays.non_inward_pairs.iter().map(|&x| x as f64).collect();
+            let non_inward_runs = compress_signal_with_reference(&non_inward_f64, Some(&primary_reads_f64), PlotType::Bars, config.curve_ratio, config.bar_ratio);
+            let non_inward_runs_merged = merge_identical_runs(non_inward_runs);
+            output.extend(non_inward_runs_merged.into_iter().map(|run| FeaturePoint {
+                contig_name: contig_name.to_string(),
+                feature: "non_inward_pairs".to_string(),
+                start_pos: run.start_pos,
+                end_pos: run.end_pos,
+                value: run.value,
+                mean: None,
+                median: None,
+                std: None,
+            }));
+            
+            let mate_unmapped_f64: Vec<f64> = arrays.mate_not_mapped.iter().map(|&x| x as f64).collect();
+            let mate_unmapped_runs = compress_signal_with_reference(&mate_unmapped_f64, Some(&primary_reads_f64), PlotType::Bars, config.curve_ratio, config.bar_ratio);
+            let mate_unmapped_runs_merged = merge_identical_runs(mate_unmapped_runs);
+            output.extend(mate_unmapped_runs_merged.into_iter().map(|run| FeaturePoint {
+                contig_name: contig_name.to_string(),
+                feature: "mate_not_mapped".to_string(),
+                start_pos: run.start_pos,
+                end_pos: run.end_pos,
+                value: run.value,
+                mean: None,
+                median: None,
+                std: None,
+            }));
+            
+            let mate_other_contig_f64: Vec<f64> = arrays.mate_on_another_contig.iter().map(|&x| x as f64).collect();
+            let mate_other_contig_runs = compress_signal_with_reference(&mate_other_contig_f64, Some(&primary_reads_f64), PlotType::Bars, config.curve_ratio, config.bar_ratio);
+            let mate_other_contig_runs_merged = merge_identical_runs(mate_other_contig_runs);
+            output.extend(mate_other_contig_runs_merged.into_iter().map(|run| FeaturePoint {
+                contig_name: contig_name.to_string(),
+                feature: "mate_on_another_contig".to_string(),
+                start_pos: run.start_pos,
+                end_pos: run.end_pos,
+                value: run.value,
+                mean: None,
+                median: None,
+                std: None,
+            }));
+        }
+
+        // Read lengths (curve for long reads, self-referential)
+        if seq_type.is_long() {
+            let values: Vec<f64> = arrays
+                .sum_read_lengths
+                .iter()
+                .zip(&arrays.count_read_lengths)
+                .map(|(&s, &c)| if c > 0 { s as f64 / c as f64 } else { 0.0 })
+                .collect();
+            add_compressed_feature(&values, "read_lengths", contig_name, config, output);
+        }
+
+        // Insert sizes (curve for paired reads, self-referential)  
+        if seq_type.is_short_paired() {
+            let values: Vec<f64> = arrays
+                .sum_insert_sizes
+                .iter()
+                .zip(&arrays.count_insert_sizes)
+                .map(|(&s, &c)| if c > 0 { s as f64 / c as f64 } else { 0.0 })
+                .collect();
+            add_compressed_feature(&values, "insert_sizes", contig_name, config, output);
+        }
+    }
+
+    // Phagetermini features
     // Coverage_reduced for phagetermini (use as reference for phagetermini bar features)
     let coverage_reduced_f64: Vec<f64> = arrays.coverage_reduced.iter().map(|&x| x as f64).collect();
-    
-    // Phagetermini features
     if flags.phagetermini {
         // coverage_reduced (self-referential curve)
         add_compressed_feature(&coverage_reduced_f64, "coverage_reduced", contig_name, config, output);
@@ -256,101 +424,6 @@ fn add_features_from_arrays(
                     std: None,
                 });
             }
-        }
-    }
-
-    // Assemblycheck features
-    if flags.assemblycheck {
-        // Clippings and insertions with statistics
-        let left_clip_counts: Vec<f64> = arrays.left_clipping_lengths.iter().map(|v| v.len() as f64).collect();
-        let left_clip_means: Vec<f64> = arrays.left_clipping_lengths.iter().map(|v| {
-            if v.is_empty() { 0.0 } else { v.iter().map(|&x| x as f64).sum::<f64>() / v.len() as f64 }
-        }).collect();
-        let left_clip_medians: Vec<f64> = arrays.left_clipping_lengths.iter().map(|v| {
-            if v.is_empty() { 0.0 } else { let mut s = v.clone(); s.sort_unstable(); s[s.len()/2] as f64 }
-        }).collect();
-        let left_clip_stds: Vec<f64> = arrays.left_clipping_lengths.iter().map(|v| {
-            if v.len() <= 1 { 0.0 } else {
-                let mean = v.iter().map(|&x| x as f64).sum::<f64>() / v.len() as f64;
-                let var = v.iter().map(|&x| { let d = x as f64 - mean; d*d }).sum::<f64>() / v.len() as f64;
-                var.sqrt()
-            }
-        }).collect();
-        add_compressed_feature_with_stats(&left_clip_counts, &left_clip_means, &left_clip_medians, &left_clip_stds,
-            Some(&primary_reads_f64), "left_clippings", contig_name, config, output);
-
-        let right_clip_counts: Vec<f64> = arrays.right_clipping_lengths.iter().map(|v| v.len() as f64).collect();
-        let right_clip_means: Vec<f64> = arrays.right_clipping_lengths.iter().map(|v| {
-            if v.is_empty() { 0.0 } else { v.iter().map(|&x| x as f64).sum::<f64>() / v.len() as f64 }
-        }).collect();
-        let right_clip_medians: Vec<f64> = arrays.right_clipping_lengths.iter().map(|v| {
-            if v.is_empty() { 0.0 } else { let mut s = v.clone(); s.sort_unstable(); s[s.len()/2] as f64 }
-        }).collect();
-        let right_clip_stds: Vec<f64> = arrays.right_clipping_lengths.iter().map(|v| {
-            if v.len() <= 1 { 0.0 } else {
-                let mean = v.iter().map(|&x| x as f64).sum::<f64>() / v.len() as f64;
-                let var = v.iter().map(|&x| { let d = x as f64 - mean; d*d }).sum::<f64>() / v.len() as f64;
-                var.sqrt()
-            }
-        }).collect();
-        add_compressed_feature_with_stats(&right_clip_counts, &right_clip_means, &right_clip_medians, &right_clip_stds,
-            Some(&primary_reads_f64), "right_clippings", contig_name, config, output);
-
-        let insertion_counts: Vec<f64> = arrays.insertion_lengths.iter().map(|v| v.len() as f64).collect();
-        let insertion_means: Vec<f64> = arrays.insertion_lengths.iter().map(|v| {
-            if v.is_empty() { 0.0 } else { v.iter().map(|&x| x as f64).sum::<f64>() / v.len() as f64 }
-        }).collect();
-        let insertion_medians: Vec<f64> = arrays.insertion_lengths.iter().map(|v| {
-            if v.is_empty() { 0.0 } else { let mut s = v.clone(); s.sort_unstable(); s[s.len()/2] as f64 }
-        }).collect();
-        let insertion_stds: Vec<f64> = arrays.insertion_lengths.iter().map(|v| {
-            if v.len() <= 1 { 0.0 } else {
-                let mean = v.iter().map(|&x| x as f64).sum::<f64>() / v.len() as f64;
-                let var = v.iter().map(|&x| { let d = x as f64 - mean; d*d }).sum::<f64>() / v.len() as f64;
-                var.sqrt()
-            }
-        }).collect();
-        add_compressed_feature_with_stats(&insertion_counts, &insertion_means, &insertion_medians, &insertion_stds,
-            Some(&primary_reads_f64), "insertions", contig_name, config, output);
-
-        // Other assembly check features (no statistics)
-        let deletions_f64: Vec<f64> = arrays.deletions.iter().map(|&x| x as f64).collect();
-        add_compressed_feature_with_reference(&deletions_f64, Some(&primary_reads_f64), "deletions", contig_name, config, output);
-        
-        let mismatches_f64: Vec<f64> = arrays.mismatches.iter().map(|&x| x as f64).collect();
-        add_compressed_feature_with_reference(&mismatches_f64, Some(&primary_reads_f64), "mismatches", contig_name, config, output);
-        
-        if seq_type.is_short_paired() {
-            let non_inward_f64: Vec<f64> = arrays.non_inward_pairs.iter().map(|&x| x as f64).collect();
-            add_compressed_feature_with_reference(&non_inward_f64, Some(&primary_reads_f64), "non_inward_pairs", contig_name, config, output);
-            
-            let mate_unmapped_f64: Vec<f64> = arrays.mate_not_mapped.iter().map(|&x| x as f64).collect();
-            add_compressed_feature_with_reference(&mate_unmapped_f64, Some(&primary_reads_f64), "mate_not_mapped", contig_name, config, output);
-            
-            let mate_other_contig_f64: Vec<f64> = arrays.mate_on_another_contig.iter().map(|&x| x as f64).collect();
-            add_compressed_feature_with_reference(&mate_other_contig_f64, Some(&primary_reads_f64), "mate_on_another_contig", contig_name, config, output);
-        }
-
-        // Read lengths (curve for long reads, self-referential)
-        if seq_type.is_long() {
-            let values: Vec<f64> = arrays
-                .sum_read_lengths
-                .iter()
-                .zip(&arrays.count_read_lengths)
-                .map(|(&s, &c)| if c > 0 { s as f64 / c as f64 } else { 0.0 })
-                .collect();
-            add_compressed_feature(&values, "read_lengths", contig_name, config, output);
-        }
-
-        // Insert sizes (curve for paired reads, self-referential)  
-        if seq_type.is_short_paired() {
-            let values: Vec<f64> = arrays
-                .sum_insert_sizes
-                .iter()
-                .zip(&arrays.count_insert_sizes)
-                .map(|(&s, &c)| if c > 0 { s as f64 / c as f64 } else { 0.0 })
-                .collect();
-            add_compressed_feature(&values, "insert_sizes", contig_name, config, output);
         }
     }
 }

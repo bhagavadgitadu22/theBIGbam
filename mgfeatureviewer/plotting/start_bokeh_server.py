@@ -98,8 +98,9 @@ def build_controls(conn):
     variables_widgets = []
     helps_widgets = []
     for module in modules:
+        # Get distinct subplots (deduplicate by subplot name only)
         cur.execute(
-            "SELECT DISTINCT Subplot, Help FROM Variable WHERE Module=? AND Feature_table_name IN ({})".format(
+            "SELECT DISTINCT Subplot FROM Variable WHERE Module=? AND Feature_table_name IN ({})".format(
                 ','.join('?' * len(tables_with_data))
             ), 
             (module,) + tuple(tables_with_data)
@@ -112,11 +113,9 @@ def build_controls(conn):
         
         module_names.append(module)
 
-        if len(variables_checkbox) > 1:
-            module_checkbox = CheckboxGroup(labels=[module], active=[])
-            module_widgets.append(module_checkbox)
-        else:
-            module_widgets.append(None)
+        # Always create module checkbox (will be shown in "One sample" view)
+        module_checkbox = CheckboxGroup(labels=[module], active=[])
+        module_widgets.append(module_checkbox)
 
         # use a CheckboxButtonGroup for selecting individual variables in this module
         cbg = CheckboxButtonGroup(labels=variables_checkbox, active=[], sizing_mode="stretch_width", orientation="vertical")
@@ -462,32 +461,23 @@ def modify_doc_factory(db_path):
             filter_samples.active = []
             # Hide module checkboxes and clear all variable selections
             for mw in widgets['module_widgets']:
-                if mw is not None:
-                    mw.visible = False
-                    mw.active = []
+                mw.visible = False
+                mw.active = []
             for cbg in widgets['variables_widgets']:
                 cbg.active = []
         else:
             # Show module checkboxes
             for mw in widgets['module_widgets']:
-                if mw is not None:
-                    mw.visible = True
+                mw.visible = True
         
         # Toggle header visibility: checkbox-header in One-sample, title-header in All-samples
         for i, mw in enumerate(widgets['module_widgets']):
             hdr_cb = module_header_with_checkbox[i]
             hdr_title = module_header_with_title[i]
             
-            if mw is None:
-                # Single-variable module: always show title header
-                if hdr_cb:
-                    hdr_cb.visible = False
-                if hdr_title:
-                    hdr_title.visible = True
-            else:
-                # Module with checkbox: toggle between headers
-                hdr_cb.visible = not is_all
-                hdr_title.visible = is_all
+            # All modules have checkbox now: toggle between headers
+            hdr_cb.visible = not is_all
+            hdr_title.visible = is_all
         
         # Unlock callbacks
         global_toggle_lock['locked'] = False
@@ -762,44 +752,27 @@ def modify_doc_factory(db_path):
 
         # Build two header variants: one with the checkbox (shows module name as label)
         # and one with the plain title (used when checkbox is hidden). Both may include the help button.
-        if module_widget is not None:
-            # Create separate title div for the title-only header
-            module_title_div = Div(text=f"{module_name}", align="center")
-            
-            if help_tooltip is not None:
-                # Need separate help buttons for each header to avoid "already in doc" error
-                help_btn_cb = HelpButton(tooltip=help_tooltip, width=20, height=20, align="center", button_type="light", stylesheets=[stylesheet])
-                help_btn_title = HelpButton(tooltip=help_tooltip, width=20, height=20, align="center", button_type="light", stylesheets=[stylesheet])
-                hdr_cb = row(toggle_btn, module_widget, help_btn_cb, sizing_mode="stretch_width", align="center")
-                hdr_title = row(toggle_btn, module_title_div, help_btn_title, sizing_mode="stretch_width", align="center")
-            else:
-                hdr_cb = row(toggle_btn, module_widget, sizing_mode="stretch_width", align="center")
-                hdr_title = row(toggle_btn, module_title_div, sizing_mode="stretch_width", align="center")
-
-            # Default: show the checkbox header, hide the plain title header
-            hdr_cb.visible = True
-            hdr_title.visible = False
-            controls_variables.append(hdr_cb)
-            controls_variables.append(hdr_title)
-            
-            module_header_with_checkbox.append(hdr_cb)
-            module_header_with_title.append(hdr_title)
+        # Create separate title div for the title-only header
+        module_title_div = Div(text=f"{module_name}", align="center")
+        
+        if help_tooltip is not None:
+            # Need separate help buttons for each header to avoid "already in doc" error
+            help_btn_cb = HelpButton(tooltip=help_tooltip, width=20, height=20, align="center", button_type="light", stylesheets=[stylesheet])
+            help_btn_title = HelpButton(tooltip=help_tooltip, width=20, height=20, align="center", button_type="light", stylesheets=[stylesheet])
+            hdr_cb = row(toggle_btn, module_widget, help_btn_cb, sizing_mode="stretch_width", align="center")
+            hdr_title = row(toggle_btn, module_title_div, help_btn_title, sizing_mode="stretch_width", align="center")
         else:
-            # No module checkbox exists: show plain title (with help if available)
-            module_title_div = Div(text=f"{module_name}", align="center")
+            hdr_cb = row(toggle_btn, module_widget, sizing_mode="stretch_width", align="center")
+            hdr_title = row(toggle_btn, module_title_div, sizing_mode="stretch_width", align="center")
 
-            if help_tooltip is not None:
-                help_btn_title = HelpButton(tooltip=help_tooltip, width=20, height=20, align="center", button_type="light", stylesheets=[stylesheet])
-                hdr_title = row(toggle_btn, module_title_div, help_btn_title, sizing_mode="stretch_width", align="center")
-            else:
-                hdr_title = row(toggle_btn, module_title_div, sizing_mode="stretch_width", align="center")
-
-            # Single-variable modules always show title (no checkbox variant)
-            hdr_title.visible = True
-            controls_variables.append(hdr_title)
-            
-            module_header_with_checkbox.append(None)
-            module_header_with_title.append(hdr_title)
+        # Default: show the checkbox header, hide the plain title header
+        hdr_cb.visible = True
+        hdr_title.visible = False
+        controls_variables.append(hdr_cb)
+        controls_variables.append(hdr_title)
+        
+        module_header_with_checkbox.append(hdr_cb)
+        module_header_with_title.append(hdr_title)
 
         # Add the module's CheckboxButtonGroup for variables (this will be collapsible)
         # Start with modules folded (collapsed)
@@ -816,9 +789,6 @@ def modify_doc_factory(db_path):
 
     ### Attach callbacks
     for i, mc in enumerate(widgets['module_widgets']):
-        if mc is None:
-            continue
-
         toggles = widgets['variables_widgets'][i]
         lock = {"locked": False}  # per-module lock
 

@@ -95,8 +95,8 @@ def build_argparser():
     # Calculation inputs
     sp.add_argument('-m', '--modules', required=True, help='Comma-separated modules (coverage,phagetermini,assemblycheck)')
     sp.add_argument('--min_coverage', type=int, default=50, help='Minimum coverage for contig inclusion (default: 50%%)')
-    sp.add_argument('--curve_ratio', type=float, default=50, help='Compression ratio for curve plots (default: 50%%)')
-    sp.add_argument('--bar_ratio', type=float, default=10, help='Compression ratio for bar plots (default: 10%%)')
+    sp.add_argument('--variation_percentage', type=float, default=50, help='Run-length encoding ratio for independent features like coverage (default: 50%%)')
+    sp.add_argument('--coverage_percentage', type=float, default=10, help='Compressing ratio for features depending on coverage: only values above this %% of the local coverage are kept (default: 10%%)')
     
     # Output
     sp.add_argument('-o', '--output', required=True, help='Output directory (must NOT exist)')
@@ -220,7 +220,8 @@ def main(argv=None):
                 annotation_tool=args.annotation_tool,
                 sequencing_type=args.sequencing_type,
                 min_coverage=args.min_coverage,
-                compress_ratio=args.compress_ratio,
+                variation_percentage=args.variation_percentage,
+                coverage_percentage=args.coverage_percentage,
                 circular=args.circular,
             )
 

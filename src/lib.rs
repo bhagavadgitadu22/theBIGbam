@@ -76,6 +76,7 @@ mod python {
     ///         - "samples_failed": int
     ///         - "total_time": float (seconds)
     #[pyfunction]
+    #[pyo3(signature = (genbank_path, bam_files, output_db, modules, threads, sequencing_type=None, annotation_tool="", min_coverage=50.0, curve_ratio=10.0, bar_ratio=10.0, circular=false, create_indexes=true))]
     fn process_all_samples<'py>(
         py: Python<'py>,
         genbank_path: &str,
@@ -83,7 +84,7 @@ mod python {
         output_db: &str,
         modules: Vec<String>,
         threads: usize,
-        sequencing_type: &str,
+        sequencing_type: Option<&str>,
         annotation_tool: &str,
         min_coverage: f64,
         curve_ratio: f64,
@@ -96,10 +97,17 @@ mod python {
         use std::path::PathBuf;
 
         // Parse sequencing type or fall back to auto-detection from first BAM
-        let seq_type = if let Some(st) = ProcessConfig::parse_sequencing_type(sequencing_type) {
-            st
+        let seq_type = if let Some(seq_type_str) = sequencing_type {
+            if let Some(st) = ProcessConfig::parse_sequencing_type(seq_type_str) {
+                st
+            } else {
+                // Auto-detect from first BAM file if invalid string provided
+                let first_bam = PathBuf::from(&bam_files[0]);
+                detect_sequencing_type(&first_bam)
+                    .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("Failed to detect sequencing type: {}", e)))?
+            }
         } else {
-            // Auto-detect from first BAM file if not provided or invalid
+            // Auto-detect from first BAM file if None provided
             let first_bam = PathBuf::from(&bam_files[0]);
             detect_sequencing_type(&first_bam)
                 .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("Failed to detect sequencing type: {}", e)))?
