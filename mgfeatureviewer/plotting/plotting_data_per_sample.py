@@ -156,11 +156,13 @@ def make_bokeh_subplot(feature_dict, height, x_range, sample_title=None, feature
             # Prepare data for ColumnDataSource
             data_dict = dict(x=xx, y=yy)
             
-            # Add width for bars if available
+            # Add width for bars if available and any width is different from 1
             if type_picked == "bars" and "width" in data_feature:
-                data_dict["width"] = data_feature["width"]
                 data_dict["first_pos"] = data_feature["first_pos"]
                 data_dict["last_pos"] = data_feature["last_pos"]
+                # Only use variable width for rendering if this specific feature has width != 1
+                if any(w != 1 for w in data_feature["width"]):
+                    data_dict["width"] = data_feature["width"]
             
             # Add statistics if available
             has_stats = data_feature.get("has_stats", False)
@@ -209,8 +211,8 @@ def make_bokeh_subplot(feature_dict, height, x_range, sample_title=None, feature
     # Add hover with conditional tooltips based on whether statistics are available
     # Check if any feature in feature_dict has statistics or variable width
     has_any_stats = any(d.get("has_stats", False) for d in feature_dict)
-    has_variable_width = any("width" in d for d in feature_dict)
-    
+    has_variable_width = any("width" in d and any(w != 1 for w in d["width"]) for d in feature_dict)
+
     if has_variable_width:
         # For bars with spans, show first and last position
         tooltips = [
@@ -218,12 +220,6 @@ def make_bokeh_subplot(feature_dict, height, x_range, sample_title=None, feature
             ("Last position", "@last_pos{0,0}"),
             ("Value", "@y{0.0}")
         ]
-        if has_any_stats:
-            tooltips.extend([
-                ("Mean", "@mean{0.0}"),
-                ("Median", "@median{0.0}"),
-                ("Std", "@std{0.0}")
-            ])
     elif has_any_stats:
         tooltips = [
             ("Position", "@x{0,0}"),
