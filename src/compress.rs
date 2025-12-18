@@ -73,42 +73,23 @@ pub fn compress_signal_with_reference(
     let mut runs = Vec::new();
 
     // For bars with reference: save positions where value > coverage * bar_ratio
+    // Each qualifying position is saved as a separate single-position bar
     curve_ratio *= 0.01; // Convert percentage to fraction
     bar_ratio *= 0.01;   // Convert percentage to fraction
     if matches!(plot_type, PlotType::Bars) && reference.is_some() {
         let coverage = reference.unwrap();
-        let mut i = 0;
-        while i < n {
+        for i in 0..n {
             let val = values[i];
             let threshold = coverage[i] * bar_ratio;
             
             if val > threshold {
-                // Found a significant position - check if consecutive positions also qualify
-                let run_start = i;
-                let mut run_sum = val;
-                let mut run_count = 1;
-                
-                // Extend run while consecutive positions are also significant
-                while i + 1 < n {
-                    let next_val = values[i + 1];
-                    let next_threshold = coverage[i + 1] * bar_ratio;
-                    if next_val > next_threshold {
-                        i += 1;
-                        run_sum += next_val;
-                        run_count += 1;
-                    } else {
-                        break;
-                    }
-                }
-                
-                // Save the run with average value
+                // Save each qualifying position as a separate single-position bar
                 runs.push(Run {
-                    start_pos: (run_start + 1) as i32,
+                    start_pos: (i + 1) as i32,
                     end_pos: (i + 1) as i32,
-                    value: (run_sum / run_count as f64) as f32,
+                    value: val as f32,
                 });
             }
-            i += 1;
         }
         return runs;
     }

@@ -505,47 +505,6 @@ pub fn process_read(
     }
 
     // -------------------------------------------------------------------------
-    // Phagetermini module - primary mappings only
-    // -------------------------------------------------------------------------
-    if flags.phagetermini && !is_secondary && !is_supplementary {
-        // For long reads, we also check the end for clipping/mismatches
-        let check_end = seq_type.is_long();
-
-        // Check if read has clean alignment at start (no clip/mismatch)
-        // raw_has_match_at_position checks both CIGAR and MD tag
-        let start_matches = raw_has_match_at_position(cigar_raw, md_tag, true);
-        let end_matches = !check_end || raw_has_match_at_position(cigar_raw, md_tag, false);
-
-        // Only count "clean" primary reads for phage termini detection
-        if start_matches && end_matches {
-            // Update coverage_reduced (clean coverage from primary mappings only)
-            // Note: end is exclusive (one past last position), so use non-inclusive increment
-            if circular {
-                increment_circular(&mut arrays.coverage_reduced, start, end, 1);
-            } else {
-                increment_range(&mut arrays.coverage_reduced, start, end, 1);
-            }
-
-            // Track start/end positions by strand
-            // We separate strands here; they're combined in finalize_strands()
-            // Note: 'end' is exclusive, so the actual last position is end-1
-            let end_pos = if end > 0 { 
-                let pos = end - 1;
-                if circular { pos % ref_length } else { pos }
-            } else { 
-                0 
-            };
-            if is_reverse {
-                arrays.start_minus[start] += 1;
-                arrays.end_minus[end_pos] += 1;
-            } else {
-                arrays.start_plus[start] += 1;
-                arrays.end_plus[end_pos] += 1;
-            }
-        }
-    }
-
-    // -------------------------------------------------------------------------
     // Assemblycheck module - primary mappings only
     // -------------------------------------------------------------------------
     if flags.assemblycheck && !is_secondary && !is_supplementary {
@@ -625,28 +584,26 @@ pub fn process_read(
 
         // --- Clippings from CIGAR ---
         // Check first and last CIGAR operations for soft/hard clips
-        // left_clippings = clipped bases on the LEFT of the mapping position (reference-based)
-        // right_clippings = clipped bases on the RIGHT of the mapping position (reference-based)
+        // Left clippings recorded at first aligned position (start)
+        // Right clippings recorded at last aligned position (end - 1)
         if !cigar_raw.is_empty() {
-            // Check first operation
+            // Check first operation for left clipping
             if let Some(&(op, len)) = cigar_raw.first() {
                 if raw_cigar_is_clipping(op) {
-                    // First clip is at start position (left of mapping)
+                    // Record at first aligned position
                     arrays.left_clipping_lengths[start].push(len);
                 }
             }
-            // Check last operation
+            // Check last operation for right clipping
             if let Some(&(op, len)) = cigar_raw.last() {
                 if raw_cigar_is_clipping(op) {
-                    // End position is where the clip happens
-                    // (subtract 1 because end is exclusive)
+                    // Record at last aligned position
                     let clip_pos = if end > 0 { 
                         let pos = end - 1;
                         if circular { pos % ref_length } else { pos }
                     } else { 
                         ref_length - 1 
                     };
-                    // Last clip is at end position (right of mapping)
                     arrays.right_clipping_lengths[clip_pos].push(len);
                 }
             }
@@ -690,6 +647,48 @@ pub fn process_read(
             // Iterator-based: no Vec allocation, just yields positions
             for pos in md.mismatch_positions_normalized(raw_start, ref_length) {
                 arrays.mismatches[pos] += 1;
+            }
+        }
+    }
+
+
+    // -------------------------------------------------------------------------
+    // Phagetermini module - primary mappings only
+    // -------------------------------------------------------------------------
+    if flags.phagetermini && !is_secondary && !is_supplementary {
+        // For long reads, we also check the end for clipping/mismatches
+        let check_end = seq_type.is_long();
+
+        // Check if read has clean alignment at start (no clip/mismatch)
+        // raw_has_match_at_position checks both CIGAR and MD tag
+        let start_matches = raw_has_match_at_position(cigar_raw, md_tag, true);
+        let end_matches = !check_end || raw_has_match_at_position(cigar_raw, md_tag, false);
+
+        // Only count "clean" primary reads for phage termini detection
+        if start_matches && end_matches {
+            // Update coverage_reduced (clean coverage from primary mappings only)
+            // Note: end is exclusive (one past last position), so use non-inclusive increment
+            if circular {
+                increment_circular(&mut arrays.coverage_reduced, start, end, 1);
+            } else {
+                increment_range(&mut arrays.coverage_reduced, start, end, 1);
+            }
+
+            // Track start/end positions by strand
+            // We separate strands here; they're combined in finalize_strands()
+            // Note: 'end' is exclusive, so the actual last position is end-1
+            let end_pos = if end > 0 { 
+                let pos = end - 1;
+                if circular { pos % ref_length } else { pos }
+            } else { 
+                0 
+            };
+            if is_reverse {
+                arrays.start_minus[start] += 1;
+                arrays.end_minus[end_pos] += 1;
+            } else {
+                arrays.start_plus[start] += 1;
+                arrays.end_plus[end_pos] += 1;
             }
         }
     }

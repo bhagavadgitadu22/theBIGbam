@@ -405,12 +405,12 @@ fn add_features_from_arrays(
             
             for pos in run.start_pos..=run.end_pos {
                 let idx = (pos - 1) as usize; // Convert from 1-indexed to 0-indexed
-                if idx < arrays.coverage_reduced.len() {
-                    let c = arrays.coverage_reduced[idx];
+                if idx < primary_reads_f64.len() {
+                    let c = primary_reads_f64[idx];
                     let s = arrays.reads_starts[idx];
                     let e = arrays.reads_ends[idx];
-                    if c > 0 {
-                        tau_sum += (s + e) as f64 / c as f64;
+                    if c > 0.0 {
+                        tau_sum += (s + e) as f64 / c;
                         count += 1;
                     }
                 }
