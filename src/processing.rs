@@ -195,7 +195,11 @@ fn add_features_from_arrays(
     // Coverage (always compress self-referentially)
     let primary_reads_f64: Vec<f64> = arrays.primary_reads.iter().map(|&x| x as f64).collect();
     if flags.coverage {
-        add_compressed_feature(&primary_reads_f64, "primary_reads", contig_name, config, output);
+        // Save strand-specific coverage (VIEW will compute total primary_reads)
+        let primary_reads_plus_f64: Vec<f64> = arrays.primary_reads_plus_only.iter().map(|&x| x as f64).collect();
+        let primary_reads_minus_f64: Vec<f64> = arrays.primary_reads_minus_only.iter().map(|&x| x as f64).collect();
+        add_compressed_feature(&primary_reads_plus_f64, "primary_reads_plus_only", contig_name, config, output);
+        add_compressed_feature(&primary_reads_minus_f64, "primary_reads_minus_only", contig_name, config, output);
         
         // Secondary reads (self-referential curve)
         // When circular=true, subtract primary coverage to remove artifact secondary alignments from doubled assembly
@@ -361,12 +365,13 @@ fn add_features_from_arrays(
         // coverage_reduced (self-referential curve)
         add_compressed_feature(&coverage_reduced_f64, "coverage_reduced", contig_name, config, output);
         
-        // reads_starts and reads_ends (bars, use coverage_reduced as reference)
+        // reads_starts and reads_ends (bars)
+        // use primary_reads as reference instead of coverage_reduced to give more weight to mapping errors revealing assembly errors that can give wrong termini
         let reads_starts: Vec<f64> = arrays.reads_starts.iter().map(|&x| x as f64).collect();
-        let reads_starts_runs = compress_signal_with_reference(&reads_starts, Some(&coverage_reduced_f64), PlotType::Bars, config.curve_ratio, config.bar_ratio);
+        let reads_starts_runs = compress_signal_with_reference(&reads_starts, Some(&primary_reads_f64), PlotType::Bars, config.curve_ratio, config.bar_ratio);
         
         let reads_ends: Vec<f64> = arrays.reads_ends.iter().map(|&x| x as f64).collect();
-        let reads_ends_runs = compress_signal_with_reference(&reads_ends, Some(&coverage_reduced_f64), PlotType::Bars, config.curve_ratio, config.bar_ratio);
+        let reads_ends_runs = compress_signal_with_reference(&reads_ends, Some(&primary_reads_f64), PlotType::Bars, config.curve_ratio, config.bar_ratio);
 
         // Add reads_starts and reads_ends to output
         output.extend(reads_starts_runs.iter().map(|run| FeaturePoint {

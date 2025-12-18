@@ -35,6 +35,12 @@ pub struct FeatureArrays {
     /// Only counts reads that are neither secondary nor supplementary.
     pub primary_reads: Vec<u64>,
 
+    /// Number of primary reads on the plus strand at each position.
+    pub primary_reads_plus_only: Vec<u64>,
+
+    /// Number of primary reads on the minus strand at each position.
+    pub primary_reads_minus_only: Vec<u64>,
+
     /// Number of secondary alignments at each position.
     /// Secondary reads have flag 0x100 set.
     pub secondary_reads: Vec<u64>,
@@ -132,6 +138,8 @@ impl FeatureArrays {
         Self {
             // Initialize all arrays to zero
             primary_reads: vec![0u64; ref_length],
+            primary_reads_plus_only: vec![0u64; ref_length],
+            primary_reads_minus_only: vec![0u64; ref_length],
             secondary_reads: vec![0u64; ref_length],
             supplementary_reads: vec![0u64; ref_length],
             coverage_reduced: vec![0u64; ref_length],
@@ -478,8 +486,20 @@ pub fn process_read(
             // Only count primary mappings in main coverage
             if circular {
                 increment_circular(&mut arrays.primary_reads, start, end, 1);
+                // Also track strand-specific coverage
+                if is_reverse {
+                    increment_circular(&mut arrays.primary_reads_minus_only, start, end, 1);
+                } else {
+                    increment_circular(&mut arrays.primary_reads_plus_only, start, end, 1);
+                }
             } else {
                 increment_range(&mut arrays.primary_reads, start, end, 1);
+                // Also track strand-specific coverage
+                if is_reverse {
+                    increment_range(&mut arrays.primary_reads_minus_only, start, end, 1);
+                } else {
+                    increment_range(&mut arrays.primary_reads_plus_only, start, end, 1);
+                }
             }
         }
     }
@@ -605,10 +625,13 @@ pub fn process_read(
 
         // --- Clippings from CIGAR ---
         // Check first and last CIGAR operations for soft/hard clips
+        // left_clippings = clipped bases on the LEFT of the mapping position (reference-based)
+        // right_clippings = clipped bases on the RIGHT of the mapping position (reference-based)
         if !cigar_raw.is_empty() {
             // Check first operation
             if let Some(&(op, len)) = cigar_raw.first() {
                 if raw_cigar_is_clipping(op) {
+                    // First clip is at start position (left of mapping)
                     arrays.left_clipping_lengths[start].push(len);
                 }
             }
@@ -623,6 +646,7 @@ pub fn process_read(
                     } else { 
                         ref_length - 1 
                     };
+                    // Last clip is at end position (right of mapping)
                     arrays.right_clipping_lengths[clip_pos].push(len);
                 }
             }

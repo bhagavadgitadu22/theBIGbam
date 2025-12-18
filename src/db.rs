@@ -231,6 +231,11 @@ fn create_variable_tables(conn: &Connection, create_indexes: bool) -> Result<()>
         )
         .with_context(|| format!("Failed to insert variable: {}", v.name))?;
 
+        // Skip creating physical table for primary_reads - it will be a VIEW instead
+        if v.name == "primary_reads" {
+            continue;
+        }
+
         // Create the Feature_* table with or without statistics columns
         let table_sql = if features_with_stats.contains(&v.name) {
             format!(
@@ -277,6 +282,18 @@ fn create_variable_tables(conn: &Connection, create_indexes: bool) -> Result<()>
                 [],
             )
             .with_context(|| format!("Failed to create index for: {}", table_name))?;
+            
+            // Create additional indexes for strand-specific tables used in VIEW
+            if v.name == "primary_reads_plus_only" || v.name == "primary_reads_minus_only" {
+                conn.execute(
+                    &format!(
+                        "CREATE INDEX idx_{}_intervals ON {}(Contig_id, Sample_id, First_position, Last_position)",
+                        v.name, table_name
+                    ),
+                    [],
+                )
+                .with_context(|| format!("Failed to create intervals index for: {}", table_name))?;
+            }
         }
     }
 
@@ -536,8 +553,17 @@ fn merge_features(
 
         // Insert summary data for this variable
         if let Some(&variable_id) = variable_name_to_id.get(v.name) {
-            for (contig_id, row_count) in contig_row_counts {
-                summary_stmt.execute(params![contig_id, sample_id, variable_id, row_count as i64])?;
+            for (contig_id, row_count) in &contig_row_counts {
+                summary_stmt.execute(params![contig_id, sample_id, variable_id, *row_count as i64])?;
+            }
+        }
+        
+        // Special case: also populate Summary for primary_reads VIEW when saving plus_only
+        if v.name == "primary_reads_plus_only" {
+            if let Some(&primary_reads_variable_id) = variable_name_to_id.get("primary_reads") {
+                for (contig_id, row_count) in &contig_row_counts {
+                    summary_stmt.execute(params![contig_id, sample_id, primary_reads_variable_id, *row_count as i64])?;
+                }
             }
         }
     }
@@ -549,6 +575,77 @@ fn merge_features(
 pub fn finalize_db(db_path: &Path) -> Result<()> {
     let conn = Connection::open(db_path)
         .with_context(|| format!("Failed to open DB for finalization: {}", db_path.display()))?;
+
+    // Create a VIEW that computes primary_reads as sum of plus and minus strands
+    // This properly handles overlapping ranges by collecting boundaries, building minimal segments,
+    // and summing values that cover each segment
+    conn.execute(
+        "CREATE VIEW IF NOT EXISTS Feature_primary_reads AS
+         WITH
+         boundaries AS (
+             SELECT Contig_id, Sample_id, First_position AS pos
+             FROM Feature_primary_reads_plus_only
+             UNION
+             SELECT Contig_id, Sample_id, Last_position + 1
+             FROM Feature_primary_reads_plus_only
+             UNION
+             SELECT Contig_id, Sample_id, First_position
+             FROM Feature_primary_reads_minus_only
+             UNION
+             SELECT Contig_id, Sample_id, Last_position + 1
+             FROM Feature_primary_reads_minus_only
+         ),
+         segments AS (
+             SELECT
+                 Contig_id,
+                 Sample_id,
+                 pos AS First_position,
+                 LEAD(pos) OVER (
+                     PARTITION BY Contig_id, Sample_id
+                     ORDER BY pos
+                 ) - 1 AS Last_position
+             FROM boundaries
+         ),
+         summed AS (
+             SELECT
+                 s.Contig_id,
+                 s.Sample_id,
+                 s.First_position,
+                 s.Last_position,
+                 COALESCE(SUM(p.Value), 0) +
+                 COALESCE(SUM(m.Value), 0) AS Value
+             FROM segments s
+             LEFT JOIN Feature_primary_reads_plus_only p
+                 ON p.Contig_id = s.Contig_id
+                AND p.Sample_id = s.Sample_id
+                AND p.First_position <= s.First_position
+                AND p.Last_position >= s.Last_position
+             LEFT JOIN Feature_primary_reads_minus_only m
+                 ON m.Contig_id = s.Contig_id
+                AND m.Sample_id = s.Sample_id
+                AND m.First_position <= s.First_position
+                AND m.Last_position >= s.Last_position
+             WHERE s.Last_position >= s.First_position
+             GROUP BY
+                 s.Contig_id,
+                 s.Sample_id,
+                 s.First_position,
+                 s.Last_position
+         )
+         SELECT
+             ROW_NUMBER() OVER (
+                 ORDER BY Contig_id, Sample_id, First_position
+             ) AS Feature_id,
+             Contig_id,
+             Sample_id,
+             First_position,
+             Last_position,
+             Value
+         FROM summed
+         WHERE Value != 0",
+        [],
+    )
+    .context("Failed to create primary_reads VIEW")?;
 
     conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
         .context("Failed to checkpoint WAL")?;

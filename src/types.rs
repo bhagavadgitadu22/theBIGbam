@@ -180,6 +180,8 @@ pub struct VariableConfig {
 pub const VARIABLES: &[VariableConfig] = &[
     // Coverage module - basic read depth
     VariableConfig { name: "primary_reads", subplot: "Primary alignments", module: "Coverage", plot_type: PlotType::Curve, color: "#333333", alpha: 0.8, fill_alpha: 0.4, size: 1.0, title: "Primary reads", help: None },
+    VariableConfig { name: "primary_reads_plus_only", subplot: "Alignments by strand", module: "Coverage", plot_type: PlotType::Curve, color: "#a1665e", alpha: 0.8, fill_alpha: 0.4, size: 1.0, title: "Primary reads (+ only)", help: None },
+    VariableConfig { name: "primary_reads_minus_only", subplot: "Alignments by strand", module: "Coverage", plot_type: PlotType::Curve, color: "#5E99A1", alpha: 0.8, fill_alpha: 0.4, size: 1.0, title: "Primary reads (- only)", help: None },
     VariableConfig { name: "secondary_reads", subplot: "Other alignments", module: "Coverage", plot_type: PlotType::Curve, color: "#1f77b4", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Secondary reads", help: None },
     VariableConfig { name: "supplementary_reads", subplot: "Other alignments", module: "Coverage", plot_type: PlotType::Curve, color: "#B45C1F", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Supplementary reads", help: None },
 
@@ -193,8 +195,8 @@ pub const VARIABLES: &[VariableConfig] = &[
     VariableConfig { name: "mate_on_another_contig", subplot: "Mate on another contig", module: "Paired-read metrics", plot_type: PlotType::Bars, color: "#CFD22D", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Missing mates", help: None },
     
     // Per position errors from reads (Assembly check)
-    VariableConfig { name: "left_clippings", subplot: "Clippings", module: "Mapping metrics per position", plot_type: PlotType::Bars, color: "#8e43e7", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Left Clippings", help: None },
-    VariableConfig { name: "right_clippings", subplot: "Clippings", module: "Mapping metrics per position", plot_type: PlotType::Bars, color: "#9CE743", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Right Clippings", help: None },
+    VariableConfig { name: "left_clippings", subplot: "Clippings", module: "Mapping metrics per position", plot_type: PlotType::Bars, color: "#8e43e7", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Left Clippings", help: Some("Extra bases are missing on the left of the reference genome") },
+    VariableConfig { name: "right_clippings", subplot: "Clippings", module: "Mapping metrics per position", plot_type: PlotType::Bars, color: "#9CE743", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Right Clippings", help: Some("Extra bases are missing on the right of the reference genome") },
     VariableConfig { name: "insertions", subplot: "Indels", module: "Mapping metrics per position", plot_type: PlotType::Bars, color: "#e50001", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Insertions", help: Some("Extra bases are present in the read but not in the reference") },
     VariableConfig { name: "deletions", subplot: "Indels", module: "Mapping metrics per position", plot_type: PlotType::Bars, color: "#00E5E4", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Deletions", help: Some("A stretch of the reference has no corresponding bases in the read") },
     VariableConfig { name: "mismatches", subplot: "Mismatches", module: "Mapping metrics per position", plot_type: PlotType::Bars, color: "#5a0f0b", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Mismatches", help: None },
