@@ -20,7 +20,9 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use crate::bam_reader::process_contig_streaming;
-use crate::compress::compress_signal_with_reference;
+use crate::compress::{
+    compress_signal_with_reference, Run,
+};
 use crate::db::{
     create_metadata_db, create_temp_sample_db, finalize_db, merge_temp_db_into_main,
     write_features_to_temp_db, write_presences_to_temp_db,
@@ -36,7 +38,7 @@ use crate::types::{
 /// Applied to features that should be constant along entire reads (deletions, mate flags).
 /// Only merges runs that are BOTH adjacent (end+1 == start) AND have the same value.
 #[inline]
-fn merge_identical_runs(runs: Vec<crate::compress::Run>) -> Vec<crate::compress::Run> {
+fn merge_identical_runs(runs: Vec<Run>) -> Vec<Run> {
     if runs.is_empty() {
         return runs;
     }
@@ -60,6 +62,282 @@ fn merge_identical_runs(runs: Vec<crate::compress::Run>) -> Vec<crate::compress:
     merged
 }
 
+/// Peak for phage termini detection.
+#[derive(Clone, Debug)]
+struct Peak {
+    position: i32,
+    value: f64,
+}
+
+/// Calculate circular distance between two positions.
+fn circular_distance(pos1: i32, pos2: i32, genome_length: usize) -> i32 {
+    let gl = genome_length as i32;
+    let dist_forward = if pos2 >= pos1 {
+        pos2 - pos1
+    } else {
+        (gl - pos1) + pos2
+    };
+    let dist_backward = if pos1 >= pos2 {
+        pos1 - pos2
+    } else {
+        (gl - pos2) + pos1
+    };
+    dist_forward.min(dist_backward)
+}
+
+/// Filters out peaks that have clipping events within max_distance.
+fn has_nearby_clip(
+    peak_pos: i32,
+    clip_positions: &[u32],
+    min_distance: i32,
+    genome_length: usize,
+    circular: bool,
+) -> bool {
+    for &clip in clip_positions {
+        let clip_pos = clip as i32;
+
+        let dist = if circular {
+            circular_distance(peak_pos, clip_pos, genome_length)
+        } else {
+            (peak_pos - clip_pos).abs()
+        };
+
+        if dist <= min_distance {
+            return true;
+        }
+    }
+    false
+}
+
+fn filter_peaks_by_spc_and_clippings(
+    reads_starts: &[Run],
+    reads_ends: &[Run],
+    min_spc: f64,
+    min_distance: i32,
+    genome_length: usize,
+    circular: bool,
+    left_clip_pos: &Option<Vec<u32>>,
+    right_clip_pos: &Option<Vec<u32>>,
+) -> (Vec<Run>, Vec<Run>) {
+    // flatten clip positions once (cheaper & simpler)
+    let left_clips: Vec<u32> = left_clip_pos.iter().flatten().copied().collect();
+    let right_clips: Vec<u32> = right_clip_pos.iter().flatten().copied().collect();
+
+    // filter reads_starts using right clipping
+    let filtered_starts: Vec<Run> = reads_starts
+        .iter()
+        .filter(|run| {
+            run.value as f64 >= min_spc &&
+            !has_nearby_clip(
+                run.start_pos,
+                &right_clips,
+                min_distance,
+                genome_length,
+                circular,
+            )
+        })
+        .cloned()
+        .collect();
+
+    // filter reads_ends using left clipping
+    let filtered_ends: Vec<Run> = reads_ends
+        .iter()
+        .filter(|run| {
+            run.value as f64 >= min_spc &&
+            !has_nearby_clip(
+                run.start_pos,
+                &left_clips,
+                min_distance,
+                genome_length,
+                circular,
+            )
+        })
+        .cloned()
+        .collect();
+
+    (filtered_starts, filtered_ends)
+}
+
+/// Merge nearby peaks within max_distance, keeping the highest value peak.
+fn merge_peaks(
+    runs: &[Run],
+    max_distance: i32,
+    genome_length: usize,
+    circular: bool,
+) -> Vec<Peak> {
+    if runs.is_empty() {
+        return Vec::new();
+    }
+
+    // Convert runs to peaks
+    let mut peaks: Vec<Peak> = runs
+        .iter()
+        .map(|r| Peak {
+            position: r.start_pos,
+            value: r.value as f64,
+        })
+        .collect();
+
+    // Sort by genomic position
+    peaks.sort_by_key(|p| p.position);
+
+    let mut merged: Vec<Peak> = Vec::new();
+    let mut current = peaks[0].clone();
+
+    for peak in peaks.into_iter().skip(1) {
+        let dist = if circular {
+            circular_distance(current.position, peak.position, genome_length)
+        } else {
+            peak.position - current.position
+        };
+
+        if dist <= max_distance {
+            // keep strongest
+            if peak.value > current.value {
+                current = peak;
+            }
+        } else {
+            merged.push(current);
+            current = peak;
+        }
+    }
+    merged.push(current);
+
+    // Circular wrap-around merge (first & last)
+    if circular && merged.len() > 1 {
+        let first = &merged[0];
+        let last = &merged[merged.len() - 1];
+
+        let wrap_dist = circular_distance(last.position, first.position, genome_length);
+
+        if wrap_dist <= max_distance {
+            let keeper = if first.value >= last.value {
+                first.clone()
+            } else {
+                last.clone()
+            };
+
+            merged.remove(merged.len() - 1);
+            merged[0] = keeper;
+        }
+    }
+
+    merged
+}
+
+/// Classify phage packaging mechanism based on peak configuration.
+fn classify_packaging(
+    start_peaks: &[Peak],
+    end_peaks: &[Peak],
+    genome_length: usize,
+    circular: bool,
+) -> (String, Option<i32>, Option<i32>) {
+    match (start_peaks.len(), end_peaks.len()) {
+        (0, 0) => ("No_packaging".to_string(), None, None),
+        
+        (1, 0) => {
+            // Only start peak - PAC
+            ("PAC".to_string(), Some(start_peaks[0].position), None)
+        }
+        
+        (0, 1) => {
+            // Only end peak - PAC
+            ("PAC".to_string(), None, Some(end_peaks[0].position))
+        }
+        
+        (1, 1) => {
+            // Two peaks - classify based on distance and order
+            let start_pos = start_peaks[0].position;
+            let end_pos = end_peaks[0].position;
+            
+            // Calculate actual genomic distance (shortest path in circular)
+            let distance = if circular {
+                circular_distance(start_pos, end_pos, genome_length)
+            } else {
+                (start_pos - end_pos).abs()
+            };
+            
+            let genome_10pct = (genome_length as f64 * 0.1) as i32;
+            
+            // Determine order: which comes first going forward (clockwise in circular)
+            // For linear: simply check positions
+            // For circular: check which direction is shorter to go from start to end
+            let end_before_start = if circular {
+                // Calculate forward distance from start to end
+                let gl = genome_length as i32;
+                let forward_dist = if end_pos >= start_pos {
+                    end_pos - start_pos
+                } else {
+                    (gl - start_pos) + end_pos
+                };
+                // If forward distance equals circular_distance, end is ahead
+                // If they're different, end is behind (going backward is shorter)
+                forward_dist != distance
+            } else {
+                end_pos < start_pos
+            };
+            
+            let (mechanism, left, right) = if distance < 2 {
+                // Very close - cohesive ends
+                ("COS".to_string(), Some(start_pos.min(end_pos)), Some(start_pos.max(end_pos)))
+            } else if distance <= 20 {
+                // Close cohesive ends with directionality
+                if end_before_start {
+                    ("COS_3'".to_string(), Some(end_pos), Some(start_pos))
+                } else {
+                    ("COS_5'".to_string(), Some(start_pos), Some(end_pos))
+                }
+            } else if distance <= 1000 {
+                // Short direct terminal repeats
+                if end_before_start {
+                    ("DTR_short_3'".to_string(), Some(end_pos), Some(start_pos))
+                } else {
+                    ("DTR_short_5'".to_string(), Some(start_pos), Some(end_pos))
+                }
+            } else if distance <= genome_10pct {
+                // Long direct terminal repeats
+                if end_before_start {
+                    ("DTR_long_3'".to_string(), Some(end_pos), Some(start_pos))
+                } else {
+                    ("DTR_long_5'".to_string(), Some(start_pos), Some(end_pos))
+                }
+            } else {
+                // Very distant - outlier
+                if end_before_start {
+                    ("DTR_outlier_3'".to_string(), Some(end_pos), Some(start_pos))
+                } else {
+                    ("DTR_outlier_5'".to_string(), Some(start_pos), Some(end_pos))
+                }
+            };
+            
+            (mechanism, left, right)
+        }
+        
+        _ => {
+            // Multiple peaks or other configurations
+            ("Unknown_packaging".to_string(), None, None)
+        }
+    }
+}
+
+/// Configuration for phage termini detection.
+#[derive(Clone, Copy)]
+pub struct PhageTerminiConfig {
+    /// Minimum SPC (Significant Peak Count) to consider a peak significant
+    pub min_spc: f64,
+    /// Maximum distance (bp) between peaks to merge them
+    pub max_distance_peaks: i32,
+}
+
+impl Default for PhageTerminiConfig {
+    fn default() -> Self {
+        Self {
+            min_spc: 10.0,
+            max_distance_peaks: 20,
+        }
+    }
+}
+
 /// Configuration for processing.
 #[derive(Clone)]
 pub struct ProcessConfig {
@@ -72,6 +350,8 @@ pub struct ProcessConfig {
     pub circular: bool,
     /// Sequencing type: determines which features to calculate
     pub sequencing_type: SequencingType,
+    /// Phage termini detection configuration
+    pub phagetermini_config: PhageTerminiConfig,
 }
 
 impl ProcessConfig {
@@ -119,11 +399,11 @@ fn add_compressed_feature_with_reference(
     contig_name: &str,
     config: &ProcessConfig,
     output: &mut Vec<FeaturePoint>,
-) {
+) -> Vec<Run> {
     let plot_type = get_plot_type(feature);
     let runs = compress_signal_with_reference(values, reference, plot_type, config.curve_ratio, config.bar_ratio);
 
-    output.extend(runs.into_iter().map(|run| FeaturePoint {
+    output.extend(runs.iter().map(|run| FeaturePoint {
         contig_name: contig_name.to_string(),
         feature: feature.to_string(),
         start_pos: run.start_pos,
@@ -133,6 +413,8 @@ fn add_compressed_feature_with_reference(
         median: None,
         std: None,
     }));
+
+    runs
 }
 
 /// Compress and add feature points with statistics (for clippings/insertions).
@@ -149,11 +431,11 @@ fn add_compressed_feature_with_stats(
     contig_name: &str,
     config: &ProcessConfig,
     output: &mut Vec<FeaturePoint>,
-) {
+) -> Vec<Run> {
     let plot_type = get_plot_type(feature);
     let runs = compress_signal_with_reference(counts, reference, plot_type, config.curve_ratio, config.bar_ratio);
 
-    output.extend(runs.into_iter().map(|run| {
+    output.extend(runs.iter().map(|run| {
         // For the run's position range, compute average statistics
         let start_idx = (run.start_pos - 1) as usize;
         let end_idx = run.end_pos as usize;
@@ -181,16 +463,20 @@ fn add_compressed_feature_with_stats(
             std: std_val,
         }
     }));
+
+    runs
 }
 
 /// Add features from FeatureArrays to output (optimized path).
+/// Returns optional packaging classification for phagetermini module.
 fn add_features_from_arrays(
     arrays: &FeatureArrays,
     contig_name: &str,
+    contig_length: usize,
     config: &ProcessConfig,
     flags: ModuleFlags,
     output: &mut Vec<FeaturePoint>,
-) {
+) -> Option<(String, Option<i32>, Option<i32>)> {
     let seq_type = config.sequencing_type;
     // Coverage (always compress self-referentially)
     let primary_reads_f64: Vec<f64> = arrays.primary_reads.iter().map(|&x| x as f64).collect();
@@ -219,7 +505,9 @@ fn add_features_from_arrays(
     }
 
     // Assemblycheck features
-    if flags.assemblycheck {
+    let mut left_clip_pos: Option<Vec<u32>> = None;
+    let mut right_clip_pos: Option<Vec<u32>> = None;
+    if flags.assemblycheck || flags.phagetermini {
         // Clippings and insertions with statistics
         let left_clip_counts: Vec<f64> = arrays.left_clipping_lengths.iter().map(|v| v.len() as f64).collect();
         let left_clip_means: Vec<f64> = arrays.left_clipping_lengths.iter().map(|v| {
@@ -235,8 +523,9 @@ fn add_features_from_arrays(
                 var.sqrt()
             }
         }).collect();
-        add_compressed_feature_with_stats(&left_clip_counts, &left_clip_means, &left_clip_medians, &left_clip_stds,
+        let left_clip_run = add_compressed_feature_with_stats(&left_clip_counts, &left_clip_means, &left_clip_medians, &left_clip_stds,
             Some(&primary_reads_f64), "left_clippings", contig_name, config, output);
+        left_clip_pos = Some(left_clip_run.iter().map(|r| r.start_pos as u32).collect());
 
         let right_clip_counts: Vec<f64> = arrays.right_clipping_lengths.iter().map(|v| v.len() as f64).collect();
         let right_clip_means: Vec<f64> = arrays.right_clipping_lengths.iter().map(|v| {
@@ -252,9 +541,12 @@ fn add_features_from_arrays(
                 var.sqrt()
             }
         }).collect();
-        add_compressed_feature_with_stats(&right_clip_counts, &right_clip_means, &right_clip_medians, &right_clip_stds,
+        let right_clip_run = add_compressed_feature_with_stats(&right_clip_counts, &right_clip_means, &right_clip_medians, &right_clip_stds,
             Some(&primary_reads_f64), "right_clippings", contig_name, config, output);
-
+        right_clip_pos = Some(right_clip_run.iter().map(|r| r.start_pos as u32).collect());
+    }
+            
+    if flags.assemblycheck {
         let insertion_counts: Vec<f64> = arrays.insertion_lengths.iter().map(|v| v.len() as f64).collect();
         let insertion_means: Vec<f64> = arrays.insertion_lengths.iter().map(|v| {
             if v.is_empty() { 0.0 } else { v.iter().map(|&x| x as f64).sum::<f64>() / v.len() as f64 }
@@ -361,7 +653,7 @@ fn add_features_from_arrays(
     // Phagetermini features
     // Coverage_reduced for phagetermini (use as reference for phagetermini bar features)
     let coverage_reduced_f64: Vec<f64> = arrays.coverage_reduced.iter().map(|&x| x as f64).collect();
-    if flags.phagetermini {
+    let packaging_result = if flags.phagetermini {
         // coverage_reduced (self-referential curve)
         add_compressed_feature(&coverage_reduced_f64, "coverage_reduced", contig_name, config, output);
         
@@ -430,7 +722,48 @@ fn add_features_from_arrays(
                 });
             }
         }
-    }
+
+        // Classify packaging mechanism
+        let pt_config = config.phagetermini_config;
+
+        // Filter runs by minimum SPC threshold AND no clipping events within max_distance
+        let (reads_starts_filtered, reads_ends_filtered) = filter_peaks_by_spc_and_clippings(
+            &reads_starts_runs,
+            &reads_ends_runs,
+            pt_config.min_spc,
+            pt_config.max_distance_peaks,
+            contig_length,
+            config.circular,
+            &left_clip_pos,
+            &right_clip_pos,
+        );
+
+        let start_peaks = merge_peaks(
+            &reads_starts_filtered,
+            pt_config.max_distance_peaks,
+            contig_length,
+            config.circular
+        );
+        let end_peaks = merge_peaks(
+            &reads_ends_filtered,
+            pt_config.max_distance_peaks,
+            contig_length,
+            config.circular
+        );
+
+        let (mechanism, left_terminus, right_terminus) = classify_packaging(
+            &start_peaks,
+            &end_peaks,
+            contig_length,
+            config.circular,
+        );
+
+        Some((mechanism, left_terminus, right_terminus))
+    } else {
+        None
+    };
+
+    packaging_result
 }
 
 /// Process one BAM file using streaming (single-pass, optimized).
@@ -488,14 +821,18 @@ pub fn process_sample(
             };
 
             // Coverage already checked and returned from process_contig_streaming
+            
+            // Calculate features for this contig
+            let mut features = Vec::new();
+            let packaging_info = add_features_from_arrays(&arrays, &ref_name, ref_length, config, flags, &mut features);
+
             let presence = PresenceData {
                 contig_name: ref_name.clone(),
                 coverage_pct: coverage_pct as f32,
+                phage_packaging_mechanism: packaging_info.as_ref().map(|(m, _, _)| m.clone()),
+                phage_left_terminus: packaging_info.as_ref().and_then(|(_, l, _)| *l),
+                phage_right_terminus: packaging_info.as_ref().and_then(|(_, _, r)| *r),
             };
-
-            // Calculate features for this contig
-            let mut features = Vec::new();
-            add_features_from_arrays(&arrays, &ref_name, config, flags, &mut features);
 
             Some((features, presence))
         })

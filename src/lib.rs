@@ -36,7 +36,7 @@ pub use circular::{increment_circular, increment_range};
 pub use compress::compress_signal_with_reference;
 pub use features::{process_read, FeatureArrays, ModuleFlags};
 pub use genbank::parse_genbank;
-pub use processing::{process_sample, run_all_samples, ProcessConfig, ProcessResult};
+pub use processing::{process_sample, run_all_samples, PhageTerminiConfig, ProcessConfig, ProcessResult};
 pub use types::{
     mean_std, ContigInfo, FeaturePoint, PlotType, PresenceData, SequencingType,
     ASSEMBLYCHECK_FEATURES, PHAGETERMINI_FEATURES, VARIABLES,
@@ -92,7 +92,7 @@ mod python {
         circular: bool,
         create_indexes: bool,
     ) -> PyResult<Bound<'py, PyDict>> {
-        use crate::processing::{run_all_samples, ProcessConfig};
+        use crate::processing::{run_all_samples, PhageTerminiConfig, ProcessConfig};
         use crate::bam_reader::detect_sequencing_type;
         use std::path::PathBuf;
 
@@ -120,6 +120,7 @@ mod python {
             bar_ratio,
             circular,
             sequencing_type: seq_type,
+            phagetermini_config: PhageTerminiConfig::default(),
         };
 
         // Convert string paths to PathBuf

@@ -406,6 +406,12 @@ pub struct PresenceData {
     pub contig_name: String,
     /// Percentage of bases with at least 1x coverage (0-100)
     pub coverage_pct: f32,
+    /// Phage packaging mechanism (only for phagetermini module)
+    pub phage_packaging_mechanism: Option<String>,
+    /// Left terminus position (1-indexed, only for phagetermini module)
+    pub phage_left_terminus: Option<i32>,
+    /// Right terminus position (1-indexed, only for phagetermini module)
+    pub phage_right_terminus: Option<i32>,
 }
 
 /// Type alias for feature calculation results.

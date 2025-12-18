@@ -76,6 +76,9 @@ fn create_core_tables(conn: &Connection, create_indexes: bool) -> Result<()> {
             Contig_id INTEGER,
             Sample_id INTEGER,
             Coverage_percentage REAL,
+            Phage_packaging_mechanism TEXT,
+            Phage_left_terminus INTEGER,
+            Phage_right_terminus INTEGER,
             FOREIGN KEY(Contig_id) REFERENCES Contig(Contig_id),
             FOREIGN KEY(Sample_id) REFERENCES Sample(Sample_id)
         )",
@@ -315,7 +318,10 @@ pub fn create_temp_sample_db(temp_db_path: &Path) -> Result<Connection> {
         "CREATE TABLE TempPresences (
             Contig_name TEXT,
             Sample_name TEXT,
-            Coverage_percentage REAL
+            Coverage_percentage REAL,
+            Phage_packaging_mechanism TEXT,
+            Phage_left_terminus INTEGER,
+            Phage_right_terminus INTEGER
         )",
         [],
     )
@@ -375,12 +381,19 @@ pub fn write_presences_to_temp_db(
     presences: &[PresenceData],
 ) -> Result<()> {
     let mut stmt = conn
-        .prepare("INSERT INTO TempPresences (Contig_name, Sample_name, Coverage_percentage) VALUES (?1, ?2, ?3)")
+        .prepare("INSERT INTO TempPresences (Contig_name, Sample_name, Coverage_percentage, Phage_packaging_mechanism, Phage_left_terminus, Phage_right_terminus) VALUES (?1, ?2, ?3, ?4, ?5, ?6)")
         .context("Failed to prepare presence insert")?;
 
     for p in presences {
-        stmt.execute(params![&p.contig_name, sample_name, p.coverage_pct])
-            .context("Failed to insert presence")?;
+        stmt.execute(params![
+            &p.contig_name,
+            sample_name,
+            p.coverage_pct,
+            &p.phage_packaging_mechanism,
+            p.phage_left_terminus,
+            p.phage_right_terminus
+        ])
+        .context("Failed to insert presence")?;
     }
 
     Ok(())
@@ -457,22 +470,22 @@ fn merge_presences(
     sample_name_to_id: &HashMap<String, i64>,
 ) -> Result<()> {
     let mut insert_stmt = conn.prepare(
-        "INSERT INTO Presences (Contig_id, Sample_id, Coverage_percentage) VALUES (?1, ?2, ?3)",
+        "INSERT INTO Presences (Contig_id, Sample_id, Coverage_percentage, Phage_packaging_mechanism, Phage_left_terminus, Phage_right_terminus) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
     )?;
 
-    let presences: Vec<(String, String, f32)> = {
+    let presences: Vec<(String, String, f32, Option<String>, Option<i64>, Option<i64>)> = {
         let mut stmt =
-            conn.prepare("SELECT Contig_name, Sample_name, Coverage_percentage FROM src.TempPresences")?;
-        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+            conn.prepare("SELECT Contig_name, Sample_name, Coverage_percentage, Phage_packaging_mechanism, Phage_left_terminus, Phage_right_terminus FROM src.TempPresences")?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)))?;
         rows.filter_map(|r| r.ok()).collect()
     };
 
-    for (contig_name, sample_name, coverage_pct) in presences {
+    for (contig_name, sample_name, coverage_pct, packaging, left_term, right_term) in presences {
         if let (Some(&contig_id), Some(&sample_id)) = (
             contig_name_to_id.get(&contig_name),
             sample_name_to_id.get(&sample_name),
         ) {
-            insert_stmt.execute(params![contig_id, sample_id, coverage_pct])?;
+            insert_stmt.execute(params![contig_id, sample_id, coverage_pct, packaging, left_term, right_term])?;
         }
     }
 
