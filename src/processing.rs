@@ -25,7 +25,7 @@ use crate::compress::{
 };
 use crate::db::{
     create_metadata_db, create_temp_sample_db, finalize_db, merge_temp_db_into_main,
-    write_features_to_temp_db, write_presences_to_temp_db,
+    write_features_to_temp_db, write_phage_mechanisms_to_temp_db, write_presences_to_temp_db,
 };
 use crate::features::{FeatureArrays, ModuleFlags};
 use crate::genbank::parse_genbank;
@@ -1097,6 +1097,30 @@ fn process_single_sample(
                     eprintln!("\nError writing presences for {}: {}", sample_name, e);
                     failed_count.fetch_add(1, Ordering::SeqCst);
                     return;
+                }
+
+                // Extract phage mechanisms from presences (only non-No_packaging entries to save space)
+                let phage_mechanisms: Vec<(String, String, String, Option<i32>, Option<i32>)> = presences
+                    .iter()
+                    .filter_map(|p| {
+                        p.phage_packaging_mechanism.as_ref()
+                            .filter(|m| *m != "No_packaging")
+                            .map(|m| (
+                                p.contig_name.clone(),
+                                sample_name.clone(),
+                                m.clone(),
+                                p.phage_left_terminus,
+                                p.phage_right_terminus,
+                            ))
+                    })
+                    .collect();
+
+                if !phage_mechanisms.is_empty() {
+                    if let Err(e) = write_phage_mechanisms_to_temp_db(&temp_conn, &phage_mechanisms) {
+                        eprintln!("\nError writing phage mechanisms for {}: {}", sample_name, e);
+                        failed_count.fetch_add(1, Ordering::SeqCst);
+                        return;
+                    }
                 }
             }
 

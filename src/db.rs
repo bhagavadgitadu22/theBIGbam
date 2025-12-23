@@ -76,9 +76,6 @@ fn create_core_tables(conn: &Connection, create_indexes: bool) -> Result<()> {
             Contig_id INTEGER,
             Sample_id INTEGER,
             Coverage_percentage REAL,
-            Phage_packaging_mechanism TEXT,
-            Phage_left_terminus INTEGER,
-            Phage_right_terminus INTEGER,
             FOREIGN KEY(Contig_id) REFERENCES Contig(Contig_id),
             FOREIGN KEY(Sample_id) REFERENCES Sample(Sample_id)
         )",
@@ -93,6 +90,20 @@ fn create_core_tables(conn: &Connection, create_indexes: bool) -> Result<()> {
         )
         .context("Failed to create Presences index")?;
     }
+
+    conn.execute(
+        "CREATE TABLE PhageMechanisms (
+            Contig_id INTEGER,
+            Sample_id INTEGER,
+            Phage_packaging_mechanism TEXT,
+            Phage_left_terminus INTEGER,
+            Phage_right_terminus INTEGER,
+            FOREIGN KEY(Contig_id) REFERENCES Contig(Contig_id),
+            FOREIGN KEY(Sample_id) REFERENCES Sample(Sample_id)
+        )",
+        [],
+    )
+    .context("Failed to create PhageMechanisms table")?;
 
     conn.execute(
         "CREATE TABLE Contig_annotation (
@@ -318,14 +329,24 @@ pub fn create_temp_sample_db(temp_db_path: &Path) -> Result<Connection> {
         "CREATE TABLE TempPresences (
             Contig_name TEXT,
             Sample_name TEXT,
-            Coverage_percentage REAL,
+            Coverage_percentage REAL
+        )",
+        [],
+    )
+    .context("Failed to create TempPresences table")?;
+
+    // New: TempPhageMechanisms table for per-sample phage mechanism info
+    conn.execute(
+        "CREATE TABLE TempPhageMechanisms (
+            Contig_name TEXT,
+            Sample_name TEXT,
             Phage_packaging_mechanism TEXT,
             Phage_left_terminus INTEGER,
             Phage_right_terminus INTEGER
         )",
         [],
     )
-    .context("Failed to create TempPresences table")?;
+    .context("Failed to create TempPhageMechanisms table")?;
 
     conn.execute(
         "CREATE TABLE TempFeatures (
@@ -381,19 +402,35 @@ pub fn write_presences_to_temp_db(
     presences: &[PresenceData],
 ) -> Result<()> {
     let mut stmt = conn
-        .prepare("INSERT INTO TempPresences (Contig_name, Sample_name, Coverage_percentage, Phage_packaging_mechanism, Phage_left_terminus, Phage_right_terminus) VALUES (?1, ?2, ?3, ?4, ?5, ?6)")
+        .prepare("INSERT INTO TempPresences (Contig_name, Sample_name, Coverage_percentage) VALUES (?1, ?2, ?3)")
         .context("Failed to prepare presence insert")?;
 
     for p in presences {
         stmt.execute(params![
             &p.contig_name,
             sample_name,
-            p.coverage_pct,
-            &p.phage_packaging_mechanism,
-            p.phage_left_terminus,
-            p.phage_right_terminus
+            p.coverage_pct
         ])
         .context("Failed to insert presence")?;
+    }
+
+    Ok(())
+}
+
+/// Write phage mechanisms to a temp database.
+/// Only stores entries where packaging mechanism is not "No_packaging" to save space.
+/// phage_mechanisms: Vec<(contig_name, sample_name, mechanism, left, right)>
+pub fn write_phage_mechanisms_to_temp_db(
+    conn: &rusqlite::Connection,
+    phage_mechanisms: &[(String, String, String, Option<i32>, Option<i32>)]
+) -> Result<()> {
+    let mut stmt = conn.prepare(
+        "INSERT INTO TempPhageMechanisms (Contig_name, Sample_name, Phage_packaging_mechanism, Phage_left_terminus, Phage_right_terminus) VALUES (?1, ?2, ?3, ?4, ?5)"
+    ).context("Failed to prepare phage mechanism insert")?;
+
+    for (contig_name, sample_name, mechanism, left, right) in phage_mechanisms {
+        stmt.execute(params![contig_name, sample_name, mechanism, left, right])
+            .context("Failed to insert phage mechanism")?;
     }
 
     Ok(())
@@ -452,6 +489,9 @@ pub fn merge_temp_db_into_main(
     // Insert presences
     merge_presences(&conn, &contig_name_to_id, &sample_name_to_id)?;
 
+    // Insert phage mechanisms
+    merge_phage_mechanisms(&conn, &contig_name_to_id, &sample_name_to_id)?;
+
     // Insert features
     merge_features(&conn, &contig_name_to_id, &sample_name_to_id, &sample_names)?;
 
@@ -470,22 +510,52 @@ fn merge_presences(
     sample_name_to_id: &HashMap<String, i64>,
 ) -> Result<()> {
     let mut insert_stmt = conn.prepare(
-        "INSERT INTO Presences (Contig_id, Sample_id, Coverage_percentage, Phage_packaging_mechanism, Phage_left_terminus, Phage_right_terminus) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        "INSERT INTO Presences (Contig_id, Sample_id, Coverage_percentage) VALUES (?1, ?2, ?3)"
     )?;
 
-    let presences: Vec<(String, String, f32, Option<String>, Option<i64>, Option<i64>)> = {
+    let presences: Vec<(String, String, f32)> = {
         let mut stmt =
-            conn.prepare("SELECT Contig_name, Sample_name, Coverage_percentage, Phage_packaging_mechanism, Phage_left_terminus, Phage_right_terminus FROM src.TempPresences")?;
-        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)))?;
+            conn.prepare("SELECT Contig_name, Sample_name, Coverage_percentage FROM src.TempPresences")?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
         rows.filter_map(|r| r.ok()).collect()
     };
 
-    for (contig_name, sample_name, coverage_pct, packaging, left_term, right_term) in presences {
+    for (contig_name, sample_name, coverage_pct) in presences {
         if let (Some(&contig_id), Some(&sample_id)) = (
             contig_name_to_id.get(&contig_name),
             sample_name_to_id.get(&sample_name),
         ) {
-            insert_stmt.execute(params![contig_id, sample_id, coverage_pct, packaging, left_term, right_term])?;
+            insert_stmt.execute(params![contig_id, sample_id, coverage_pct])?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Merge phage mechanisms from temp DB into PhageMechanisms table.
+fn merge_phage_mechanisms(
+    conn: &rusqlite::Connection,
+    contig_name_to_id: &std::collections::HashMap<String, i64>,
+    sample_name_to_id: &std::collections::HashMap<String, i64>,
+) -> Result<()> {
+    let mut insert_stmt = conn.prepare(
+        "INSERT OR IGNORE INTO PhageMechanisms (Contig_id, Sample_id, Phage_packaging_mechanism, Phage_left_terminus, Phage_right_terminus) VALUES (?1, ?2, ?3, ?4, ?5)"
+    )?;
+
+    let mechanisms: Vec<(String, String, String, Option<i64>, Option<i64>)> = {
+        let mut stmt = conn.prepare(
+            "SELECT Contig_name, Sample_name, Phage_packaging_mechanism, Phage_left_terminus, Phage_right_terminus FROM src.TempPhageMechanisms"
+        )?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)))?;
+        rows.filter_map(|r| r.ok()).collect()
+    };
+
+    for (contig_name, sample_name, mechanism, left, right) in mechanisms {
+        if let (Some(&contig_id), Some(&sample_id)) = (
+            contig_name_to_id.get(&contig_name),
+            sample_name_to_id.get(&sample_name),
+        ) {
+            insert_stmt.execute(params![contig_id, sample_id, mechanism, left, right])?;
         }
     }
 
@@ -570,7 +640,7 @@ fn merge_features(
                 summary_stmt.execute(params![contig_id, sample_id, variable_id, *row_count as i64])?;
             }
         }
-        
+
         // Special case: also populate Summary for primary_reads VIEW when saving plus_only
         if v.name == "primary_reads_plus_only" {
             if let Some(&primary_reads_variable_id) = variable_name_to_id.get("primary_reads") {
@@ -660,23 +730,24 @@ pub fn finalize_db(db_path: &Path) -> Result<()> {
     )
     .context("Failed to create primary_reads VIEW")?;
 
-    // Create a view joining Contig, Sample, and Presences for explicit metadata
+    // Create a view joining Contig, Sample, Presences, and PhageMechanisms for explicit metadata
     conn.execute(
-        "CREATE VIEW IF NOT EXISTS Explicit_presences AS
+        "CREATE VIEW IF NOT EXISTS Explicit_phage_mechanisms AS
          SELECT
              p.Presence_id,
              c.Contig_name,
              s.Sample_name,
              p.Coverage_percentage,
-             p.Phage_packaging_mechanism,
-             p.Phage_left_terminus,
-             p.Phage_right_terminus
+             m.Phage_packaging_mechanism,
+             m.Phage_left_terminus,
+             m.Phage_right_terminus
          FROM Presences p
          JOIN Contig c ON p.Contig_id = c.Contig_id
-         JOIN Sample s ON p.Sample_id = s.Sample_id",
+         JOIN Sample s ON p.Sample_id = s.Sample_id
+         LEFT JOIN PhageMechanisms m ON p.Contig_id = m.Contig_id AND p.Sample_id = m.Sample_id",
         [],
     )
-    .context("Failed to create Explicit_presences VIEW")?;
+    .context("Failed to create Explicit_phage_mechanisms VIEW")?;
 
     conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
         .context("Failed to checkpoint WAL")?;
