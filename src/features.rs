@@ -80,6 +80,9 @@ pub struct FeatureArrays {
     /// Deletion events from CIGAR (sequence in reference but not in read).
     pub deletions: Vec<u64>,
 
+    /// Lengths of deletion events from CIGAR (one entry per deletion at each position).
+    pub deletion_lengths: Vec<Vec<u32>>,
+
     /// Base mismatches (from MD tag).
     /// High mismatch rates may indicate errors or strain variation.
     pub mismatches: Vec<u64>,
@@ -149,6 +152,7 @@ impl FeatureArrays {
             right_clipping_lengths: vec![Vec::new(); ref_length],
             insertion_lengths: vec![Vec::new(); ref_length],
             deletions: vec![0u64; ref_length],
+            deletion_lengths: vec![Vec::new(); ref_length],
             mismatches: vec![0u64; ref_length],
             sum_read_lengths: vec![0u64; ref_length],
             count_read_lengths: vec![0u64; ref_length],
@@ -624,11 +628,13 @@ pub fn process_read(
                 'D' => {
                     // Deletion: sequence in reference, not in read
                     // Spans multiple reference positions
-                    let len = len as usize;
-                    for j in 0..len {
+                    let len_usize = len as usize;
+                    // Store deletion length at the starting position
+                    arrays.deletion_lengths[ref_pos % ref_length].push(len);
+                    for j in 0..len_usize {
                         arrays.deletions[(ref_pos + j) % ref_length] += 1;
                     }
-                    ref_pos += len; // Deletions consume reference
+                    ref_pos += len_usize; // Deletions consume reference
                 }
                 _ => {
                     // Other operations (M, =, X, N) that consume reference

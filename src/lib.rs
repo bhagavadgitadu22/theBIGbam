@@ -68,7 +68,6 @@ mod python {
     ///     compress_ratio: Compression ratio threshold (default 10.0)
     ///     circular: Whether the genome is circular (default False)
     ///     create_indexes: Whether to create database indexes (default True)
-    ///     max_points: Maximum points per feature (default 10000)
     ///
     /// Returns:
     ///     dict with keys:

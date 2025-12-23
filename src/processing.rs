@@ -26,6 +26,7 @@ use crate::compress::{
 use crate::db::{
     create_metadata_db, create_temp_sample_db, finalize_db, merge_temp_db_into_main,
     write_features_to_temp_db, write_phage_mechanisms_to_temp_db, write_presences_to_temp_db,
+    write_completeness_to_temp_db, CompletenessData,
 };
 use crate::features::{FeatureArrays, ModuleFlags};
 use crate::genbank::parse_genbank;
@@ -376,6 +377,227 @@ pub struct ProcessResult {
     pub writing_time_secs: f64,
 }
 
+/// Compute completeness statistics from clipping, insertion, mismatch, and deletion data.
+///
+/// For the left side: finds the first left-clipping event where clipped_length > distance_to_start.
+///
+/// For the right side: finds the first right-clipping event where clipped_length > distance_to_end.
+///
+/// score_completeness: sum of weighted missing basepairs (in reads but not reference):
+/// - clippings: (count/coverage) * median_length
+/// - insertions: (count/coverage) * median_length
+/// - mismatches: (count/coverage) * 1
+///
+/// score_contamination: sum of weighted contamination basepairs (in reference but not reads):
+/// - mismatches: (count/coverage) * 1
+/// - deletions: (count/coverage) * median_length
+/// - paired clippings (right followed by left): average_prevalence * distance
+///
+/// Returns None for a side if the first clipping event doesn't satisfy the condition.
+fn compute_completeness(
+    left_clipping_lengths: &[Vec<u32>],
+    right_clipping_lengths: &[Vec<u32>],
+    insertion_lengths: &[Vec<u32>],
+    deletion_lengths: &[Vec<u32>],
+    primary_reads: &[u64],
+    left_clip_runs: &[Run],
+    right_clip_runs: &[Run],
+    insertion_runs: &[Run],
+    deletion_runs: &[Run],
+    mismatch_runs: &[Run],
+    contig_name: &str,
+    contig_length: usize,
+) -> CompletenessData {
+    // Helper function to compute median from a vector of lengths
+    fn compute_median(lengths: &[u32]) -> i32 {
+        if lengths.is_empty() {
+            return 0;
+        }
+        let mut sorted = lengths.to_vec();
+        sorted.sort_unstable();
+        let mid = sorted.len() / 2;
+        if sorted.len() % 2 == 0 {
+            ((sorted[mid - 1] + sorted[mid]) / 2) as i32
+        } else {
+            sorted[mid] as i32
+        }
+    }
+
+    // Find the FIRST left-clipping event (leftmost position), then check if clipped_length > distance_to_start
+    // Only valid if the first left-clipping satisfies the condition
+    let left_result = left_clip_runs
+        .iter()
+        .min_by_key(|run| run.start_pos) // Find the first (leftmost) left-clipping
+        .and_then(|run| {
+            let pos = (run.start_pos - 1) as usize; // Convert to 0-indexed
+            let distance_to_start = run.start_pos - 1; // Distance from position 1
+            let min_missing = if pos < left_clipping_lengths.len() {
+                compute_median(&left_clipping_lengths[pos])
+            } else {
+                0
+            };
+            // Only valid if clipped length > distance to start
+            if min_missing > distance_to_start {
+                let clipping_count = run.value as f64;
+                let coverage = primary_reads.get(pos).copied().unwrap_or(0) as f64;
+                let prevalence = if coverage > 0.0 { clipping_count / coverage } else { 0.0 };
+                Some((prevalence, distance_to_start, min_missing))
+            } else {
+                None
+            }
+        });
+
+    // Find the FIRST right-clipping event (rightmost position), then check if clipped_length > distance_to_end
+    // Only valid if the first right-clipping satisfies the condition
+    let right_result = right_clip_runs
+        .iter()
+        .max_by_key(|run| run.start_pos) // Find the first (rightmost) right-clipping
+        .and_then(|run| {
+            let pos = (run.start_pos - 1) as usize; // Convert to 0-indexed
+            let distance_to_end = contig_length as i32 - run.start_pos; // Distance to end
+            let min_missing = if pos < right_clipping_lengths.len() {
+                compute_median(&right_clipping_lengths[pos])
+            } else {
+                0
+            };
+            // Only valid if clipped length > distance to end
+            if min_missing > distance_to_end {
+                let clipping_count = run.value as f64;
+                let coverage = primary_reads.get(pos).copied().unwrap_or(0) as f64;
+                let prevalence = if coverage > 0.0 { clipping_count / coverage } else { 0.0 };
+                Some((prevalence, distance_to_end, min_missing))
+            } else {
+                None
+            }
+        });
+
+    // Compute score_completeness: sum of weighted missing basepairs (in reads but not reference)
+    let mut score_incomp = 0.0;
+
+    // Left clippings contribution (using median length)
+    for run in left_clip_runs {
+        let pos = (run.start_pos - 1) as usize;
+        let count = run.value as f64;
+        let coverage = primary_reads.get(pos).copied().unwrap_or(0) as f64;
+        if coverage > 0.0 && pos < left_clipping_lengths.len() {
+            let length = compute_median(&left_clipping_lengths[pos]) as f64;
+            score_incomp += (count / coverage) * length;
+        }
+    }
+
+    // Right clippings contribution (using median length)
+    for run in right_clip_runs {
+        let pos = (run.start_pos - 1) as usize;
+        let count = run.value as f64;
+        let coverage = primary_reads.get(pos).copied().unwrap_or(0) as f64;
+        if coverage > 0.0 && pos < right_clipping_lengths.len() {
+            let length = compute_median(&right_clipping_lengths[pos]) as f64;
+            score_incomp += (count / coverage) * length;
+        }
+    }
+
+    // Insertions contribution (using median length)
+    for run in insertion_runs {
+        let pos = (run.start_pos - 1) as usize;
+        let count = run.value as f64;
+        let coverage = primary_reads.get(pos).copied().unwrap_or(0) as f64;
+        if coverage > 0.0 && pos < insertion_lengths.len() {
+            let length = compute_median(&insertion_lengths[pos]) as f64;
+            score_incomp += (count / coverage) * length;
+        }
+    }
+
+    // Mismatches contribution to completeness (each mismatch contributes 1 bp)
+    for run in mismatch_runs {
+        let pos = (run.start_pos - 1) as usize;
+        let count = run.value as f64;
+        let coverage = primary_reads.get(pos).copied().unwrap_or(0) as f64;
+        if coverage > 0.0 {
+            score_incomp += count / coverage;
+        }
+    }
+
+    let score_completeness = if score_incomp > 0.0 { Some(score_incomp) } else { None };
+
+    // Compute score_contamination: sum of weighted contamination basepairs (in reference but not reads)
+    let mut score_contam = 0.0;
+
+    // Mismatches contribution to contamination (each mismatch contributes 1 bp)
+    for run in mismatch_runs {
+        let pos = (run.start_pos - 1) as usize;
+        let count = run.value as f64;
+        let coverage = primary_reads.get(pos).copied().unwrap_or(0) as f64;
+        if coverage > 0.0 {
+            score_contam += count / coverage;
+        }
+    }
+
+    // Deletions contribution (using median length)
+    for run in deletion_runs {
+        let pos = (run.start_pos - 1) as usize;
+        let count = run.value as f64;
+        let coverage = primary_reads.get(pos).copied().unwrap_or(0) as f64;
+        if coverage > 0.0 && pos < deletion_lengths.len() {
+            let length = compute_median(&deletion_lengths[pos]) as f64;
+            score_contam += (count / coverage) * length;
+        }
+    }
+
+    // Paired clippings contribution: right-clipping followed by left-clipping without gaps
+    // Combine and sort all clip events by position
+    #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+    enum ClipType { Right, Left }
+
+    let mut all_clips: Vec<(i32, ClipType, f64)> = Vec::new(); // (position, type, prevalence)
+
+    for run in right_clip_runs {
+        let pos = (run.start_pos - 1) as usize;
+        let count = run.value as f64;
+        let coverage = primary_reads.get(pos).copied().unwrap_or(0) as f64;
+        let prevalence = if coverage > 0.0 { count / coverage } else { 0.0 };
+        all_clips.push((run.start_pos, ClipType::Right, prevalence));
+    }
+
+    for run in left_clip_runs {
+        let pos = (run.start_pos - 1) as usize;
+        let count = run.value as f64;
+        let coverage = primary_reads.get(pos).copied().unwrap_or(0) as f64;
+        let prevalence = if coverage > 0.0 { count / coverage } else { 0.0 };
+        all_clips.push((run.start_pos, ClipType::Left, prevalence));
+    }
+
+    // Sort by position
+    all_clips.sort_by_key(|(pos, _, _)| *pos);
+
+    // Find consecutive pairs: right-clipping followed immediately by left-clipping
+    for i in 0..all_clips.len().saturating_sub(1) {
+        let (pos_right, type_right, prev_right) = all_clips[i];
+        let (pos_left, type_left, prev_left) = all_clips[i + 1];
+
+        if type_right == ClipType::Right && type_left == ClipType::Left {
+            let distance = pos_left - pos_right;
+            if distance > 0 {
+                let avg_prevalence = (prev_right + prev_left) / 2.0;
+                score_contam += avg_prevalence * distance as f64;
+            }
+        }
+    }
+
+    let score_contamination = if score_contam > 0.0 { Some(score_contam) } else { None };
+
+    CompletenessData {
+        contig_name: contig_name.to_string(),
+        prevalence_left: left_result.map(|(p, _, _)| p),
+        distance_left: left_result.map(|(_, d, _)| d),
+        min_missing_left: left_result.map(|(_, _, m)| m),
+        prevalence_right: right_result.map(|(p, _, _)| p),
+        distance_right: right_result.map(|(_, d, _)| d),
+        min_missing_right: right_result.map(|(_, _, m)| m),
+        score_completeness,
+        score_contamination,
+    }
+}
+
 /// Compress and add feature points to the output vector.
 #[inline]
 fn add_compressed_feature(
@@ -468,7 +690,9 @@ fn add_compressed_feature_with_stats(
 }
 
 /// Add features from FeatureArrays to output (optimized path).
-/// Returns optional packaging classification for phagetermini module.
+/// Returns a tuple of:
+/// - Optional packaging classification for phagetermini module
+/// - Optional completeness data for assemblycheck module
 fn add_features_from_arrays(
     arrays: &FeatureArrays,
     contig_name: &str,
@@ -476,7 +700,7 @@ fn add_features_from_arrays(
     config: &ProcessConfig,
     flags: ModuleFlags,
     output: &mut Vec<FeaturePoint>,
-) -> Option<(String, Option<i32>, Option<i32>)> {
+) -> (Option<(String, Option<i32>, Option<i32>)>, Option<CompletenessData>) {
     let seq_type = config.sequencing_type;
     // Coverage (always compress self-referentially)
     let primary_reads_f64: Vec<f64> = arrays.primary_reads.iter().map(|&x| x as f64).collect();
@@ -507,6 +731,11 @@ fn add_features_from_arrays(
     // Assemblycheck features
     let mut left_clip_pos: Option<Vec<u32>> = None;
     let mut right_clip_pos: Option<Vec<u32>> = None;
+    let mut left_clip_runs: Vec<Run> = Vec::new();
+    let mut right_clip_runs: Vec<Run> = Vec::new();
+    let mut insertion_runs: Vec<Run> = Vec::new();
+    let mut deletion_runs: Vec<Run> = Vec::new();
+    let mut mismatch_runs: Vec<Run> = Vec::new();
     if flags.assemblycheck || flags.phagetermini {
         // Clippings and insertions with statistics
         let left_clip_counts: Vec<f64> = arrays.left_clipping_lengths.iter().map(|v| v.len() as f64).collect();
@@ -523,9 +752,9 @@ fn add_features_from_arrays(
                 var.sqrt()
             }
         }).collect();
-        let left_clip_run = add_compressed_feature_with_stats(&left_clip_counts, &left_clip_means, &left_clip_medians, &left_clip_stds,
+        left_clip_runs = add_compressed_feature_with_stats(&left_clip_counts, &left_clip_means, &left_clip_medians, &left_clip_stds,
             Some(&primary_reads_f64), "left_clippings", contig_name, config, output);
-        left_clip_pos = Some(left_clip_run.iter().map(|r| r.start_pos as u32).collect());
+        left_clip_pos = Some(left_clip_runs.iter().map(|r| r.start_pos as u32).collect());
 
         let right_clip_counts: Vec<f64> = arrays.right_clipping_lengths.iter().map(|v| v.len() as f64).collect();
         let right_clip_means: Vec<f64> = arrays.right_clipping_lengths.iter().map(|v| {
@@ -541,9 +770,9 @@ fn add_features_from_arrays(
                 var.sqrt()
             }
         }).collect();
-        let right_clip_run = add_compressed_feature_with_stats(&right_clip_counts, &right_clip_means, &right_clip_medians, &right_clip_stds,
+        right_clip_runs = add_compressed_feature_with_stats(&right_clip_counts, &right_clip_means, &right_clip_medians, &right_clip_stds,
             Some(&primary_reads_f64), "right_clippings", contig_name, config, output);
-        right_clip_pos = Some(right_clip_run.iter().map(|r| r.start_pos as u32).collect());
+        right_clip_pos = Some(right_clip_runs.iter().map(|r| r.start_pos as u32).collect());
     }
             
     if flags.assemblycheck {
@@ -561,14 +790,14 @@ fn add_features_from_arrays(
                 var.sqrt()
             }
         }).collect();
-        add_compressed_feature_with_stats(&insertion_counts, &insertion_means, &insertion_medians, &insertion_stds,
+        insertion_runs = add_compressed_feature_with_stats(&insertion_counts, &insertion_means, &insertion_medians, &insertion_stds,
             Some(&primary_reads_f64), "insertions", contig_name, config, output);
 
         // Other assembly check features (no statistics)
         // Apply two-stage compression: first with coverage reference, then merge identical runs
         let deletions_f64: Vec<f64> = arrays.deletions.iter().map(|&x| x as f64).collect();
-        let deletions_runs = compress_signal_with_reference(&deletions_f64, Some(&primary_reads_f64), PlotType::Bars, config.curve_ratio, config.bar_ratio);
-        let deletions_runs_merged = merge_identical_runs(deletions_runs);
+        deletion_runs = compress_signal_with_reference(&deletions_f64, Some(&primary_reads_f64), PlotType::Bars, config.curve_ratio, config.bar_ratio);
+        let deletions_runs_merged = merge_identical_runs(deletion_runs.clone());
         output.extend(deletions_runs_merged.into_iter().map(|run| FeaturePoint {
             contig_name: contig_name.to_string(),
             feature: "deletions".to_string(),
@@ -579,9 +808,9 @@ fn add_features_from_arrays(
             median: None,
             std: None,
         }));
-        
+
         let mismatches_f64: Vec<f64> = arrays.mismatches.iter().map(|&x| x as f64).collect();
-        add_compressed_feature_with_reference(&mismatches_f64, Some(&primary_reads_f64), "mismatches", contig_name, config, output);
+        mismatch_runs = add_compressed_feature_with_reference(&mismatches_f64, Some(&primary_reads_f64), "mismatches", contig_name, config, output);
         
         if seq_type.is_short_paired() {
             let non_inward_f64: Vec<f64> = arrays.non_inward_pairs.iter().map(|&x| x as f64).collect();
@@ -763,7 +992,32 @@ fn add_features_from_arrays(
         None
     };
 
-    packaging_result
+    // Compute completeness statistics when assemblycheck is enabled
+    let completeness_result = if flags.assemblycheck {
+        let completeness = compute_completeness(
+            &arrays.left_clipping_lengths,
+            &arrays.right_clipping_lengths,
+            &arrays.insertion_lengths,
+            &arrays.deletion_lengths,
+            &arrays.primary_reads,
+            &left_clip_runs,
+            &right_clip_runs,
+            &insertion_runs,
+            &deletion_runs,
+            &mismatch_runs,
+            contig_name,
+            contig_length,
+        );
+        if completeness.has_data() {
+            Some(completeness)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    (packaging_result, completeness_result)
 }
 
 /// Process one BAM file using streaming (single-pass, optimized).
@@ -773,7 +1027,7 @@ pub fn process_sample(
     contigs: &[ContigInfo],
     modules: &[String],
     config: &ProcessConfig,
-) -> Result<(Vec<FeaturePoint>, Vec<PresenceData>, String)> {
+) -> Result<(Vec<FeaturePoint>, Vec<PresenceData>, Vec<CompletenessData>, String)> {
     let sample_name = bam_path
         .file_stem()
         .unwrap_or_default()
@@ -821,10 +1075,10 @@ pub fn process_sample(
             };
 
             // Coverage already checked and returned from process_contig_streaming
-            
+
             // Calculate features for this contig
             let mut features = Vec::new();
-            let packaging_info = add_features_from_arrays(&arrays, &ref_name, ref_length, config, flags, &mut features);
+            let (packaging_info, completeness_info) = add_features_from_arrays(&arrays, &ref_name, ref_length, config, flags, &mut features);
 
             let presence = PresenceData {
                 contig_name: ref_name.clone(),
@@ -834,20 +1088,24 @@ pub fn process_sample(
                 phage_right_terminus: packaging_info.as_ref().and_then(|(_, _, r)| *r),
             };
 
-            Some((features, presence))
+            Some((features, presence, completeness_info))
         })
         .collect();
 
     // Merge results from all contigs
     let mut all_features = Vec::new();
     let mut all_presences = Vec::new();
-    
-    for (features, presence) in results {
+    let mut all_completeness = Vec::new();
+
+    for (features, presence, completeness) in results {
         all_features.extend(features);
         all_presences.push(presence);
+        if let Some(comp) = completeness {
+            all_completeness.push(comp);
+        }
     }
 
-    Ok((all_features, all_presences, sample_name))
+    Ok((all_features, all_presences, all_completeness, sample_name))
 }
 
 /// Extract contig information from BAM file headers.
@@ -1072,7 +1330,7 @@ fn process_single_sample(
     let result = process_sample(bam_path, contigs, modules, config);
 
     match result {
-        Ok((features, presences, sample_name)) => {
+        Ok((features, presences, completeness, sample_name)) => {
             let temp_db_path = temp_dir.join(format!("{}.db", sample_name));
 
             let temp_conn = match create_temp_sample_db(&temp_db_path) {
@@ -1121,6 +1379,15 @@ fn process_single_sample(
                         failed_count.fetch_add(1, Ordering::SeqCst);
                         return;
                     }
+                }
+            }
+
+            // Write completeness data (only entries with data are stored)
+            if !completeness.is_empty() {
+                if let Err(e) = write_completeness_to_temp_db(&temp_conn, &sample_name, &completeness) {
+                    eprintln!("\nError writing completeness for {}: {}", sample_name, e);
+                    failed_count.fetch_add(1, Ordering::SeqCst);
+                    return;
                 }
             }
 

@@ -106,6 +106,25 @@ fn create_core_tables(conn: &Connection, create_indexes: bool) -> Result<()> {
     .context("Failed to create PhageMechanisms table")?;
 
     conn.execute(
+        "CREATE TABLE Completeness (
+            Contig_id INTEGER,
+            Sample_id INTEGER,
+            Prevalence_completeness_left REAL,
+            Distance_contaminated_left INTEGER,
+            Min_missing_left INTEGER,
+            Prevalence_completeness_right REAL,
+            Distance_contaminated_right INTEGER,
+            Min_missing_right INTEGER,
+            Score_completeness REAL,
+            Score_contamination REAL,
+            FOREIGN KEY(Contig_id) REFERENCES Contig(Contig_id),
+            FOREIGN KEY(Sample_id) REFERENCES Sample(Sample_id)
+        )",
+        [],
+    )
+    .context("Failed to create Completeness table")?;
+
+    conn.execute(
         "CREATE TABLE Contig_annotation (
             Contig_annotation_id INTEGER PRIMARY KEY AUTOINCREMENT,
             Contig_id INTEGER,
@@ -348,6 +367,24 @@ pub fn create_temp_sample_db(temp_db_path: &Path) -> Result<Connection> {
     )
     .context("Failed to create TempPhageMechanisms table")?;
 
+    // TempCompleteness table for per-sample completeness statistics
+    conn.execute(
+        "CREATE TABLE TempCompleteness (
+            Contig_name TEXT,
+            Sample_name TEXT,
+            Prevalence_completeness_left REAL,
+            Distance_contaminated_left INTEGER,
+            Min_missing_left INTEGER,
+            Prevalence_completeness_right REAL,
+            Distance_contaminated_right INTEGER,
+            Min_missing_right INTEGER,
+            Score_completeness REAL,
+            Score_contamination REAL
+        )",
+        [],
+    )
+    .context("Failed to create TempCompleteness table")?;
+
     conn.execute(
         "CREATE TABLE TempFeatures (
             Variable_name TEXT,
@@ -436,6 +473,63 @@ pub fn write_phage_mechanisms_to_temp_db(
     Ok(())
 }
 
+/// Completeness data for a contig.
+/// Contains assembly completeness statistics computed from clipping events at reference ends.
+#[derive(Clone, Debug)]
+pub struct CompletenessData {
+    pub contig_name: String,
+    pub prevalence_left: Option<f64>,
+    pub distance_left: Option<i32>,
+    pub min_missing_left: Option<i32>,
+    pub prevalence_right: Option<f64>,
+    pub distance_right: Option<i32>,
+    pub min_missing_right: Option<i32>,
+    /// Sum of weighted missing basepairs from clippings, insertions, and mismatches (in reads but not in reference)
+    pub score_completeness: Option<f64>,
+    /// Sum of weighted contamination basepairs from deletions, mismatches, and paired clippings (in reference but not in reads)
+    pub score_contamination: Option<f64>,
+}
+
+impl CompletenessData {
+    /// Returns true if there is any completeness data (left, right, or scores).
+    pub fn has_data(&self) -> bool {
+        self.prevalence_left.is_some() || self.prevalence_right.is_some()
+            || self.score_completeness.is_some() || self.score_contamination.is_some()
+    }
+}
+
+/// Write completeness data to a temp database.
+/// Only stores entries that have at least one side with data.
+pub fn write_completeness_to_temp_db(
+    conn: &rusqlite::Connection,
+    sample_name: &str,
+    completeness_data: &[CompletenessData],
+) -> Result<()> {
+    let mut stmt = conn.prepare(
+        "INSERT INTO TempCompleteness (Contig_name, Sample_name, Prevalence_completeness_left, Distance_contaminated_left, Min_missing_left, Prevalence_completeness_right, Distance_contaminated_right, Min_missing_right, Score_completeness, Score_contamination) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)"
+    ).context("Failed to prepare completeness insert")?;
+
+    for data in completeness_data {
+        if data.has_data() {
+            stmt.execute(params![
+                &data.contig_name,
+                sample_name,
+                data.prevalence_left,
+                data.distance_left,
+                data.min_missing_left,
+                data.prevalence_right,
+                data.distance_right,
+                data.min_missing_right,
+                data.score_completeness,
+                data.score_contamination,
+            ])
+            .context("Failed to insert completeness data")?;
+        }
+    }
+
+    Ok(())
+}
+
 /// Merge a temp sample DB into the main database.
 pub fn merge_temp_db_into_main(
     main_db_path: &Path,
@@ -491,6 +585,9 @@ pub fn merge_temp_db_into_main(
 
     // Insert phage mechanisms
     merge_phage_mechanisms(&conn, &contig_name_to_id, &sample_name_to_id)?;
+
+    // Insert completeness data
+    merge_completeness(&conn, &contig_name_to_id, &sample_name_to_id)?;
 
     // Insert features
     merge_features(&conn, &contig_name_to_id, &sample_name_to_id, &sample_names)?;
@@ -556,6 +653,39 @@ fn merge_phage_mechanisms(
             sample_name_to_id.get(&sample_name),
         ) {
             insert_stmt.execute(params![contig_id, sample_id, mechanism, left, right])?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Merge completeness data from temp DB into Completeness table.
+fn merge_completeness(
+    conn: &rusqlite::Connection,
+    contig_name_to_id: &std::collections::HashMap<String, i64>,
+    sample_name_to_id: &std::collections::HashMap<String, i64>,
+) -> Result<()> {
+    let mut insert_stmt = conn.prepare(
+        "INSERT OR IGNORE INTO Completeness (Contig_id, Sample_id, Prevalence_completeness_left, Distance_contaminated_left, Min_missing_left, Prevalence_completeness_right, Distance_contaminated_right, Min_missing_right, Score_completeness, Score_contamination) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)"
+    )?;
+
+    let completeness_rows: Vec<(String, String, Option<f64>, Option<i64>, Option<i64>, Option<f64>, Option<i64>, Option<i64>, Option<f64>, Option<f64>)> = {
+        let mut stmt = conn.prepare(
+            "SELECT Contig_name, Sample_name, Prevalence_completeness_left, Distance_contaminated_left, Min_missing_left, Prevalence_completeness_right, Distance_contaminated_right, Min_missing_right, Score_completeness, Score_contamination FROM src.TempCompleteness"
+        )?;
+        let rows = stmt.query_map([], |row| Ok((
+            row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?,
+            row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?, row.get(8)?, row.get(9)?
+        )))?;
+        rows.filter_map(|r| r.ok()).collect()
+    };
+
+    for (contig_name, sample_name, prev_left, dist_left, min_left, prev_right, dist_right, min_right, score_comp, score_contam) in completeness_rows {
+        if let (Some(&contig_id), Some(&sample_id)) = (
+            contig_name_to_id.get(&contig_name),
+            sample_name_to_id.get(&sample_name),
+        ) {
+            insert_stmt.execute(params![contig_id, sample_id, prev_left, dist_left, min_left, prev_right, dist_right, min_right, score_comp, score_contam])?;
         }
     }
 
@@ -748,6 +878,29 @@ pub fn finalize_db(db_path: &Path) -> Result<()> {
         [],
     )
     .context("Failed to create Explicit_phage_mechanisms VIEW")?;
+
+    // Create a view joining Contig, Sample, and Completeness for explicit completeness data
+    conn.execute(
+        "CREATE VIEW IF NOT EXISTS Explicit_completeness AS
+         SELECT
+             c.Contig_name,
+             s.Sample_name,
+             comp.Prevalence_completeness_left,
+             comp.Distance_contaminated_left,
+             comp.Min_missing_left,
+             comp.Prevalence_completeness_right,
+             comp.Distance_contaminated_right,
+             comp.Min_missing_right,
+             comp.Score_completeness,
+             CASE WHEN c.Contig_length > 0 THEN 100 - ((comp.Score_completeness) * 100.0 / c.Contig_length) ELSE NULL END AS Percentage_completeness,
+             comp.Score_contamination,
+             CASE WHEN c.Contig_length > 0 THEN comp.Score_contamination * 100.0 / c.Contig_length ELSE NULL END AS Percentage_contamination
+         FROM Completeness comp
+         JOIN Contig c ON comp.Contig_id = c.Contig_id
+         JOIN Sample s ON comp.Sample_id = s.Sample_id",
+        [],
+    )
+    .context("Failed to create Explicit_completeness VIEW")?;
 
     conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
         .context("Failed to checkpoint WAL")?;
