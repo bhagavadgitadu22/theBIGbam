@@ -587,10 +587,10 @@ fn compute_completeness(
 
     CompletenessData {
         contig_name: contig_name.to_string(),
-        prevalence_left: left_result.map(|(p, _, _)| p),
+        prevalence_left: left_result.map(|(p, _, _)| p * 100.0), // Store as percentage
         distance_left: left_result.map(|(_, d, _)| d),
         min_missing_left: left_result.map(|(_, _, m)| m),
-        prevalence_right: right_result.map(|(p, _, _)| p),
+        prevalence_right: right_result.map(|(p, _, _)| p * 100.0), // Store as percentage
         distance_right: right_result.map(|(_, d, _)| d),
         min_missing_right: right_result.map(|(_, _, m)| m),
         score_completeness,
