@@ -713,6 +713,13 @@ fn add_features_from_arrays(
         // Supplementary reads (self-referential curve)
         let supplementary_reads_f64: Vec<f64> = arrays.supplementary_reads.iter().map(|&x| x as f64).collect();
         add_compressed_feature(&supplementary_reads_f64, "supplementary_reads", contig_name, config, output);
+
+        // MAPQ - average mapping quality per position (sum_mapq / primary_reads)
+        let mapq_f64: Vec<f64> = arrays.sum_mapq.iter()
+            .zip(&arrays.primary_reads)
+            .map(|(&sum, &count)| if count > 0 { sum as f64 / count as f64 } else { 0.0 })
+            .collect();
+        add_compressed_feature(&mapq_f64, "mapq", contig_name, config, output);
     }
 
     // Assemblycheck features

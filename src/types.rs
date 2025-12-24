@@ -184,6 +184,7 @@ pub const VARIABLES: &[VariableConfig] = &[
     VariableConfig { name: "primary_reads_minus_only", subplot: "Alignments by strand", module: "Coverage", plot_type: PlotType::Curve, color: "#5E99A1", alpha: 0.8, fill_alpha: 0.4, size: 1.0, title: "Primary reads (- only)", help: None },
     VariableConfig { name: "secondary_reads", subplot: "Other alignments", module: "Coverage", plot_type: PlotType::Curve, color: "#1f77b4", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Secondary reads", help: None },
     VariableConfig { name: "supplementary_reads", subplot: "Other alignments", module: "Coverage", plot_type: PlotType::Curve, color: "#B45C1F", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Supplementary reads", help: None },
+    VariableConfig { name: "mapq", subplot: "MAPQ", module: "Coverage", plot_type: PlotType::Curve, color: "#77dd77", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Mapping Quality", help: None },
 
     // Per read metrics (long reads)
     VariableConfig { name: "read_lengths", subplot: "Read lengths", module: "Long-read metrics", plot_type: PlotType::Curve, color: "#ed8b00", alpha: 0.8, fill_alpha: 0.4, size: 1.0, title: "Read Lengths", help: None },

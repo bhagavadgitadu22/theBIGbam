@@ -173,6 +173,7 @@ pub fn process_contig_streaming(
             record.tid() != record.mtid(),
             &cigar_buf,
             md_tag,
+            record.mapq(),
             seq_type,
             flags,
             circular,

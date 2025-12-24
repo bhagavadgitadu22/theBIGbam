@@ -49,6 +49,10 @@ pub struct FeatureArrays {
     /// Supplementary reads have flag 0x800 set.
     pub supplementary_reads: Vec<u64>,
 
+    /// Sum of MAPQ values at each position (for primary reads only).
+    /// Average MAPQ = sum_mapq / primary_reads.
+    pub sum_mapq: Vec<u64>,
+
     // -------------------------------------------------------------------------
     // Phagetermini Module
     // -------------------------------------------------------------------------
@@ -145,6 +149,7 @@ impl FeatureArrays {
             primary_reads_minus_only: vec![0u64; ref_length],
             secondary_reads: vec![0u64; ref_length],
             supplementary_reads: vec![0u64; ref_length],
+            sum_mapq: vec![0u64; ref_length],
             coverage_reduced: vec![0u64; ref_length],
             reads_starts: vec![0u64; ref_length],
             reads_ends: vec![0u64; ref_length],
@@ -420,6 +425,7 @@ impl ModuleFlags {
 /// * `mate_other_contig` - True if the mate is mapped to a different contig
 /// * `cigar_raw` - CIGAR operations as (operation_char, length) tuples
 /// * `md_tag` - Optional MD tag bytes for mismatch detection
+/// * `mapq` - Mapping quality (0-255)
 /// * `seq_type` - Sequencing type (affects which features to calculate)
 /// * `flags` - Which modules are enabled
 /// * `circular` - True if genome is circular (affects position calculations)
@@ -453,6 +459,7 @@ pub fn process_read(
     mate_other_contig: bool,
     cigar_raw: &[(u32, u32)],
     md_tag: Option<&[u8]>,
+    mapq: u8,
     seq_type: SequencingType,
     flags: ModuleFlags,
     circular: bool,
@@ -488,8 +495,10 @@ pub fn process_read(
             }
         } else {
             // Only count primary mappings in main coverage
+            let mapq_val = mapq as u64;
             if circular {
                 increment_circular(&mut arrays.primary_reads, start, end, 1);
+                increment_circular(&mut arrays.sum_mapq, start, end, mapq_val);
                 // Also track strand-specific coverage
                 if is_reverse {
                     increment_circular(&mut arrays.primary_reads_minus_only, start, end, 1);
@@ -498,6 +507,7 @@ pub fn process_read(
                 }
             } else {
                 increment_range(&mut arrays.primary_reads, start, end, 1);
+                increment_range(&mut arrays.sum_mapq, start, end, mapq_val);
                 // Also track strand-specific coverage
                 if is_reverse {
                     increment_range(&mut arrays.primary_reads_minus_only, start, end, 1);
