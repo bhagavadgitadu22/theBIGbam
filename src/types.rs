@@ -191,7 +191,7 @@ pub const VARIABLES: &[VariableConfig] = &[
     // Per read metrics (paired-reads)
     VariableConfig { name: "insert_sizes", subplot: "Insert sizes", module: "Paired-read metrics", plot_type: PlotType::Curve, color: "#ed8b00", alpha: 0.8, fill_alpha: 0.4, size: 1.0, title: "Insert Sizes", help: None },
     VariableConfig { name: "non_inward_pairs", subplot: "Non-inward pairs", module: "Paired-read metrics", plot_type: PlotType::Bars, color: "#c94009", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Non-inward pairs", help: None },
-    VariableConfig { name: "mate_not_nmapped", subplot: "Mate not mapped", module: "Paired-read metrics", plot_type: PlotType::Bars, color: "#302DD2", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Missing mates", help: None },
+    VariableConfig { name: "mate_not_mapped", subplot: "Mate not mapped", module: "Paired-read metrics", plot_type: PlotType::Bars, color: "#302DD2", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Missing mates", help: None },
     VariableConfig { name: "mate_on_another_contig", subplot: "Mate on another contig", module: "Paired-read metrics", plot_type: PlotType::Bars, color: "#CFD22D", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Missing mates", help: None },
     
     // Per position errors from reads (Assembly check)
@@ -406,12 +406,25 @@ pub struct PresenceData {
     pub contig_name: String,
     /// Percentage of bases with at least 1x coverage (0-100)
     pub coverage_pct: f32,
-    /// Phage packaging mechanism (only for phagetermini module)
-    pub phage_packaging_mechanism: Option<String>,
-    /// Left terminus position (1-indexed, only for phagetermini module)
-    pub phage_left_terminus: Option<i32>,
-    /// Right terminus position (1-indexed, only for phagetermini module)
-    pub phage_right_terminus: Option<i32>,
+    /// Coverage-Weighted Total Variation: 1/(n-1) * Σ|cov(i+1) - cov(i)|
+    /// Measures coverage smoothness (low = uniform, high = variable)
+    pub coverage_variation: f32,
+}
+
+/// Phage packaging mechanism data for a contig in a sample.
+///
+/// Stores the detected packaging mechanism and terminus positions.
+/// Similar to CompletenessData, this is stored separately from PresenceData.
+#[derive(Clone, Debug)]
+pub struct PackagingData {
+    /// The contig name
+    pub contig_name: String,
+    /// Phage packaging mechanism (e.g., "PAC", "COS", "DTR_short_5'", etc.)
+    pub mechanism: String,
+    /// Left terminus position (1-indexed)
+    pub left_terminus: Option<i32>,
+    /// Right terminus position (1-indexed)
+    pub right_terminus: Option<i32>,
 }
 
 /// Type alias for feature calculation results.

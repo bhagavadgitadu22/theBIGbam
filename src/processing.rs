@@ -25,13 +25,13 @@ use crate::compress::{
 };
 use crate::db::{
     create_metadata_db, create_temp_sample_db, finalize_db, merge_temp_db_into_main,
-    write_features_to_temp_db, write_phage_mechanisms_to_temp_db, write_presences_to_temp_db,
+    write_features_to_temp_db, write_packaging_to_temp_db, write_presences_to_temp_db,
     write_completeness_to_temp_db, CompletenessData,
 };
 use crate::features::{FeatureArrays, ModuleFlags};
 use crate::genbank::parse_genbank;
 use crate::types::{
-    get_plot_type, ContigInfo, FeaturePoint, PlotType, PresenceData, SequencingType
+    get_plot_type, ContigInfo, FeaturePoint, PackagingData, PlotType, PresenceData, SequencingType
 };
 
 /// Merge consecutive runs with identical values (0% tolerance RLE).
@@ -471,80 +471,65 @@ fn compute_completeness(
             }
         });
 
-    // Compute score_completeness: sum of weighted missing basepairs (in reads but not reference)
-    let mut score_incomp = 0.0;
+    // Compute individual score components
 
-    // Left clippings contribution (using median length)
-    for run in left_clip_runs {
-        let pos = (run.start_pos - 1) as usize;
-        let count = run.value as f64;
-        let coverage = primary_reads.get(pos).copied().unwrap_or(0) as f64;
-        if coverage > 0.0 && pos < left_clipping_lengths.len() {
-            let length = compute_median(&left_clipping_lengths[pos]) as f64;
-            score_incomp += (count / coverage) * length;
-        }
-    }
-
-    // Right clippings contribution (using median length)
-    for run in right_clip_runs {
-        let pos = (run.start_pos - 1) as usize;
-        let count = run.value as f64;
-        let coverage = primary_reads.get(pos).copied().unwrap_or(0) as f64;
-        if coverage > 0.0 && pos < right_clipping_lengths.len() {
-            let length = compute_median(&right_clipping_lengths[pos]) as f64;
-            score_incomp += (count / coverage) * length;
-        }
-    }
-
-    // Insertions contribution (using median length)
-    for run in insertion_runs {
-        let pos = (run.start_pos - 1) as usize;
-        let count = run.value as f64;
-        let coverage = primary_reads.get(pos).copied().unwrap_or(0) as f64;
-        if coverage > 0.0 && pos < insertion_lengths.len() {
-            let length = compute_median(&insertion_lengths[pos]) as f64;
-            score_incomp += (count / coverage) * length;
-        }
-    }
-
-    // Mismatches contribution to completeness (each mismatch contributes 1 bp)
+    // Total mismatches: Σ(count/coverage) - each mismatch contributes 1 bp
+    let mut total_mismatches = 0.0;
     for run in mismatch_runs {
         let pos = (run.start_pos - 1) as usize;
         let count = run.value as f64;
         let coverage = primary_reads.get(pos).copied().unwrap_or(0) as f64;
         if coverage > 0.0 {
-            score_incomp += count / coverage;
+            total_mismatches += count / coverage;
         }
     }
 
-    let score_completeness = if score_incomp > 0.0 { Some(score_incomp) } else { None };
-
-    // Compute score_contamination: sum of weighted contamination basepairs (in reference but not reads)
-    let mut score_contam = 0.0;
-
-    // Mismatches contribution to contamination (each mismatch contributes 1 bp)
-    for run in mismatch_runs {
-        let pos = (run.start_pos - 1) as usize;
-        let count = run.value as f64;
-        let coverage = primary_reads.get(pos).copied().unwrap_or(0) as f64;
-        if coverage > 0.0 {
-            score_contam += count / coverage;
-        }
-    }
-
-    // Deletions contribution (using median length)
+    // Total deletions: Σ(count/coverage * median_length)
+    let mut total_deletions = 0.0;
     for run in deletion_runs {
         let pos = (run.start_pos - 1) as usize;
         let count = run.value as f64;
         let coverage = primary_reads.get(pos).copied().unwrap_or(0) as f64;
         if coverage > 0.0 && pos < deletion_lengths.len() {
             let length = compute_median(&deletion_lengths[pos]) as f64;
-            score_contam += (count / coverage) * length;
+            total_deletions += (count / coverage) * length;
         }
     }
 
-    // Paired clippings contribution: right-clipping followed by left-clipping without gaps
-    // Combine and sort all clip events by position
+    // Total insertions: Σ(count/coverage * median_length)
+    let mut total_insertions = 0.0;
+    for run in insertion_runs {
+        let pos = (run.start_pos - 1) as usize;
+        let count = run.value as f64;
+        let coverage = primary_reads.get(pos).copied().unwrap_or(0) as f64;
+        if coverage > 0.0 && pos < insertion_lengths.len() {
+            let length = compute_median(&insertion_lengths[pos]) as f64;
+            total_insertions += (count / coverage) * length;
+        }
+    }
+
+    // Total reads clipped: Σ(count/coverage * median_length) for left + right clippings
+    let mut total_reads_clipped = 0.0;
+    for run in left_clip_runs {
+        let pos = (run.start_pos - 1) as usize;
+        let count = run.value as f64;
+        let coverage = primary_reads.get(pos).copied().unwrap_or(0) as f64;
+        if coverage > 0.0 && pos < left_clipping_lengths.len() {
+            let length = compute_median(&left_clipping_lengths[pos]) as f64;
+            total_reads_clipped += (count / coverage) * length;
+        }
+    }
+    for run in right_clip_runs {
+        let pos = (run.start_pos - 1) as usize;
+        let count = run.value as f64;
+        let coverage = primary_reads.get(pos).copied().unwrap_or(0) as f64;
+        if coverage > 0.0 && pos < right_clipping_lengths.len() {
+            let length = compute_median(&right_clipping_lengths[pos]) as f64;
+            total_reads_clipped += (count / coverage) * length;
+        }
+    }
+
+    // Total reference clipped: Σ(avg_prevalence * distance) for paired clips (right followed by left)
     #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
     enum ClipType { Right, Left }
 
@@ -570,6 +555,7 @@ fn compute_completeness(
     all_clips.sort_by_key(|(pos, _, _)| *pos);
 
     // Find consecutive pairs: right-clipping followed immediately by left-clipping
+    let mut total_reference_clipped = 0.0;
     for i in 0..all_clips.len().saturating_sub(1) {
         let (pos_right, type_right, prev_right) = all_clips[i];
         let (pos_left, type_left, prev_left) = all_clips[i + 1];
@@ -578,12 +564,10 @@ fn compute_completeness(
             let distance = pos_left - pos_right;
             if distance > 0 {
                 let avg_prevalence = (prev_right + prev_left) / 2.0;
-                score_contam += avg_prevalence * distance as f64;
+                total_reference_clipped += avg_prevalence * distance as f64;
             }
         }
     }
-
-    let score_contamination = if score_contam > 0.0 { Some(score_contam) } else { None };
 
     CompletenessData {
         contig_name: contig_name.to_string(),
@@ -593,8 +577,11 @@ fn compute_completeness(
         prevalence_right: right_result.map(|(p, _, _)| p * 100.0), // Store as percentage
         distance_right: right_result.map(|(_, d, _)| d),
         min_missing_right: right_result.map(|(_, _, m)| m),
-        score_completeness,
-        score_contamination,
+        total_mismatches: if total_mismatches > 0.0 { Some(total_mismatches) } else { None },
+        total_deletions: if total_deletions > 0.0 { Some(total_deletions) } else { None },
+        total_insertions: if total_insertions > 0.0 { Some(total_insertions) } else { None },
+        total_reads_clipped: if total_reads_clipped > 0.0 { Some(total_reads_clipped) } else { None },
+        total_reference_clipped: if total_reference_clipped > 0.0 { Some(total_reference_clipped) } else { None },
     }
 }
 
@@ -691,7 +678,7 @@ fn add_compressed_feature_with_stats(
 
 /// Add features from FeatureArrays to output (optimized path).
 /// Returns a tuple of:
-/// - Optional packaging classification for phagetermini module
+/// - Optional packaging data for phagetermini module
 /// - Optional completeness data for assemblycheck module
 fn add_features_from_arrays(
     arrays: &FeatureArrays,
@@ -700,7 +687,7 @@ fn add_features_from_arrays(
     config: &ProcessConfig,
     flags: ModuleFlags,
     output: &mut Vec<FeaturePoint>,
-) -> (Option<(String, Option<i32>, Option<i32>)>, Option<CompletenessData>) {
+) -> (Option<PackagingData>, Option<CompletenessData>) {
     let seq_type = config.sequencing_type;
     // Coverage (always compress self-referentially)
     let primary_reads_f64: Vec<f64> = arrays.primary_reads.iter().map(|&x| x as f64).collect();
@@ -987,7 +974,17 @@ fn add_features_from_arrays(
             config.circular,
         );
 
-        Some((mechanism, left_terminus, right_terminus))
+        // Only return PackagingData if there's a detected mechanism (not "No_packaging")
+        if mechanism != "No_packaging" {
+            Some(PackagingData {
+                contig_name: contig_name.to_string(),
+                mechanism,
+                left_terminus,
+                right_terminus,
+            })
+        } else {
+            None
+        }
     } else {
         None
     };
@@ -1027,7 +1024,7 @@ pub fn process_sample(
     contigs: &[ContigInfo],
     modules: &[String],
     config: &ProcessConfig,
-) -> Result<(Vec<FeaturePoint>, Vec<PresenceData>, Vec<CompletenessData>, String)> {
+) -> Result<(Vec<FeaturePoint>, Vec<PresenceData>, Vec<PackagingData>, Vec<CompletenessData>, String)> {
     let sample_name = bam_path
         .file_stem()
         .unwrap_or_default()
@@ -1080,32 +1077,48 @@ pub fn process_sample(
             let mut features = Vec::new();
             let (packaging_info, completeness_info) = add_features_from_arrays(&arrays, &ref_name, ref_length, config, flags, &mut features);
 
+            // Calculate Coverage-Weighted Total Variation (CWTV)
+            // CWTV = 1/(n-1) * Σ|cov(i+1) - cov(i)| for i=1 to n (circular wrap-around)
+            let coverage_variation = if arrays.primary_reads.len() > 1 {
+                let n = arrays.primary_reads.len();
+                // Sum of consecutive differences (n-1 terms)
+                let total_variation: f64 = arrays.primary_reads
+                    .windows(2)
+                    .map(|w| (w[1] as f64 - w[0] as f64).abs())
+                    .sum();
+                (total_variation / (n - 1) as f64) as f32
+            } else {
+                0.0
+            };
+
             let presence = PresenceData {
                 contig_name: ref_name.clone(),
                 coverage_pct: coverage_pct as f32,
-                phage_packaging_mechanism: packaging_info.as_ref().map(|(m, _, _)| m.clone()),
-                phage_left_terminus: packaging_info.as_ref().and_then(|(_, l, _)| *l),
-                phage_right_terminus: packaging_info.as_ref().and_then(|(_, _, r)| *r),
+                coverage_variation,
             };
 
-            Some((features, presence, completeness_info))
+            Some((features, presence, packaging_info, completeness_info))
         })
         .collect();
 
     // Merge results from all contigs
     let mut all_features = Vec::new();
     let mut all_presences = Vec::new();
+    let mut all_packaging = Vec::new();
     let mut all_completeness = Vec::new();
 
-    for (features, presence, completeness) in results {
+    for (features, presence, packaging, completeness) in results {
         all_features.extend(features);
         all_presences.push(presence);
+        if let Some(pkg) = packaging {
+            all_packaging.push(pkg);
+        }
         if let Some(comp) = completeness {
             all_completeness.push(comp);
         }
     }
 
-    Ok((all_features, all_presences, all_completeness, sample_name))
+    Ok((all_features, all_presences, all_packaging, all_completeness, sample_name))
 }
 
 /// Extract contig information from BAM file headers.
@@ -1330,7 +1343,7 @@ fn process_single_sample(
     let result = process_sample(bam_path, contigs, modules, config);
 
     match result {
-        Ok((features, presences, completeness, sample_name)) => {
+        Ok((features, presences, packaging, completeness, sample_name)) => {
             let temp_db_path = temp_dir.join(format!("{}.db", sample_name));
 
             let temp_conn = match create_temp_sample_db(&temp_db_path) {
@@ -1356,29 +1369,14 @@ fn process_single_sample(
                     failed_count.fetch_add(1, Ordering::SeqCst);
                     return;
                 }
+            }
 
-                // Extract phage mechanisms from presences (only non-No_packaging entries to save space)
-                let phage_mechanisms: Vec<(String, String, String, Option<i32>, Option<i32>)> = presences
-                    .iter()
-                    .filter_map(|p| {
-                        p.phage_packaging_mechanism.as_ref()
-                            .filter(|m| *m != "No_packaging")
-                            .map(|m| (
-                                p.contig_name.clone(),
-                                sample_name.clone(),
-                                m.clone(),
-                                p.phage_left_terminus,
-                                p.phage_right_terminus,
-                            ))
-                    })
-                    .collect();
-
-                if !phage_mechanisms.is_empty() {
-                    if let Err(e) = write_phage_mechanisms_to_temp_db(&temp_conn, &phage_mechanisms) {
-                        eprintln!("\nError writing phage mechanisms for {}: {}", sample_name, e);
-                        failed_count.fetch_add(1, Ordering::SeqCst);
-                        return;
-                    }
+            // Write phage packaging data (already filtered for non-No_packaging)
+            if !packaging.is_empty() {
+                if let Err(e) = write_packaging_to_temp_db(&temp_conn, &sample_name, &packaging) {
+                    eprintln!("\nError writing phage packaging for {}: {}", sample_name, e);
+                    failed_count.fetch_add(1, Ordering::SeqCst);
+                    return;
                 }
             }
 

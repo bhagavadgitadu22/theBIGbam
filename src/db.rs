@@ -16,7 +16,7 @@ use rusqlite::{params, Connection};
 use std::collections::HashMap;
 use std::path::Path;
 
-use crate::types::{feature_table_name, ContigInfo, FeatureAnnotation, FeaturePoint, PresenceData, VARIABLES};
+use crate::types::{feature_table_name, ContigInfo, FeatureAnnotation, FeaturePoint, PackagingData, PresenceData, VARIABLES};
 
 /// Create the main SQLite database with schema and initial data.
 /// If `create_indexes` is false, skip creating indexes (for Python compatibility).
@@ -76,6 +76,7 @@ fn create_core_tables(conn: &Connection, create_indexes: bool) -> Result<()> {
             Contig_id INTEGER,
             Sample_id INTEGER,
             Coverage_percentage REAL,
+            Coverage_variation REAL,
             FOREIGN KEY(Contig_id) REFERENCES Contig(Contig_id),
             FOREIGN KEY(Sample_id) REFERENCES Sample(Sample_id)
         )",
@@ -115,8 +116,11 @@ fn create_core_tables(conn: &Connection, create_indexes: bool) -> Result<()> {
             Prevalence_completeness_right REAL,
             Distance_contaminated_right INTEGER,
             Min_missing_right INTEGER,
-            Score_completeness REAL,
-            Score_contamination REAL,
+            Total_mismatches REAL,
+            Total_deletions REAL,
+            Total_insertions REAL,
+            Total_reads_clipped REAL,
+            Total_reference_clipped REAL,
             FOREIGN KEY(Contig_id) REFERENCES Contig(Contig_id),
             FOREIGN KEY(Sample_id) REFERENCES Sample(Sample_id)
         )",
@@ -348,7 +352,8 @@ pub fn create_temp_sample_db(temp_db_path: &Path) -> Result<Connection> {
         "CREATE TABLE TempPresences (
             Contig_name TEXT,
             Sample_name TEXT,
-            Coverage_percentage REAL
+            Coverage_percentage REAL,
+            Coverage_variation REAL
         )",
         [],
     )
@@ -378,8 +383,11 @@ pub fn create_temp_sample_db(temp_db_path: &Path) -> Result<Connection> {
             Prevalence_completeness_right REAL,
             Distance_contaminated_right INTEGER,
             Min_missing_right INTEGER,
-            Score_completeness REAL,
-            Score_contamination REAL
+            Total_mismatches REAL,
+            Total_deletions REAL,
+            Total_insertions REAL,
+            Total_reads_clipped REAL,
+            Total_reference_clipped REAL
         )",
         [],
     )
@@ -439,14 +447,15 @@ pub fn write_presences_to_temp_db(
     presences: &[PresenceData],
 ) -> Result<()> {
     let mut stmt = conn
-        .prepare("INSERT INTO TempPresences (Contig_name, Sample_name, Coverage_percentage) VALUES (?1, ?2, ?3)")
+        .prepare("INSERT INTO TempPresences (Contig_name, Sample_name, Coverage_percentage, Coverage_variation) VALUES (?1, ?2, ?3, ?4)")
         .context("Failed to prepare presence insert")?;
 
     for p in presences {
         stmt.execute(params![
             &p.contig_name,
             sample_name,
-            p.coverage_pct
+            p.coverage_pct,
+            p.coverage_variation
         ])
         .context("Failed to insert presence")?;
     }
@@ -454,20 +463,20 @@ pub fn write_presences_to_temp_db(
     Ok(())
 }
 
-/// Write phage mechanisms to a temp database.
-/// Only stores entries where packaging mechanism is not "No_packaging" to save space.
-/// phage_mechanisms: Vec<(contig_name, sample_name, mechanism, left, right)>
-pub fn write_phage_mechanisms_to_temp_db(
+/// Write phage packaging data to a temp database.
+/// Only called with entries where packaging mechanism was detected (not "No_packaging").
+pub fn write_packaging_to_temp_db(
     conn: &rusqlite::Connection,
-    phage_mechanisms: &[(String, String, String, Option<i32>, Option<i32>)]
+    sample_name: &str,
+    packaging_data: &[PackagingData],
 ) -> Result<()> {
     let mut stmt = conn.prepare(
         "INSERT INTO TempPhageMechanisms (Contig_name, Sample_name, Phage_packaging_mechanism, Phage_left_terminus, Phage_right_terminus) VALUES (?1, ?2, ?3, ?4, ?5)"
-    ).context("Failed to prepare phage mechanism insert")?;
+    ).context("Failed to prepare phage packaging insert")?;
 
-    for (contig_name, sample_name, mechanism, left, right) in phage_mechanisms {
-        stmt.execute(params![contig_name, sample_name, mechanism, left, right])
-            .context("Failed to insert phage mechanism")?;
+    for pkg in packaging_data {
+        stmt.execute(params![&pkg.contig_name, sample_name, &pkg.mechanism, pkg.left_terminus, pkg.right_terminus])
+            .context("Failed to insert phage packaging")?;
     }
 
     Ok(())
@@ -475,6 +484,7 @@ pub fn write_phage_mechanisms_to_temp_db(
 
 /// Completeness data for a contig.
 /// Contains assembly completeness statistics computed from clipping events at reference ends.
+/// Individual score components are stored; score_completeness and score_contamination are computed in VIEW.
 #[derive(Clone, Debug)]
 pub struct CompletenessData {
     pub contig_name: String,
@@ -484,17 +494,25 @@ pub struct CompletenessData {
     pub prevalence_right: Option<f64>,
     pub distance_right: Option<i32>,
     pub min_missing_right: Option<i32>,
-    /// Sum of weighted missing basepairs from clippings, insertions, and mismatches (in reads but not in reference)
-    pub score_completeness: Option<f64>,
-    /// Sum of weighted contamination basepairs from deletions, mismatches, and paired clippings (in reference but not in reads)
-    pub score_contamination: Option<f64>,
+    /// Weighted mismatches: Σ(count/coverage) - contributes to both completeness and contamination
+    pub total_mismatches: Option<f64>,
+    /// Weighted deletions: Σ(count/coverage * median_length) - contributes to contamination
+    pub total_deletions: Option<f64>,
+    /// Weighted insertions: Σ(count/coverage * median_length) - contributes to completeness
+    pub total_insertions: Option<f64>,
+    /// Weighted clippings: Σ(count/coverage * median_length) for left+right - contributes to completeness
+    pub total_reads_clipped: Option<f64>,
+    /// Weighted reference gaps: Σ(avg_prevalence * distance) for paired clips - contributes to contamination
+    pub total_reference_clipped: Option<f64>,
 }
 
 impl CompletenessData {
-    /// Returns true if there is any completeness data (left, right, or scores).
+    /// Returns true if there is any completeness data.
     pub fn has_data(&self) -> bool {
         self.prevalence_left.is_some() || self.prevalence_right.is_some()
-            || self.score_completeness.is_some() || self.score_contamination.is_some()
+            || self.total_mismatches.is_some() || self.total_deletions.is_some()
+            || self.total_insertions.is_some() || self.total_reads_clipped.is_some()
+            || self.total_reference_clipped.is_some()
     }
 }
 
@@ -506,7 +524,7 @@ pub fn write_completeness_to_temp_db(
     completeness_data: &[CompletenessData],
 ) -> Result<()> {
     let mut stmt = conn.prepare(
-        "INSERT INTO TempCompleteness (Contig_name, Sample_name, Prevalence_completeness_left, Distance_contaminated_left, Min_missing_left, Prevalence_completeness_right, Distance_contaminated_right, Min_missing_right, Score_completeness, Score_contamination) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)"
+        "INSERT INTO TempCompleteness (Contig_name, Sample_name, Prevalence_completeness_left, Distance_contaminated_left, Min_missing_left, Prevalence_completeness_right, Distance_contaminated_right, Min_missing_right, Total_mismatches, Total_deletions, Total_insertions, Total_reads_clipped, Total_reference_clipped) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)"
     ).context("Failed to prepare completeness insert")?;
 
     for data in completeness_data {
@@ -520,8 +538,11 @@ pub fn write_completeness_to_temp_db(
                 data.prevalence_right,
                 data.distance_right,
                 data.min_missing_right,
-                data.score_completeness,
-                data.score_contamination,
+                data.total_mismatches,
+                data.total_deletions,
+                data.total_insertions,
+                data.total_reads_clipped,
+                data.total_reference_clipped,
             ])
             .context("Failed to insert completeness data")?;
         }
@@ -607,22 +628,22 @@ fn merge_presences(
     sample_name_to_id: &HashMap<String, i64>,
 ) -> Result<()> {
     let mut insert_stmt = conn.prepare(
-        "INSERT INTO Presences (Contig_id, Sample_id, Coverage_percentage) VALUES (?1, ?2, ?3)"
+        "INSERT INTO Presences (Contig_id, Sample_id, Coverage_percentage, Coverage_variation) VALUES (?1, ?2, ?3, ?4)"
     )?;
 
-    let presences: Vec<(String, String, f32)> = {
+    let presences: Vec<(String, String, f32, f32)> = {
         let mut stmt =
-            conn.prepare("SELECT Contig_name, Sample_name, Coverage_percentage FROM src.TempPresences")?;
-        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+            conn.prepare("SELECT Contig_name, Sample_name, Coverage_percentage, Coverage_variation FROM src.TempPresences")?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))?;
         rows.filter_map(|r| r.ok()).collect()
     };
 
-    for (contig_name, sample_name, coverage_pct) in presences {
+    for (contig_name, sample_name, coverage_pct, coverage_variation) in presences {
         if let (Some(&contig_id), Some(&sample_id)) = (
             contig_name_to_id.get(&contig_name),
             sample_name_to_id.get(&sample_name),
         ) {
-            insert_stmt.execute(params![contig_id, sample_id, coverage_pct])?;
+            insert_stmt.execute(params![contig_id, sample_id, coverage_pct, coverage_variation])?;
         }
     }
 
@@ -666,26 +687,27 @@ fn merge_completeness(
     sample_name_to_id: &std::collections::HashMap<String, i64>,
 ) -> Result<()> {
     let mut insert_stmt = conn.prepare(
-        "INSERT OR IGNORE INTO Completeness (Contig_id, Sample_id, Prevalence_completeness_left, Distance_contaminated_left, Min_missing_left, Prevalence_completeness_right, Distance_contaminated_right, Min_missing_right, Score_completeness, Score_contamination) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)"
+        "INSERT OR IGNORE INTO Completeness (Contig_id, Sample_id, Prevalence_completeness_left, Distance_contaminated_left, Min_missing_left, Prevalence_completeness_right, Distance_contaminated_right, Min_missing_right, Total_mismatches, Total_deletions, Total_insertions, Total_reads_clipped, Total_reference_clipped) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)"
     )?;
 
-    let completeness_rows: Vec<(String, String, Option<f64>, Option<i64>, Option<i64>, Option<f64>, Option<i64>, Option<i64>, Option<f64>, Option<f64>)> = {
+    let completeness_rows: Vec<(String, String, Option<f64>, Option<i64>, Option<i64>, Option<f64>, Option<i64>, Option<i64>, Option<f64>, Option<f64>, Option<f64>, Option<f64>, Option<f64>)> = {
         let mut stmt = conn.prepare(
-            "SELECT Contig_name, Sample_name, Prevalence_completeness_left, Distance_contaminated_left, Min_missing_left, Prevalence_completeness_right, Distance_contaminated_right, Min_missing_right, Score_completeness, Score_contamination FROM src.TempCompleteness"
+            "SELECT Contig_name, Sample_name, Prevalence_completeness_left, Distance_contaminated_left, Min_missing_left, Prevalence_completeness_right, Distance_contaminated_right, Min_missing_right, Total_mismatches, Total_deletions, Total_insertions, Total_reads_clipped, Total_reference_clipped FROM src.TempCompleteness"
         )?;
         let rows = stmt.query_map([], |row| Ok((
             row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?,
-            row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?, row.get(8)?, row.get(9)?
+            row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?,
+            row.get(8)?, row.get(9)?, row.get(10)?, row.get(11)?, row.get(12)?
         )))?;
         rows.filter_map(|r| r.ok()).collect()
     };
 
-    for (contig_name, sample_name, prev_left, dist_left, min_left, prev_right, dist_right, min_right, score_comp, score_contam) in completeness_rows {
+    for (contig_name, sample_name, prev_left, dist_left, min_left, prev_right, dist_right, min_right, total_mm, total_del, total_ins, total_reads_clip, total_ref_clip) in completeness_rows {
         if let (Some(&contig_id), Some(&sample_id)) = (
             contig_name_to_id.get(&contig_name),
             sample_name_to_id.get(&sample_name),
         ) {
-            insert_stmt.execute(params![contig_id, sample_id, prev_left, dist_left, min_left, prev_right, dist_right, min_right, score_comp, score_contam])?;
+            insert_stmt.execute(params![contig_id, sample_id, prev_left, dist_left, min_left, prev_right, dist_right, min_right, total_mm, total_del, total_ins, total_reads_clip, total_ref_clip])?;
         }
     }
 
@@ -860,6 +882,22 @@ pub fn finalize_db(db_path: &Path) -> Result<()> {
     )
     .context("Failed to create primary_reads VIEW")?;
 
+    // Create a view joining Contig, Sample, and Presences for explicit presence data
+    conn.execute(
+        "CREATE VIEW IF NOT EXISTS Explicit_presences AS
+         SELECT
+             p.Presence_id,
+             c.Contig_name,
+             s.Sample_name,
+             p.Coverage_percentage,
+             p.Coverage_variation
+         FROM Presences p
+         JOIN Contig c ON p.Contig_id = c.Contig_id
+         JOIN Sample s ON p.Sample_id = s.Sample_id",
+        [],
+    )
+    .context("Failed to create Explicit_presences VIEW")?;
+
     // Create a view joining Contig, Sample, Presences, and PhageMechanisms for explicit metadata
     conn.execute(
         "CREATE VIEW IF NOT EXISTS Explicit_phage_mechanisms AS
@@ -880,6 +918,8 @@ pub fn finalize_db(db_path: &Path) -> Result<()> {
     .context("Failed to create Explicit_phage_mechanisms VIEW")?;
 
     // Create a view joining Contig, Sample, and Completeness for explicit completeness data
+    // Score_completeness = mismatches + insertions + reads_clipped (sequence in reads not in reference)
+    // Score_contamination = mismatches + deletions + reference_clipped (sequence in reference not in reads)
     conn.execute(
         "CREATE VIEW IF NOT EXISTS Explicit_completeness AS
          SELECT
@@ -891,10 +931,15 @@ pub fn finalize_db(db_path: &Path) -> Result<()> {
              comp.Prevalence_completeness_right,
              comp.Distance_contaminated_right,
              comp.Min_missing_right,
-             comp.Score_completeness,
-             CASE WHEN c.Contig_length > 0 THEN 100 - ((comp.Score_completeness) * 100.0 / c.Contig_length) ELSE NULL END AS Percentage_completeness,
-             comp.Score_contamination,
-             CASE WHEN c.Contig_length > 0 THEN comp.Score_contamination * 100.0 / c.Contig_length ELSE NULL END AS Percentage_contamination
+             comp.Total_mismatches,
+             comp.Total_deletions,
+             comp.Total_insertions,
+             comp.Total_reads_clipped,
+             comp.Total_reference_clipped,
+             COALESCE(comp.Total_mismatches, 0) + COALESCE(comp.Total_insertions, 0) + COALESCE(comp.Total_reads_clipped, 0) AS Score_completeness,
+             CASE WHEN c.Contig_length > 0 THEN 100 - ((COALESCE(comp.Total_mismatches, 0) + COALESCE(comp.Total_insertions, 0) + COALESCE(comp.Total_reads_clipped, 0)) * 100.0 / c.Contig_length) ELSE NULL END AS Percentage_completeness,
+             COALESCE(comp.Total_mismatches, 0) + COALESCE(comp.Total_deletions, 0) + COALESCE(comp.Total_reference_clipped, 0) AS Score_contamination,
+             CASE WHEN c.Contig_length > 0 THEN (COALESCE(comp.Total_mismatches, 0) + COALESCE(comp.Total_deletions, 0) + COALESCE(comp.Total_reference_clipped, 0)) * 100.0 / c.Contig_length ELSE NULL END AS Percentage_contamination
          FROM Completeness comp
          JOIN Contig c ON comp.Contig_id = c.Contig_id
          JOIN Sample s ON comp.Sample_id = s.Sample_id",
