@@ -2,11 +2,11 @@
 //!
 //! Orchestrates parallel processing of BAM files:
 //! 1. Each BAM file processed by separate thread (rayon)
-//! 2. Features written to temporary SQLite database per sample
-//! 3. Temp databases merged sequentially into main database
+//! 2. Results collected in memory
+//! 3. Written to DuckDB sequentially (DuckDB is single-writer)
 //!
 //! BAM processing (95% of time) is fully parallelized.
-//! Database merging (5% of time) runs sequentially after processing completes.
+//! Database writing (5% of time) runs sequentially after processing completes.
 
 use anyhow::{Context, Result};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
@@ -16,18 +16,12 @@ use rust_htslib::htslib;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
-use std::sync::Mutex;
 
 use crate::bam_reader::process_contig_streaming;
 use crate::compress::{
     compress_signal_with_reference, Run,
 };
-use crate::db::{
-    create_metadata_db, create_temp_sample_db, finalize_db, merge_temp_db_into_main,
-    write_features_to_temp_db, write_packaging_to_temp_db, write_presences_to_temp_db,
-    write_completeness_to_temp_db, CompletenessData,
-};
+use crate::db::{DbWriter, CompletenessData};
 use crate::features::{FeatureArrays, ModuleFlags};
 use crate::genbank::parse_genbank;
 use crate::types::{
@@ -1186,7 +1180,7 @@ pub fn run_all_samples(
     modules: &[String],
     annotation_tool: &str,
     config: &ProcessConfig,
-    create_indexes: bool,
+    _create_indexes: bool, // Ignored - DuckDB uses zone maps instead of indexes
 ) -> Result<ProcessResult> {
     unsafe {
         htslib::hts_set_log_level(htslib::htsLogLevel_HTS_LOG_ERROR);
@@ -1217,12 +1211,11 @@ pub fn run_all_samples(
     if let Some(parent) = output_db.parent() {
         fs::create_dir_all(parent).context("Failed to create output directory")?;
     }
-    let temp_dir = output_db.with_extension("temp_dbs");
-    fs::create_dir_all(&temp_dir).context("Failed to create temp directory")?;
 
     std::thread::sleep(std::time::Duration::from_millis(50));
 
-    create_metadata_db(output_db, &contigs, &annotations, create_indexes)?;
+    // Create database with schema and initial data
+    let db_writer = DbWriter::create(output_db, &contigs, &annotations)?;
 
     eprintln!(
         "### Processing {} samples with {} threads",
@@ -1231,13 +1224,20 @@ pub fn run_all_samples(
     );
     eprintln!("Modules: {}\n", modules.join(", "));
 
-    let result = process_samples_parallel(&bam_files, &contigs, modules, config, output_db, &temp_dir)?;
-
-    finalize_db(output_db)?;
+    let result = process_samples_parallel(&bam_files, &contigs, modules, config, db_writer)?;
 
     print_summary(&result, output_db);
 
     Ok(result)
+}
+
+/// Holds processed sample data ready for database writing.
+struct SampleResult {
+    sample_name: String,
+    features: Vec<FeaturePoint>,
+    presences: Vec<PresenceData>,
+    packaging: Vec<PackagingData>,
+    completeness: Vec<CompletenessData>,
 }
 
 fn process_samples_parallel(
@@ -1245,8 +1245,7 @@ fn process_samples_parallel(
     contigs: &[ContigInfo],
     modules: &[String],
     config: &ProcessConfig,
-    db_path: &Path,
-    temp_dir: &Path,
+    db_writer: DbWriter,
 ) -> Result<ProcessResult> {
     let mp = MultiProgress::new();
     let total = bam_files.len();
@@ -1261,66 +1260,90 @@ fn process_samples_parallel(
     );
     process_pb.enable_steady_tick(std::time::Duration::from_millis(100));
 
-    let merge_pb = mp.add(ProgressBar::new(total as u64));
-    merge_pb.set_style(
+    let write_pb = mp.add(ProgressBar::new(total as u64));
+    write_pb.set_style(
         ProgressStyle::with_template(
             "{spinner:.yellow} Writing:     [{elapsed_precise}] [{bar:40.yellow/red}] {pos}/{len} {msg}",
         )
         .unwrap()
         .progress_chars("=>-"),
     );
-    merge_pb.enable_steady_tick(std::time::Duration::from_millis(100));
+    write_pb.enable_steady_tick(std::time::Duration::from_millis(100));
 
     let start_time = std::time::Instant::now();
     let completed_count = AtomicUsize::new(0);
     let failed_count = AtomicUsize::new(0);
 
-    // Collect temp DB paths from parallel processing
-    let temp_db_paths = Arc::new(Mutex::new(Vec::new()));
+    // Process all samples in parallel, collecting results in memory
+    let results: Vec<Option<SampleResult>> = bam_files
+        .par_iter()
+        .map(|bam_path| {
+            let sample_start = std::time::Instant::now();
 
-    bam_files.par_iter().for_each(|bam_path| {
-        process_single_sample(
-            bam_path,
-            contigs,
-            modules,
-            config,
-            temp_dir,
-            Arc::clone(&temp_db_paths),
-            &completed_count,
-            &failed_count,
-            &process_pb,
-            total,
-        );
-    });
+            match process_sample(bam_path, contigs, modules, config) {
+                Ok((features, presences, packaging, completeness, sample_name)) => {
+                    let sample_time = sample_start.elapsed().as_secs_f64();
+                    let done = completed_count.fetch_add(1, Ordering::SeqCst) + 1;
+                    process_pb.set_message(format!("[{}/{}] {} ({:.2}s)", done, total, sample_name, sample_time));
+                    process_pb.inc(1);
+
+                    Some(SampleResult {
+                        sample_name,
+                        features,
+                        presences,
+                        packaging,
+                        completeness,
+                    })
+                }
+                Err(e) => {
+                    eprintln!("\nError processing {}: {}", bam_path.display(), e);
+                    let sample_time = sample_start.elapsed().as_secs_f64();
+                    let done = completed_count.fetch_add(1, Ordering::SeqCst) + 1;
+                    failed_count.fetch_add(1, Ordering::SeqCst);
+                    process_pb.set_message(format!("[{}/{}] ERR ({:.2}s)", done, total, sample_time));
+                    process_pb.inc(1);
+                    None
+                }
+            }
+        })
+        .collect();
 
     process_pb.finish_with_message("Done");
     let processing_time = start_time.elapsed();
 
-    // Merge all temp DBs sequentially (fast operation, not a bottleneck)
-    let merge_start = std::time::Instant::now();
-    let temp_paths = temp_db_paths.lock().unwrap();
-    for temp_db_path in temp_paths.iter() {
-        let sample_name = temp_db_path
-            .file_stem()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .to_string();
+    // Write all results sequentially to DuckDB (single-writer model)
+    let write_start = std::time::Instant::now();
 
-        if merge_temp_db_into_main(db_path, temp_db_path, contigs).is_err() {
-            merge_pb.set_message(format!("ERR: {}", sample_name));
-        } else {
-            merge_pb.set_message(sample_name);
+    for result in results.into_iter().flatten() {
+        // Insert sample and get ID
+        if let Err(e) = db_writer.insert_sample(&result.sample_name) {
+            eprintln!("\nError inserting sample {}: {}", result.sample_name, e);
+            write_pb.set_message(format!("ERR: {}", result.sample_name));
+            write_pb.inc(1);
+            continue;
         }
 
-        let _ = fs::remove_file(temp_db_path);
-        merge_pb.inc(1);
+        // Write all data for this sample
+        if let Err(e) = db_writer.write_sample_data(
+            &result.sample_name,
+            &result.presences,
+            &result.packaging,
+            &result.completeness,
+            &result.features,
+        ) {
+            eprintln!("\nError writing data for {}: {}", result.sample_name, e);
+            write_pb.set_message(format!("ERR: {}", result.sample_name));
+        } else {
+            write_pb.set_message(result.sample_name);
+        }
+        write_pb.inc(1);
     }
-    drop(temp_paths);
 
-    let _ = fs::remove_dir(temp_dir);
-    merge_pb.finish_with_message("Done");
+    // Finalize database (create views)
+    db_writer.finalize()?;
+    write_pb.finish_with_message("Done");
 
-    let writing_time = merge_start.elapsed();
+    let writing_time = write_start.elapsed();
     let elapsed = start_time.elapsed();
     let failed = failed_count.load(Ordering::SeqCst);
 
@@ -1331,90 +1354,6 @@ fn process_samples_parallel(
         processing_time_secs: processing_time.as_secs_f64(),
         writing_time_secs: writing_time.as_secs_f64(),
     })
-}
-
-#[allow(clippy::too_many_arguments)]
-fn process_single_sample(
-    bam_path: &Path,
-    contigs: &[ContigInfo],
-    modules: &[String],
-    config: &ProcessConfig,
-    temp_dir: &Path,
-    temp_db_paths: Arc<Mutex<Vec<PathBuf>>>,
-    completed_count: &AtomicUsize,
-    failed_count: &AtomicUsize,
-    process_pb: &ProgressBar,
-    total: usize,
-) {
-    let sample_start = std::time::Instant::now();
-    let result = process_sample(bam_path, contigs, modules, config);
-
-    match result {
-        Ok((features, presences, packaging, completeness, sample_name)) => {
-            let temp_db_path = temp_dir.join(format!("{}.db", sample_name));
-
-            let temp_conn = match create_temp_sample_db(&temp_db_path) {
-                Ok(conn) => conn,
-                Err(e) => {
-                    eprintln!("\nError creating temp DB for {}: {}", sample_name, e);
-                    failed_count.fetch_add(1, Ordering::SeqCst);
-                    return;
-                }
-            };
-
-            if !features.is_empty() {
-                if let Err(e) = write_features_to_temp_db(&temp_conn, &features) {
-                    eprintln!("\nError writing features for {}: {}", sample_name, e);
-                    failed_count.fetch_add(1, Ordering::SeqCst);
-                    return;
-                }
-            }
-
-            if !presences.is_empty() {
-                if let Err(e) = write_presences_to_temp_db(&temp_conn, &sample_name, &presences) {
-                    eprintln!("\nError writing presences for {}: {}", sample_name, e);
-                    failed_count.fetch_add(1, Ordering::SeqCst);
-                    return;
-                }
-            }
-
-            // Write phage packaging data (already filtered for non-No_packaging)
-            if !packaging.is_empty() {
-                if let Err(e) = write_packaging_to_temp_db(&temp_conn, &sample_name, &packaging) {
-                    eprintln!("\nError writing phage packaging for {}: {}", sample_name, e);
-                    failed_count.fetch_add(1, Ordering::SeqCst);
-                    return;
-                }
-            }
-
-            // Write completeness data (only entries with data are stored)
-            if !completeness.is_empty() {
-                if let Err(e) = write_completeness_to_temp_db(&temp_conn, &sample_name, &completeness) {
-                    eprintln!("\nError writing completeness for {}: {}", sample_name, e);
-                    failed_count.fetch_add(1, Ordering::SeqCst);
-                    return;
-                }
-            }
-
-            drop(temp_conn);
-            
-            // Add temp DB path to collection for later merging
-            temp_db_paths.lock().unwrap().push(temp_db_path);
-
-            let sample_time = sample_start.elapsed().as_secs_f64();
-            let done = completed_count.fetch_add(1, Ordering::SeqCst) + 1;
-            process_pb.set_message(format!("[{}/{}] {} ({:.2}s)", done, total, sample_name, sample_time));
-            process_pb.inc(1);
-        }
-        Err(e) => {
-            eprintln!("\nError processing {}: {}", bam_path.display(), e);
-            let sample_time = sample_start.elapsed().as_secs_f64();
-            let done = completed_count.fetch_add(1, Ordering::SeqCst) + 1;
-            failed_count.fetch_add(1, Ordering::SeqCst);
-            process_pb.set_message(format!("[{}/{}] ERR ({:.2}s)", done, total, sample_time));
-            process_pb.inc(1);
-        }
-    }
 }
 
 fn print_summary(result: &ProcessResult, output_db: &Path) {

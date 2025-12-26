@@ -1,6 +1,7 @@
 import argparse
+import base64
 import os
-import sqlite3
+import duckdb
 import traceback
 
 from bokeh.layouts import column, row
@@ -33,15 +34,16 @@ def build_controls(conn):
     except Exception:
         pass
 
-    # Get Coverage_variation min/max from Presences table
+    # Get Coverage_variation min/max from Presences table (stored as INTEGER ×100)
     coverage_variation_min = 0.0
     coverage_variation_max = 100.0
     try:
         cur.execute("SELECT MIN(Coverage_variation), MAX(Coverage_variation) FROM Presences WHERE Coverage_variation IS NOT NULL")
         result = cur.fetchone()
         if result and result[0] is not None and result[1] is not None:
-            coverage_variation_min = result[0]
-            coverage_variation_max = result[1]
+            # Divide by 100 since values are stored as INTEGER ×100
+            coverage_variation_min = result[0] / 100.0
+            coverage_variation_max = result[1] / 100.0
     except Exception:
         pass
 
@@ -376,60 +378,64 @@ def modify_doc_factory(db_path):
         allowed_contigs = set(orig_contigs)
         cur = conn.cursor()
 
-        # Apply coverage percentage filter
+        # Apply coverage percentage filter (stored as INTEGER ×100)
         if coverage_percentage_slider is not None:
             min_val, max_val = coverage_percentage_slider.value
             if min_val > 0 or max_val < 100:
+                # Multiply by 100 to match stored INTEGER values
                 query = """
                     SELECT DISTINCT Contig.Contig_name
                     FROM Presences p
                     JOIN Contig ON p.Contig_id = Contig.Contig_id
                     WHERE p.Coverage_percentage >= ? AND p.Coverage_percentage <= ?
                 """
-                cur.execute(query, (min_val, max_val))
+                cur.execute(query, (int(min_val * 100), int(max_val * 100)))
                 matching = {row[0] for row in cur.fetchall()}
                 allowed_contigs &= matching
 
-        # Apply coverage variation filter
+        # Apply coverage variation filter (stored as INTEGER ×100)
         if coverage_variation_slider is not None:
             min_val, max_val = coverage_variation_slider.value
             cov_var_min = widgets['coverage_variation_min']
             cov_var_max = widgets['coverage_variation_max']
             if min_val > cov_var_min or max_val < cov_var_max:
+                # Multiply by 100 to match stored INTEGER values
                 query = """
                     SELECT DISTINCT Contig.Contig_name
                     FROM Presences p
                     JOIN Contig ON p.Contig_id = Contig.Contig_id
                     WHERE p.Coverage_variation >= ? AND p.Coverage_variation <= ?
                 """
-                cur.execute(query, (min_val, max_val))
+                cur.execute(query, (int(min_val * 100), int(max_val * 100)))
                 matching = {row[0] for row in cur.fetchall()}
                 allowed_contigs &= matching
 
-        # Apply completeness filters (range sliders)
+        # Apply completeness filters (range sliders) - prevalence stored as INTEGER ×100
         if prevalence_left_slider is not None:
             min_val, max_val = prevalence_left_slider.value
             if min_val > 0 or max_val < 100:
+                # Multiply by 100 to match stored INTEGER values
                 query = """
                     SELECT DISTINCT Contig.Contig_name
                     FROM Completeness comp
                     JOIN Contig ON comp.Contig_id = Contig.Contig_id
                     WHERE comp.Prevalence_completeness_left >= ? AND comp.Prevalence_completeness_left <= ?
                 """
-                cur.execute(query, (min_val, max_val))
+                cur.execute(query, (int(min_val * 100), int(max_val * 100)))
                 matching = {row[0] for row in cur.fetchall()}
                 allowed_contigs &= matching
 
         if prevalence_right_slider is not None:
             min_val, max_val = prevalence_right_slider.value
             if min_val > 0 or max_val < 100:
+                # Multiply by 100 to match stored INTEGER values
                 query = """
                     SELECT DISTINCT Contig.Contig_name
                     FROM Completeness comp
                     JOIN Contig ON comp.Contig_id = Contig.Contig_id
                     WHERE comp.Prevalence_completeness_right >= ? AND comp.Prevalence_completeness_right <= ?
                 """
-                cur.execute(query, (min_val, max_val))
+                cur.execute(query, (int(min_val * 100), int(max_val * 100)))
                 matching = {row[0] for row in cur.fetchall()}
                 allowed_contigs &= matching
 
@@ -481,60 +487,64 @@ def modify_doc_factory(db_path):
         allowed_samples = set(orig_samples)
         cur = conn.cursor()
 
-        # Apply coverage percentage filter
+        # Apply coverage percentage filter (stored as INTEGER ×100)
         if coverage_percentage_slider is not None:
             min_val, max_val = coverage_percentage_slider.value
             if min_val > 0 or max_val < 100:
+                # Multiply by 100 to match stored INTEGER values
                 query = """
                     SELECT DISTINCT Sample.Sample_name
                     FROM Presences p
                     JOIN Sample ON p.Sample_id = Sample.Sample_id
                     WHERE p.Coverage_percentage >= ? AND p.Coverage_percentage <= ?
                 """
-                cur.execute(query, (min_val, max_val))
+                cur.execute(query, (int(min_val * 100), int(max_val * 100)))
                 matching = {row[0] for row in cur.fetchall()}
                 allowed_samples &= matching
 
-        # Apply coverage variation filter
+        # Apply coverage variation filter (stored as INTEGER ×100)
         if coverage_variation_slider is not None:
             min_val, max_val = coverage_variation_slider.value
             cov_var_min = widgets['coverage_variation_min']
             cov_var_max = widgets['coverage_variation_max']
             if min_val > cov_var_min or max_val < cov_var_max:
+                # Multiply by 100 to match stored INTEGER values
                 query = """
                     SELECT DISTINCT Sample.Sample_name
                     FROM Presences p
                     JOIN Sample ON p.Sample_id = Sample.Sample_id
                     WHERE p.Coverage_variation >= ? AND p.Coverage_variation <= ?
                 """
-                cur.execute(query, (min_val, max_val))
+                cur.execute(query, (int(min_val * 100), int(max_val * 100)))
                 matching = {row[0] for row in cur.fetchall()}
                 allowed_samples &= matching
 
-        # Apply completeness filters (range sliders)
+        # Apply completeness filters (range sliders) - prevalence stored as INTEGER ×100
         if prevalence_left_slider is not None:
             min_val, max_val = prevalence_left_slider.value
             if min_val > 0 or max_val < 100:
+                # Multiply by 100 to match stored INTEGER values
                 query = """
                     SELECT DISTINCT Sample.Sample_name
                     FROM Completeness comp
                     JOIN Sample ON comp.Sample_id = Sample.Sample_id
                     WHERE comp.Prevalence_completeness_left >= ? AND comp.Prevalence_completeness_left <= ?
                 """
-                cur.execute(query, (min_val, max_val))
+                cur.execute(query, (int(min_val * 100), int(max_val * 100)))
                 matching = {row[0] for row in cur.fetchall()}
                 allowed_samples &= matching
 
         if prevalence_right_slider is not None:
             min_val, max_val = prevalence_right_slider.value
             if min_val > 0 or max_val < 100:
+                # Multiply by 100 to match stored INTEGER values
                 query = """
                     SELECT DISTINCT Sample.Sample_name
                     FROM Completeness comp
                     JOIN Sample ON comp.Sample_id = Sample.Sample_id
                     WHERE comp.Prevalence_completeness_right >= ? AND comp.Prevalence_completeness_right <= ?
                 """
-                cur.execute(query, (min_val, max_val))
+                cur.execute(query, (int(min_val * 100), int(max_val * 100)))
                 matching = {row[0] for row in cur.fetchall()}
                 allowed_samples &= matching
 
@@ -892,19 +902,26 @@ def modify_doc_factory(db_path):
             main_placeholder.children = [Div(text=f"<pre>Error building plot:\n{tb}</pre>")]
 
     ### Creating all DOM elements
-    # Open SQLite database connection to build widgets depending on data
-    conn = sqlite3.connect(db_path)
+    # Open DuckDB database connection to build widgets depending on data
+    conn = duckdb.connect(db_path, read_only=True)
     widgets = build_controls(conn)
 
-    # Load the CSS
-    css_path = os.path.join(os.path.dirname(__file__), "..", "..", "static", "bokeh_styles.css")
+    # Load the CSS and logo
+    static_path = os.path.join(os.path.dirname(__file__), "..", "..", "static")
+    css_path = os.path.join(static_path, "bokeh_styles.css")
     with open(css_path) as f:
         css_text = f.read()
     stylesheet = InlineStyleSheet(css=css_text)
 
+    # Load logo as base64 to avoid static file serving issues
+    logo_path = os.path.join(static_path, "LOGO.png")
+    with open(logo_path, "rb") as f:
+        logo_b64 = base64.b64encode(f.read()).decode("utf-8")
+
     # Create main elements
     ## Views section
-    views = RadioButtonGroup(labels=["One sample", "All samples"], active=0, sizing_mode="stretch_width", button_type="primary")
+    logo = Div(text=f"""<img src="data:image/png;base64,{logo_b64}" style="width:100%; max-width:600px; padding: 0 20%;">""")
+    views = RadioButtonGroup(labels=["One sample", "All samples"], active=0, sizing_mode="stretch_width", stylesheets=[stylesheet])
 
     # Global lock for toggles when enforcing "All samples" view (single-variable mode)
     global_toggle_lock = {'locked': False}
@@ -915,7 +932,7 @@ def modify_doc_factory(db_path):
 
 
     ## Build filtering section
-    filtering_toggle_btn = Button(label="▼", width=20, height=20, button_type="primary", align="center", margin=0, stylesheets=[stylesheet])
+    filtering_toggle_btn = Button(label="▶", width=20, height=20, button_type="primary", align="center", margin=0, stylesheets=[stylesheet])
     filtering_title = Div(text="<b>Filtering</b>", align="center")
     filtering_header = row(filtering_toggle_btn, filtering_title, sizing_mode="stretch_width", align="center")
 
@@ -1027,7 +1044,7 @@ def modify_doc_factory(db_path):
 
     filtering_content = column(
         *filtering_children,
-        visible=True, sizing_mode="stretch_width"
+        visible=False, sizing_mode="stretch_width"
     )
 
     filtering_toggle_btn.on_click(make_toggle_callback(filtering_toggle_btn, filtering_content))
@@ -1188,7 +1205,7 @@ def modify_doc_factory(db_path):
 
 
     ## Create final Apply button
-    apply_button = Button(label="Apply", button_type="primary", align="center")
+    apply_button = Button(label="Apply", align="center", stylesheets=[stylesheet], css_classes=["apply-btn"])
     apply_button.on_click(lambda: apply_clicked())
 
 
@@ -1199,7 +1216,7 @@ def modify_doc_factory(db_path):
     separator_contigs = Div(text="", height=1, width=350, styles={'background-color': '#333', 'margin': '10px 0'})
     separator_variables = Div(text="", height=1, width=350, styles={'background-color': '#333', 'margin': '10px 0'})
 
-    controls_children = [views, separator_filtering, filtering_header, filtering_content, 
+    controls_children = [logo, views, separator_filtering, filtering_header, filtering_content, 
                          separator_samples, sample_header, sample_content, widgets['sample_select'], 
                          separator_contigs, contig_header, contig_content, widgets['contig_select'], 
                          separator_variables, variables_title, show_genemap
@@ -1219,32 +1236,8 @@ def modify_doc_factory(db_path):
 
     return modify_doc
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--db", required=True, help="Path to sqlite DB")
-    parser.add_argument("--port", type=int, default=5006, help="Port to serve Bokeh app")
-    args = parser.parse_args()
-
-    modify_doc = modify_doc_factory(args.db)
-
-    # Start bokeh server programmatically
-    try:
-        from bokeh.server.server import Server
-        from bokeh.application import Application
-        from bokeh.application.handlers.function import FunctionHandler
-    except Exception as e:
-        print("Bokeh server components not installed or unavailable:", e)
-        print("You can run this file with `bokeh serve --show start_bokeh_server.py --args --db <DB>` as alternative.")
-        return
-
-    app = Application(FunctionHandler(modify_doc))
-    server = Server({'/': app}, port=args.port)
-    server.start()
-    print(f"Bokeh server running at http://localhost:{args.port}/")
-    server.io_loop.start()
-
 def add_serve_args(parser):
-    parser.add_argument("--db", required=True, help="Path to sqlite DB")
+    parser.add_argument("--db", required=True, help="Path to DuckDB database")
     parser.add_argument("--port", type=int, default=5006, help="Port to serve Bokeh app")
 
 def run_serve(args):
@@ -1260,7 +1253,8 @@ def run_serve(args):
         return 1
 
     app = Application(FunctionHandler(modify_doc))
-    server = Server({'/': app}, port=args.port)
+    static_path = os.path.join(os.path.dirname(__file__), "..", "..", "static")
+    server = Server({'/': app}, port=args.port, static_dirs={'static': static_path})
     server.start()
     print(f"Bokeh server running at http://localhost:{args.port}/")
     server.io_loop.start()

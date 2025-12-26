@@ -1,4 +1,5 @@
-import argparse, sqlite3
+import argparse
+import duckdb
 from bokeh.models import Range1d
 from bokeh.layouts import gridplot
 from bokeh.plotting import output_file, save
@@ -10,7 +11,7 @@ def generate_bokeh_plot_all_samples(conn, variable, contig_name, xstart=None, xe
     """Generate a Bokeh plot showing all samples for a single variable.
 
     Args:
-        conn: SQLite connection
+        conn: DuckDB connection
         variable: Variable/feature to plot
         contig_name: Name of the contig to plot
         xstart: Optional x-axis start position
@@ -72,7 +73,7 @@ def generate_bokeh_plot_all_samples(conn, variable, contig_name, xstart=None, xe
 def save_html_plot_all_samples(db_path, variable, contig_name, subplot_size, output_filename, genbank_path=None):
     # --- Save interactive HTML plot ---
     output_file(filename = output_filename)
-    conn = sqlite3.connect(db_path)
+    conn = duckdb.connect(db_path, read_only=True)
     try:
         grid = generate_bokeh_plot_all_samples(conn, variable, contig_name, subplot_size=subplot_size, genbank_path=genbank_path)
         save(grid)
@@ -84,7 +85,7 @@ def main():
     # Parse command line arguments
     print("Parsing arguments...", flush=True)
     parser = argparse.ArgumentParser(description="Parse input files.")
-    parser.add_argument("-d", "--db", required=True, help="Path to sqlite database file to store results")
+    parser.add_argument("-d", "--db", required=True, help="Path to DuckDB database file")
     parser.add_argument("-v", "--variable", required=True, help="Variable to compute (only one variable allowed)")
     parser.add_argument("--contig", required=True, help="Name of the contig to plot")
     parser.add_argument("--html", required=False, default="MGFeatureViewer_all_samples.html", help="Name for output html files. A bokeh server will be started if not provided")
@@ -105,7 +106,7 @@ def main():
     save_html_plot_all_samples(db_path, variable, contig_name, subplot_size, output_filename)
 
 def add_plot_all_args(parser):
-    parser.add_argument("-d", "--db", required=True, help="Path to sqlite database file to store results")
+    parser.add_argument("-d", "--db", required=True, help="Path to DuckDB database file")
     parser.add_argument("-v", "--variable", required=True, help="Variable to compute (only one variable allowed)")
     parser.add_argument("--contig", required=True, help="Name of the contig to plot")
     parser.add_argument("-g", "--genbank", help="Path to genbank file (optional; if provided, gene map will be plotted)")

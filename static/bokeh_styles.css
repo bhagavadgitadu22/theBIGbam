@@ -1,13 +1,35 @@
-/* Using terracotta palette from https://colorswall.com/palette/150119 */
 .left-col {
-    background-color: #ece9e6; /* light tan background */
+    background-color: #ffe0f1; /* light tan background */
     padding: 15px;
     min-width: 350px;
+    max-height: 100vh;
+    overflow-y: auto;
+    position: sticky;
+    top: 0;
 }
 
 .bk-btn {
     padding: 0px !important;
     line-height: 1.0 !important;
+}
+
+.bk-btn-group .bk-btn {
+    background: #00f5ab !important;
+    border-color: #00b17c !important;
+    padding: 8px 12px !important;
+    font-weight: bold !important;
+}
+
+.bk-btn-group .bk-btn.bk-active {
+    background: #00b17c !important;
+    border-color: #00b17c !important;
+}
+
+.apply-btn .bk-btn {
+    background: #00f5ab !important;
+    border-color: #00b17c !important;
+    padding: 8px 12px !important;
+    font-weight: bold !important;
 }
 
 .bk-input-group label {

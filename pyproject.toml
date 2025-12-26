@@ -19,6 +19,7 @@ dependencies = [
     "numba>=0.56",
     "dna-features-viewer>=1.0",
     "pyarrow>=14.0",
+    "duckdb>=1.0",
 ]
 
 [project.optional-dependencies]

@@ -37,8 +37,8 @@ indicatif = "0.17"
 # Path handling
 walkdir = "2"
 
-# SQLite for metadata.db
-rusqlite = { version = "0.32", features = ["bundled"] }
+# DuckDB for metadata.db (columnar, better compression)
+duckdb = { version = "1.1", features = ["bundled"] }
 
 # PyO3 bindings (optional, enabled via "python" feature)
 pyo3 = { version = "0.23", features = ["extension-module", "anyhow"], optional = true }

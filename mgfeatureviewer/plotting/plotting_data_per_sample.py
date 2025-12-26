@@ -1,4 +1,5 @@
-import argparse, sqlite3
+import argparse
+import duckdb
 from Bio.Seq import Seq
 from Bio.SeqRecord import SeqRecord
 from Bio.SeqFeature import SeqFeature, FeatureLocation
@@ -79,7 +80,7 @@ def get_contig_info(cur, contig_name):
 def make_bokeh_genemap(conn, contig_id, locus_name, locus_size, annotation_tool, subplot_size, shared_xrange):
     cur = conn.cursor()
 
-    cur.execute("SELECT Start, End, Strand, Type, Product, Function, Phrog FROM Contig_annotation WHERE Contig_id=?", (contig_id,))
+    cur.execute("SELECT \"Start\", \"End\", Strand, \"Type\", Product, \"Function\", Phrog FROM Contig_annotation WHERE Contig_id=?", (contig_id,))
     seq_ann_rows = cur.fetchall()
 
     sequence_annotations = []
@@ -264,16 +265,14 @@ def get_feature_data(cur, feature, contig_id, sample_id):
     """Get feature data for plotting.
 
     Args:
-        cur: SQLite cursor
+        cur: DuckDB cursor
         feature: Feature name to query
         contig_id: Contig ID
         sample_id: Sample ID
-        contig_name: Contig name (unused, kept for compatibility)
-        sample_name: Sample name (unused, kept for compatibility)
     """
-    # Get rendering info from Variable table
+    # Get rendering info from Variable table (Type and Size are quoted - reserved words in DuckDB)
     cur.execute(
-        "SELECT Type, Color, Alpha, Fill_alpha, Size, Title, Feature_table_name "
+        "SELECT \"Type\", Color, Alpha, Fill_alpha, \"Size\", Title, Feature_table_name "
         "FROM Variable WHERE Subplot=?",
         (feature,)
     )
@@ -299,6 +298,10 @@ def get_feature_data(cur, feature, contig_id, sample_id):
         features_with_stats = ["left_clippings", "right_clippings", "insertions"]
         has_stats = feature_table in [f"Feature_{f}" for f in features_with_stats]
 
+        # Check if this feature stores scaled values (stored as INTEGER ×100)
+        scaled_features = ["Feature_tau", "Feature_mapq"]
+        is_scaled = feature_table in scaled_features
+
         # Query Feature_* table (RLE format: First_position, Last_position, Value, and optionally Mean, Median, Std)
         if has_stats:
             cur.execute(
@@ -313,26 +316,30 @@ def get_feature_data(cur, feature, contig_id, sample_id):
                 (sample_id, contig_id)
             )
         data_rows = cur.fetchall()
-        
+
         # Expand RLE runs into individual points for plotting
         x_coords = []
         y_coords = []
         mean_coords = []
         median_coords = []
         std_coords = []
-        
+
         # Store widths for bars (needed for plotting spans)
         width_coords = []
         first_pos_coords = []
         last_pos_coords = []
-        
+
         for row in data_rows:
             if has_stats:
                 first_pos, last_pos, value, mean, median, std = row
             else:
                 first_pos, last_pos, value = row
                 mean = median = std = None
-            
+
+            # Scale back if this is a scaled feature (tau, mapq stored as ×100)
+            if is_scaled:
+                value = value / 100.0 if value is not None else None
+
             if type_picked == "bars":
                 # For bars: use midpoint as x position and calculate width
                 midpoint = (first_pos + last_pos) / 2.0
@@ -362,7 +369,7 @@ def get_feature_data(cur, feature, contig_id, sample_id):
                         mean_coords.extend([mean, mean])
                         median_coords.extend([median, median])
                         std_coords.extend([std, std])
-        
+
         feature_dict["x"] = x_coords
         feature_dict["y"] = y_coords
         feature_dict["has_stats"] = has_stats
@@ -386,7 +393,7 @@ def generate_bokeh_plot_per_sample(conn, list_features, contig_name, sample_name
     """Generate a Bokeh plot for a single sample.
 
     Args:
-        conn: SQLite connection
+        conn: DuckDB connection
         list_features: List of features/modules to plot (can be mix of modules and individual features)
         contig_name: Name of the contig to plot
         sample_name: Name of the sample to plot
@@ -449,7 +456,7 @@ def generate_bokeh_plot_per_sample(conn, list_features, contig_name, sample_name
 def save_html_plot_per_sample(db_path, list_features, contig_name, sample_name, subplot_size, output_filename, genbank_path=None):
     # --- Save interactive HTML plot ---
     output_file(filename = output_filename)
-    conn = sqlite3.connect(db_path)
+    conn = duckdb.connect(db_path, read_only=True)
     try:
         grid = generate_bokeh_plot_per_sample(conn, list_features, contig_name, sample_name, subplot_size=subplot_size, genbank_path=genbank_path)
         save(grid)
@@ -492,7 +499,7 @@ def parse_requested_features(list_features):
 
 ### Main function
 def add_plot_per_sample_args(parser):
-    parser.add_argument("--db", required=True, help="Path to sqlite database file to store results")
+    parser.add_argument("--db", required=True, help="Path to DuckDB database file")
     parser.add_argument("--variables", required=True, help="List of variables or full modules to compute (comma-separated) (options allowed for modules: coverage, phagetermini, assemblycheck)")
     parser.add_argument("--contig", required=True, help="Name of the contig to plot")
     parser.add_argument("--sample", required=True, help="Name of the sample to plot")

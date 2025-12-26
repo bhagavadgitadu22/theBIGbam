@@ -1,12 +1,13 @@
-import sqlite3
+import duckdb
 
 def list_variables(db_path, detailed=False):
     """Print variables and detailed metadata from Variable table (excluding Feature_table_name)."""
-    conn = sqlite3.connect(db_path)
+    conn = duckdb.connect(db_path, read_only=True)
     cur = conn.cursor()
 
-    cur.execute("PRAGMA table_info(Variable)")
-    cols = [r[1] for r in cur.fetchall()]
+    # DuckDB: get column names from DESCRIBE statement
+    cur.execute("DESCRIBE Variable")
+    cols = [r[0] for r in cur.fetchall()]
 
     # Fields we will display (exclude Feature_table_name)
     display_fields = [c for c in cols if not(c in ['Variable_id', 'Feature_table_name'])]
@@ -35,7 +36,7 @@ def list_variables(db_path, detailed=False):
 
 def list_samples(db_path):
     """Print Sample_name values from Sample table."""
-    conn = sqlite3.connect(db_path)
+    conn = duckdb.connect(db_path, read_only=True)
     cur = conn.cursor()
     cur.execute("SELECT Sample_name FROM Sample ORDER BY Sample_name")
     rows = [r[0] for r in cur.fetchall()]
@@ -48,7 +49,7 @@ def list_samples(db_path):
 
 def list_contigs(db_path):
     """Print Contig_name values from Contig table."""
-    conn = sqlite3.connect(db_path)
+    conn = duckdb.connect(db_path, read_only=True)
     cur = conn.cursor()
     cur.execute("SELECT Contig_name FROM Contig ORDER BY Contig_name")
     rows = [r[0] for r in cur.fetchall()]
