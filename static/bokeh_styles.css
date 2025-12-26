@@ -8,28 +8,17 @@
     top: 0;
 }
 
-.bk-btn {
-    padding: 0px !important;
-    line-height: 1.0 !important;
-}
-
 .bk-btn-group .bk-btn {
     background: #00f5ab !important;
     border-color: #00b17c !important;
-    padding: 8px 12px !important;
     font-weight: bold !important;
+    color: white !important;
 }
 
 .bk-btn-group .bk-btn.bk-active {
     background: #00b17c !important;
     border-color: #00b17c !important;
-}
-
-.apply-btn .bk-btn {
-    background: #00f5ab !important;
-    border-color: #00b17c !important;
-    padding: 8px 12px !important;
-    font-weight: bold !important;
+    color: white !important;
 }
 
 .bk-input-group label {

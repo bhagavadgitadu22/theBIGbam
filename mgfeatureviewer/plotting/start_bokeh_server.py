@@ -913,15 +913,21 @@ def modify_doc_factory(db_path):
         css_text = f.read()
     stylesheet = InlineStyleSheet(css=css_text)
 
+    # Separate stylesheet for toggle buttons (minimal styling)
+    toggle_css_path = os.path.join(static_path, "toggle_styles.css")
+    with open(toggle_css_path) as f:
+        toggle_css_text = f.read()
+    toggle_stylesheet = InlineStyleSheet(css=toggle_css_text)
+
     # Load logo as base64 to avoid static file serving issues
-    logo_path = os.path.join(static_path, "LOGO.png")
+    logo_path = os.path.join(static_path, "logo.png")
     with open(logo_path, "rb") as f:
         logo_b64 = base64.b64encode(f.read()).decode("utf-8")
 
     # Create main elements
     ## Views section
     logo = Div(text=f"""<img src="data:image/png;base64,{logo_b64}" style="width:100%; max-width:600px; padding: 0 20%;">""")
-    views = RadioButtonGroup(labels=["One sample", "All samples"], active=0, sizing_mode="stretch_width", stylesheets=[stylesheet])
+    views = RadioButtonGroup(labels=["ONE SAMPLE", "ALL SAMPLES"], active=0, sizing_mode="stretch_width", stylesheets=[stylesheet])
 
     # Global lock for toggles when enforcing "All samples" view (single-variable mode)
     global_toggle_lock = {'locked': False}
@@ -932,7 +938,7 @@ def modify_doc_factory(db_path):
 
 
     ## Build filtering section
-    filtering_toggle_btn = Button(label="▶", width=20, height=20, button_type="primary", align="center", margin=0, stylesheets=[stylesheet])
+    filtering_toggle_btn = Button(label="▶", width=20, height=20, button_type="primary", align="center", margin=0, stylesheets=[toggle_stylesheet])
     filtering_title = Div(text="<b>Filtering</b>", align="center")
     filtering_header = row(filtering_toggle_btn, filtering_title, sizing_mode="stretch_width", align="center")
 
@@ -1026,7 +1032,7 @@ def modify_doc_factory(db_path):
     # Add "Per variable" filtering subsection
     combined_help = "Filter by variable characteristics.\n\n#Points: Filter by number of data points.\n  - One sample view: Show contigs where more/less than threshold points exist for the variable in selected sample\n  - All samples view: Show contigs where at least one sample has more/less than threshold points\n\nMax: Filter by maximum value.\n  - One sample view: Show contigs where the variable reaches above/below threshold value in selected sample\n  - All samples view: Show contigs where the variable reaches above/below threshold value in at least one sample"
     tooltip = Tooltip(content=combined_help, position="right")
-    help_per_variable = HelpButton(tooltip=tooltip, width=20, height=20, align="center", button_type="light", stylesheets=[stylesheet])
+    help_per_variable = HelpButton(tooltip=tooltip, width=20, height=20, align="center", button_type="light", stylesheets=[toggle_stylesheet])
     per_variable_title = Div(text="<b>Per variable:</b>")
     per_variable_header = row(per_variable_title, help_per_variable, sizing_mode="stretch_width")
 
@@ -1051,7 +1057,7 @@ def modify_doc_factory(db_path):
 
 
     ## Build Sample section
-    sample_toggle_btn = Button(label="▼", width=20, height=20, button_type="primary", align="center", margin=0, stylesheets=[stylesheet])
+    sample_toggle_btn = Button(label="▼", width=20, height=20, button_type="primary", align="center", margin=0, stylesheets=[toggle_stylesheet])
     sample_title = Div(text="<b>Samples</b>", align="center")
     sample_header = row(sample_toggle_btn, sample_title, sizing_mode="stretch_width", align="center")
 
@@ -1085,7 +1091,7 @@ def modify_doc_factory(db_path):
         length_slider.on_change('value', lambda attr, old, new: refresh_contig_options())
 
     # Create collapsible Filtering section
-    contig_toggle_btn = Button(label="▼", width=20, height=20, button_type="primary", align="center", margin=0, stylesheets=[stylesheet])
+    contig_toggle_btn = Button(label="▼", width=20, height=20, button_type="primary", align="center", margin=0, stylesheets=[toggle_stylesheet])
     contig_toggle_btn.styles = {'padding': '0px', 'line-height': '20px'}
     contig_title = Div(text="<b>Contigs</b>", align="center")
     contig_header = row(contig_toggle_btn, contig_title, sizing_mode="stretch_width", align="center")
@@ -1123,7 +1129,7 @@ def modify_doc_factory(db_path):
 
         # Create a small toggle button for collapsible section (just the arrow)
         # Start with modules folded (collapsed)
-        toggle_btn = Button(label="▶", width=20, height=20, button_type="primary", align="center", margin=0, stylesheets=[stylesheet])
+        toggle_btn = Button(label="▶", width=20, height=20, button_type="primary", align="center", margin=0, stylesheets=[toggle_stylesheet])
         toggle_btn.styles = {'padding': '0px', 'line-height': '20px'}
         module_toggles.append(toggle_btn)
 
@@ -1134,8 +1140,8 @@ def modify_doc_factory(db_path):
         
         if help_tooltip is not None:
             # Need separate help buttons for each header to avoid "already in doc" error
-            help_btn_cb = HelpButton(tooltip=help_tooltip, width=20, height=20, align="center", button_type="light", stylesheets=[stylesheet])
-            help_btn_title = HelpButton(tooltip=help_tooltip, width=20, height=20, align="center", button_type="light", stylesheets=[stylesheet])
+            help_btn_cb = HelpButton(tooltip=help_tooltip, width=20, height=20, align="center", button_type="light", stylesheets=[toggle_stylesheet])
+            help_btn_title = HelpButton(tooltip=help_tooltip, width=20, height=20, align="center", button_type="light", stylesheets=[toggle_stylesheet])
             hdr_cb = row(toggle_btn, module_widget, help_btn_cb, sizing_mode="stretch_width", align="center")
             hdr_title = row(toggle_btn, module_title_div, help_btn_title, sizing_mode="stretch_width", align="center")
         else:
@@ -1205,7 +1211,7 @@ def modify_doc_factory(db_path):
 
 
     ## Create final Apply button
-    apply_button = Button(label="Apply", align="center", stylesheets=[stylesheet], css_classes=["apply-btn"])
+    apply_button = Button(label="APPLY", align="center", stylesheets=[stylesheet], css_classes=["apply-btn"])
     apply_button.on_click(lambda: apply_clicked())
 
 
