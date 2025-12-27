@@ -117,7 +117,7 @@ def build_controls(conn):
     variables = [r[0] for r in cur.fetchall() if r[1] in tables_with_data]
 
     # Get modules that have at least one variable with data
-    cur.execute("SELECT DISTINCT Module FROM Variable WHERE Feature_table_name IN ({})".format(
+    cur.execute("SELECT DISTINCT Module FROM Variable WHERE Feature_table_name IN ({}) ORDER BY Module".format(
         ','.join('?' * len(tables_with_data))
     ), tuple(tables_with_data))
     modules = [r[0] for r in cur.fetchall()]
