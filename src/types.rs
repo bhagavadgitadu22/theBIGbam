@@ -357,8 +357,8 @@ pub struct FeatureAnnotation {
     pub product: Option<String>,
     /// Functional annotation
     pub function: Option<String>,
-    /// PHROG database annotation (phage-specific)
-    pub phrog: Option<String>,
+    /// PHROG database annotation (phage-specific) - integer ID
+    pub phrog: Option<i32>,
 }
 
 /// A single data point for a calculated feature.

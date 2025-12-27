@@ -10,7 +10,7 @@ except ImportError:
     _rust = None
 
 
-def calculating_all_features_parallel(list_modules, bam_files, output_db, min_coverage, curve_ratio, bar_ratio, circular=False, n_sample_cores=None, sequencing_type=None, genbank_path=None, annotation_tool=""):
+def calculating_all_features_parallel(list_modules, bam_files, output_db, min_coverage, curve_ratio, bar_ratio, circular=False, n_sample_cores=None, sequencing_type=None, genbank_path=None, annotation_tool="", max_samples_in_memory=10):
     """Process all BAM files in parallel using Rust bindings."""
     if not HAS_RUST:
         sys.exit("ERROR: Rust bindings (mgfeatureviewer_rs) are required but not available. Please install them first.")
@@ -34,6 +34,7 @@ def calculating_all_features_parallel(list_modules, bam_files, output_db, min_co
             bar_ratio=float(bar_ratio),
             circular=circular,
             create_indexes=True,
+            max_samples_in_memory=max_samples_in_memory,
         )
     except Exception as e:
         print(f"ERROR: Rust processing failed: {e}", flush=True)
@@ -66,6 +67,7 @@ def add_calculate_args(parser):
     parser.add_argument('--variation_percentage', type=float, default=50, help='Run-length encoding ratio for independent features like coverage (default: 50%%)')
     parser.add_argument('--coverage_percentage', type=float, default=10, help='Compressing ratio for features depending on coverage: only values above this %% of the local coverage are kept (default: 10%%)')
     parser.add_argument("--circular", action="store_true", help="Set if assembly was doubled during mapping (enables modulo logic)")
+    parser.add_argument("--max-samples-in-memory", type=int, default=10, help="Max samples to hold in memory during processing (default: 10). Lower for large datasets to reduce memory usage.")
 
 def run_calculate_args(args):
     annotation_tool = args.annotation_tool
@@ -92,10 +94,13 @@ def run_calculate_args(args):
     if genbank_path and not os.path.exists(genbank_path):
         sys.exit(f"ERROR: GenBank file not found: {genbank_path}")
 
+    max_samples_in_memory = getattr(args, 'max_samples_in_memory', 10)
+
     print("Calculating values for all requested features from mapping files...", flush=True)
     calculating_all_features_parallel(
         requested_modules, bam_files, output_db, min_coverage, variation_percentage, coverage_percentage, circular, n_cores,
-        sequencing_type=args.sequencing_type, genbank_path=genbank_path, annotation_tool=annotation_tool if genbank_path else ""
+        sequencing_type=args.sequencing_type, genbank_path=genbank_path, annotation_tool=annotation_tool if genbank_path else "",
+        max_samples_in_memory=max_samples_in_memory
     )
 
     print(f"\nOutput written to: {output_db}", flush=True)

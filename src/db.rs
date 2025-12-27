@@ -379,7 +379,7 @@ fn create_core_tables(conn: &Connection) -> Result<()> {
             \"Type\" TEXT,
             Product TEXT,
             \"Function\" TEXT,
-            Phrog TEXT
+            Phrog INTEGER
         )",
         [],
     )

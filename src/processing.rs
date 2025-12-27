@@ -9,6 +9,7 @@
 //! Database writing (5% of time) runs sequentially after processing completes.
 
 use anyhow::{Context, Result};
+use atty::Stream;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use rayon::prelude::*;
 use rust_htslib::bam::{IndexedReader, Read as BamRead};
@@ -16,6 +17,8 @@ use rust_htslib::htslib;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc::sync_channel;
+use std::thread;
 
 use crate::bam_reader::process_contig_streaming;
 use crate::compress::{
@@ -1181,6 +1184,7 @@ pub fn run_all_samples(
     annotation_tool: &str,
     config: &ProcessConfig,
     _create_indexes: bool, // Ignored - DuckDB uses zone maps instead of indexes
+    max_samples_in_memory: usize,
 ) -> Result<ProcessResult> {
     unsafe {
         htslib::hts_set_log_level(htslib::htsLogLevel_HTS_LOG_ERROR);
@@ -1224,7 +1228,7 @@ pub fn run_all_samples(
     );
     eprintln!("Modules: {}\n", modules.join(", "));
 
-    let result = process_samples_parallel(&bam_files, &contigs, modules, config, db_writer)?;
+    let result = process_samples_parallel(&bam_files, &contigs, modules, config, db_writer, max_samples_in_memory)?;
 
     print_summary(&result, output_db);
 
@@ -1246,113 +1250,285 @@ fn process_samples_parallel(
     modules: &[String],
     config: &ProcessConfig,
     db_writer: DbWriter,
+    max_samples_in_memory: usize,
 ) -> Result<ProcessResult> {
-    let mp = MultiProgress::new();
     let total = bam_files.len();
-
-    let process_pb = mp.add(ProgressBar::new(total as u64));
-    process_pb.set_style(
-        ProgressStyle::with_template(
-            "{spinner:.green} Processing:  [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} {msg}",
-        )
-        .unwrap()
-        .progress_chars("=>-"),
-    );
-    process_pb.enable_steady_tick(std::time::Duration::from_millis(100));
-
-    let write_pb = mp.add(ProgressBar::new(total as u64));
-    write_pb.set_style(
-        ProgressStyle::with_template(
-            "{spinner:.yellow} Writing:     [{elapsed_precise}] [{bar:40.yellow/red}] {pos}/{len} {msg}",
-        )
-        .unwrap()
-        .progress_chars("=>-"),
-    );
-    write_pb.enable_steady_tick(std::time::Duration::from_millis(100));
-
+    let is_tty = atty::is(Stream::Stderr);
     let start_time = std::time::Instant::now();
+
+    // Sequential mode for single thread: process one → write one → repeat
+    if config.threads == 1 {
+        return process_samples_sequential(bam_files, contigs, modules, config, db_writer, is_tty);
+    }
+
+    // Parallel mode: producer-consumer with bounded channel
+    let mp = MultiProgress::new();
+
+    // For TTY: use interactive progress bars
+    // For non-TTY (SLURM logs): use hidden bars and print log messages
+    let process_pb = if is_tty {
+        let pb = mp.add(ProgressBar::new(total as u64));
+        pb.set_style(
+            ProgressStyle::with_template(
+                "{spinner:.green} Processing:  [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} {msg}",
+            )
+            .unwrap()
+            .progress_chars("=>-"),
+        );
+        pb.enable_steady_tick(std::time::Duration::from_millis(100));
+        pb
+    } else {
+        mp.add(ProgressBar::hidden())
+    };
+
+    let write_pb = if is_tty {
+        let pb = mp.add(ProgressBar::new(total as u64));
+        pb.set_style(
+            ProgressStyle::with_template(
+                "{spinner:.yellow} Writing:     [{elapsed_precise}] [{bar:40.yellow/red}] {pos}/{len} {msg}",
+            )
+            .unwrap()
+            .progress_chars("=>-"),
+        );
+        pb.enable_steady_tick(std::time::Duration::from_millis(100));
+        pb
+    } else {
+        mp.add(ProgressBar::hidden())
+    };
+
+    // Bounded channel limits memory to ~max_samples_in_memory samples
+    let (tx, rx) = sync_channel::<SampleResult>(max_samples_in_memory);
+
     let completed_count = AtomicUsize::new(0);
     let failed_count = AtomicUsize::new(0);
 
-    // Process all samples in parallel, collecting results in memory
-    let results: Vec<Option<SampleResult>> = bam_files
-        .par_iter()
-        .map(|bam_path| {
-            let sample_start = std::time::Instant::now();
+    // Clone values needed by writer thread
+    let write_pb_clone = write_pb.clone();
+    let is_tty_writer = is_tty;
+    let total_writer = total;
 
-            match process_sample(bam_path, contigs, modules, config) {
-                Ok((features, presences, packaging, completeness, sample_name)) => {
-                    let sample_time = sample_start.elapsed().as_secs_f64();
-                    let done = completed_count.fetch_add(1, Ordering::SeqCst) + 1;
-                    process_pb.set_message(format!("[{}/{}] {} ({:.2}s)", done, total, sample_name, sample_time));
-                    process_pb.inc(1);
+    // Spawn dedicated writer thread
+    let writer_handle = thread::spawn(move || -> Result<(usize, std::time::Duration)> {
+        let write_start = std::time::Instant::now();
+        let mut written_count = 0usize;
 
-                    Some(SampleResult {
-                        sample_name,
-                        features,
-                        presences,
-                        packaging,
-                        completeness,
-                    })
+        // Receive and write samples as they arrive
+        for result in rx {
+            written_count += 1;
+
+            // Insert sample
+            if let Err(e) = db_writer.insert_sample(&result.sample_name) {
+                eprintln!("\nError inserting sample {}: {}", result.sample_name, e);
+                let msg = format!("ERR: {}", result.sample_name);
+                write_pb_clone.set_message(msg.clone());
+                write_pb_clone.inc(1);
+                if !is_tty_writer {
+                    eprintln!("Writing:    [{}/{}] {}", written_count, total_writer, msg);
                 }
-                Err(e) => {
-                    eprintln!("\nError processing {}: {}", bam_path.display(), e);
-                    let sample_time = sample_start.elapsed().as_secs_f64();
-                    let done = completed_count.fetch_add(1, Ordering::SeqCst) + 1;
-                    failed_count.fetch_add(1, Ordering::SeqCst);
-                    process_pb.set_message(format!("[{}/{}] ERR ({:.2}s)", done, total, sample_time));
-                    process_pb.inc(1);
-                    None
+                continue;
+            }
+
+            // Write all data for this sample
+            if let Err(e) = db_writer.write_sample_data(
+                &result.sample_name,
+                &result.presences,
+                &result.packaging,
+                &result.completeness,
+                &result.features,
+            ) {
+                eprintln!("\nError writing data for {}: {}", result.sample_name, e);
+                let msg = format!("ERR: {}", result.sample_name);
+                write_pb_clone.set_message(msg.clone());
+                if !is_tty_writer {
+                    eprintln!("Writing:    [{}/{}] {}", written_count, total_writer, msg);
+                }
+            } else {
+                write_pb_clone.set_message(result.sample_name.clone());
+                if !is_tty_writer {
+                    eprintln!("Writing:    [{}/{}] {}", written_count, total_writer, result.sample_name);
                 }
             }
-        })
-        .collect();
+            write_pb_clone.inc(1);
+        }
+
+        // Finalize database
+        db_writer.finalize()?;
+        write_pb_clone.finish_with_message("Done");
+        if !is_tty_writer {
+            eprintln!("Writing:    Done ({:.2}s)", write_start.elapsed().as_secs_f64());
+        }
+
+        Ok((written_count, write_start.elapsed()))
+    });
+
+    // Process samples in parallel, sending to channel immediately
+    // send() blocks if channel is full (backpressure)
+    bam_files.par_iter().for_each(|bam_path| {
+        let sample_start = std::time::Instant::now();
+
+        match process_sample(bam_path, contigs, modules, config) {
+            Ok((features, presences, packaging, completeness, sample_name)) => {
+                let sample_time = sample_start.elapsed().as_secs_f64();
+                let done = completed_count.fetch_add(1, Ordering::SeqCst) + 1;
+                let msg = format!("[{}/{}] {} ({:.2}s)", done, total, sample_name, sample_time);
+                process_pb.set_message(msg.clone());
+                process_pb.inc(1);
+                if !is_tty {
+                    eprintln!("Processing: {}", msg);
+                }
+
+                // Send to writer thread (blocks if channel full)
+                let _ = tx.send(SampleResult {
+                    sample_name,
+                    features,
+                    presences,
+                    packaging,
+                    completeness,
+                });
+            }
+            Err(e) => {
+                eprintln!("\nError processing {}: {}", bam_path.display(), e);
+                let sample_time = sample_start.elapsed().as_secs_f64();
+                let done = completed_count.fetch_add(1, Ordering::SeqCst) + 1;
+                failed_count.fetch_add(1, Ordering::SeqCst);
+                let msg = format!("[{}/{}] ERR ({:.2}s)", done, total, sample_time);
+                process_pb.set_message(msg.clone());
+                process_pb.inc(1);
+                if !is_tty {
+                    eprintln!("Processing: {}", msg);
+                }
+            }
+        }
+    });
+
+    // Drop sender to signal writer thread that processing is complete
+    drop(tx);
 
     process_pb.finish_with_message("Done");
     let processing_time = start_time.elapsed();
-
-    // Write all results sequentially to DuckDB (single-writer model)
-    let write_start = std::time::Instant::now();
-
-    for result in results.into_iter().flatten() {
-        // Insert sample and get ID
-        if let Err(e) = db_writer.insert_sample(&result.sample_name) {
-            eprintln!("\nError inserting sample {}: {}", result.sample_name, e);
-            write_pb.set_message(format!("ERR: {}", result.sample_name));
-            write_pb.inc(1);
-            continue;
-        }
-
-        // Write all data for this sample
-        if let Err(e) = db_writer.write_sample_data(
-            &result.sample_name,
-            &result.presences,
-            &result.packaging,
-            &result.completeness,
-            &result.features,
-        ) {
-            eprintln!("\nError writing data for {}: {}", result.sample_name, e);
-            write_pb.set_message(format!("ERR: {}", result.sample_name));
-        } else {
-            write_pb.set_message(result.sample_name);
-        }
-        write_pb.inc(1);
+    if !is_tty {
+        eprintln!("Processing: Done ({:.2}s)", processing_time.as_secs_f64());
     }
 
-    // Finalize database (create views)
-    db_writer.finalize()?;
-    write_pb.finish_with_message("Done");
+    // Wait for writer thread to finish
+    let (written_count, writing_time) = writer_handle
+        .join()
+        .map_err(|_| anyhow::anyhow!("Writer thread panicked"))??;
 
-    let writing_time = write_start.elapsed();
     let elapsed = start_time.elapsed();
     let failed = failed_count.load(Ordering::SeqCst);
 
     Ok(ProcessResult {
-        samples_processed: total - failed,
+        samples_processed: written_count,
         samples_failed: failed,
         total_time_secs: elapsed.as_secs_f64(),
         processing_time_secs: processing_time.as_secs_f64(),
         writing_time_secs: writing_time.as_secs_f64(),
+    })
+}
+
+/// Sequential processing for single-threaded mode.
+/// Process one sample → write it → repeat. No channel overhead.
+fn process_samples_sequential(
+    bam_files: &[PathBuf],
+    contigs: &[ContigInfo],
+    modules: &[String],
+    config: &ProcessConfig,
+    db_writer: DbWriter,
+    is_tty: bool,
+) -> Result<ProcessResult> {
+    let total = bam_files.len();
+    let start_time = std::time::Instant::now();
+
+    let pb = if is_tty {
+        let pb = ProgressBar::new(total as u64);
+        pb.set_style(
+            ProgressStyle::with_template(
+                "{spinner:.green} Processing:  [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} {msg}",
+            )
+            .unwrap()
+            .progress_chars("=>-"),
+        );
+        pb.enable_steady_tick(std::time::Duration::from_millis(100));
+        pb
+    } else {
+        ProgressBar::hidden()
+    };
+
+    let mut processed = 0usize;
+    let mut failed = 0usize;
+    let mut processing_time_total = std::time::Duration::ZERO;
+    let mut writing_time_total = std::time::Duration::ZERO;
+
+    for bam_path in bam_files {
+        let sample_start = std::time::Instant::now();
+
+        match process_sample(bam_path, contigs, modules, config) {
+            Ok((features, presences, packaging, completeness, sample_name)) => {
+                let process_elapsed = sample_start.elapsed();
+                processing_time_total += process_elapsed;
+
+                let write_start = std::time::Instant::now();
+
+                // Insert sample
+                if let Err(e) = db_writer.insert_sample(&sample_name) {
+                    eprintln!("\nError inserting sample {}: {}", sample_name, e);
+                    failed += 1;
+                    pb.inc(1);
+                    continue;
+                }
+
+                // Write sample data
+                if let Err(e) = db_writer.write_sample_data(
+                    &sample_name,
+                    &presences,
+                    &packaging,
+                    &completeness,
+                    &features,
+                ) {
+                    eprintln!("\nError writing data for {}: {}", sample_name, e);
+                    failed += 1;
+                } else {
+                    processed += 1;
+                }
+
+                writing_time_total += write_start.elapsed();
+
+                let total_sample_time = sample_start.elapsed().as_secs_f64();
+                let msg = format!("[{}/{}] {} ({:.2}s)", processed + failed, total, sample_name, total_sample_time);
+                pb.set_message(msg.clone());
+                pb.inc(1);
+                if !is_tty {
+                    eprintln!("{}", msg);
+                }
+            }
+            Err(e) => {
+                eprintln!("\nError processing {}: {}", bam_path.display(), e);
+                failed += 1;
+                processing_time_total += sample_start.elapsed();
+                let msg = format!("[{}/{}] ERR", processed + failed, total);
+                pb.set_message(msg.clone());
+                pb.inc(1);
+                if !is_tty {
+                    eprintln!("{}", msg);
+                }
+            }
+        }
+    }
+
+    // Finalize database
+    db_writer.finalize()?;
+    pb.finish_with_message("Done");
+    if !is_tty {
+        eprintln!("Done ({:.2}s)", start_time.elapsed().as_secs_f64());
+    }
+
+    Ok(ProcessResult {
+        samples_processed: processed,
+        samples_failed: failed,
+        total_time_secs: start_time.elapsed().as_secs_f64(),
+        processing_time_secs: processing_time_total.as_secs_f64(),
+        writing_time_secs: writing_time_total.as_secs_f64(),
     })
 }
 

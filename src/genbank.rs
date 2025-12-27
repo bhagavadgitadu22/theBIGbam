@@ -84,7 +84,7 @@ pub fn parse_genbank(path: &Path, annotation_tool: &str) -> Result<(Vec<ContigIn
 
             let product = feature.qualifier_values("product").next().map(|s| s.to_string());
             let function = feature.qualifier_values("function").next().map(|s| s.to_string());
-            let phrog = feature.qualifier_values("phrog").next().map(|s| s.to_string());
+            let phrog = feature.qualifier_values("phrog").next().and_then(|s| s.parse::<i32>().ok());
 
             annotations.push(FeatureAnnotation {
                 contig_id,

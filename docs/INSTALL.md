@@ -151,3 +151,5 @@ pip uninstall mgfeatureviewer
 ```
 
 The Rust toolchain and external tools (conda environment) remain installed and can be removed separately if desired.
+
+#TODO: need module load llvm for HPC cluster

@@ -33,6 +33,7 @@ thiserror = "2"
 
 # Progress and logging
 indicatif = "0.17"
+atty = "0.2"
 
 # Path handling
 walkdir = "2"
