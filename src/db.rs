@@ -166,7 +166,7 @@ impl DbWriter {
                 } else {
                     pkg.right_termini.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(",")
                 };
-                appender.append_row(params![contig_id, sample_id, &pkg.mechanism, &left_str, &right_str])?;
+                appender.append_row(params![contig_id, sample_id, &pkg.mechanism, &left_str, &right_str, pkg.duplication])?;
             }
         }
 
@@ -384,7 +384,8 @@ fn create_core_tables(conn: &Connection) -> Result<()> {
             Sample_id INTEGER,
             Phage_packaging_mechanism TEXT,
             Phage_left_terminus TEXT,
-            Phage_right_terminus TEXT
+            Phage_right_terminus TEXT,
+            Duplication BOOLEAN
         )",
         [],
     )
@@ -689,7 +690,10 @@ fn create_views(conn: &Connection) -> Result<()> {
              p.Coverage_percentage / 100.0 AS Coverage_percentage,
              m.Phage_packaging_mechanism,
              m.Phage_left_terminus,
-             m.Phage_right_terminus
+             m.Phage_right_terminus,
+             CASE WHEN m.Duplication = true THEN 'DTR'
+                  WHEN m.Duplication = false THEN 'ITR'
+                  ELSE NULL END AS Duplication
          FROM Presences p
          JOIN Contig c ON p.Contig_id = c.Contig_id
          JOIN Sample s ON p.Sample_id = s.Sample_id

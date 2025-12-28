@@ -429,6 +429,8 @@ pub struct PackagingData {
     pub left_termini: Vec<i32>,
     /// Right terminus positions (1-indexed) - multiple positions for terminal repeats
     pub right_termini: Vec<i32>,
+    /// Whether termini are in a duplication: Some(true) = DTR, Some(false) = ITR, None = no/mixed
+    pub duplication: Option<bool>,
 }
 
 /// Type alias for feature calculation results.
