@@ -27,6 +27,8 @@ pub mod db;
 pub mod features;
 pub mod genbank;
 pub mod processing;
+pub mod processing_completeness;
+pub mod processing_phage_packaging;
 pub mod types;
 
 // Re-export main types for library users
@@ -36,7 +38,8 @@ pub use circular::{increment_circular, increment_range};
 pub use compress::compress_signal_with_reference;
 pub use features::{process_read, FeatureArrays, ModuleFlags};
 pub use genbank::parse_genbank;
-pub use processing::{process_sample, run_all_samples, PhageTerminiConfig, ProcessConfig, ProcessResult};
+pub use processing::{process_sample, run_all_samples, ProcessConfig, ProcessResult};
+pub use processing_phage_packaging::PhageTerminiConfig;
 pub use types::{
     mean_std, ContigInfo, FeaturePoint, PlotType, PresenceData, SequencingType,
     ASSEMBLYCHECK_FEATURES, PHAGETERMINI_FEATURES, VARIABLES,
@@ -93,7 +96,8 @@ mod python {
         max_samples_in_memory: usize,
         autoblast_file: &str,
     ) -> PyResult<Bound<'py, PyDict>> {
-        use crate::processing::{run_all_samples, PhageTerminiConfig, ProcessConfig};
+        use crate::processing::{run_all_samples, ProcessConfig};
+        use crate::processing_phage_packaging::PhageTerminiConfig;
         use crate::bam_reader::detect_sequencing_type;
         use std::path::PathBuf;
 

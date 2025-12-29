@@ -2,10 +2,11 @@
 //!
 //! Compresses signals by grouping consecutive positions with similar values into runs.
 //! - **Curves**: Uses adaptive RLE with self-referential threshold (compress_ratio * run_value).
-//! - **Bars**: Filters positions where `value > coverage * compress_ratio`. Consecutive 
+//! - **Bars**: Filters positions where `value > coverage * compress_ratio`. Consecutive
 //!   significant positions are grouped into runs with average values.
 
-use crate::types::PlotType;
+use crate::processing::ProcessConfig;
+use crate::types::{get_plot_type, FeaturePoint, PlotType};
 
 // ============================================================================
 // RUN STRUCTURE
@@ -137,6 +138,127 @@ pub fn compress_signal_with_reference(
         end_pos: (run_start + run_count) as i32,
         value: run_value as f32,
     });
+
+    runs
+}
+
+/// Merge consecutive runs with identical values (0% tolerance RLE).
+///
+/// Applied to features that should be constant along entire reads (deletions, mate flags).
+/// Only merges runs that are BOTH adjacent (end+1 == start) AND have the same value.
+#[inline]
+pub fn merge_identical_runs(runs: Vec<Run>) -> Vec<Run> {
+    if runs.is_empty() {
+        return runs;
+    }
+    
+    let mut merged = Vec::new();
+    let mut current = runs[0].clone();
+    
+    for run in runs.into_iter().skip(1) {
+        // Only merge if runs are adjacent AND have the same value
+        if current.end_pos + 1 == run.start_pos && (run.value - current.value).abs() < f32::EPSILON {
+            // Adjacent runs with same value: extend the current run
+            current.end_pos = run.end_pos;
+        } else {
+            // Either not adjacent or different value: push current and start new
+            merged.push(current);
+            current = run;
+        }
+    }
+    merged.push(current);
+    
+    merged
+}
+
+
+/// Compress and add feature points to the output vector.
+#[inline]
+pub fn add_compressed_feature(
+    values: &[f64],
+    feature: &str,
+    contig_name: &str,
+    config: &ProcessConfig,
+    output: &mut Vec<FeaturePoint>,
+) {
+    add_compressed_feature_with_reference(values, None, feature, contig_name, config, output);
+}
+
+/// Compress and add feature points with optional coverage reference.
+///
+/// For bar plots, uses coverage as reference for context-aware compression.
+#[inline]
+pub fn add_compressed_feature_with_reference(
+    values: &[f64],
+    reference: Option<&[f64]>,
+    feature: &str,
+    contig_name: &str,
+    config: &ProcessConfig,
+    output: &mut Vec<FeaturePoint>,
+) -> Vec<Run> {
+    let plot_type = get_plot_type(feature);
+    let runs = compress_signal_with_reference(values, reference, plot_type, config.curve_ratio, config.bar_ratio);
+
+    output.extend(runs.iter().map(|run| FeaturePoint {
+        contig_name: contig_name.to_string(),
+        feature: feature.to_string(),
+        start_pos: run.start_pos,
+        end_pos: run.end_pos,
+        value: run.value,
+        mean: None,
+        median: None,
+        std: None,
+    }));
+
+    runs
+}
+
+/// Compress and add feature points with statistics (for clippings/insertions).
+///
+/// Includes mean, median, and standard deviation from the length vectors.
+#[inline]
+pub fn add_compressed_feature_with_stats(
+    counts: &[f64],
+    means: &[f64],
+    medians: &[f64],
+    stds: &[f64],
+    reference: Option<&[f64]>,
+    feature: &str,
+    contig_name: &str,
+    config: &ProcessConfig,
+    output: &mut Vec<FeaturePoint>,
+) -> Vec<Run> {
+    let plot_type = get_plot_type(feature);
+    let runs = compress_signal_with_reference(counts, reference, plot_type, config.curve_ratio, config.bar_ratio);
+
+    output.extend(runs.iter().map(|run| {
+        // For the run's position range, compute average statistics
+        let start_idx = (run.start_pos - 1) as usize;
+        let end_idx = run.end_pos as usize;
+        
+        let (mean_val, median_val, std_val) = if start_idx < means.len() {
+            let range_mean: f64 = means[start_idx..end_idx.min(means.len())].iter().sum::<f64>() 
+                / (end_idx - start_idx) as f64;
+            let range_median: f64 = medians[start_idx..end_idx.min(medians.len())].iter().sum::<f64>() 
+                / (end_idx - start_idx) as f64;
+            let range_std: f64 = stds[start_idx..end_idx.min(stds.len())].iter().sum::<f64>() 
+                / (end_idx - start_idx) as f64;
+            (Some(range_mean as f32), Some(range_median as f32), Some(range_std as f32))
+        } else {
+            (None, None, None)
+        };
+
+        FeaturePoint {
+            contig_name: contig_name.to_string(),
+            feature: feature.to_string(),
+            start_pos: run.start_pos,
+            end_pos: run.end_pos,
+            value: run.value,
+            mean: mean_val,
+            median: median_val,
+            std: std_val,
+        }
+    }));
 
     runs
 }

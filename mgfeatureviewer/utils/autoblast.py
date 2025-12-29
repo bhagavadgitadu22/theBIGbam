@@ -9,9 +9,56 @@ relevant for phage termini analysis.
 from pathlib import Path
 import subprocess
 import tempfile
-import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import List
 
 from Bio import SeqIO
+from Bio.SeqRecord import SeqRecord
+
+
+def _blast_single_contig(record: SeqRecord, evalue: float) -> List[str]:
+    """Perform self-BLAST for a single contig.
+
+    Args:
+        record: BioPython SeqRecord to BLAST against itself
+        evalue: E-value threshold for BLAST
+
+    Returns:
+        List of BLAST output lines (filtered to remove exact self-hits)
+    """
+    results = []
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        # Write single sequence to temp file
+        seq_fasta = Path(tmpdir) / "seq.fasta"
+        SeqIO.write([record], str(seq_fasta), "fasta")
+
+        # Run BLASTn of this sequence against itself
+        blast_output = Path(tmpdir) / "blast_out.tsv"
+        blastn_cmd = [
+            "blastn",
+            "-query", str(seq_fasta),
+            "-subject", str(seq_fasta),
+            "-evalue", str(evalue),
+            "-outfmt", "6",
+            "-out", str(blast_output)
+        ]
+        subprocess.run(blastn_cmd, check=True, capture_output=True)
+
+        # Read results and filter out exact self-hits
+        if blast_output.exists():
+            with open(blast_output, 'r') as blast_handle:
+                for line in blast_handle:
+                    fields = line.strip().split('\t')
+                    if len(fields) >= 10:
+                        qstart, qend = int(fields[6]), int(fields[7])
+                        sstart, send = int(fields[8]), int(fields[9])
+                        # Skip if positions are identical (exact self-hit)
+                        if qstart == sstart and qend == send:
+                            continue
+                    results.append(line)
+
+    return results
 
 
 def extract_fasta_from_genbank(genbank_path: Path, output_fasta: Path) -> bool:
@@ -44,7 +91,7 @@ def perform_autoblast(threads: int, assembly_path: Path, output_path: Path, eval
     which identifies internal duplications like terminal repeats.
 
     Args:
-        threads: Number of threads for BLAST
+        threads: Number of threads for BLAST (parallelizes across contigs)
         assembly_path: Path to FASTA file with reference sequences
         output_path: Path to output file with BLAST results (outfmt 6)
         evalue: E-value threshold for BLAST (default 1e-10)
@@ -55,51 +102,31 @@ def perform_autoblast(threads: int, assembly_path: Path, output_path: Path, eval
     if not sequences:
         raise ValueError(f"No sequences found in {assembly_path}")
 
-    # Create output file (or clear if exists)
+    # Create output directory if needed
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
+    # Run BLAST for each contig in parallel
+    all_results = []
+    with ThreadPoolExecutor(max_workers=threads) as executor:
+        # Submit all BLAST jobs
+        future_to_record = {
+            executor.submit(_blast_single_contig, record, evalue): record.id
+            for record in sequences
+        }
+
+        # Collect results as they complete
+        for future in as_completed(future_to_record):
+            contig_id = future_to_record[future]
+            try:
+                results = future.result()
+                all_results.extend(results)
+            except Exception as e:
+                print(f"Warning: BLAST failed for {contig_id}: {e}")
+
+    # Write all results to output file
     with open(output_path, 'w') as out_handle:
-        # For each sequence, create a temporary database and BLAST against itself
-        for record in sequences:
-            with tempfile.TemporaryDirectory() as tmpdir:
-                # Write single sequence to temp file
-                seq_fasta = Path(tmpdir) / "seq.fasta"
-                SeqIO.write([record], str(seq_fasta), "fasta")
-
-                # Create BLAST database for this sequence only
-                makeblastdb_cmd = [
-                    "makeblastdb",
-                    "-in", str(seq_fasta),
-                    "-dbtype", "nucl",
-                    "-out", str(Path(tmpdir) / "seqdb")
-                ]
-                subprocess.run(makeblastdb_cmd, check=True, capture_output=True)
-
-                # Run BLASTn of this sequence against itself
-                blast_output = Path(tmpdir) / "blast_out.tsv"
-                blastn_cmd = [
-                    "blastn",
-                    "-query", str(seq_fasta),
-                    "-db", str(Path(tmpdir) / "seqdb"),
-                    "-evalue", str(evalue),
-                    "-outfmt", "6",
-                    "-out", str(blast_output),
-                    "-num_threads", str(threads)
-                ]
-                subprocess.run(blastn_cmd, check=True, capture_output=True)
-
-                # Append results to output file (filtering out exact self-hits)
-                if blast_output.exists():
-                    with open(blast_output, 'r') as blast_handle:
-                        for line in blast_handle:
-                            fields = line.strip().split('\t')
-                            if len(fields) >= 10:
-                                qstart, qend = int(fields[6]), int(fields[7])
-                                sstart, send = int(fields[8]), int(fields[9])
-                                # Skip if positions are identical (exact self-hit)
-                                if qstart == sstart and qend == send:
-                                    continue
-                            out_handle.write(line)
+        for line in all_results:
+            out_handle.write(line)
 
     return output_path
 
