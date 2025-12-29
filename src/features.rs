@@ -218,10 +218,14 @@ impl FeatureArrays {
                 std::mem::swap(&mut self.reads_ends, &mut self.end_minus);
             }
             SequencingType::Long => {
-                // Long reads: sum both strands
+                // Long reads: sum 5' ends for reads_starts, 3' ends for reads_ends
+                // For + strand: start=5', end=3' (leftmost/rightmost in ref coords)
+                // For - strand: start=3', end=5' (reversed in ref coords)
+                // So: reads_starts = start_plus (5') + end_minus (5')
+                //     reads_ends = end_plus (3') + start_minus (3')
                 for i in 0..self.ref_length() {
-                    self.reads_starts[i] = self.start_plus[i] + self.start_minus[i];
-                    self.reads_ends[i] = self.end_plus[i] + self.end_minus[i];
+                    self.reads_starts[i] = self.start_plus[i] + self.end_minus[i];
+                    self.reads_ends[i] = self.end_plus[i] + self.start_minus[i];
                 }
             }
         }
@@ -693,12 +697,13 @@ pub fn process_read(
             // Track start/end positions by strand
             // We separate strands here; they're combined in finalize_strands()
             // Note: 'end' is exclusive, so the actual last position is end-1
-            let end_pos = if end > 0 { 
+            let end_pos = if end > 0 {
                 let pos = end - 1;
                 if circular { pos % ref_length } else { pos }
-            } else { 
-                0 
+            } else {
+                0
             };
+
             if is_reverse {
                 arrays.start_minus[start] += 1;
                 arrays.end_minus[end_pos] += 1;

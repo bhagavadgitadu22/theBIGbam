@@ -98,25 +98,10 @@ mod python {
     ) -> PyResult<Bound<'py, PyDict>> {
         use crate::processing::{run_all_samples, ProcessConfig};
         use crate::processing_phage_packaging::PhageTerminiConfig;
-        use crate::bam_reader::detect_sequencing_type;
         use std::path::PathBuf;
 
-        // Parse sequencing type or fall back to auto-detection from first BAM
-        let seq_type = if let Some(seq_type_str) = sequencing_type {
-            if let Some(st) = ProcessConfig::parse_sequencing_type(seq_type_str) {
-                st
-            } else {
-                // Auto-detect from first BAM file if invalid string provided
-                let first_bam = PathBuf::from(&bam_files[0]);
-                detect_sequencing_type(&first_bam)
-                    .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("Failed to detect sequencing type: {}", e)))?
-            }
-        } else {
-            // Auto-detect from first BAM file if None provided
-            let first_bam = PathBuf::from(&bam_files[0]);
-            detect_sequencing_type(&first_bam)
-                .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("Failed to detect sequencing type: {}", e)))?
-        };
+        // Parse sequencing type: Some(type) if user provided valid value, None for per-sample auto-detection
+        let seq_type = sequencing_type.and_then(|s| ProcessConfig::parse_sequencing_type(s));
 
         let config = ProcessConfig {
             threads,

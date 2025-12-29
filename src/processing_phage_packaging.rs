@@ -191,38 +191,22 @@ pub fn filter_peaks_by_clippings(
         .map(|r| r.start_pos as u32)
         .collect();
 
-    // filter reads_starts using left clipping only
+    // Filter reads_starts: keep peaks above threshold without nearby left clipping
     let filtered_starts: Vec<Run> = reads_starts
         .iter()
         .filter(|run| {
-            let above_threshold = (run.value as f64) >= min_events;
-            let no_nearby_clip = has_nearby_clip(
-                run.start_pos,
-                &left_clips,
-                min_distance,
-                genome_length,
-                circular,
-                dtr_regions,
-            ).is_none();
-            above_threshold && no_nearby_clip
+            (run.value as f64) >= min_events
+                && has_nearby_clip(run.start_pos, &left_clips, min_distance, genome_length, circular, dtr_regions).is_none()
         })
         .cloned()
         .collect();
 
-    // filter reads_ends using right clipping only
+    // Filter reads_ends: keep peaks above threshold without nearby right clipping
     let filtered_ends: Vec<Run> = reads_ends
         .iter()
         .filter(|run| {
-            let above_threshold = (run.value as f64) >= min_events;
-            let no_nearby_clip = has_nearby_clip(
-                run.start_pos,
-                &right_clips,
-                min_distance,
-                genome_length,
-                circular,
-                dtr_regions,
-            ).is_none();
-            above_threshold && no_nearby_clip
+            (run.value as f64) >= min_events
+                && has_nearby_clip(run.start_pos, &right_clips, min_distance, genome_length, circular, dtr_regions).is_none()
         })
         .cloned()
         .collect();

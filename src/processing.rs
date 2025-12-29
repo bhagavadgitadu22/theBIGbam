@@ -20,7 +20,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::sync_channel;
 use std::thread;
 
-use crate::bam_reader::process_contig_streaming;
+use crate::bam_reader::{detect_sequencing_type, process_contig_streaming};
 use crate::compress::{
     compress_signal_with_reference, Run,
     add_compressed_feature, add_compressed_feature_with_reference,
@@ -49,8 +49,8 @@ pub struct ProcessConfig {
     pub bar_ratio: f64,
     /// Circular genome flag: if true, assembly was doubled during mapping (enables modulo logic)
     pub circular: bool,
-    /// Sequencing type: determines which features to calculate
-    pub sequencing_type: SequencingType,
+    /// Sequencing type: if None, auto-detect per sample; if Some, use for all samples
+    pub sequencing_type: Option<SequencingType>,
     /// Phage termini detection configuration
     pub phagetermini_config: PhageTerminiConfig,
 }
@@ -76,7 +76,6 @@ pub struct ProcessResult {
     pub processing_time_secs: f64,
     pub writing_time_secs: f64,
 }
-
 /// Add features from FeatureArrays to output (optimized path).
 /// Returns a tuple of:
 /// - Optional packaging data for phagetermini module
@@ -86,6 +85,7 @@ fn add_features_from_arrays(
     contig_name: &str,
     contig_length: usize,
     config: &ProcessConfig,
+    seq_type: SequencingType,
     flags: ModuleFlags,
     duplications: &[DuplicationData],
     output: &mut Vec<FeaturePoint>,
@@ -134,7 +134,6 @@ fn add_features_from_arrays(
         Vec::new()
     };
 
-    let seq_type = config.sequencing_type;
     // Coverage (always compress self-referentially)
     let primary_reads_f64: Vec<f64> = arrays.primary_reads.iter().map(|&x| x as f64).collect();
     if flags.coverage {
@@ -325,10 +324,10 @@ fn add_features_from_arrays(
 
         // reads_starts and reads_ends (bars) - save original data
         let reads_starts_original: Vec<f64> = arrays.reads_starts.iter().map(|&x| x as f64).collect();
-        let reads_starts_runs = compress_signal_with_reference(&reads_starts_original, Some(&primary_reads_f64), PlotType::Bars, config.curve_ratio, config.bar_ratio);
+        let reads_starts_runs = compress_signal_with_reference(&reads_starts_original, Some(&coverage_reduced_f64), PlotType::Bars, config.curve_ratio, config.bar_ratio);
 
         let reads_ends_original: Vec<f64> = arrays.reads_ends.iter().map(|&x| x as f64).collect();
-        let reads_ends_runs = compress_signal_with_reference(&reads_ends_original, Some(&primary_reads_f64), PlotType::Bars, config.curve_ratio, config.bar_ratio);
+        let reads_ends_runs = compress_signal_with_reference(&reads_ends_original, Some(&coverage_reduced_f64), PlotType::Bars, config.curve_ratio, config.bar_ratio);
 
         // Add reads_starts and reads_ends to output (original data)
         output.extend(reads_starts_runs.iter().map(|run| FeaturePoint {
@@ -360,12 +359,12 @@ fn add_features_from_arrays(
 
             for pos in run.start_pos..=run.end_pos {
                 let idx = (pos - 1) as usize;
-                if idx < primary_reads_f64.len() {
-                    let c = primary_reads_f64[idx];
+                if idx < arrays.coverage_reduced.len() {
+                    let c = arrays.coverage_reduced[idx];
                     let s = arrays.reads_starts[idx];
                     let e = arrays.reads_ends[idx];
-                    if c > 0.0 {
-                        tau_sum += (s + e) as f64 / c;
+                    if c > 0 {
+                        tau_sum += (s + e) as f64 / c as f64;
                         count += 1;
                     }
                 }
@@ -386,33 +385,29 @@ fn add_features_from_arrays(
             }
         }
 
-        // === STEP 2: Apply DTR merging for peak detection only ===
-        // This modifies arrays in place but we've already saved original data above
+        // === STEP 2: Apply DTR merging to arrays ===
         if !dtr_regions.is_empty() {
             apply_dtr_merging(arrays, &dtr_regions);
         }
 
-        // === STEP 3: Recompute runs from MERGED data for peak detection ===
-        let primary_reads_f64: Vec<f64> = arrays.primary_reads.iter().map(|&x| x as f64).collect();
+        // === STEP 3: Recompute runs from MERGED data ===
+        let coverage_reduced_f64: Vec<f64> = arrays.coverage_reduced.iter().map(|&x| x as f64).collect();
         let reads_starts_merged: Vec<f64> = arrays.reads_starts.iter().map(|&x| x as f64).collect();
-        let reads_starts_runs_merged = compress_signal_with_reference(&reads_starts_merged, Some(&primary_reads_f64), PlotType::Bars, config.curve_ratio, config.bar_ratio);
-
         let reads_ends_merged: Vec<f64> = arrays.reads_ends.iter().map(|&x| x as f64).collect();
-        let reads_ends_runs_merged = compress_signal_with_reference(&reads_ends_merged, Some(&primary_reads_f64), PlotType::Bars, config.curve_ratio, config.bar_ratio);
+        let reads_starts_runs_merged = compress_signal_with_reference(&reads_starts_merged, Some(&coverage_reduced_f64), PlotType::Bars, config.curve_ratio, config.bar_ratio);
+        let reads_ends_runs_merged = compress_signal_with_reference(&reads_ends_merged, Some(&coverage_reduced_f64), PlotType::Bars, config.curve_ratio, config.bar_ratio);
+        
+        let left_clip_counts: Vec<f64> = arrays.left_clipping_lengths.iter().map(|v| v.len() as f64).collect();
+        let right_clip_counts: Vec<f64> = arrays.right_clipping_lengths.iter().map(|v| v.len() as f64).collect();
+        let left_clip_runs = compress_signal_with_reference(&left_clip_counts, Some(&primary_reads_f64), PlotType::Bars, config.curve_ratio, config.bar_ratio);
+        let right_clip_runs = compress_signal_with_reference(&right_clip_counts, Some(&primary_reads_f64), PlotType::Bars, config.curve_ratio, config.bar_ratio);
 
-        // Recompute clipping runs from MERGED data for filtering
-        let left_clip_counts_merged: Vec<f64> = arrays.left_clipping_lengths.iter().map(|v| v.len() as f64).collect();
-        let left_clip_runs_merged = compress_signal_with_reference(&left_clip_counts_merged, Some(&primary_reads_f64), PlotType::Bars, config.curve_ratio, config.bar_ratio);
-
-        let right_clip_counts_merged: Vec<f64> = arrays.right_clipping_lengths.iter().map(|v| v.len() as f64).collect();
-        let right_clip_runs_merged = compress_signal_with_reference(&right_clip_counts_merged, Some(&primary_reads_f64), PlotType::Bars, config.curve_ratio, config.bar_ratio);
-
-        // === STEP 4: Classify packaging using merged data ===
+        // === STEP 4: Filter and merge peaks ===
         let (reads_starts_filtered, reads_ends_filtered) = filter_peaks_by_clippings(
             &reads_starts_runs_merged,
             &reads_ends_runs_merged,
-            &left_clip_runs_merged,
-            &right_clip_runs_merged,
+            &left_clip_runs,
+            &right_clip_runs,
             pt_config.min_events,
             pt_config.max_distance_peaks,
             contig_length,
@@ -510,6 +505,13 @@ pub fn process_sample(
     let n_refs = temp_bam.header().target_count();
     drop(temp_bam);
 
+    // Determine sequencing type: use provided value or auto-detect from this BAM file
+    let seq_type = match config.sequencing_type {
+        Some(st) => st,
+        None => detect_sequencing_type(bam_path)
+            .with_context(|| format!("Failed to detect sequencing type from {}", bam_path.display()))?,
+    };
+
     // Process contigs in parallel - each gets its own BAM reader
     // This is critical for samples with many contigs (e.g., 50,000 contigs with 1 sample)
     let results: Vec<_> = (0..n_refs)
@@ -533,7 +535,7 @@ pub fn process_sample(
 
             // Process contig using streaming - single pass over reads
             // Early coverage check happens inside process_contig_streaming
-            let (mut arrays, coverage_pct) = match process_contig_streaming(&mut bam, &ref_name, ref_length, config.sequencing_type, flags, config.circular, config.min_coverage) {
+            let (mut arrays, coverage_pct) = match process_contig_streaming(&mut bam, &ref_name, ref_length, seq_type, flags, config.circular, config.min_coverage) {
                 Ok(Some(result)) => result,
                 Ok(None) => return None,
                 Err(e) => {
@@ -546,7 +548,7 @@ pub fn process_sample(
 
             // Calculate features for this contig
             let mut features = Vec::new();
-            let (packaging_info, completeness_info) = add_features_from_arrays(&mut arrays, &ref_name, ref_length, config, flags, duplications, &mut features);
+            let (packaging_info, completeness_info) = add_features_from_arrays(&mut arrays, &ref_name, ref_length, config, seq_type, flags, duplications, &mut features);
 
             // Calculate Coverage-Weighted Total Variation (CWTV)
             // CWTV = 1/(n-1) * Σ|cov(i+1) - cov(i)| for i=1 to n (circular wrap-around)
