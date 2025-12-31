@@ -487,7 +487,7 @@ pub fn process_sample(
     modules: &[String],
     config: &ProcessConfig,
     duplications: &[DuplicationData],
-) -> Result<(Vec<FeaturePoint>, Vec<PresenceData>, Vec<PackagingData>, Vec<CompletenessData>, String)> {
+) -> Result<(Vec<FeaturePoint>, Vec<PresenceData>, Vec<PackagingData>, Vec<CompletenessData>, String, SequencingType)> {
     let sample_name = bam_path
         .file_stem()
         .unwrap_or_default()
@@ -588,7 +588,7 @@ pub fn process_sample(
         }
     }
 
-    Ok((all_features, all_presences, all_packaging, all_completeness, sample_name))
+    Ok((all_features, all_presences, all_packaging, all_completeness, sample_name, seq_type))
 }
 
 /// Extract contig information from BAM file headers.
@@ -715,6 +715,7 @@ pub fn run_all_samples(
 /// Holds processed sample data ready for database writing.
 struct SampleResult {
     sample_name: String,
+    sequencing_type: SequencingType,
     features: Vec<FeaturePoint>,
     presences: Vec<PresenceData>,
     packaging: Vec<PackagingData>,
@@ -795,7 +796,7 @@ fn process_samples_parallel(
             written_count += 1;
 
             // Insert sample
-            if let Err(e) = db_writer.insert_sample(&result.sample_name) {
+            if let Err(e) = db_writer.insert_sample(&result.sample_name, result.sequencing_type.as_str()) {
                 eprintln!("\nError inserting sample {}: {}", result.sample_name, e);
                 let msg = format!("ERR: {}", result.sample_name);
                 write_pb_clone.set_message(msg.clone());
@@ -845,7 +846,7 @@ fn process_samples_parallel(
         let sample_start = std::time::Instant::now();
 
         match process_sample(bam_path, contigs, modules, config, duplications) {
-            Ok((features, presences, packaging, completeness, sample_name)) => {
+            Ok((features, presences, packaging, completeness, sample_name, sequencing_type)) => {
                 let sample_time = sample_start.elapsed().as_secs_f64();
                 completed_count.fetch_add(1, Ordering::SeqCst);
                 let msg = format!("{} ({:.2}s)", sample_name, sample_time);
@@ -858,6 +859,7 @@ fn process_samples_parallel(
                 // Send to writer thread (blocks if channel full)
                 let _ = tx.send(SampleResult {
                     sample_name,
+                    sequencing_type,
                     features,
                     presences,
                     packaging,
@@ -943,14 +945,14 @@ fn process_samples_sequential(
         let sample_start = std::time::Instant::now();
 
         match process_sample(bam_path, contigs, modules, config, duplications) {
-            Ok((features, presences, packaging, completeness, sample_name)) => {
+            Ok((features, presences, packaging, completeness, sample_name, sequencing_type)) => {
                 let process_elapsed = sample_start.elapsed();
                 processing_time_total += process_elapsed;
 
                 let write_start = std::time::Instant::now();
 
                 // Insert sample
-                if let Err(e) = db_writer.insert_sample(&sample_name) {
+                if let Err(e) = db_writer.insert_sample(&sample_name, sequencing_type.as_str()) {
                     eprintln!("\nError inserting sample {}: {}", sample_name, e);
                     failed += 1;
                     pb.inc(1);

@@ -82,6 +82,16 @@ impl SequencingType {
     pub fn is_short_paired(&self) -> bool {
         matches!(self, Self::ShortPaired)
     }
+
+    /// Convert to database-friendly string representation.
+    #[inline]
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Long => "long",
+            Self::ShortPaired => "paired-short",
+            Self::ShortSingle => "single-short",
+        }
+    }
 }
 
 // ============================================================================

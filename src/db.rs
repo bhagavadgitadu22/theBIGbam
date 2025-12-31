@@ -78,7 +78,7 @@ impl DbWriter {
     }
 
     /// Insert a sample and return its ID.
-    pub fn insert_sample(&self, sample_name: &str) -> Result<i64> {
+    pub fn insert_sample(&self, sample_name: &str, sequencing_type: &str) -> Result<i64> {
         // Get next sample ID
         let sample_id = {
             let mut next_id = self.next_sample_id.lock().unwrap();
@@ -89,8 +89,8 @@ impl DbWriter {
 
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO Sample (Sample_id, Sample_name) VALUES (?1, ?2)",
-            params![sample_id, sample_name],
+            "INSERT INTO Sample (Sample_id, Sample_name, Sequencing_type) VALUES (?1, ?2, ?3)",
+            params![sample_id, sample_name, sequencing_type],
         )?;
         drop(conn);
 
@@ -358,7 +358,8 @@ fn create_core_tables(conn: &Connection) -> Result<()> {
     conn.execute(
         "CREATE TABLE Sample (
             Sample_id INTEGER PRIMARY KEY,
-            Sample_name TEXT UNIQUE
+            Sample_name TEXT UNIQUE,
+            Sequencing_type TEXT
         )",
         [],
     )
