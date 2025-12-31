@@ -286,6 +286,17 @@ samtools view tests/linear_bams/1000_long_reads.bam | awk '{print $1, $6}' | hea
 
 To get coverages:
 ```bash
-samtools depth -a linear_bams/1000_long_reads.bam > coverages/coverage_1000_long_reads.csv
+samtools depth -a linear_bams/50_read_pairs_inverted.bam | cut -f 3 > coverages/coverage_50_read_pairs_inverted.csv
+samtools depth -a linear_bams/50_read_pairs.bam | cut -f 3 > coverages/coverage_50_read_pairs.csv
+samtools depth -a linear_bams/5000_read_pairs_concat.bam | cut -f 3 > coverages/coverage_5000_read_pairs_concat.csv
+samtools depth -a linear_bams/100_long_reads_concat.bam | cut -f 3 > coverages/coverage_100_long_reads_concat.csv
+samtools depth -a linear_bams/1000_long_reads.bam | cut -f 3 > coverages/coverage_1000_long_reads.csv
 
+samtools depth -a circular_bams/1000_long_reads_circular.bam | cut -f 3 | awk -v N=10000 '{ sum[(NR-1)%N] += $1 } END { for (i=0; i<N; i++) print sum[i]+0 }' > coverages/coverage_1000_long_reads_circular.csv
+samtools depth -a circular_bams/100_long_reads_concat_circular.bam | cut -f 3 | awk -v N=10000 '{ sum[(NR-1)%N] += $1 } END { for (i=0; i<N; i++) print sum[i]+0 }' > coverages/coverage_100_long_reads_concat_circular.csv
+samtools depth -a circular_bams/5000_read_pairs_concat_circular.bam | cut -f 3 | awk -v N=10000 '{ sum[(NR-1)%N] += $1 } END { for (i=0; i<N; i++) print sum[i]+0 }' > coverages/coverage_5000_read_pairs_concat_circular.csv
+samtools depth -a circular_bams/50_read_pairs_circular.bam | cut -f 3 | awk -v N=10000 '{ sum[(NR-1)%N] += $1 } END { for (i=0; i<N; i++) print sum[i]+0 }' > coverages/coverage_50_read_pairs_circular.csv
+samtools depth -a circular_bams/50_read_pairs_inverted_circular.bam | cut -f 3 | awk -v N=10000 '{ sum[(NR-1)%N] += $1 } END { for (i=0; i<N; i++) print sum[i]+0 }' > coverages/coverage_50_read_pairs_inverted_circular.csv
+
+samtools depth -a circular_bams/50_read_pairs_circular.bam | cut -f 3 | awk -v N=10000 '{ sum[(NR-1)%N] += $1 } END { for (i=0; i<N; i++) print sum[i]+0 }' > coverages/coverage_50_read_pairs_circular.csv
 ```

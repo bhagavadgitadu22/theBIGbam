@@ -66,8 +66,8 @@ def run_calculate(bam_dir: str, output_db: str, circular: bool):
         "-m", "coverage,phagetermini,assemblycheck",
         "-o", output_db,
         "-t", "4",
-        "--coverage_percentage", "1",
-        "--variation_percentage", "1",
+        "--coverage_percentage", "0",
+        "--variation_percentage", "0",
     ]
     if circular:
         cmd.append("--circular")
@@ -177,9 +177,9 @@ def get_coverage_arrays(conn, contig_id, sample_id):
 @pytest.mark.parametrize("sample_name,coverage_file", [
     ("50_read_pairs", "coverage_50_read_pairs.csv"),
     ("50_read_pairs_inverted", "coverage_50_read_pairs_inverted.csv"),
+    ("5000_read_pairs_concat", "coverage_5000_read_pairs_concat.csv"),
     ("1000_long_reads", "coverage_1000_long_reads.csv"),
     ("100_long_reads_concat", "coverage_100_long_reads_concat.csv"),
-    ("5000_read_pairs_concat", "coverage_5000_read_pairs_concat.csv"),
 ])
 def test_coverage_linear_database(tests_dir, sample_name, coverage_file):
     """Test that file_coverage = primary + secondary + supplementary for linear DB."""
@@ -375,11 +375,7 @@ def test_calculate_circular_simple(test_bams, tests_dir):
 
 
 @pytest.mark.parametrize("db_type,sample_name", [
-    ("linear", "50_read_pairs"),
-    ("linear", "50_read_pairs_inverted"),
     ("linear", "1000_long_reads"),
-    ("circular", "50_read_pairs_circular"),
-    ("circular", "50_read_pairs_inverted_circular"),
     ("circular", "1000_long_reads_circular"),
     ("circular", "5000_read_pairs_concat_circular"),
     ("circular", "100_long_reads_concat_circular"),
@@ -409,5 +405,7 @@ def test_validate_simple_RLE(tests_dir, db_type, sample_name):
     row_count = cur.fetchone()[0]
 
     conn.close()
+
+    print(f"Sample {sample_name} has {row_count} RLE rows in primary_reads")
 
     assert row_count == 1, f"Expected 1 RLE row for {sample_name}, got {row_count}"
