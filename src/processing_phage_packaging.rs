@@ -1,7 +1,7 @@
 //! Phage packaging mechanism classification and terminal repeat detection.
 
 use crate::compress::Run;
-use crate::db::DuplicationData;
+use crate::db::RepeatsData;
 use crate::features::FeatureArrays;
 
 /// Peak for phage termini detection.
@@ -293,11 +293,11 @@ pub fn merge_peaks(
     merged
 }
 
-/// Check if a duplication is valid for phage termini analysis.
-/// A valid duplication must have:
+/// Check if a repeat is valid for phage termini analysis.
+/// A valid repeat must have:
 /// - One region starting within max_distance from position 1 (beginning)
 /// - The other region ending within max_distance from contig_length (end)
-pub fn is_valid_terminal_duplication(dup: &DuplicationData, contig_length: usize, max_distance: i32) -> bool {
+pub fn is_valid_terminal_repeat(dup: &RepeatsData, contig_length: usize, max_distance: i32) -> bool {
     let first_start = dup.position1.min(dup.position2);
     let first_end = dup.position1.max(dup.position2);
     let second_start = dup.position1prime.min(dup.position2prime);

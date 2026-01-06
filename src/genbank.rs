@@ -33,9 +33,10 @@
 //! Uses the `gb_io` crate for GenBank parsing, which is pure Rust and
 //! faster than BioPython for large files.
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use gb_io::reader::SeqReader;
 use std::fs::File;
+use std::io::{BufRead, BufReader};
 use std::path::Path;
 
 use crate::types::{ContigInfo, FeatureAnnotation};
@@ -43,6 +44,47 @@ use crate::types::{ContigInfo, FeatureAnnotation};
 /// Check if location is complemented (reverse strand).
 fn is_complement(loc: &gb_io::seq::Location) -> bool {
     matches!(loc, gb_io::seq::Location::Complement(_))
+}
+
+/// Print context lines around a problematic area in the file
+fn print_file_context(path: &Path, record_num: usize) {
+    // Try to find the start of the problematic record by counting LOCUS lines
+    if let Ok(file) = File::open(path) {
+        let reader = BufReader::new(file);
+        let mut locus_count = 0;
+        let mut line_num = 0;
+        let mut record_start_line = 0;
+
+        for line in reader.lines() {
+            line_num += 1;
+            if let Ok(ref l) = line {
+                if l.starts_with("LOCUS") {
+                    locus_count += 1;
+                    if locus_count == record_num {
+                        record_start_line = line_num;
+                    }
+                }
+            }
+        }
+
+        // Now print lines around the problematic record
+        if record_start_line > 0 {
+            eprintln!("=== Context around record {} (starting at line {}) ===", record_num, record_start_line);
+            if let Ok(file2) = File::open(path) {
+                let reader2 = BufReader::new(file2);
+                for (i, line) in reader2.lines().enumerate() {
+                    let ln = i + 1;
+                    // Print 50 lines from the start of the problematic record
+                    if ln >= record_start_line && ln < record_start_line + 50 {
+                        if let Ok(l) = line {
+                            eprintln!("{:6}: {}", ln, l);
+                        }
+                    }
+                }
+            }
+            eprintln!("=== End context ===");
+        }
+    }
 }
 
 /// Parse GenBank file and extract contigs and annotations.
@@ -53,9 +95,19 @@ pub fn parse_genbank(path: &Path, annotation_tool: &str) -> Result<(Vec<ContigIn
     let mut contigs = Vec::new();
     let mut annotations = Vec::new();
     let mut contig_id = 1i64;
+    let mut record_num = 0usize;
 
     for result in reader {
-        let seq = result.context("Failed to parse GenBank record")?;
+        record_num += 1;
+        let seq = match result {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("ERROR parsing GenBank record #{} in file: {}", record_num, path.display());
+                eprintln!("gb_io error: {:?}", e);
+                print_file_context(path, record_num);
+                return Err(anyhow!("Failed to parse GenBank record #{}: {}", record_num, e));
+            }
+        };
 
         let name = seq.name.clone().unwrap_or_else(|| format!("contig_{}", contig_id));
         let length = seq.seq.len();

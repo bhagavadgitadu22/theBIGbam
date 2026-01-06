@@ -26,7 +26,7 @@ use crate::compress::{
     add_compressed_feature, add_compressed_feature_with_reference,
     add_compressed_feature_with_stats, merge_identical_runs, 
 };
-use crate::db::{DbWriter, CompletenessData, DuplicationData};
+use crate::db::{DbWriter, CompletenessData, RepeatsData};
 use crate::features::{FeatureArrays, ModuleFlags};
 use crate::genbank::parse_genbank;
 use crate::types::{
@@ -35,7 +35,7 @@ use crate::types::{
 
 use crate::processing_phage_packaging::{
     apply_dtr_merging, classify_packaging, filter_peaks_by_clippings,
-    is_valid_terminal_duplication, merge_peaks, DtrRegion, PhageTerminiConfig,
+    is_valid_terminal_repeat, merge_peaks, DtrRegion, PhageTerminiConfig,
 };
 use crate::processing_completeness::compute_completeness;
 
@@ -87,23 +87,23 @@ fn add_features_from_arrays(
     config: &ProcessConfig,
     seq_type: SequencingType,
     flags: ModuleFlags,
-    duplications: &[DuplicationData],
+    repeats: &[RepeatsData],
     output: &mut Vec<FeaturePoint>,
 ) -> (Option<PackagingData>, Option<CompletenessData>) {
     let pt_config = config.phagetermini_config;
 
-    // Build DTR regions from duplications for this contig (used for both merging and classification)
+    // Build DTR regions from repeats for this contig (used for both merging and classification)
     // Filter criteria:
     // - Same contig
     // - ≥90% identity
-    // - Valid terminal duplication (one region at start, other at end of contig)
-    let dtr_regions: Vec<DtrRegion> = if flags.phagetermini && !duplications.is_empty() {
-        duplications
+    // - Valid terminal repeat (one region at start, other at end of contig)
+    let dtr_regions: Vec<DtrRegion> = if flags.phagetermini && !repeats.is_empty() {
+        repeats
             .iter()
             .filter(|d| {
                 d.contig_name == contig_name
                     && d.pident >= 90.0
-                    && is_valid_terminal_duplication(d, contig_length, pt_config.max_distance_duplication)
+                    && is_valid_terminal_repeat(d, contig_length, pt_config.max_distance_duplication)
             })
             .map(|d| {
                 // Determine if direct (DTR) or inverted (ITR)
@@ -486,7 +486,7 @@ pub fn process_sample(
     contigs: &[ContigInfo],
     modules: &[String],
     config: &ProcessConfig,
-    duplications: &[DuplicationData],
+    repeats: &[RepeatsData],
 ) -> Result<(Vec<FeaturePoint>, Vec<PresenceData>, Vec<PackagingData>, Vec<CompletenessData>, String, SequencingType)> {
     let sample_name = bam_path
         .file_stem()
@@ -545,7 +545,7 @@ pub fn process_sample(
 
             // Calculate features for this contig
             let mut features = Vec::new();
-            let (packaging_info, completeness_info) = add_features_from_arrays(&mut arrays, &ref_name, ref_length, config, seq_type, flags, duplications, &mut features);
+            let (packaging_info, completeness_info) = add_features_from_arrays(&mut arrays, &ref_name, ref_length, config, seq_type, flags, repeats, &mut features);
 
             // Calculate Coverage-Weighted Total Variation (CWTV)
             // CWTV = 1/(n-1) * Σ|cov(i+1) - cov(i)| for i=1 to n (circular wrap-around)
@@ -688,16 +688,16 @@ pub fn run_all_samples(
     // Create database with schema and initial data
     let db_writer = DbWriter::create(output_db, &contigs, &annotations)?;
 
-    // Parse and write duplications from autoblast file (if provided)
-    let duplications = if !autoblast_file.as_os_str().is_empty() && autoblast_file.exists() {
+    // Parse and write repeats from autoblast file (if provided)
+    let repeats = if !autoblast_file.as_os_str().is_empty() && autoblast_file.exists() {
         eprintln!("\n### Parsing autoblast results...");
-        let dups = crate::db::parse_autoblast_file(autoblast_file)?;
-        if !dups.is_empty() {
-            db_writer.write_duplications(&dups)?;
+        let reps = crate::db::parse_autoblast_file(autoblast_file)?;
+        if !reps.is_empty() {
+            db_writer.write_repeats(&reps)?;
         } else {
-            eprintln!("No duplications found in autoblast file");
+            eprintln!("No repeats found in autoblast file");
         }
-        dups
+        reps
     } else {
         Vec::new()
     };
@@ -705,7 +705,7 @@ pub fn run_all_samples(
     eprintln!("\n### Processing {} samples with {} threads", bam_files.len(), config.threads);
     eprintln!("Modules: {}\n", modules.join(", "));
 
-    let result = process_samples_parallel(&bam_files, &contigs, modules, config, db_writer, max_samples_in_memory, &duplications)?;
+    let result = process_samples_parallel(&bam_files, &contigs, modules, config, db_writer, max_samples_in_memory, &repeats)?;
 
     print_summary(&result, output_db);
 
@@ -729,7 +729,7 @@ fn process_samples_parallel(
     config: &ProcessConfig,
     db_writer: DbWriter,
     max_samples_in_memory: usize,
-    duplications: &[DuplicationData],
+    repeats: &[RepeatsData],
 ) -> Result<ProcessResult> {
     let total = bam_files.len();
     let is_tty = atty::is(Stream::Stderr);
@@ -737,7 +737,7 @@ fn process_samples_parallel(
 
     // Sequential mode for single thread: process one → write one → repeat
     if config.threads == 1 {
-        return process_samples_sequential(bam_files, contigs, modules, config, db_writer, is_tty, duplications);
+        return process_samples_sequential(bam_files, contigs, modules, config, db_writer, is_tty, repeats);
     }
 
     // Parallel mode: producer-consumer with bounded channel
@@ -845,7 +845,7 @@ fn process_samples_parallel(
     bam_files.par_iter().for_each(|bam_path| {
         let sample_start = std::time::Instant::now();
 
-        match process_sample(bam_path, contigs, modules, config, duplications) {
+        match process_sample(bam_path, contigs, modules, config, repeats) {
             Ok((features, presences, packaging, completeness, sample_name, sequencing_type)) => {
                 let sample_time = sample_start.elapsed().as_secs_f64();
                 completed_count.fetch_add(1, Ordering::SeqCst);
@@ -916,7 +916,7 @@ fn process_samples_sequential(
     config: &ProcessConfig,
     db_writer: DbWriter,
     is_tty: bool,
-    duplications: &[DuplicationData],
+    repeats: &[RepeatsData],
 ) -> Result<ProcessResult> {
     let total = bam_files.len();
     let start_time = std::time::Instant::now();
@@ -944,7 +944,7 @@ fn process_samples_sequential(
     for bam_path in bam_files {
         let sample_start = std::time::Instant::now();
 
-        match process_sample(bam_path, contigs, modules, config, duplications) {
+        match process_sample(bam_path, contigs, modules, config, repeats) {
             Ok((features, presences, packaging, completeness, sample_name, sequencing_type)) => {
                 let process_elapsed = sample_start.elapsed();
                 processing_time_total += process_elapsed;

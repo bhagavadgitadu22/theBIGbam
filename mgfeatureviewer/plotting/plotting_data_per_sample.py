@@ -277,21 +277,31 @@ def make_bokeh_subplot(feature_dict, height, x_range, sample_title=None, feature
 
     return p
 
-### Function to get duplications (contig-level, sample-independent)
-def get_duplication_data(cur, contig_id):
-    """Get duplication data for plotting, formatted for make_bokeh_subplot().
+### Function to get repeats (contig-level, sample-independent)
+def get_repeats_data(cur, contig_id, variable_name="direct_repeats"):
+    """Get repeats data for plotting, formatted for make_bokeh_subplot().
 
     Args:
         cur: DuckDB cursor
         contig_id: Contig ID
+        variable_name: Either 'direct_repeats' or 'inverted_repeats'
 
     Returns:
         List with one feature dict formatted for make_bokeh_subplot()
     """
+    # Map variable name to table name
+    table_map = {
+        "direct_repeats": "Contig_DirectRepeats",
+        "inverted_repeats": "Contig_InvertedRepeats",
+    }
+    table_name = table_map.get(variable_name)
+    if not table_name:
+        return []
+
     # Get variable info from database
     cur.execute(
         "SELECT \"Type\", Color, Alpha, Fill_alpha, \"Size\", Title "
-        "FROM Variable WHERE Variable_name='duplications'"
+        f"FROM Variable WHERE Variable_name='{variable_name}'"
     )
     var_row = cur.fetchone()
     if not var_row:
@@ -299,11 +309,11 @@ def get_duplication_data(cur, contig_id):
 
     type_picked, color, alpha, fill_alpha, size, title = var_row
 
-    # Check if Duplications table exists and has data
+    # Check if table exists and has data
     try:
         cur.execute(
-            "SELECT Position1, Position2, Position1prime, Position2prime, Pident "
-            "FROM Duplications WHERE Contig_id=? ORDER BY Position1",
+            f"SELECT Position1, Position2, Position1prime, Position2prime, Pident "
+            f"FROM {table_name} WHERE Contig_id=? ORDER BY Position1",
             (contig_id,)
         )
         rows = cur.fetchall()
@@ -525,8 +535,30 @@ def generate_bokeh_plot_per_sample(conn, list_features, contig_name, sample_name
     # --- Add one subplot per feature requested ---
     # Requested features are variables like 'coverage', 'reads_starts', etc.
     subplots = []
-    requested_features, include_duplications = parse_requested_features(list_features)
+    requested_features, include_repeats = parse_requested_features(list_features)
 
+    # Add Repeats subplots if requested (contig-level, sample-independent)
+    if include_repeats:
+        # Direct repeats
+        try:
+            direct_feature_dict = get_repeats_data(cur, contig_id, "direct_repeats")
+            if direct_feature_dict:
+                direct_subplot = make_bokeh_subplot(direct_feature_dict, subplot_size, shared_xrange)
+                if direct_subplot is not None:
+                    subplots.append(direct_subplot)
+        except Exception as e:
+            print(f"Error processing Direct Repeats: {e}", flush=True)
+        # Inverted repeats
+        try:
+            inverted_feature_dict = get_repeats_data(cur, contig_id, "inverted_repeats")
+            if inverted_feature_dict:
+                inverted_subplot = make_bokeh_subplot(inverted_feature_dict, subplot_size, shared_xrange)
+                if inverted_subplot is not None:
+                    subplots.append(inverted_subplot)
+        except Exception as e:
+            print(f"Error processing Inverted Repeats: {e}", flush=True)
+
+    # Add other requested features
     for feature in requested_features:
         try:
             list_feature_dict = get_feature_data(cur, feature, contig_id, sample_id)
@@ -535,17 +567,6 @@ def generate_bokeh_plot_per_sample(conn, list_features, contig_name, sample_name
                 subplots.append(subplot_feature)
         except Exception as e:
             print(f"Error processing feature '{feature}': {e}", flush=True)
-
-    # Add Duplications subplot if requested (contig-level, sample-independent)
-    if include_duplications:
-        try:
-            dup_feature_dict = get_duplication_data(cur, contig_id)
-            if dup_feature_dict:
-                dup_subplot = make_bokeh_subplot(dup_feature_dict, subplot_size, shared_xrange)
-                if dup_subplot is not None:
-                    subplots.append(dup_subplot)
-        except Exception as e:
-            print(f"Error processing Duplications: {e}", flush=True)
 
     # --- Combine all figures in a single grid with one shared toolbar ---
     if annotation_fig:
@@ -579,13 +600,13 @@ def parse_requested_features(list_features):
     Accepts a mix of module names and individual feature names.
     Module names are case-insensitive and can include:
     - "coverage" or "Coverage" -> primary_reads, secondary_reads, supplementary_reads
-    - "phagetermini" or "Phage termini" -> coverage_reduced, reads_starts, reads_ends, tau + Duplications
+    - "phagetermini" or "Phage termini" -> coverage_reduced, reads_starts, reads_ends, tau + Repeats
     - "assemblycheck" or "Assembly check" -> all assembly check features
 
-    Returns tuple of (deduplicated list of individual feature names, include_duplications bool).
+    Returns tuple of (deduplicated list of individual feature names, include_repeats bool).
     """
     features = []
-    include_duplications = False
+    include_repeats = False
 
     for item in list_features:
         item_lower = item.lower().strip()
@@ -596,13 +617,13 @@ def parse_requested_features(list_features):
         # Module: Phage termini / phagetermini
         elif item_lower in ["phage termini", "phagetermini", "phage_termini"]:
             features.extend(["Coverage reduced", "Reads termini", "Tau"])
-            include_duplications = True
+            include_repeats = True
         # Module: Assembly check / assemblycheck
         elif item_lower in ["assembly check", "assemblycheck", "assembly_check"]:
             features.extend(["Clippings", "Indels", "Mismatches", "Read lengths", "Insert sizes", "Bad orientations"])
-        # Handle "Duplications" specifically
-        elif item_lower in ["duplications", "duplication"]:
-            include_duplications = True
+        # Handle "Repeats" specifically (also accept legacy "duplications")
+        elif item_lower in ["repeats", "repeat", "duplications", "duplication"]:
+            include_repeats = True
         # Individual feature
         else:
             features.append(item)
@@ -610,7 +631,7 @@ def parse_requested_features(list_features):
     # Deduplicate while preserving order
     seen = set()
     deduped_features = [f for f in features if not (f in seen or seen.add(f))]
-    return deduped_features, include_duplications
+    return deduped_features, include_repeats
 
 ### Main function
 def add_plot_per_sample_args(parser):

@@ -123,12 +123,19 @@ def build_controls(conn):
         #    # Table might not exist, skip it
         #    continue
 
-    # Check if Duplications table has data
-    # Add Feature_duplications to tables_with_data so duplications variable is included
+    # Check if repeat tables have data
+    # Add table names to tables_with_data so repeat variables are included
     try:
-        cur.execute("SELECT 1 FROM Duplications LIMIT 1")
+        cur.execute("SELECT 1 FROM Contig_DirectRepeats LIMIT 1")
         if cur.fetchone() is not None:
-            tables_with_data.add("Feature_duplications")
+            tables_with_data.add("Contig_DirectRepeats")
+    except Exception:
+        pass
+
+    try:
+        cur.execute("SELECT 1 FROM Contig_InvertedRepeats LIMIT 1")
+        if cur.fetchone() is not None:
+            tables_with_data.add("Contig_InvertedRepeats")
     except Exception:
         pass
 
@@ -137,10 +144,16 @@ def build_controls(conn):
     variables = [r[0] for r in cur.fetchall() if r[1] in tables_with_data]
 
     # Get modules that have at least one variable with data
-    cur.execute("SELECT DISTINCT Module FROM Variable WHERE Feature_table_name IN ({}) ORDER BY Module".format(
+    # Define the display order for modules
+    MODULE_ORDER = ["Genome", "Coverage", "Mapping metrics per position", "Long-read metrics", "Paired-read metrics", "Phage termini"]
+
+    cur.execute("SELECT DISTINCT Module FROM Variable WHERE Feature_table_name IN ({})".format(
         ','.join('?' * len(tables_with_data))
     ), tuple(tables_with_data))
-    modules = [r[0] for r in cur.fetchall()]
+    modules_from_db = [r[0] for r in cur.fetchall()]
+
+    # Sort modules according to MODULE_ORDER, keeping any unknown modules at the end
+    modules = sorted(modules_from_db, key=lambda m: MODULE_ORDER.index(m) if m in MODULE_ORDER else len(MODULE_ORDER))
 
     # For each module get variables (only those with data)
     module_names = []
@@ -156,6 +169,10 @@ def build_controls(conn):
             (module,) + tuple(tables_with_data)
         )
         variables_checkbox = [r[0] for r in cur.fetchall()]
+
+        # For Genome module, add "Gene map" as the first option
+        if module == "Genome":
+            variables_checkbox = ["Gene map"] + variables_checkbox
 
         # Skip this module if no variables with data
         if not variables_checkbox:
@@ -805,15 +822,17 @@ def modify_doc_factory(db_path):
             sample = widgets['sample_select'].value
             contig = widgets['contig_select'].value
 
-            # Check if gene map should be shown
-            genbank_path = db_path if (0 in show_genemap.active) else None
+            # Check if gene map should be shown (Gene map is first label in Genome module's cbg)
+            genbank_path = db_path if (genome_cbg is not None and 0 in genome_cbg.active) else None
 
-            # Build requested_features list
+            # Build requested_features list (exclude "Gene map" which is handled separately)
             requested_features = []
             for cbg in widgets['variables_widgets']:
                 # cbg.active is a list of indices
                 for idx in cbg.active:
-                    requested_features.append(cbg.labels[idx])
+                    label = cbg.labels[idx]
+                    if label != "Gene map":
+                        requested_features.append(label)
 
             # Save current positions of the plot for restoration after re-plot
             fig = main_placeholder.children[0]
@@ -1065,8 +1084,8 @@ def modify_doc_factory(db_path):
 
     ## Build Variables section
     variables_title = Div(text="<b>Variables</b>")
-    show_genemap = CheckboxGroup(labels=["Show gene map"], active=[0])
-    
+    genome_cbg = None  # Will store reference to Genome module's CheckboxButtonGroup for Gene map check
+
     # Append variable selectors. For modules that have a module-checkbox widget we
     # show either the checkbox (One-sample) or the plain module title (All-samples)
     # We create a container that holds both variants and toggle visibility
@@ -1119,6 +1138,10 @@ def modify_doc_factory(db_path):
         module_contents.append(cbg)
         controls_variables.append(cbg)
 
+        # Store reference to Genome module's cbg for Gene map check
+        if module_name == "Genome":
+            genome_cbg = cbg
+
     # Add callbacks for collapsible sections
     for i, toggle_btn in enumerate(module_toggles):
         content = module_contents[i]
@@ -1133,7 +1156,7 @@ def modify_doc_factory(db_path):
         # Module → toggles (CheckboxButtonGroup)
         def make_module_callback(mc, toggles, lock):
             def callback(attr, old, new):
-                if lock.get("locked", False):
+                if lock.get("locked", False) or global_toggle_lock.get("locked", False):
                     return
                 lock["locked"] = True
                 module_on = 0 in mc.active
@@ -1149,7 +1172,7 @@ def modify_doc_factory(db_path):
         # Variable → module (update module checkbox only)
         def make_variable_callback(mc, toggles, lock):
             def callback(attr, old, new):
-                if lock.get("locked", False):
+                if lock.get("locked", False) or global_toggle_lock.get("locked", False):
                     return
                 total = len(toggles.labels)
                 active_count = len(toggles.active)
@@ -1177,10 +1200,11 @@ def modify_doc_factory(db_path):
     separator_contigs = Div(text="", height=1, width=350, styles={'background-color': '#333', 'margin': '10px 0'})
     separator_variables = Div(text="", height=1, width=350, styles={'background-color': '#333', 'margin': '10px 0'})
 
-    controls_children = [logo, views, separator_filtering, filtering_header, filtering_content, 
-                         separator_samples, sample_header, sample_content, widgets['sample_select'], 
-                         separator_contigs, contig_header, contig_content, widgets['contig_select'], 
-                         separator_variables, variables_title, show_genemap
+    # Gene map is now part of the Genome module's CheckboxButtonGroup
+    controls_children = [logo, views, separator_filtering, filtering_header, filtering_content,
+                         separator_samples, sample_header, sample_content, widgets['sample_select'],
+                         separator_contigs, contig_header, contig_content, widgets['contig_select'],
+                         separator_variables, variables_title
                         ] + controls_variables + [apply_button]
 
     controls_column = column(*controls_children, width=350, sizing_mode="stretch_height", spacing=0)

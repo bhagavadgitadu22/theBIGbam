@@ -293,34 +293,54 @@ impl DbWriter {
         Ok(())
     }
 
-    /// Write duplication data to the database.
+    /// Write repeats data to the database (both direct and inverted).
     /// This is called once during database creation (not per-sample).
-    pub fn write_duplications(&self, duplications: &[DuplicationData]) -> Result<()> {
-        if duplications.is_empty() {
+    pub fn write_repeats(&self, repeats: &[RepeatsData]) -> Result<()> {
+        if repeats.is_empty() {
             return Ok(());
         }
 
         let conn = self.conn.lock().unwrap();
-        let mut appender = conn.appender("Duplications")
-            .context("Failed to create Duplications appender")?;
+        let mut direct_appender = conn.appender("Contig_DirectRepeats")
+            .context("Failed to create Contig_DirectRepeats appender")?;
+        let mut inverted_appender = conn.appender("Contig_InvertedRepeats")
+            .context("Failed to create Contig_InvertedRepeats appender")?;
 
-        for dup in duplications {
+        let mut direct_count = 0;
+        let mut inverted_count = 0;
+
+        for dup in repeats {
             if let Some(&contig_id) = self.contig_name_to_id.get(&dup.contig_name) {
                 // Store pident as INTEGER (×100)
                 let pident_int = (dup.pident * 100.0).round() as i32;
-                appender.append_row(params![
-                    contig_id,
-                    dup.position1,
-                    dup.position2,
-                    dup.position1prime,
-                    dup.position2prime,
-                    pident_int
-                ])?;
+
+                if dup.is_direct {
+                    direct_appender.append_row(params![
+                        contig_id,
+                        dup.position1,
+                        dup.position2,
+                        dup.position1prime,
+                        dup.position2prime,
+                        pident_int
+                    ])?;
+                    direct_count += 1;
+                } else {
+                    inverted_appender.append_row(params![
+                        contig_id,
+                        dup.position1,
+                        dup.position2,
+                        dup.position1prime,
+                        dup.position2prime,
+                        pident_int
+                    ])?;
+                    inverted_count += 1;
+                }
             }
         }
 
-        appender.flush().context("Failed to flush Duplications appender")?;
-        eprintln!("Wrote {} duplications to database", duplications.len());
+        direct_appender.flush().context("Failed to flush Contig_DirectRepeats appender")?;
+        inverted_appender.flush().context("Failed to flush Contig_InvertedRepeats appender")?;
+        eprintln!("Wrote {} direct repeats and {} inverted repeats to database", direct_count, inverted_count);
         Ok(())
     }
 
@@ -392,11 +412,10 @@ fn create_core_tables(conn: &Connection) -> Result<()> {
     )
     .context("Failed to create PhageMechanisms table")?;
 
-    // Duplications table - stores self-BLAST results for duplicated regions
-    // position1prime can be < position2prime if duplicated region is inverted
+    // Contig_DirectRepeats table - stores direct repeats (same orientation)
     // Pident stored as INTEGER (×100)
     conn.execute(
-        "CREATE TABLE Duplications (
+        "CREATE TABLE Contig_DirectRepeats (
             Contig_id INTEGER,
             Position1 INTEGER,
             Position2 INTEGER,
@@ -406,7 +425,22 @@ fn create_core_tables(conn: &Connection) -> Result<()> {
         )",
         [],
     )
-    .context("Failed to create Duplications table")?;
+    .context("Failed to create Contig_DirectRepeats table")?;
+
+    // Contig_InvertedRepeats table - stores inverted repeats (opposite orientation)
+    // Pident stored as INTEGER (×100)
+    conn.execute(
+        "CREATE TABLE Contig_InvertedRepeats (
+            Contig_id INTEGER,
+            Position1 INTEGER,
+            Position2 INTEGER,
+            Position1prime INTEGER,
+            Position2prime INTEGER,
+            Pident INTEGER
+        )",
+        [],
+    )
+    .context("Failed to create Contig_InvertedRepeats table")?;
 
     // Completeness table - clipping prevalences stored as INTEGER (×100), totals as INTEGER
     // Note: Prevalence_clippings_* stores clipping_count/coverage (raw clipping prevalence)
@@ -534,7 +568,12 @@ fn create_variable_tables(conn: &Connection) -> Result<()> {
     let features_with_stats = ["left_clippings", "right_clippings", "insertions"];
 
     for (i, v) in VARIABLES.iter().enumerate() {
-        let table_name = feature_table_name(v.name);
+        // Special case: repeat data is stored in separate Contig_* tables
+        let table_name = match v.name {
+            "direct_repeats" => "Contig_DirectRepeats".to_string(),
+            "inverted_repeats" => "Contig_InvertedRepeats".to_string(),
+            _ => feature_table_name(v.name),
+        };
 
         conn.execute(
             "INSERT INTO Variable (Variable_id, Variable_name, Subplot, Module, Module_order, \"Type\", Color, Alpha, Fill_alpha, \"Size\", Title, Help, Feature_table_name)
@@ -557,8 +596,10 @@ fn create_variable_tables(conn: &Connection) -> Result<()> {
         )
         .with_context(|| format!("Failed to insert variable: {}", v.name))?;
 
-        // Skip creating physical table for primary_reads - it will be a VIEW instead
-        if v.name == "primary_reads" {
+        // Skip creating physical table for:
+        // - primary_reads: it will be a VIEW instead
+        // - direct_repeats/inverted_repeats: data stored in Contig_* tables (created in create_core_tables)
+        if v.name == "primary_reads" || v.name == "direct_repeats" || v.name == "inverted_repeats" {
             continue;
         }
 
@@ -743,10 +784,10 @@ fn create_views(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// Duplication data from self-BLAST results.
-/// Represents a duplicated region within a contig.
+/// Repeats data from self-BLAST results.
+/// Represents a repeated region within a contig.
 #[derive(Clone, Debug)]
-pub struct DuplicationData {
+pub struct RepeatsData {
     pub contig_name: String,
     /// Start position of the first copy (query start)
     pub position1: i32,
@@ -758,6 +799,8 @@ pub struct DuplicationData {
     pub position2prime: i32,
     /// Percentage identity
     pub pident: f64,
+    /// True if direct repeat (same orientation), false if inverted repeat
+    pub is_direct: bool,
 }
 
 /// Completeness data for a contig.
@@ -794,7 +837,7 @@ impl CompletenessData {
     }
 }
 
-/// Parse BLAST outfmt 6 file and return duplication data.
+/// Parse BLAST outfmt 6 file and return repeats data.
 ///
 /// BLAST outfmt 6 columns:
 /// 1. qseqid - query sequence id (contig name)
@@ -809,7 +852,7 @@ impl CompletenessData {
 /// 10. send - subject end
 /// 11. evalue - e-value
 /// 12. bitscore - bit score
-pub fn parse_autoblast_file(path: &Path) -> Result<Vec<DuplicationData>> {
+pub fn parse_autoblast_file(path: &Path) -> Result<Vec<RepeatsData>> {
     use std::fs::File;
     use std::io::{BufRead, BufReader};
 
@@ -820,7 +863,7 @@ pub fn parse_autoblast_file(path: &Path) -> Result<Vec<DuplicationData>> {
     let file = File::open(path).with_context(|| format!("Failed to open autoblast file: {}", path.display()))?;
     let reader = BufReader::new(file);
 
-    let mut duplications = Vec::new();
+    let mut repeats = Vec::new();
 
     for (line_num, line_result) in reader.lines().enumerate() {
         let line = line_result.with_context(|| format!("Failed to read line {} of autoblast file", line_num + 1))?;
@@ -847,15 +890,19 @@ pub fn parse_autoblast_file(path: &Path) -> Result<Vec<DuplicationData>> {
             continue;
         }
 
-        duplications.push(DuplicationData {
+        // Determine if direct (same orientation) or inverted (opposite orientation)
+        let is_direct = (qstart < qend && sstart < send) || (qstart > qend && sstart > send);
+
+        repeats.push(RepeatsData {
             contig_name,
             position1: qstart,
             position2: qend,
             position1prime: sstart,
             position2prime: send,
             pident,
+            is_direct,
         });
     }
 
-    Ok(duplications)
+    Ok(repeats)
 }

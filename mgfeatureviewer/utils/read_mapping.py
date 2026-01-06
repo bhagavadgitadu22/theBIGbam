@@ -71,8 +71,9 @@ def map_with_mapper(threads: int, assembly_file: Path, sequencing_type: str, rea
             ]
         else:
             # just removed secondary=no to keep secondary alignments for short reads
+            # -a flag is required to output SAM format (otherwise minimap2 outputs PAF)
             mapper_cmd = [
-                "minimap2",  "-k21", "-w11", "--sr", "--frag=yes", "-A2", "-B8", "-O12,32", "-E2,1", "-r100", "-p.5", "-N20", "-f1000,5000", "-n2", "-m25", "-s40", "-g100", "-2K50m", "--heap-sort=yes", "--secondary=yes", "-t", str(threads), str(work_assembly), str(read1)
+                "minimap2", "-a", "-k21", "-w11", "--sr", "--frag=yes", "-A2", "-B8", "-O12,32", "-E2,1", "-r100", "-p.5", "-N20", "-f1000,5000", "-n2", "-m25", "-s40", "-g100", "-2K50m", "--heap-sort=yes", "--secondary=yes", "-t", str(threads), str(work_assembly), str(read1)
             ]
             #mapper_cmd = [
             #    "minimap2", "-ax", "sr", "-t", str(threads), str(work_assembly), str(read1)
