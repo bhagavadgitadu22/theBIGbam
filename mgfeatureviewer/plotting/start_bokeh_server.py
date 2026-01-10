@@ -156,10 +156,13 @@ def build_controls(conn):
     modules = sorted(modules_from_db, key=lambda m: MODULE_ORDER.index(m) if m in MODULE_ORDER else len(MODULE_ORDER))
 
     # For each module get variables (only those with data)
+    # Create TWO sets of widgets: one for "One Sample" view, one for "All Samples" view
     module_names = []
-    module_widgets = []
-    variables_widgets = []
+    module_widgets_one = []  # Module checkboxes for One Sample view
+    variables_widgets_one = []  # Variable button groups for One Sample view
+    variables_widgets_all = []  # Variable button groups for All Samples view
     helps_widgets = []
+    variables_labels = []  # Store labels for each module
     for module in modules:
         # Get distinct subplots (deduplicate by subplot name only)
         cur.execute(
@@ -179,14 +182,19 @@ def build_controls(conn):
             continue
 
         module_names.append(module)
+        variables_labels.append(variables_checkbox)
 
-        # Always create module checkbox (will be shown in "One sample" view)
+        # Module checkbox (for One Sample view only)
         module_checkbox = CheckboxGroup(labels=[module], active=[])
-        module_widgets.append(module_checkbox)
+        module_widgets_one.append(module_checkbox)
 
-        # use a CheckboxButtonGroup for selecting individual variables in this module
-        cbg = CheckboxButtonGroup(labels=variables_checkbox, active=[], sizing_mode="stretch_width", orientation="vertical")
-        variables_widgets.append(cbg)
+        # CheckboxButtonGroup for One Sample view
+        cbg_one = CheckboxButtonGroup(labels=variables_checkbox, active=[], sizing_mode="stretch_width", orientation="vertical")
+        variables_widgets_one.append(cbg_one)
+
+        # CheckboxButtonGroup for All Samples view (separate instance)
+        cbg_all = CheckboxButtonGroup(labels=variables_checkbox, active=[], sizing_mode="stretch_width", orientation="vertical")
+        variables_widgets_all.append(cbg_all)
 
         # Consolidate help texts for the module into a single HelpButton attached to module title
         combined_help = ""
@@ -214,9 +222,11 @@ def build_controls(conn):
         'sample_to_contigs': sample_to_contigs,
         'contig_to_samples': contig_to_samples,
         'module_names': module_names,
-        'module_widgets': module_widgets,
+        'module_widgets_one': module_widgets_one,
         'helps_widgets': helps_widgets,
-        'variables_widgets': variables_widgets,
+        'variables_widgets_one': variables_widgets_one,
+        'variables_widgets_all': variables_widgets_all,
+        'variables_labels': variables_labels,
         'contigs': contigs,
         'contig_lengths': contig_lengths,
         'samples': samples,
@@ -641,7 +651,13 @@ def modify_doc_factory(db_path):
 
     ## Views function
     # Enforce single-variable selection when in "All samples" view
-    def make_global_variable_callback(cbg):
+    # Genome module is in Contigs section and can be selected freely
+    def make_global_variable_callback_all(cbg, _unused=None):
+        """Callback for All Samples view - enforces single variable selection.
+
+        Only one variable can be selected at a time across all modules in Variables section.
+        Genome module is in the Contigs section and is handled separately.
+        """
         def callback(attr, old, new):
             if global_toggle_lock['locked']:
                 return
@@ -649,8 +665,7 @@ def modify_doc_factory(db_path):
             if views.active != 1:
                 return
 
-            # Determine which index was most-recently changed.
-            # Use set difference to find an added index (preferred).
+            # Determine which index was most-recently changed
             sel_index = None
             old_set = set(old) if old else set()
             new_set = set(new) if new else set()
@@ -663,8 +678,9 @@ def modify_doc_factory(db_path):
                 # no clear addition, fall back to last element
                 sel_index = new[-1]
 
+            # Enforce single selection across all modules in Variables section
             global_toggle_lock['locked'] = True
-            for other in widgets['variables_widgets']:
+            for other in widgets['variables_widgets_all']:
                 if other is cbg:
                     if sel_index is None:
                         other.active = []
@@ -674,15 +690,15 @@ def modify_doc_factory(db_path):
                     other.active = []
             global_toggle_lock['locked'] = False
         return callback
-    
+
     # Views (One sample / All samples) callback: show/hide sample-related controls
     def on_view_change(attr, old, new):
         is_all = (new == 1)  # True means All samples
-        
+
         # Lock callbacks during view change to prevent cascading updates
         global_toggle_lock['locked'] = True
-        
-        # Toggle Sample section
+
+        # Toggle Sample section - hide entirely in All Samples view
         separator_samples.visible = not is_all
         sample_header.visible = not is_all
         sample_content.visible = not is_all
@@ -690,42 +706,21 @@ def modify_doc_factory(db_path):
         widgets['sample_select'].visible = not is_all
 
         # Contig section: keep visible but hide filter checkbox in All samples mode
-        # separator_contigs always visible
-        # contig_header always visible
-        # contig_content always visible
-        # per_variable_header always visible
-        # variable_filters_column always visible
         filter_contigs.visible = not is_all
-        
+
         if is_all:
             filter_contigs.active = []
             filter_samples.active = []
-            # Hide module checkboxes and clear all variable selections
-            for mw in widgets['module_widgets']:
-                mw.visible = False
-                mw.active = []
-            for cbg in widgets['variables_widgets']:
-                cbg.active = []
-        else:
-            # Show module checkboxes
-            for mw in widgets['module_widgets']:
-                mw.visible = True
-        
-        # Toggle header visibility: checkbox-header in One-sample, title-header in All-samples
-        for i, mw in enumerate(widgets['module_widgets']):
-            hdr_cb = module_header_with_checkbox[i]
-            hdr_title = module_header_with_title[i]
-            
-            # All modules have checkbox now: toggle between headers
-            hdr_cb.visible = not is_all
-            hdr_title.visible = is_all
-        
+
+        # Toggle visibility between the two variables sections
+        # Each section maintains its own state independently
+        variables_section_one.visible = not is_all
+        variables_section_all.visible = is_all
+
         # Unlock callbacks
         global_toggle_lock['locked'] = False
-        
+
         # Refresh options after view change
-        # In "All samples": apply length filter and per-variable filter (where any sample meets criteria)
-        # In "One sample": apply all filters including presence and per-variable (for selected sample)
         refresh_contig_options()
         if not is_all:
             refresh_sample_options()
@@ -821,22 +816,18 @@ def modify_doc_factory(db_path):
         try:
             sample = widgets['sample_select'].value
             contig = widgets['contig_select'].value
+            is_all = (views.active == 1)
 
+            # Select the correct widget set based on current view
+            active_variables_widgets = widgets['variables_widgets_all'] if is_all else widgets['variables_widgets_one']
+
+            # Genome module is shared between views (in Contigs section)
             # Check if gene map should be shown (Gene map is first label in Genome module's cbg)
-            genbank_path = db_path if (genome_cbg is not None and 0 in genome_cbg.active) else None
-
-            # Build requested_features list (exclude "Gene map" which is handled separately)
-            requested_features = []
-            for cbg in widgets['variables_widgets']:
-                # cbg.active is a list of indices
-                for idx in cbg.active:
-                    label = cbg.labels[idx]
-                    if label != "Gene map":
-                        requested_features.append(label)
+            genbank_path = db_path if (genome_cbg_one is not None and 0 in genome_cbg_one.active) else None
 
             # Save current positions of the plot for restoration after re-plot
             fig = main_placeholder.children[0]
-            
+
             xstart = None
             xend = None
             if isinstance(fig, GridPlot):
@@ -844,26 +835,54 @@ def modify_doc_factory(db_path):
                 xstart = subplot.x_range.start
                 xend = subplot.x_range.end
 
-            if views.active == 1:
-                # All-samples view: require exactly one variable selected across all modules
+            if is_all:
+                # All-samples view: require exactly one variable selected from non-Genome modules
+                # Genome module is shared (in Contigs section):
+                #   - Gene map (index 0) is handled via genbank_path
+                #   - Other Genome features (Repeats, etc.) are passed via genome_features parameter
                 selected_var = None
-                for cbg in widgets['variables_widgets']:
-                    if cbg.active:
-                        # pick the last selected index in this group
+                genome_features = []
+
+                # Collect Genome features from shared genome_cbg_one (except Gene map)
+                if genome_cbg_one is not None:
+                    for idx in genome_cbg_one.active:
+                        if idx == 0:  # Skip Gene map (handled via genbank_path)
+                            continue
+                        genome_features.append(genome_cbg_one.labels[idx])
+
+                # Get the selected variable from non-Genome modules
+                for cbg in active_variables_widgets:
+                    if cbg.active and selected_var is None:
                         selected_var = cbg.labels[cbg.active[-1]]
-                        break
 
-                if not selected_var:
-                    raise ValueError("When in 'All samples' view you must select one variable to plot.")
+                if not selected_var and not genome_features:
+                    raise ValueError("When in 'All samples' view you must select at least one variable to plot.")
 
-                print(f"[start_bokeh_server] Generating plot for all samples with variable={selected_var}, contig={contig}")
-                grid = generate_bokeh_plot_all_samples(conn, selected_var, contig, xstart=xstart, xend=xend, genbank_path=genbank_path)
+                # Compute filtered samples (same logic as refresh_sample_options)
+                # Start with samples that have the selected contig
+                filtered_samples = [s for s in orig_samples if s in widgets['contig_to_samples'].get(contig, set())]
+                # Apply module-based filters (coverage, completeness, phage mechanism)
+                module_allowed = get_module_filtered_samples()
+                filtered_samples = [s for s in filtered_samples if s in module_allowed]
+                # Apply variable-based filters
+                var_allowed = get_variable_filtered_samples()
+                filtered_samples = [s for s in filtered_samples if s in var_allowed]
+
+                print(f"[start_bokeh_server] Generating plot for all samples with variable={selected_var}, contig={contig}, genome_features={genome_features}, filtered_samples={len(filtered_samples)}")
+                grid = generate_bokeh_plot_all_samples(conn, selected_var, contig, xstart=xstart, xend=xend, genbank_path=genbank_path, genome_features=genome_features if genome_features else None, allowed_samples=set(filtered_samples))
             else:
                 # One-sample view: collect possibly-many requested features and call per-sample plot
                 requested_features = []
-                for cbg in widgets['variables_widgets']:
+
+                # Collect features from Variables section
+                for cbg in active_variables_widgets:
                     for idx in cbg.active:
                         requested_features.append(cbg.labels[idx])
+
+                # Collect Genome features from shared genome_cbg_one (in Contigs section)
+                if genome_cbg_one is not None:
+                    for idx in genome_cbg_one.active:
+                        requested_features.append(genome_cbg_one.labels[idx])
 
                 print(f"[start_bokeh_server] Generating plot for sample={sample}, contig={contig}, features={requested_features}")
                 grid = generate_bokeh_plot_per_sample(conn, requested_features, contig, sample, xstart=xstart, xend=xend, genbank_path=genbank_path)
@@ -905,9 +924,12 @@ def modify_doc_factory(db_path):
 
     # Global lock for toggles when enforcing "All samples" view (single-variable mode)
     global_toggle_lock = {'locked': False}
-    # Attach global variable callbacks to all CheckboxButtonGroups
-    for cbg in widgets['variables_widgets']:
-        cbg.on_change('active', make_global_variable_callback(cbg))
+
+    # Attach global variable callbacks to All Samples CheckboxButtonGroups only
+    # (One Sample view allows multiple selections, so no callback needed there)
+    # Genome module is in Contigs section now, so pass None as genome_cbg_ref
+    for cbg in widgets['variables_widgets_all']:
+        cbg.on_change('active', make_global_variable_callback_all(cbg, None))
     views.on_change('active', on_view_change)
 
 
@@ -1082,75 +1104,131 @@ def modify_doc_factory(db_path):
     widgets['contig_select'].on_change('value', lambda attr, old, new: refresh_sample_options())
 
 
-    ## Build Variables section
-    variables_title = Div(text="<b>Variables</b>")
-    genome_cbg = None  # Will store reference to Genome module's CheckboxButtonGroup for Gene map check
+    ## Build Variables section - TWO SEPARATE SECTIONS for each view
+    variables_title_one = Div(text="<b>Variables</b>")
+    variables_title_all = Div(text="<b>Variables</b>")
+    genome_cbg_one = None  # Will store reference to Genome module's CheckboxButtonGroup (shared between views)
 
-    # Append variable selectors. For modules that have a module-checkbox widget we
-    # show either the checkbox (One-sample) or the plain module title (All-samples)
-    # We create a container that holds both variants and toggle visibility
-    module_header_with_checkbox = []
-    module_header_with_title = []
-    # Store toggle buttons and content containers for collapsible sections
-    module_toggles = []
-    module_contents = []
+    # Build "One Sample" view variables section
+    # Has module checkboxes + collapsible variable groups
+    # NOTE: Genome module is built separately and placed in Contigs section
+    controls_variables_one = []
+    module_toggles_one = []
+    module_contents_one = []
+    genome_index_one = None  # Track Genome module index for separate handling
 
-    controls_variables = []
-    for i, module_widget in enumerate(widgets['module_widgets']):
+    for i, module_widget in enumerate(widgets['module_widgets_one']):
         module_name = widgets['module_names'][i]
-        
         help_tooltip = widgets['helps_widgets'][i]
 
-        # Create a small toggle button for collapsible section (just the arrow)
-        # Start with modules folded (collapsed)
+        # Skip Genome module - will be added to Contigs section
+        if module_name == "Genome":
+            genome_index_one = i
+            genome_cbg_one = widgets['variables_widgets_one'][i]
+            continue
+
+        # Create toggle button for collapsible section
         toggle_btn = Button(label="▶", width=20, height=20, button_type="primary", align="center", margin=0, stylesheets=[toggle_stylesheet])
         toggle_btn.styles = {'padding': '0px', 'line-height': '20px'}
-        module_toggles.append(toggle_btn)
+        module_toggles_one.append(toggle_btn)
 
-        # Build two header variants: one with the checkbox (shows module name as label)
-        # and one with the plain title (used when checkbox is hidden). Both may include the help button.
-        # Create separate title div for the title-only header
-        module_title_div = Div(text=f"{module_name}", align="center")
-        
+        # Build header with checkbox (module_widget has module name as label)
         if help_tooltip is not None:
-            # Need separate help buttons for each header to avoid "already in doc" error
-            help_btn_cb = HelpButton(tooltip=help_tooltip, width=20, height=20, align="center", button_type="light", stylesheets=[toggle_stylesheet])
-            help_btn_title = HelpButton(tooltip=help_tooltip, width=20, height=20, align="center", button_type="light", stylesheets=[toggle_stylesheet])
-            hdr_cb = row(toggle_btn, module_widget, help_btn_cb, sizing_mode="stretch_width", align="center")
-            hdr_title = row(toggle_btn, module_title_div, help_btn_title, sizing_mode="stretch_width", align="center")
+            help_btn = HelpButton(tooltip=help_tooltip, width=20, height=20, align="center", button_type="light", stylesheets=[toggle_stylesheet])
+            hdr = row(toggle_btn, module_widget, help_btn, sizing_mode="stretch_width", align="center")
         else:
-            hdr_cb = row(toggle_btn, module_widget, sizing_mode="stretch_width", align="center")
-            hdr_title = row(toggle_btn, module_title_div, sizing_mode="stretch_width", align="center")
+            hdr = row(toggle_btn, module_widget, sizing_mode="stretch_width", align="center")
 
-        # Default: show the checkbox header, hide the plain title header
-        hdr_cb.visible = True
-        hdr_title.visible = False
-        controls_variables.append(hdr_cb)
-        controls_variables.append(hdr_title)
-        
-        module_header_with_checkbox.append(hdr_cb)
-        module_header_with_title.append(hdr_title)
+        controls_variables_one.append(hdr)
 
-        # Add the module's CheckboxButtonGroup for variables (this will be collapsible)
-        # Start with modules folded (collapsed)
-        cbg = widgets['variables_widgets'][i]
+        # Add the module's CheckboxButtonGroup for variables (collapsible, starts folded)
+        cbg = widgets['variables_widgets_one'][i]
         cbg.visible = False
-        module_contents.append(cbg)
-        controls_variables.append(cbg)
+        module_contents_one.append(cbg)
+        controls_variables_one.append(cbg)
 
-        # Store reference to Genome module's cbg for Gene map check
-        if module_name == "Genome":
-            genome_cbg = cbg
-
-    # Add callbacks for collapsible sections
-    for i, toggle_btn in enumerate(module_toggles):
-        content = module_contents[i]
+    # Add toggle callbacks for One Sample view
+    for i, toggle_btn in enumerate(module_toggles_one):
+        content = module_contents_one[i]
         toggle_btn.on_click(make_toggle_callback(toggle_btn, content))
 
+    # Build "All Samples" view variables section
+    # NOTE: Genome module is built separately and placed in Contigs section
+    # Other modules have title-only headers (no checkbox)
+    controls_variables_all = []
+    module_toggles_all = []
+    module_contents_all = []
 
-    ### Attach callbacks
-    for i, mc in enumerate(widgets['module_widgets']):
-        toggles = widgets['variables_widgets'][i]
+    for i in range(len(widgets['module_names'])):
+        module_name = widgets['module_names'][i]
+        help_tooltip = widgets['helps_widgets'][i]
+
+        # Skip Genome module - it's in the Contigs section (shared between views)
+        if module_name == "Genome":
+            continue
+
+        # Create toggle button for collapsible section
+        toggle_btn = Button(label="▶", width=20, height=20, button_type="primary", align="center", margin=0, stylesheets=[toggle_stylesheet])
+        toggle_btn.styles = {'padding': '0px', 'line-height': '20px'}
+        module_toggles_all.append(toggle_btn)
+
+        # Build header with title only (no checkbox) for non-Genome modules
+        module_title_div = Div(text=f"{module_name}", align="center")
+        if help_tooltip is not None:
+            # Create new tooltip instance to avoid "already in doc" error
+            help_text = help_tooltip.content
+            tooltip_all = Tooltip(content=help_text, position="right")
+            help_btn = HelpButton(tooltip=tooltip_all, width=20, height=20, align="center", button_type="light", stylesheets=[toggle_stylesheet])
+            hdr = row(toggle_btn, module_title_div, help_btn, sizing_mode="stretch_width", align="center")
+        else:
+            hdr = row(toggle_btn, module_title_div, sizing_mode="stretch_width", align="center")
+
+        controls_variables_all.append(hdr)
+
+        # Add the module's CheckboxButtonGroup for variables (collapsible, starts folded)
+        cbg = widgets['variables_widgets_all'][i]
+        cbg.visible = False
+        module_contents_all.append(cbg)
+        controls_variables_all.append(cbg)
+
+    # Add toggle callbacks for All Samples view
+    for i, toggle_btn in enumerate(module_toggles_all):
+        content = module_contents_all[i]
+        toggle_btn.on_click(make_toggle_callback(toggle_btn, content))
+
+    # Create the two variables section containers
+    variables_section_one = column(variables_title_one, *controls_variables_one, visible=True, sizing_mode="stretch_width")
+    variables_section_all = column(variables_title_all, *controls_variables_all, visible=False, sizing_mode="stretch_width")
+
+    ## Build Genome module controls (placed in Contigs section, shared between views)
+    genome_section = None
+
+    if genome_index_one is not None:
+        # Get Genome module info
+        genome_help_tooltip = widgets['helps_widgets'][genome_index_one]
+        genome_module_widget = widgets['module_widgets_one'][genome_index_one]
+
+        # Build single Genome section (shared between One Sample and All Samples views)
+        genome_toggle_btn = Button(label="▶", width=20, height=20, button_type="primary", align="center", margin=0, stylesheets=[toggle_stylesheet])
+        genome_toggle_btn.styles = {'padding': '0px', 'line-height': '20px'}
+
+        if genome_help_tooltip is not None:
+            help_btn = HelpButton(tooltip=genome_help_tooltip, width=20, height=20, align="center", button_type="light", stylesheets=[toggle_stylesheet])
+            genome_hdr = row(genome_toggle_btn, genome_module_widget, help_btn, sizing_mode="stretch_width", align="center")
+        else:
+            genome_hdr = row(genome_toggle_btn, genome_module_widget, sizing_mode="stretch_width", align="center")
+
+        genome_cbg_one.visible = False
+        genome_toggle_btn.on_click(make_toggle_callback(genome_toggle_btn, genome_cbg_one))
+        genome_section = column(genome_hdr, genome_cbg_one, visible=True, sizing_mode="stretch_width")
+
+    # Add Genome section to contig_content
+    if genome_section is not None:
+        contig_content.children = list(contig_content.children) + [genome_section]
+
+    ### Attach callbacks for One Sample view (module checkbox ↔ variable bidirectional sync)
+    for i, mc in enumerate(widgets['module_widgets_one']):
+        toggles = widgets['variables_widgets_one'][i]
         lock = {"locked": False}  # per-module lock
 
         # Module → toggles (CheckboxButtonGroup)
@@ -1187,7 +1265,6 @@ def modify_doc_factory(db_path):
 
         toggles.on_change("active", make_variable_callback(mc, toggles, lock))
 
-
     ## Create final Apply button
     apply_button = Button(label="APPLY", align="center", stylesheets=[stylesheet], css_classes=["apply-btn"])
     apply_button.on_click(lambda: apply_clicked())
@@ -1201,11 +1278,14 @@ def modify_doc_factory(db_path):
     separator_variables = Div(text="", height=1, width=350, styles={'background-color': '#333', 'margin': '10px 0'})
 
     # Gene map is now part of the Genome module's CheckboxButtonGroup
+    # Include both variables sections - visibility is toggled by on_view_change
     controls_children = [logo, views, separator_filtering, filtering_header, filtering_content,
-                         separator_samples, sample_header, sample_content, widgets['sample_select'],
-                         separator_contigs, contig_header, contig_content, widgets['contig_select'],
-                         separator_variables, variables_title
-                        ] + controls_variables + [apply_button]
+                         separator_contigs, contig_header, widgets['contig_select'], contig_content,
+                         separator_samples, sample_header, widgets['sample_select'], sample_content, 
+                         separator_variables,
+                         variables_section_one,  # One Sample view (with module checkboxes)
+                         variables_section_all,  # All Samples view (title headers only)
+                         apply_button]
 
     controls_column = column(*controls_children, width=350, sizing_mode="stretch_height", spacing=0)
     controls_column.css_classes = ["left-col"]

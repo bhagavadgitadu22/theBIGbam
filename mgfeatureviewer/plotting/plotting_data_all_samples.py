@@ -4,19 +4,22 @@ from bokeh.models import Range1d
 from bokeh.layouts import gridplot
 from bokeh.plotting import output_file, save
 
-from .plotting_data_per_sample import get_contig_info, get_feature_data, make_bokeh_subplot, make_bokeh_genemap
+from .plotting_data_per_sample import get_contig_info, get_feature_data, get_repeats_data, make_bokeh_subplot, make_bokeh_genemap
 
 ### Function to generate the bokeh plot
-def generate_bokeh_plot_all_samples(conn, variable, contig_name, xstart=None, xend=None, subplot_size=130, genbank_path=None):
+def generate_bokeh_plot_all_samples(conn, variable, contig_name, xstart=None, xend=None, subplot_size=130, genbank_path=None, genome_features=None, allowed_samples=None):
     """Generate a Bokeh plot showing all samples for a single variable.
 
     Args:
         conn: DuckDB connection
-        variable: Variable/feature to plot
+        variable: Variable/feature to plot (from non-Genome modules)
         contig_name: Name of the contig to plot
         xstart: Optional x-axis start position
         xend: Optional x-axis end position
         subplot_size: Height of each subplot in pixels
+        genbank_path: Path to genbank file (optional; if provided, gene map will be plotted)
+        genome_features: List of additional Genome module features to plot (optional)
+        allowed_samples: Set of sample names to include (optional; if None, all samples are included)
     """
     cur = conn.cursor()
 
@@ -37,9 +40,52 @@ def generate_bokeh_plot_all_samples(conn, variable, contig_name, xstart=None, xe
     rows = cur.fetchall()
     if rows is None:
         raise ValueError(f"No sample comprised this contig in the database: {contig_name}")
+
+    # Filter to allowed samples if specified (respects Filtering section criteria)
+    if allowed_samples is not None:
+        rows = [(sid, sname) for sid, sname in rows if sname in allowed_samples]
+        if not rows:
+            raise ValueError("No samples match the current filters")
+
     sample_ids, sample_names = [list(t) for t in zip(*rows)]
 
-    # --- Add one subplot per feature requested ---
+    # --- Add subplots for additional Genome features (contig-level, not per-sample) ---
+    genome_subplots = []
+    if genome_features:
+        for genome_feature in genome_features:
+            try:
+                feature_lower = genome_feature.lower().strip()
+
+                # Handle Repeats specially - they use contig-only tables
+                if feature_lower in ["repeats", "repeat", "direct repeats", "inverted repeats"]:
+                    # Direct repeats
+                    if feature_lower in ["repeats", "repeat", "direct repeats"]:
+                        direct_feature_dict = get_repeats_data(cur, contig_id, "direct_repeats")
+                        if direct_feature_dict:
+                            direct_subplot = make_bokeh_subplot(direct_feature_dict, subplot_size, shared_xrange)
+                            if direct_subplot is not None:
+                                genome_subplots.append(direct_subplot)
+                    # Inverted repeats
+                    if feature_lower in ["repeats", "repeat", "inverted repeats"]:
+                        inverted_feature_dict = get_repeats_data(cur, contig_id, "inverted_repeats")
+                        if inverted_feature_dict:
+                            inverted_subplot = make_bokeh_subplot(inverted_feature_dict, subplot_size, shared_xrange)
+                            if inverted_subplot is not None:
+                                genome_subplots.append(inverted_subplot)
+                else:
+                    # Other Genome features - try to get data (may fail if sample-dependent)
+                    list_feature_dict = get_feature_data(cur, genome_feature, contig_id, sample_id=None)
+                    if not list_feature_dict:
+                        continue
+
+                    subplot_feature = make_bokeh_subplot(list_feature_dict, subplot_size, shared_xrange, sample_title=genome_feature)
+                    if subplot_feature is not None:
+                        genome_subplots.append(subplot_feature)
+            except Exception as e:
+                print(f"Error processing genome feature '{genome_feature}': {e}", flush=True)
+                continue
+
+    # --- Add one subplot per sample for the main variable ---
     # Requested features are variables like 'coverage', 'reads_starts', etc.
     subplots = []
     for sample_id, sample_name in zip(sample_ids, sample_names):
@@ -56,17 +102,16 @@ def generate_bokeh_plot_all_samples(conn, variable, contig_name, xstart=None, xe
             continue
 
     # --- Combine all figures in a single grid with one shared toolbar ---
+    all_plots = []
     if annotation_fig:
-        if not subplots:
-            grid = gridplot([[annotation_fig]], merge_tools=True, sizing_mode='stretch_width')
-        else:
-            all_plots = [annotation_fig] + subplots
-            grid = gridplot([[p] for p in all_plots], merge_tools=True, sizing_mode='stretch_width')
-    else:
-        # No gene map - just show subplots
-        if not subplots:
-            raise ValueError("No plots to display")
-        grid = gridplot([[p] for p in subplots], merge_tools=True, sizing_mode='stretch_width')
+        all_plots.append(annotation_fig)
+    all_plots.extend(genome_subplots)
+    all_plots.extend(subplots)
+
+    if not all_plots:
+        raise ValueError("No plots to display")
+
+    grid = gridplot([[p] for p in all_plots], merge_tools=True, sizing_mode='stretch_width')
 
     return grid
 
