@@ -4,7 +4,6 @@ mgfeatureviewer calculate -t 4 -b ${DIR}/HK97_GCF_000848825.1_with_MD.bam -m cov
 mgfeatureviewer calculate -t 4 -b ${DIR}/HK97_GCF_000848825.1_with_MD.bam -m coverage,phagetermini,assemblycheck -o examples/outputs/HK97/pipeline_single_sample/features_no_gbk_curve10_bar100.db --circular --curve_ratio 10 --bar_ratio 10
 mgfeatureviewer calculate -t 4 -b ${DIR}/HK97_GCF_000848825.1_with_MD.bam -m coverage,phagetermini,assemblycheck -o examples/outputs/HK97/pipeline_single_sample/features_no_gbk_curve10_bar100.db --circular --curve_ratio 10 --bar_ratio 100
 
-
 Test with various inputs:
 mgfeatureviewer calculate -t 4 -b examples/inputs/HK97 -g examples/inputs/HK97/HK97_GCF_000848825.1_pharokka.gbk \
     -m coverage,phagetermini,assemblycheck --circular --annotation_tool pharokka -o examples/outputs/HK97/HK97.db
@@ -34,8 +33,8 @@ mgfeatureviewer calculate -t 4 -b examples/inputs/phageterm_long_short_and_nexte
 
 mgfeatureviewer serve --db examples/outputs/phageterm_virome/phageterm_virome.db --port 5007
 
-
 # Test on the cluster:
+
 mgfeatureviewer installed in base conda environment
 sbatch -q serial -N 1 -n 1 -c 32 -t 48:00:00 --wrap="mgfeatureviewer calculate \
     -t 32 -b /scratch/boutroux/test_MGFeatureViewer/bams_NOMIS \
@@ -55,7 +54,9 @@ sbatch -q serial -N 1 -n 1 -c 32 -t 48:00:00 --wrap="mgfeatureviewer calculate \
     -o /scratch/boutroux/test_MGFeatureViewer/NOMIS_VIRUS_duckdb.db"
 
 # BEWARE: for LEA Genome I need eukaryotic annotations
+
 # Use list_contig_filter_5kb_50X
+
 python /scratch/boutroux/test_MGFeatureViewer/NOMIS_mapping/double_assembly.py -a contigs_hydrurus.fasta -o doubld_contigs_hydrurus.fasta
 
 sbatch -q serial -N 1 -n 1 -c 20 -t 20:00:00 --wrap="minimap2 -ax ont -t 20 doubled_contigs_hydrurus.fasta /work/river/ICEBIO/Hannes/Hydrurus.fastq.gz | samtools view -@ 20 -bS -F 4 | samtools sort -@ 20 -o contigs_hydrurus.bam"

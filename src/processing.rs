@@ -173,7 +173,7 @@ fn add_features_from_arrays(
     let mut insertion_runs: Vec<Run> = Vec::new();
     let mut deletion_runs: Vec<Run> = Vec::new();
     let mut mismatch_runs: Vec<Run> = Vec::new();
-    if flags.assemblycheck || flags.phagetermini {
+    if flags.mapping_metrics || flags.phagetermini {
         // Clippings and insertions with statistics
         let left_clip_counts: Vec<f64> = arrays.left_clipping_lengths.iter().map(|v| v.len() as f64).collect();
         let left_clip_means: Vec<f64> = arrays.left_clipping_lengths.iter().map(|v| {
@@ -210,7 +210,7 @@ fn add_features_from_arrays(
             Some(&primary_reads_f64), "right_clippings", contig_name, config, output);
     }
             
-    if flags.assemblycheck {
+    if flags.mapping_metrics {
         let insertion_counts: Vec<f64> = arrays.insertion_lengths.iter().map(|v| v.len() as f64).collect();
         let insertion_means: Vec<f64> = arrays.insertion_lengths.iter().map(|v| {
             if v.is_empty() { 0.0 } else { v.iter().map(|&x| x as f64).sum::<f64>() / v.len() as f64 }
@@ -228,7 +228,7 @@ fn add_features_from_arrays(
         insertion_runs = add_compressed_feature_with_stats(&insertion_counts, &insertion_means, &insertion_medians, &insertion_stds,
             Some(&primary_reads_f64), "insertions", contig_name, config, output);
 
-        // Other assembly check features (no statistics)
+        // Other mapping metrics features (no statistics)
         // Apply two-stage compression: first with coverage reference, then merge identical runs
         let deletions_f64: Vec<f64> = arrays.deletions.iter().map(|&x| x as f64).collect();
         deletion_runs = compress_signal_with_reference(&deletions_f64, Some(&primary_reads_f64), PlotType::Bars, config.curve_ratio, config.bar_ratio);
@@ -246,69 +246,68 @@ fn add_features_from_arrays(
 
         let mismatches_f64: Vec<f64> = arrays.mismatches.iter().map(|&x| x as f64).collect();
         mismatch_runs = add_compressed_feature_with_reference(&mismatches_f64, Some(&primary_reads_f64), "mismatches", contig_name, config, output);
-        
-        if seq_type.is_short_paired() {
-            let non_inward_f64: Vec<f64> = arrays.non_inward_pairs.iter().map(|&x| x as f64).collect();
-            let non_inward_runs = compress_signal_with_reference(&non_inward_f64, Some(&primary_reads_f64), PlotType::Curve, config.curve_ratio, config.bar_ratio);
-            output.extend(non_inward_runs.into_iter().map(|run| FeaturePoint {
-                contig_name: contig_name.to_string(),
-                feature: "non_inward_pairs".to_string(),
-                start_pos: run.start_pos,
-                end_pos: run.end_pos,
-                value: run.value,
-                mean: None,
-                median: None,
-                std: None,
-            }));
-            
-            let mate_unmapped_f64: Vec<f64> = arrays.mate_not_mapped.iter().map(|&x| x as f64).collect();
-            let mate_unmapped_runs = compress_signal_with_reference(&mate_unmapped_f64, Some(&primary_reads_f64), PlotType::Curve, config.curve_ratio, config.bar_ratio);
-            output.extend(mate_unmapped_runs.into_iter().map(|run| FeaturePoint {
-                contig_name: contig_name.to_string(),
-                feature: "mate_not_mapped".to_string(),
-                start_pos: run.start_pos,
-                end_pos: run.end_pos,
-                value: run.value,
-                mean: None,
-                median: None,
-                std: None,
-            }));
-            
-            let mate_other_contig_f64: Vec<f64> = arrays.mate_on_another_contig.iter().map(|&x| x as f64).collect();
-            let mate_other_contig_runs = compress_signal_with_reference(&mate_other_contig_f64, Some(&primary_reads_f64), PlotType::Curve, config.curve_ratio, config.bar_ratio);
-            output.extend(mate_other_contig_runs.into_iter().map(|run| FeaturePoint {
-                contig_name: contig_name.to_string(),
-                feature: "mate_on_another_contig".to_string(),
-                start_pos: run.start_pos,
-                end_pos: run.end_pos,
-                value: run.value,
-                mean: None,
-                median: None,
-                std: None,
-            }));
-        }
+    }
 
-        // Read lengths (curve for long reads, self-referential)
-        if seq_type.is_long() {
-            let values: Vec<f64> = arrays
-                .sum_read_lengths
-                .iter()
-                .zip(&arrays.count_read_lengths)
-                .map(|(&s, &c)| if c > 0 { s as f64 / c as f64 } else { 0.0 })
-                .collect();
-            add_compressed_feature(&values, "read_lengths", contig_name, config, output);
-        }
+    // Paired-read metrics module
+    if flags.paired_read_metrics && seq_type.is_short_paired() {
+        let non_inward_f64: Vec<f64> = arrays.non_inward_pairs.iter().map(|&x| x as f64).collect();
+        let non_inward_runs = compress_signal_with_reference(&non_inward_f64, Some(&primary_reads_f64), PlotType::Curve, config.curve_ratio, config.bar_ratio);
+        output.extend(non_inward_runs.into_iter().map(|run| FeaturePoint {
+            contig_name: contig_name.to_string(),
+            feature: "non_inward_pairs".to_string(),
+            start_pos: run.start_pos,
+            end_pos: run.end_pos,
+            value: run.value,
+            mean: None,
+            median: None,
+            std: None,
+        }));
 
-        // Insert sizes (curve for paired reads, self-referential)  
-        if seq_type.is_short_paired() {
-            let values: Vec<f64> = arrays
-                .sum_insert_sizes
-                .iter()
-                .zip(&arrays.count_insert_sizes)
-                .map(|(&s, &c)| if c > 0 { s as f64 / c as f64 } else { 0.0 })
-                .collect();
-            add_compressed_feature(&values, "insert_sizes", contig_name, config, output);
-        }
+        let mate_unmapped_f64: Vec<f64> = arrays.mate_not_mapped.iter().map(|&x| x as f64).collect();
+        let mate_unmapped_runs = compress_signal_with_reference(&mate_unmapped_f64, Some(&primary_reads_f64), PlotType::Curve, config.curve_ratio, config.bar_ratio);
+        output.extend(mate_unmapped_runs.into_iter().map(|run| FeaturePoint {
+            contig_name: contig_name.to_string(),
+            feature: "mate_not_mapped".to_string(),
+            start_pos: run.start_pos,
+            end_pos: run.end_pos,
+            value: run.value,
+            mean: None,
+            median: None,
+            std: None,
+        }));
+
+        let mate_other_contig_f64: Vec<f64> = arrays.mate_on_another_contig.iter().map(|&x| x as f64).collect();
+        let mate_other_contig_runs = compress_signal_with_reference(&mate_other_contig_f64, Some(&primary_reads_f64), PlotType::Curve, config.curve_ratio, config.bar_ratio);
+        output.extend(mate_other_contig_runs.into_iter().map(|run| FeaturePoint {
+            contig_name: contig_name.to_string(),
+            feature: "mate_on_another_contig".to_string(),
+            start_pos: run.start_pos,
+            end_pos: run.end_pos,
+            value: run.value,
+            mean: None,
+            median: None,
+            std: None,
+        }));
+
+        // Insert sizes (curve for paired reads, self-referential)
+        let values: Vec<f64> = arrays
+            .sum_insert_sizes
+            .iter()
+            .zip(&arrays.count_insert_sizes)
+            .map(|(&s, &c)| if c > 0 { s as f64 / c as f64 } else { 0.0 })
+            .collect();
+        add_compressed_feature(&values, "insert_sizes", contig_name, config, output);
+    }
+
+    // Long-read metrics module
+    if flags.long_read_metrics && seq_type.is_long() {
+        let values: Vec<f64> = arrays
+            .sum_read_lengths
+            .iter()
+            .zip(&arrays.count_read_lengths)
+            .map(|(&s, &c)| if c > 0 { s as f64 / c as f64 } else { 0.0 })
+            .collect();
+        add_compressed_feature(&values, "read_lengths", contig_name, config, output);
     }
 
     // Phagetermini features
@@ -451,8 +450,8 @@ fn add_features_from_arrays(
         None
     };
 
-    // Compute completeness statistics when assemblycheck is enabled
-    let completeness_result = if flags.assemblycheck {
+    // Compute completeness statistics when mapping_metrics is enabled
+    let completeness_result = if flags.mapping_metrics {
         let completeness = compute_completeness(
             &arrays.left_clipping_lengths,
             &arrays.right_clipping_lengths,

@@ -376,28 +376,41 @@ impl FeatureArrays {
 pub struct ModuleFlags {
     /// Calculate basic coverage (read depth)
     pub coverage: bool,
-    /// Calculate phage termini features (coverage_reduced, reads_starts, reads_ends)
+    /// Calculate mapping metrics per position (clippings, indels, mismatches)
+    pub mapping_metrics: bool,
+    /// Calculate long-read specific metrics (read_lengths)
+    pub long_read_metrics: bool,
+    /// Calculate paired-read specific metrics (insert_sizes, non_inward_pairs, etc.)
+    pub paired_read_metrics: bool,
+    /// Calculate phage termini features (coverage_reduced, reads_starts, reads_ends, tau)
     pub phagetermini: bool,
-    /// Calculate assembly check features (clippings, indels, mismatches, etc.)
-    pub assemblycheck: bool,
 }
 
 impl ModuleFlags {
     /// Create flags from a list of module names.
     ///
     /// # Arguments
-    /// * `modules` - List of module names: "coverage", "phagetermini", "assemblycheck"
+    /// * `modules` - List of module names matching types.rs Variable.module values:
+    ///   "Coverage", "Mapping metrics per position", "Long-read metrics",
+    ///   "Paired-read metrics", "Phage termini"
     ///
     /// # Note
-    /// If assemblycheck is enabled, coverage is automatically enabled too
-    /// (assemblycheck needs coverage data for normalization).
+    /// Coverage is automatically enabled when dependent modules are requested
+    /// (mapping_metrics, long_read_metrics, paired_read_metrics need coverage for normalization).
     pub fn from_modules(modules: &[String]) -> Self {
-        let assemblycheck = modules.iter().any(|m| m == "assemblycheck");
+        let has = |name: &str| modules.iter().any(|m| m.eq_ignore_ascii_case(name));
+
+        let mapping_metrics = has("Mapping metrics per position");
+        let long_read_metrics = has("Long-read metrics");
+        let paired_read_metrics = has("Paired-read metrics");
+
         Self {
-            // Coverage is needed if explicitly requested OR if assemblycheck is enabled
-            coverage: modules.iter().any(|m| m == "coverage") || assemblycheck,
-            phagetermini: modules.iter().any(|m| m == "phagetermini"),
-            assemblycheck,
+            // Coverage needed if explicitly requested or if dependent modules are enabled
+            coverage: has("Coverage") || mapping_metrics || long_read_metrics || paired_read_metrics,
+            mapping_metrics,
+            long_read_metrics,
+            paired_read_metrics,
+            phagetermini: has("Phage termini"),
         }
     }
 
@@ -406,10 +419,10 @@ impl ModuleFlags {
     /// MD tag extraction has some overhead, so we only do it when needed.
     /// It's required for:
     /// - phagetermini: to check for mismatches at read ends
-    /// - assemblycheck: to count mismatches
+    /// - mapping_metrics: to count mismatches
     #[inline]
     pub fn needs_md(&self) -> bool {
-        self.phagetermini || self.assemblycheck
+        self.phagetermini || self.mapping_metrics
     }
 }
 
@@ -552,83 +565,89 @@ pub fn process_read(
     }
 
     // -------------------------------------------------------------------------
-    // Assemblycheck module - primary mappings only
+    // Long-read metrics module - primary mappings only
     // -------------------------------------------------------------------------
-    if flags.assemblycheck && !is_secondary && !is_supplementary {
-        // --- Read lengths (long reads only) ---
+    if flags.long_read_metrics && seq_type.is_long() && !is_secondary && !is_supplementary {
+        // --- Read lengths ---
         // Track sum and count to compute average read length at each position
-        if seq_type.is_long() {
-            let ql = query_length as u64;
+        let ql = query_length as u64;
 
-            // OPTIMIZATION: Non-wrapping case (most common)
-            // Avoids modulo operation in tight loop
-            if raw_end <= ref_length {
-                for p in raw_start..raw_end {
-                    arrays.sum_read_lengths[p] += ql;
-                    arrays.count_read_lengths[p] += 1;
+        // OPTIMIZATION: Non-wrapping case (most common)
+        // Avoids modulo operation in tight loop
+        if raw_end <= ref_length {
+            for p in raw_start..raw_end {
+                arrays.sum_read_lengths[p] += ql;
+                arrays.count_read_lengths[p] += 1;
+            }
+        } else {
+            // Wrapping case (read spans the origin of circular genome)
+            for pos in raw_start..raw_end {
+                let p = pos % ref_length;
+                arrays.sum_read_lengths[p] += ql;
+                arrays.count_read_lengths[p] += 1;
+            }
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Paired-read metrics module - primary mappings only
+    // -------------------------------------------------------------------------
+    if flags.paired_read_metrics && seq_type.is_short_paired() && !is_secondary && !is_supplementary {
+        // --- Insert sizes and mate orientation issues ---
+        // Only track insert size for read1 with valid template length
+        // (read2 would double-count the same fragment)
+        let track_insert = is_read1 && template_length > 0;
+        let tl = template_length as u64;
+
+        // Classify mate issues
+        let non_inward = !is_proper_pair && !mate_unmapped && !mate_other_contig;
+        let mate_unmapped_flag = mate_unmapped;
+        let mate_other_contig_flag = mate_other_contig;
+
+        // OPTIMIZATION: Separate non-wrapping and wrapping paths
+        if raw_end <= ref_length {
+            // Non-wrapping fast path
+            for p in raw_start..raw_end {
+                if track_insert {
+                    arrays.sum_insert_sizes[p] += tl;
+                    arrays.count_insert_sizes[p] += 1;
                 }
-            } else {
-                // Wrapping case (read spans the origin of circular genome)
-                for pos in raw_start..raw_end {
-                    let p = pos % ref_length;
-                    arrays.sum_read_lengths[p] += ql;
-                    arrays.count_read_lengths[p] += 1;
+                if non_inward {
+                    arrays.non_inward_pairs[p] += 1;
+                }
+                if mate_unmapped_flag {
+                    arrays.mate_not_mapped[p] += 1;
+                }
+                if mate_other_contig_flag {
+                    arrays.mate_on_another_contig[p] += 1;
+                }
+            }
+        } else {
+            // Wrapping case
+            for pos in raw_start..raw_end {
+                let p = pos % ref_length;
+                if track_insert {
+                    arrays.sum_insert_sizes[p] += tl;
+                    arrays.count_insert_sizes[p] += 1;
+                }
+                if non_inward {
+                    arrays.non_inward_pairs[p] += 1;
+                }
+                if mate_unmapped_flag {
+                    arrays.mate_not_mapped[p] += 1;
+                }
+                if mate_other_contig_flag {
+                    arrays.mate_on_another_contig[p] += 1;
                 }
             }
         }
+    }
 
-        // --- Insert sizes and mate orientation issues (short paired only) ---
-        if seq_type.is_short_paired() {
-            // Only track insert size for read1 with valid template length
-            // (read2 would double-count the same fragment)
-            let track_insert = is_read1 && template_length > 0;
-            let tl = template_length as u64;
-            
-            // Classify mate issues
-            let non_inward = !is_proper_pair && !mate_unmapped && !mate_other_contig;
-            let mate_unmapped_flag = mate_unmapped;
-            let mate_other_contig_flag = mate_other_contig;
-
-            // OPTIMIZATION: Separate non-wrapping and wrapping paths
-            if raw_end <= ref_length {
-                // Non-wrapping fast path
-                for p in raw_start..raw_end {
-                    if track_insert {
-                        arrays.sum_insert_sizes[p] += tl;
-                        arrays.count_insert_sizes[p] += 1;
-                    }
-                    if non_inward {
-                        arrays.non_inward_pairs[p] += 1;
-                    }
-                    if mate_unmapped_flag {
-                        arrays.mate_not_mapped[p] += 1;
-                    }
-                    if mate_other_contig_flag {
-                        arrays.mate_on_another_contig[p] += 1;
-                    }
-                }
-            } else {
-                // Wrapping case - only non_inward_pairs needs circular handling
-                // mate_not_mapped and mate_on_another_contig are position-independent issues
-                for pos in raw_start..raw_end {
-                    let p = pos % ref_length;
-                    if track_insert {
-                        arrays.sum_insert_sizes[p] += tl;
-                        arrays.count_insert_sizes[p] += 1;
-                    }
-                    if non_inward {
-                        arrays.non_inward_pairs[p] += 1;
-                    }
-                    if mate_unmapped_flag {
-                        arrays.mate_not_mapped[p] += 1;
-                    }
-                    if mate_other_contig_flag {
-                        arrays.mate_on_another_contig[p] += 1;
-                    }
-                }
-            }
-        }
-
+    // -------------------------------------------------------------------------
+    // Mapping metrics module - clippings, indels, mismatches (primary only)
+    // Also needed for phagetermini (clippings used for completeness detection)
+    // -------------------------------------------------------------------------
+    if (flags.mapping_metrics || flags.phagetermini) && !is_secondary && !is_supplementary {
         // --- Clippings from CIGAR ---
         // Check first and last CIGAR operations for soft/hard clips
         // Left clippings recorded at first aligned position (start)
@@ -645,17 +664,20 @@ pub fn process_read(
             if let Some(&(op, len)) = cigar_raw.last() {
                 if raw_cigar_is_clipping(op) {
                     // Record at last aligned position
-                    let clip_pos = if end > 0 { 
+                    let clip_pos = if end > 0 {
                         let pos = end - 1;
                         if circular { pos % ref_length } else { pos }
-                    } else { 
-                        ref_length - 1 
+                    } else {
+                        ref_length - 1
                     };
                     arrays.right_clipping_lengths[clip_pos].push(len);
                 }
             }
         }
+    }
 
+    // --- Indels and mismatches (mapping_metrics only) ---
+    if flags.mapping_metrics && !is_secondary && !is_supplementary {
         // --- Indels from CIGAR ---
         // Walk through CIGAR operations to find insertions and deletions
         let mut ref_pos = raw_start;

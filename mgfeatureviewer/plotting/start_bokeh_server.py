@@ -440,13 +440,6 @@ def modify_doc_factory(db_path):
         conditions = []
         params = []
 
-        # In "One sample" view, filter by the selected sample for proper contig-sample pair filtering
-        if views.active == 0:
-            sel_sample = widgets['sample_select'].value
-            if sel_sample:
-                conditions.append("Sample_name = ?")
-                params.append(sel_sample)
-
         if coverage_percentage_slider is not None:
             min_val, max_val = coverage_percentage_slider.value
             if min_val > 0 or max_val < 100:
@@ -476,13 +469,6 @@ def modify_doc_factory(db_path):
         # Apply completeness filters using Explicit_completeness view (single combined query)
         conditions = []
         params = []
-
-        # In "One sample" view, filter by the selected sample for proper contig-sample pair filtering
-        if views.active == 0:
-            sel_sample = widgets['sample_select'].value
-            if sel_sample:
-                conditions.append("Sample_name = ?")
-                params.append(sel_sample)
 
         if prevalence_left_slider is not None:
             min_val, max_val = prevalence_left_slider.value
@@ -517,21 +503,12 @@ def modify_doc_factory(db_path):
 
         # Apply phage mechanism filter using Explicit_phage_mechanisms view
         if phage_mechanism_filter is not None and phage_mechanism_filter.value:
-            sel_sample = widgets['sample_select'].value if views.active == 0 else None
-            if sel_sample:
-                query = """
-                    SELECT DISTINCT Contig_name
-                    FROM Explicit_phage_mechanisms
-                    WHERE Phage_packaging_mechanism = ? AND Sample_name = ?
-                """
-                cur.execute(query, (phage_mechanism_filter.value, sel_sample))
-            else:
-                query = """
-                    SELECT DISTINCT Contig_name
-                    FROM Explicit_phage_mechanisms
-                    WHERE Phage_packaging_mechanism = ?
-                """
-                cur.execute(query, (phage_mechanism_filter.value,))
+            query = """
+                SELECT DISTINCT Contig_name
+                FROM Explicit_phage_mechanisms
+                WHERE Phage_packaging_mechanism = ?
+            """
+            cur.execute(query, (phage_mechanism_filter.value,))
             matching = {row[0] for row in cur.fetchall()}
             allowed_contigs &= matching
 
@@ -545,13 +522,6 @@ def modify_doc_factory(db_path):
         # Apply coverage filters using Explicit_presences view (single combined query)
         conditions = []
         params = []
-
-        # In "One sample" view, filter by the selected contig for proper contig-sample pair filtering
-        if views.active == 0:
-            sel_contig = widgets['contig_select'].value
-            if sel_contig:
-                conditions.append("Contig_name = ?")
-                params.append(sel_contig)
 
         if coverage_percentage_slider is not None:
             min_val, max_val = coverage_percentage_slider.value
@@ -582,13 +552,6 @@ def modify_doc_factory(db_path):
         # Apply completeness filters using Explicit_completeness view (single combined query)
         conditions = []
         params = []
-
-        # In "One sample" view, filter by the selected contig for proper contig-sample pair filtering
-        if views.active == 0:
-            sel_contig = widgets['contig_select'].value
-            if sel_contig:
-                conditions.append("Contig_name = ?")
-                params.append(sel_contig)
 
         if prevalence_left_slider is not None:
             min_val, max_val = prevalence_left_slider.value
@@ -623,21 +586,12 @@ def modify_doc_factory(db_path):
 
         # Apply phage mechanism filter using Explicit_phage_mechanisms view
         if phage_mechanism_filter is not None and phage_mechanism_filter.value:
-            sel_contig = widgets['contig_select'].value if views.active == 0 else None
-            if sel_contig:
-                query = """
-                    SELECT DISTINCT Sample_name
-                    FROM Explicit_phage_mechanisms
-                    WHERE Phage_packaging_mechanism = ? AND Contig_name = ?
-                """
-                cur.execute(query, (phage_mechanism_filter.value, sel_contig))
-            else:
-                query = """
-                    SELECT DISTINCT Sample_name
-                    FROM Explicit_phage_mechanisms
-                    WHERE Phage_packaging_mechanism = ?
-                """
-                cur.execute(query, (phage_mechanism_filter.value,))
+            query = """
+                SELECT DISTINCT Sample_name
+                FROM Explicit_phage_mechanisms
+                WHERE Phage_packaging_mechanism = ?
+            """
+            cur.execute(query, (phage_mechanism_filter.value,))
             matching = {row[0] for row in cur.fetchall()}
             allowed_samples &= matching
 

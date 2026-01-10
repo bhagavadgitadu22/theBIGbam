@@ -93,7 +93,7 @@ def build_argparser():
     sp.add_argument('--meta', action='store_true', help='Pass --meta to annotator for multi-organism assemblies')
     
     # Calculation inputs
-    sp.add_argument('-m', '--modules', required=True, help='Comma-separated modules (coverage,phagetermini,assemblycheck)')
+    sp.add_argument('-m', '--modules', help='Comma-separated modules. Options: Coverage, Mapping metrics per position, Long-read metrics, Paired-read metrics, Phage termini. If not provided, all modules are computed.')
     sp.add_argument('--min_coverage', type=int, default=50, help='Minimum coverage for contig inclusion (default: 50%%)')
     sp.add_argument('--variation_percentage', type=float, default=50, help='Run-length encoding ratio for independent features like coverage (default: 50%%)')
     sp.add_argument('--coverage_percentage', type=float, default=10, help='Compressing ratio for features depending on coverage: only values above this %% of the local coverage are kept (default: 10%%)')
@@ -226,9 +226,10 @@ def main(argv=None):
             final_db = os.path.join(output_dir, 'features.db')
             calc_ns = argparse.Namespace(
                 threads=args.threads,
-                genbank=anno_target,  # Empty string if no annotation
+                genbank=anno_target if anno_target else None,  # None if no annotation
+                assembly=args.assembly,  # Pass assembly for autoblast
                 bam_files=map_outdir,
-                modules=args.modules,
+                modules=args.modules,  # None means all modules
                 output=final_db,
                 annotation_tool=args.annotation_tool if args.annotation_tool else "",
                 sequencing_type=args.sequencing_type,
@@ -236,6 +237,7 @@ def main(argv=None):
                 variation_percentage=args.variation_percentage,
                 coverage_percentage=args.coverage_percentage,
                 circular=args.circular,
+                max_samples_in_memory=10,  # Default value
             )
 
             print(f"[{step}/{total_steps}] Calculate: modules={args.modules} -> {final_db}")

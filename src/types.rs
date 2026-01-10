@@ -201,7 +201,14 @@ pub const VARIABLES: &[VariableConfig] = &[
     VariableConfig { name: "secondary_reads", subplot: "Other alignments", module: "Coverage", module_order: 3, plot_type: PlotType::Curve, color: "#1f77b4", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Secondary reads", help: None },
     VariableConfig { name: "supplementary_reads", subplot: "Other alignments", module: "Coverage", module_order: 3, plot_type: PlotType::Curve, color: "#B45C1F", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Supplementary reads", help: None },
     VariableConfig { name: "mapq", subplot: "MAPQ", module: "Coverage", module_order: 4, plot_type: PlotType::Curve, color: "#77dd77", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Mapping quality", help: None },
-
+        
+    // Per position errors from reads (Assembly check)
+    VariableConfig { name: "left_clippings", subplot: "Clippings", module: "Mapping metrics per position", module_order: 1, plot_type: PlotType::Bars, color: "#8e43e7", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Left clippings", help: Some("Extra bases are missing on the left of the reference genome") },
+    VariableConfig { name: "right_clippings", subplot: "Clippings", module: "Mapping metrics per position", module_order: 1, plot_type: PlotType::Bars, color: "#9CE743", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Right clippings", help: Some("Extra bases are missing on the right of the reference genome") },
+    VariableConfig { name: "insertions", subplot: "Indels", module: "Mapping metrics per position", module_order: 2, plot_type: PlotType::Bars, color: "#e50001", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Insertions", help: Some("Extra bases are present in the read but not in the reference") },
+    VariableConfig { name: "deletions", subplot: "Indels", module: "Mapping metrics per position", module_order: 2, plot_type: PlotType::Bars, color: "#00E5E4", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Deletions", help: Some("A stretch of the reference has no corresponding bases in the read") },
+    VariableConfig { name: "mismatches", subplot: "Mismatches", module: "Mapping metrics per position", module_order: 3, plot_type: PlotType::Bars, color: "#5a0f0b", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Mismatches", help: None },
+    
     // Per read metrics (long reads)
     VariableConfig { name: "read_lengths", subplot: "Read lengths", module: "Long-read metrics", module_order: 1, plot_type: PlotType::Curve, color: "#ed8b00", alpha: 0.8, fill_alpha: 0.4, size: 1.0, title: "Read lengths", help: None },
 
@@ -210,14 +217,7 @@ pub const VARIABLES: &[VariableConfig] = &[
     VariableConfig { name: "non_inward_pairs", subplot: "Non-inward pairs", module: "Paired-read metrics", module_order: 2, plot_type: PlotType::Curve, color: "#c94009", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Non-inward pairs", help: None },
     VariableConfig { name: "mate_not_mapped", subplot: "Mate not mapped", module: "Paired-read metrics", module_order: 3, plot_type: PlotType::Curve, color: "#302DD2", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Missing mates", help: None },
     VariableConfig { name: "mate_on_another_contig", subplot: "Mate on another contig", module: "Paired-read metrics", module_order: 4, plot_type: PlotType::Curve, color: "#CFD22D", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Missing mates", help: None },
-    
-    // Per position errors from reads (Assembly check)
-    VariableConfig { name: "left_clippings", subplot: "Clippings", module: "Mapping metrics per position", module_order: 1, plot_type: PlotType::Bars, color: "#8e43e7", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Left clippings", help: Some("Extra bases are missing on the left of the reference genome") },
-    VariableConfig { name: "right_clippings", subplot: "Clippings", module: "Mapping metrics per position", module_order: 1, plot_type: PlotType::Bars, color: "#9CE743", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Right clippings", help: Some("Extra bases are missing on the right of the reference genome") },
-    VariableConfig { name: "insertions", subplot: "Indels", module: "Mapping metrics per position", module_order: 2, plot_type: PlotType::Bars, color: "#e50001", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Insertions", help: Some("Extra bases are present in the read but not in the reference") },
-    VariableConfig { name: "deletions", subplot: "Indels", module: "Mapping metrics per position", module_order: 2, plot_type: PlotType::Bars, color: "#00E5E4", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Deletions", help: Some("A stretch of the reference has no corresponding bases in the read") },
-    VariableConfig { name: "mismatches", subplot: "Mismatches", module: "Mapping metrics per position", module_order: 3, plot_type: PlotType::Bars, color: "#5a0f0b", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Mismatches", help: None },
-    
+
     // Phage termini module - for detecting phage DNA packaging sites
     VariableConfig { name: "reads_starts", subplot: "Reads termini", module: "Phage termini", module_order: 2, plot_type: PlotType::Bars, color: "#215732", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Read starts", help: None },
     VariableConfig { name: "reads_ends", subplot: "Reads termini", module: "Phage termini", module_order: 3, plot_type: PlotType::Bars, color: "#572146", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Read ends", help: None },

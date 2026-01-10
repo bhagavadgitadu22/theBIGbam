@@ -12,7 +12,7 @@
 //!     genbank_path="annotation.gbk",
 //!     bam_dir="/path/to/bams",
 //!     output_dir="/path/to/output",
-//!     modules=["coverage", "phagetermini", "assemblycheck"],
+//!     modules=["Coverage", "Mapping metrics per position", "Long-read metrics", "Paired-read metrics", "Phage termini"],
 //!     threads=8,
 //!     annotation_tool="pharokka",
 //! )
@@ -64,7 +64,7 @@ mod python {
     ///     genbank_path: Path to the GenBank annotation file (empty string to skip)
     ///     bam_files: List of BAM file paths to process
     ///     output_db: Output database file path (.db)
-    ///     modules: List of modules to compute: "coverage", "phagetermini", "assemblycheck"
+    ///     modules: List of modules to compute: "Coverage", "Mapping metrics per position", "Long-read metrics", "Paired-read metrics", "Phage termini"
     ///     threads: Number of threads to use
     ///     annotation_tool: Annotation tool name (e.g., "pharokka")
     ///     min_coverage: Minimum coverage percentage for contig inclusion (default 50.0)

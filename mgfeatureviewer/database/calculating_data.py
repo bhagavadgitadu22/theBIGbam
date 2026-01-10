@@ -54,7 +54,7 @@ def add_calculate_args(parser):
     parser.add_argument("-g", "--genbank", help="Path to genbank file (optional; if not provided, no gene annotations will be stored)")
     parser.add_argument("-a", "--assembly", help="Path to assembly FASTA file (only needed for autoblast when genbank lacks sequence data)")
     parser.add_argument("-b", "--bam_files", required=True, help="Path to bam file or directory containing mapping files (BAM format)")
-    parser.add_argument("-m", "--modules", required=True, help="List of modules to compute (comma-separated) (options allowed: coverage, phagetermini, assemblycheck)")
+    parser.add_argument("-m", "--modules", required=False, default=None, help="List of modules to compute (comma-separated). If not provided, all modules are computed. Options: Coverage, Mapping metrics per position, Long-read metrics, Paired-read metrics, Phage termini")
     parser.add_argument("-o", "--output", required=True, help="Output database file path (.db)")
     parser.add_argument("--annotation_tool", default="", help="Optional: to color the contigs specify the annotation tool used (options allowed: pharokka)")
     parser.add_argument('-s', '--sequencing_type', choices=['long', 'paired-short', 'single-short'], help='Sequencing type (long or short allowed)')
@@ -63,6 +63,8 @@ def add_calculate_args(parser):
     parser.add_argument('--coverage_percentage', type=float, default=10, help='Compressing ratio for features depending on coverage: only values above this %% of the local coverage are kept (default: 10%%)')
     parser.add_argument("--circular", action="store_true", help="Set if assembly was doubled during mapping (enables modulo logic)")
     parser.add_argument("--max-samples-in-memory", type=int, default=10, help="Max samples to hold in memory during processing (default: 10). Lower for large datasets to reduce memory usage.")
+
+VALID_MODULES = ["Coverage", "Mapping metrics per position", "Long-read metrics", "Paired-read metrics", "Phage termini"]
 
 def run_calculate_args(args):
     annotation_tool = args.annotation_tool
@@ -76,7 +78,15 @@ def run_calculate_args(args):
     if not bam_files:
         sys.exit("ERROR: No BAM files found in the specified mapping path.")
 
-    requested_modules = args.modules.split(",")
+    if args.modules is None:
+        # Default: all modules
+        requested_modules = VALID_MODULES.copy()
+    else:
+        requested_modules = [m.strip() for m in args.modules.split(",")]
+        # Validate module names
+        for module in requested_modules:
+            if module not in VALID_MODULES:
+                sys.exit(f"ERROR: Unknown module '{module}'. Valid modules are: {', '.join(VALID_MODULES)}")
     min_coverage = args.min_coverage
     variation_percentage = args.variation_percentage
     coverage_percentage = args.coverage_percentage
@@ -95,11 +105,15 @@ def run_calculate_args(args):
 
     max_samples_in_memory = getattr(args, 'max_samples_in_memory', 10)
 
-    # Run autoblast if phagetermini module is requested
+    # Warn if "Phage termini" is requested without genbank
+    if "Phage termini" in requested_modules and not genbank_path:
+        print("WARNING: No annotation file was provided: phage packaging will not be determined properly for contigs harboring a terminal repeat at both ends. Rerun with an annotation file to perform the \"Phage termini\" module properly.", flush=True)
+
+    # Run autoblast if Phage termini module is requested
     autoblast_file = None
-    if "phagetermini" in requested_modules:
+    if "Phage termini" in requested_modules:
         from mgfeatureviewer.utils.autoblast import perform_autoblast, extract_fasta_from_genbank
-        print("Running autoblast for phagetermini analysis...", flush=True)
+        print("Running autoblast for Phage termini analysis...", flush=True)
 
         # Determine FASTA source: use assembly file if provided, otherwise extract from genbank
         fasta_path = None

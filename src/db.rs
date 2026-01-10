@@ -16,7 +16,7 @@
 
 use anyhow::{Context, Result};
 use duckdb::{params, Connection};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -29,6 +29,8 @@ pub struct DbWriter {
     sample_name_to_id: Mutex<HashMap<String, i64>>,
     next_sample_id: Mutex<i64>,
     variable_name_to_id: HashMap<String, i64>,
+    /// Tracks which feature tables have been created (lazy creation)
+    created_tables: Mutex<HashSet<String>>,
 }
 
 impl DbWriter {
@@ -74,6 +76,7 @@ impl DbWriter {
             sample_name_to_id: Mutex::new(HashMap::new()),
             next_sample_id: Mutex::new(1),
             variable_name_to_id,
+            created_tables: Mutex::new(HashSet::new()),
         })
     }
 
@@ -220,9 +223,13 @@ impl DbWriter {
         // Track row counts for summary table
         let mut summary_data: Vec<(i64, i64, i64)> = Vec::new(); // (contig_id, variable_id, count)
 
+        // Lock created_tables for lazy table creation
+        let mut created_tables = self.created_tables.lock().unwrap();
+
         for v in VARIABLES {
             // Skip primary_reads - it's a VIEW
-            if v.name == "primary_reads" {
+            // Skip direct_repeats/inverted_repeats - stored in Contig_* tables
+            if v.name == "primary_reads" || v.name == "direct_repeats" || v.name == "inverted_repeats" {
                 continue;
             }
 
@@ -232,6 +239,9 @@ impl DbWriter {
 
             let table_name = feature_table_name(v.name);
             let has_stats = features_with_stats.contains(&v.name);
+
+            // Create table lazily if it doesn't exist yet
+            create_feature_table_if_needed(conn, &table_name, has_stats, &mut created_tables)?;
 
             // Determine if this variable stores scaled integers
             let is_scaled = v.name == "tau" || v.name == "mapq";
@@ -349,7 +359,13 @@ impl DbWriter {
     /// Finalize the database after all samples are processed.
     pub fn finalize(self) -> Result<()> {
         let conn = self.conn.into_inner().unwrap();
-        create_views(&conn)?;
+        let created_tables = self.created_tables.into_inner().unwrap();
+
+        // Only create views if underlying tables exist
+        create_views(&conn, &created_tables)?;
+
+        // Delete Variable entries for features without tables
+        cleanup_unused_variables(&conn, &created_tables)?;
 
         // Force checkpoint to compress data and write to disk
         conn.execute("CHECKPOINT", [])
@@ -566,11 +582,8 @@ fn insert_annotations(conn: &Connection, annotations: &[FeatureAnnotation]) -> R
     Ok(())
 }
 
-/// Create Variable entries and Feature_* tables.
+/// Create Variable metadata entries only. Feature tables are created lazily.
 fn create_variable_tables(conn: &Connection) -> Result<()> {
-    // Features that need statistics columns
-    let features_with_stats = ["left_clippings", "right_clippings", "insertions"];
-
     for (i, v) in VARIABLES.iter().enumerate() {
         // Special case: repeat data is stored in separate Contig_* tables
         let table_name = match v.name {
@@ -599,58 +612,68 @@ fn create_variable_tables(conn: &Connection) -> Result<()> {
             ],
         )
         .with_context(|| format!("Failed to insert variable: {}", v.name))?;
-
-        // Skip creating physical table for:
-        // - primary_reads: it will be a VIEW instead
-        // - direct_repeats/inverted_repeats: data stored in Contig_* tables (created in create_core_tables)
-        if v.name == "primary_reads" || v.name == "direct_repeats" || v.name == "inverted_repeats" {
-            continue;
-        }
-
-        // All feature values stored as INTEGER (tau and mapq are ×100)
-        // No Feature_id needed - data is accessed by (Contig_id, Sample_id, position)
-        let table_sql = if features_with_stats.contains(&v.name) {
-            format!(
-                "CREATE TABLE {} (
-                    Contig_id INTEGER,
-                    Sample_id INTEGER,
-                    First_position INTEGER,
-                    Last_position INTEGER,
-                    Value INTEGER,
-                    Mean INTEGER,
-                    Median INTEGER,
-                    Std INTEGER
-                )",
-                table_name
-            )
-        } else {
-            format!(
-                "CREATE TABLE {} (
-                    Contig_id INTEGER,
-                    Sample_id INTEGER,
-                    First_position INTEGER,
-                    Last_position INTEGER,
-                    Value INTEGER
-                )",
-                table_name
-            )
-        };
-
-        conn.execute(&table_sql, [])
-            .with_context(|| format!("Failed to create table: {}", table_name))?;
     }
 
     Ok(())
 }
 
+/// Create a feature table if it doesn't exist yet.
+fn create_feature_table_if_needed(
+    conn: &Connection,
+    table_name: &str,
+    has_stats: bool,
+    created_tables: &mut HashSet<String>,
+) -> Result<()> {
+    if created_tables.contains(table_name) {
+        return Ok(());
+    }
+
+    let table_sql = if has_stats {
+        format!(
+            "CREATE TABLE {} (
+                Contig_id INTEGER,
+                Sample_id INTEGER,
+                First_position INTEGER,
+                Last_position INTEGER,
+                Value INTEGER,
+                Mean INTEGER,
+                Median INTEGER,
+                Std INTEGER
+            )",
+            table_name
+        )
+    } else {
+        format!(
+            "CREATE TABLE {} (
+                Contig_id INTEGER,
+                Sample_id INTEGER,
+                First_position INTEGER,
+                Last_position INTEGER,
+                Value INTEGER
+            )",
+            table_name
+        )
+    };
+
+    conn.execute(&table_sql, [])
+        .with_context(|| format!("Failed to create table: {}", table_name))?;
+
+    created_tables.insert(table_name.to_string());
+    Ok(())
+}
+
 /// Create views after all data is inserted.
-fn create_views(conn: &Connection) -> Result<()> {
-    // Create a VIEW that computes primary_reads as sum of plus and minus strands
-    // NOTE: The Bokeh server now bypasses this VIEW by computing in Python
-    // (merging Feature_primary_reads_plus_only + Feature_primary_reads_minus_only)
-    // to avoid OOM issues. This VIEW is kept for backward compatibility.
-    conn.execute(
-        "CREATE VIEW Feature_primary_reads AS
+fn create_views(conn: &Connection, created_tables: &HashSet<String>) -> Result<()> {
+    // Only create primary_reads VIEW if both underlying tables exist
+    let plus_table = "Feature_primary_reads_plus_only";
+    let minus_table = "Feature_primary_reads_minus_only";
+    if created_tables.contains(plus_table) && created_tables.contains(minus_table) {
+        // Create a VIEW that computes primary_reads as sum of plus and minus strands
+        // NOTE: The Bokeh server now bypasses this VIEW by computing in Python
+        // (merging Feature_primary_reads_plus_only + Feature_primary_reads_minus_only)
+        // to avoid OOM issues. This VIEW is kept for backward compatibility.
+        conn.execute(
+            "CREATE VIEW Feature_primary_reads AS
          WITH
          boundaries AS (
              SELECT Contig_id, Sample_id, First_position AS pos
@@ -714,8 +737,9 @@ fn create_views(conn: &Connection) -> Result<()> {
          FROM summed
          WHERE Value != 0",
         [],
-    )
-    .context("Failed to create primary_reads VIEW")?;
+        )
+        .context("Failed to create primary_reads VIEW")?;
+    }
 
     // Explicit_presences VIEW - note: divide by 100.0 to get original values for pct/variation
     conn.execute(
@@ -788,6 +812,49 @@ fn create_views(conn: &Connection) -> Result<()> {
         [],
     )
     .context("Failed to create Explicit_completeness VIEW")?;
+
+    Ok(())
+}
+
+/// Delete Variable entries for features that don't have data (no table created).
+fn cleanup_unused_variables(conn: &Connection, created_tables: &HashSet<String>) -> Result<()> {
+    // Get all variable names and their table names
+    let mut stmt = conn.prepare("SELECT Variable_name, Feature_table_name FROM Variable")?;
+    let rows: Vec<(String, String)> = stmt
+        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    let mut deleted_count = 0;
+    for (var_name, table_name) in rows {
+        // Skip special cases:
+        // - direct_repeats/inverted_repeats: data stored in Contig_* tables (always exist)
+        // - primary_reads: is a VIEW, not a table (depends on plus/minus tables)
+        if var_name == "direct_repeats" || var_name == "inverted_repeats" {
+            continue;
+        }
+
+        // For primary_reads VIEW, check if the underlying tables exist
+        if var_name == "primary_reads" {
+            let plus_exists = created_tables.contains("Feature_primary_reads_plus_only");
+            let minus_exists = created_tables.contains("Feature_primary_reads_minus_only");
+            if !plus_exists || !minus_exists {
+                conn.execute("DELETE FROM Variable WHERE Variable_name = ?1", params![var_name])?;
+                deleted_count += 1;
+            }
+            continue;
+        }
+
+        // For regular features, check if the table was created
+        if !created_tables.contains(&table_name) {
+            conn.execute("DELETE FROM Variable WHERE Variable_name = ?1", params![var_name])?;
+            deleted_count += 1;
+        }
+    }
+
+    if deleted_count > 0 {
+        eprintln!("Removed {} unused variable entries from database", deleted_count);
+    }
 
     Ok(())
 }
