@@ -292,6 +292,16 @@ impl FeatureArrays {
         }).collect()
     }
 
+    /// Compute mean coverage across all positions.
+    /// Returns the average of primary_reads as f64.
+    pub fn coverage_mean(&self) -> f64 {
+        if self.primary_reads.is_empty() {
+            0.0
+        } else {
+            self.primary_reads.iter().sum::<u64>() as f64 / self.primary_reads.len() as f64
+        }
+    }
+
     /// Convert to FeatureMap for assemblycheck features.
     ///
     /// Only includes features relevant to the sequencing type:

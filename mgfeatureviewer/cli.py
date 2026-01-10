@@ -83,7 +83,7 @@ def build_argparser():
     # Common mapping args (shared between both mapping modes)
     sp.add_argument('-r2', '--read2', help='Read2 file (optional, for paired-end reads)')
     sp.add_argument('-a', '--assembly', required=True, help='Reference assembly (fasta file)')
-    sp.add_argument('-s', '--sequencing_type', required=True, choices=['long', 'paired-short', 'single-short'], help='Sequencing type (long or short allowed). Use optionally if all your samples were sequenced the same way. If not specified, the tool will infer the sequencing type per bam file.')
+    sp.add_argument('-s', '--sequencing_type', required=True, choices=['long', 'paired-short', 'single-short'], help='Sequencing type: use "paired-short", "single-short" or "long". Use optionally if all your samples were sequenced the same way. If not specified, the tool will infer the sequencing type per bam file.')
     sp.add_argument('--circular', action='store_true', help='Treat assemblies as circular')
     sp.add_argument('-t', '--threads', type=int, default=4, help='Number of threads (default: 4)')
     

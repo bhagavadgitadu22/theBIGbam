@@ -426,6 +426,8 @@ pub struct PresenceData {
     /// Coverage-Weighted Total Variation: 1/(n-1) * Σ|cov(i+1) - cov(i)|
     /// Measures coverage smoothness (low = uniform, high = variable)
     pub coverage_variation: f32,
+    /// Mean coverage depth across all positions
+    pub coverage_mean: f32,
 }
 
 /// Phage packaging mechanism data for a contig in a sample.

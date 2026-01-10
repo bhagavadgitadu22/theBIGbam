@@ -561,10 +561,14 @@ pub fn process_sample(
                 0.0
             };
 
+            // Calculate mean coverage depth
+            let coverage_mean = arrays.coverage_mean() as f32;
+
             let presence = PresenceData {
                 contig_name: ref_name.clone(),
                 coverage_pct: coverage_pct as f32,
                 coverage_variation,
+                coverage_mean,
             };
 
             Some((features, presence, packaging_info, completeness_info))

@@ -58,7 +58,6 @@ subsampled_illumina_random_P1_SRR5042723_1_mapped_on_combined_assemblies     │
 
 ## On other utils:
 - Possibility to provide minimap2 parameters with tool? at least to say if map-ont pacbio...
-- !important! --sequencing-type {long,paired-short,single-short} but message says Sequencing type: use "long" or "short" -> discrepancy
 - During mapping discard reads that pass twice the termini ending, cause they will create fake clippings in circular mode just because they are too long to map on the reference. Or discard those reads directly in calculate?
 - Add possibility for user to annotate eukaryotic genome with eggnogg-mapper?
 - Think about proper way to calculate sequencing_type per sample?
@@ -79,12 +78,11 @@ subsampled_illumina_random_P1_SRR5042723_1_mapped_on_combined_assemblies     │
 - !important! Filter contigs by genes present to look for a specific function for example
 - !important! Make 2 buttons instead of just Apply: "Peruse" and "Plot". Peruse lets you see one tables with as many columns as plots requested. Plus show general statistics associated to this contig in this sample at the top. Similarly adapted for All-samples view with table showing differents statistics per samples as well
 - !important! Possibility to extract tables with data as well
-- !important! Be able to slide down in lists contigs and samples -> pagination
+- !important! Be able to slide down in autocomplete lists -> pagination easy to implement?
 - Flavobacterium147_T9_12_phage2 -> no sites kept because many small site -> i could plot sites post termini classification via view? idea highlight on plot of phagetermini via point or similar?
 - When i click on gene also have gray associated areas in subplots or remove gray altogether?
 - Show loading logo when waiting for plot to be generated
 - Change title Bokeh Application in the web page
-- !important! In All Samples mode only show samples that pass the filters from the filtering section for the contig selected
 
 # On publication: 
 

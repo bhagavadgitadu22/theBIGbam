@@ -139,9 +139,11 @@ impl DbWriter {
         for p in presences {
             if let Some(&contig_id) = self.contig_name_to_id.get(&p.contig_name) {
                 // Store coverage_percentage and coverage_variation as integers (×100)
+                // Store coverage_mean as integer (rounded)
                 let cov_pct = p.coverage_pct.round() as i32;
                 let cov_var = p.coverage_variation.round() as i32;
-                appender.append_row(params![contig_id, sample_id, cov_pct, cov_var])?;
+                let cov_mean = p.coverage_mean.round() as i32;
+                appender.append_row(params![contig_id, sample_id, cov_pct, cov_var, cov_mean])?;
             }
         }
 
@@ -386,6 +388,7 @@ fn create_core_tables(conn: &Connection) -> Result<()> {
     .context("Failed to create Sample table")?;
 
     // Coverage_percentage and Coverage_variation stored as INTEGER (×100)
+    // Coverage_mean stored as INTEGER (rounded)
     // No Presence_id needed - (Contig_id, Sample_id) is the natural key
     conn.execute(
         "CREATE TABLE Presences (
@@ -393,6 +396,7 @@ fn create_core_tables(conn: &Connection) -> Result<()> {
             Sample_id INTEGER,
             Coverage_percentage INTEGER,
             Coverage_variation INTEGER,
+            Coverage_mean INTEGER,
             PRIMARY KEY (Contig_id, Sample_id)
         )",
         [],
@@ -713,14 +717,15 @@ fn create_views(conn: &Connection) -> Result<()> {
     )
     .context("Failed to create primary_reads VIEW")?;
 
-    // Explicit_presences VIEW - note: divide by 100.0 to get original values
+    // Explicit_presences VIEW - note: divide by 100.0 to get original values for pct/variation
     conn.execute(
         "CREATE VIEW Explicit_presences AS
          SELECT
              c.Contig_name,
              s.Sample_name,
              p.Coverage_percentage AS Coverage_percentage,
-             p.Coverage_variation AS Coverage_variation
+             p.Coverage_variation AS Coverage_variation,
+             p.Coverage_mean AS Coverage_mean
          FROM Presences p
          JOIN Contig c ON p.Contig_id = c.Contig_id
          JOIN Sample s ON p.Sample_id = s.Sample_id",

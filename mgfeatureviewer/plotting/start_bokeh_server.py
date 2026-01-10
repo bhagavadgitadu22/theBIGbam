@@ -35,8 +35,18 @@ def build_controls(conn):
     except Exception:
         pass
 
+    # Get Coverage_mean min/max from Presences table (stored as INTEGER ×100)
+    coverage_mean_max = 0
+    try:
+        cur.execute("SELECT MIN(Coverage_mean), MAX(Coverage_mean) FROM Presences WHERE Coverage_mean IS NOT NULL")
+        result = cur.fetchone()
+        if result and result[0] is not None and result[1] is not None:
+            coverage_mean_min = result[0]
+            coverage_mean_max = result[1]
+    except Exception:
+        pass
+
     # Get Coverage_variation min/max from Presences table (stored as INTEGER ×100)
-    coverage_variation_min = 0.0
     coverage_variation_max = 100.0
     try:
         cur.execute("SELECT MIN(Coverage_variation), MAX(Coverage_variation) FROM Presences WHERE Coverage_variation IS NOT NULL")
@@ -235,7 +245,7 @@ def build_controls(conn):
         'sample_originally_disabled': len(samples) == 1,
         'phage_mechanisms': phage_mechanisms_list,
         'has_completeness': has_completeness,
-        'coverage_variation_min': coverage_variation_min,
+        'coverage_mean_max': coverage_mean_max,
         'coverage_variation_max': coverage_variation_max,
         'whole_contamination_max': whole_contamination_max
     }
@@ -430,17 +440,30 @@ def modify_doc_factory(db_path):
         conditions = []
         params = []
 
+        # In "One sample" view, filter by the selected sample for proper contig-sample pair filtering
+        if views.active == 0:
+            sel_sample = widgets['sample_select'].value
+            if sel_sample:
+                conditions.append("Sample_name = ?")
+                params.append(sel_sample)
+
         if coverage_percentage_slider is not None:
             min_val, max_val = coverage_percentage_slider.value
             if min_val > 0 or max_val < 100:
                 conditions.append("Coverage_percentage >= ? AND Coverage_percentage <= ?")
                 params.extend([min_val, max_val])
 
+        if coverage_mean_slider is not None:
+            min_val, max_val = coverage_mean_slider.value
+            cov_mean_max = widgets['coverage_mean_max']
+            if min_val > 0 or max_val < cov_mean_max:
+                conditions.append("Coverage_mean >= ? AND Coverage_mean <= ?")
+                params.extend([min_val, max_val])
+
         if coverage_variation_slider is not None:
             min_val, max_val = coverage_variation_slider.value
-            cov_var_min = widgets['coverage_variation_min']
             cov_var_max = widgets['coverage_variation_max']
-            if min_val > cov_var_min or max_val < cov_var_max:
+            if min_val > 0 or max_val < cov_var_max:
                 conditions.append("Coverage_variation >= ? AND Coverage_variation <= ?")
                 params.extend([min_val, max_val])
 
@@ -453,6 +476,13 @@ def modify_doc_factory(db_path):
         # Apply completeness filters using Explicit_completeness view (single combined query)
         conditions = []
         params = []
+
+        # In "One sample" view, filter by the selected sample for proper contig-sample pair filtering
+        if views.active == 0:
+            sel_sample = widgets['sample_select'].value
+            if sel_sample:
+                conditions.append("Sample_name = ?")
+                params.append(sel_sample)
 
         if prevalence_left_slider is not None:
             min_val, max_val = prevalence_left_slider.value
@@ -487,12 +517,21 @@ def modify_doc_factory(db_path):
 
         # Apply phage mechanism filter using Explicit_phage_mechanisms view
         if phage_mechanism_filter is not None and phage_mechanism_filter.value:
-            query = """
-                SELECT DISTINCT Contig_name
-                FROM Explicit_phage_mechanisms
-                WHERE Phage_packaging_mechanism = ?
-            """
-            cur.execute(query, (phage_mechanism_filter.value,))
+            sel_sample = widgets['sample_select'].value if views.active == 0 else None
+            if sel_sample:
+                query = """
+                    SELECT DISTINCT Contig_name
+                    FROM Explicit_phage_mechanisms
+                    WHERE Phage_packaging_mechanism = ? AND Sample_name = ?
+                """
+                cur.execute(query, (phage_mechanism_filter.value, sel_sample))
+            else:
+                query = """
+                    SELECT DISTINCT Contig_name
+                    FROM Explicit_phage_mechanisms
+                    WHERE Phage_packaging_mechanism = ?
+                """
+                cur.execute(query, (phage_mechanism_filter.value,))
             matching = {row[0] for row in cur.fetchall()}
             allowed_contigs &= matching
 
@@ -507,17 +546,30 @@ def modify_doc_factory(db_path):
         conditions = []
         params = []
 
+        # In "One sample" view, filter by the selected contig for proper contig-sample pair filtering
+        if views.active == 0:
+            sel_contig = widgets['contig_select'].value
+            if sel_contig:
+                conditions.append("Contig_name = ?")
+                params.append(sel_contig)
+
         if coverage_percentage_slider is not None:
             min_val, max_val = coverage_percentage_slider.value
             if min_val > 0 or max_val < 100:
                 conditions.append("Coverage_percentage >= ? AND Coverage_percentage <= ?")
                 params.extend([min_val, max_val])
 
+        if coverage_mean_slider is not None:
+            min_val, max_val = coverage_mean_slider.value
+            cov_mean_max = widgets['coverage_mean_max']
+            if min_val > 0 or max_val < cov_mean_max:
+                conditions.append("Coverage_mean >= ? AND Coverage_mean <= ?")
+                params.extend([min_val, max_val])
+
         if coverage_variation_slider is not None:
             min_val, max_val = coverage_variation_slider.value
-            cov_var_min = widgets['coverage_variation_min']
             cov_var_max = widgets['coverage_variation_max']
-            if min_val > cov_var_min or max_val < cov_var_max:
+            if min_val > 0 or max_val < cov_var_max:
                 conditions.append("Coverage_variation >= ? AND Coverage_variation <= ?")
                 params.extend([min_val, max_val])
 
@@ -530,6 +582,13 @@ def modify_doc_factory(db_path):
         # Apply completeness filters using Explicit_completeness view (single combined query)
         conditions = []
         params = []
+
+        # In "One sample" view, filter by the selected contig for proper contig-sample pair filtering
+        if views.active == 0:
+            sel_contig = widgets['contig_select'].value
+            if sel_contig:
+                conditions.append("Contig_name = ?")
+                params.append(sel_contig)
 
         if prevalence_left_slider is not None:
             min_val, max_val = prevalence_left_slider.value
@@ -564,12 +623,21 @@ def modify_doc_factory(db_path):
 
         # Apply phage mechanism filter using Explicit_phage_mechanisms view
         if phage_mechanism_filter is not None and phage_mechanism_filter.value:
-            query = """
-                SELECT DISTINCT Sample_name
-                FROM Explicit_phage_mechanisms
-                WHERE Phage_packaging_mechanism = ?
-            """
-            cur.execute(query, (phage_mechanism_filter.value,))
+            sel_contig = widgets['contig_select'].value if views.active == 0 else None
+            if sel_contig:
+                query = """
+                    SELECT DISTINCT Sample_name
+                    FROM Explicit_phage_mechanisms
+                    WHERE Phage_packaging_mechanism = ? AND Contig_name = ?
+                """
+                cur.execute(query, (phage_mechanism_filter.value, sel_contig))
+            else:
+                query = """
+                    SELECT DISTINCT Sample_name
+                    FROM Explicit_phage_mechanisms
+                    WHERE Phage_packaging_mechanism = ?
+                """
+                cur.execute(query, (phage_mechanism_filter.value,))
             matching = {row[0] for row in cur.fetchall()}
             allowed_samples &= matching
 
@@ -947,6 +1015,7 @@ def modify_doc_factory(db_path):
     pct_completeness_slider = None
     pct_contamination_slider = None
     coverage_percentage_slider = None
+    coverage_mean_slider = None
     coverage_variation_slider = None
 
     # Add "Per module" filtering subsection (if phage mechanisms or completeness data exists)
@@ -964,7 +1033,17 @@ def modify_doc_factory(db_path):
         coverage_percentage_slider.on_change('value', lambda attr, old, new: (refresh_contig_options(), refresh_sample_options()))
         filtering_children.append(coverage_percentage_slider)
 
-        cov_var_min = min(0, widgets['coverage_variation_min'])
+        cov_mean_min = 0
+        cov_mean_max = max(100, widgets['coverage_mean_max'])
+        coverage_mean_slider = RangeSlider(
+            start=cov_mean_min, end=cov_mean_max, value=(cov_mean_min, cov_mean_max), step=1,
+            title="Coverage mean",
+            sizing_mode="stretch_width"
+        )
+        coverage_mean_slider.on_change('value', lambda attr, old, new: (refresh_contig_options(), refresh_sample_options()))
+        filtering_children.append(coverage_mean_slider)
+
+        cov_var_min = 0
         cov_var_max = max(100, widgets['coverage_variation_max'])
         # Round for nice slider values
         coverage_variation_slider = RangeSlider(
