@@ -51,7 +51,7 @@ The MGFeatureViewer pipeline consists of two main steps:
 
 ### Database computation
 
-This is the core of the MGFeatureViewer pipeline. It takes a list of BAM files containing read mappings against contigs of interest and extracts relevant features to store them in a lightweight DuckDB database. 
+This is the core of the MGFeatureViewer pipeline. It takes a list of BAM files containing read mappings against contigs of interest and extracts relevant features to store them in a DuckDB database. Individual read information is discarded in favor of lightweight per-position averages.
 
 A genbank file containing annotations of your contigs of interest can also be provided to be added in the database.
 
@@ -60,14 +60,14 @@ A genbank file containing annotations of your contigs of interest can also be pr
 Calculate command takes at least a directory of mapping files (-b) and an output path for the database (-o):
 
 ```sh
-mgfeatureviewer calculate -b examples/inputs/HK97/bams --circular -g examples/inputs/HK97/HK97_GCF_000848825.1_pharokka.gbk --annotation_tool pharokka -o examples/outputs/HK97/HK97.db -t 4 
+mgfeatureviewer calculate -b examples/inputs/HK97/bams --circular -g examples/inputs/HK97/HK97_GCF_000848825.1_pharokka.gbk --annotation_tool pharokka -m "Coverage","Mapping metrics per position"-o examples/outputs/HK97/HK97.db -t 4 
 ```
 
 Here several optional parameters are added:
 
 - --circular is necessary if the mapping files were generated using the --circular option of the tool
 
-- -g option to provide an annotation file (here with genbank format .gbk)
+- -g option to provide an annotation file (GENBANK .gbk extension)
 
 - --annotation_tool to specify the bioinformatic tool used to generate the annotation file: it is used to color the genes on the genome track during the visualization
 
@@ -93,43 +93,51 @@ samtools index example.sorted.bam
 samtools calmd -b example.sorted.bam ref.fasta > example.sorted.md.bam
 ```
 
-Alternatively, if you do not have sorted mapping files with MD tags (.bam), you can generate them using the scripts provided in [the preprocessing section](docs/PREPROCESSING.md). The mapping scripts use a modified version of the standard mapper (minimap2) to allow for seamless circular mapping. 
+Alternatively, if you do not have sorted mapping files with MD tags (.bam extension), you can generate them using the scripts provided in [the preprocessing section](docs/PREPROCESSING.md). The mapping scripts use a modified version of the standard mapper (minimap2) to allow for seamless circular mapping. 
 
 **Warning:** If you use those mapping scripts with the --circular option, do not forget to specify the --circular flag as well when computing the database.
 
 ##### Annotation file:
 
-**Parameter:** --genbank FILE, short-version -g
+**Parameter (optional, strongly recommended):** --genbank FILE, short-version -g
 
-Annotation assembly file should be a .gbk or .gff file made with the tool of your choice: bakta for bacteria, pharokka or phold for phages, eggnog-mapper, etc.)
-
-TODO: what files can be inputted exactly?
+Annotation assembly file should be a GENBANK file (.gbk extension) made with the tool of your choice: bakta for bacteria, pharokka or phold for phages, eggnog-mapper, etc.).
 
 #### Which features can I calculate?
 
-**Parameter:** --modules LIST, short version -m
+**Parameter (optional):** --modules COMMA-SEPARATED LIST, short version -m
 
-MGFeatureViewer performs fast Rust-based computations on your BAM files to extract values corresponding to the modules you request. All modules are stored in the database unless you provide a specific list of modules.
-
-TODO: how to specify modules
+MGFeatureViewer performs fast Rust-based computations on your BAM files to extract relevant values and discard irrelevant information. All modules are computed and stored in the database unless you provide a specific subset of modules.
 
 5 modules exist at the moment:
 
-- **Coverage**: computes per-position coverage for primary, secondary, and supplementary reads
-- **Mapping metrics per position:**
-- **Long-read metrics:**
-- **Paired-read metrics:**
-- **Phage termini:**
-- **assemblycheck**: computes various metrics to assess contig completeness and contamination. This includes counts of clippings, indels, and mismatches. For long reads, read lengths are computed; for paired-end short reads, insert sizes and incorrect pair orientations are reported
-- **phagetermini**: analyzes the start and end positions of mapped reads, particularly useful for identifying phage termini (see the [PhageTerm publication](https://www.nature.com/articles/s41598-017-07910-5)). A stringent coverage metric is calculated using only reads that begin (and for long reads, end) with a match. For each position, the number of read starts, read ends, and the ratio $τ = (reads\_starts + reads\_ends) / stringent\_coverage$ are reported
+- **Coverage**: computes per-position coverage for primary, secondary, and supplementary reads, as well as the mapping quality (MAPQ)
+- **Mapping metrics per position:** computes per-position number of clippings, insertions, deletions and mismatches
+- **Long-read metrics:** computes per-position average length of reads
+- **Paired-read metrics:** computes per-position average insert size of reads along with the number of incorrect pair orientations (non-inward pairs, mate unmapped or mapping or another contig)
+- **Phage termini:** compute per-position coverage for primary-reads starting with an exact match. Among those reads, the number of mapped reads starting and ending is computed along with the tau ratio calculating the proportion of reads terminating at each position relative to the coverage
 
-The --modules (-m) option allows you to specify which of these features to compute. You can select one or more features by providing a comma-separated list (e.g., --modules coverage,phagetermini,assemblycheck).
+If an annotation file is provided, the **Genome** module is also computed. It keeps track of the contig annotations (positions of the coding sequences and their functions) and calculates the repeats contained within each contig using an autoblast.
 
-If an annotation file is provided, the Genome module is additionnally computed. It keeps track of the contig annotations (positions of the coding sequences and their functions) and calculates the repeats contained within each contig using an autoblast.
-
-A more detailed explanation of the modules and the features it contains is available in the preprocessing section](docs/FEATURES.md).
+A more detailed explanation of the modules and the features it contains is available in [the features section](docs/FEATURES.md).
 
 #### Database compression
+
+**Parameters (optional):** --min_coverage, --variation_percentage, --coverage_percentage
+
+Discarding the reads to only keep general summarise of the mappings (like the coverage per position) already allows the DuckDB database to be lighter than the original BAM file. 
+
+The database is organised per contig per sample. It is generally not useful though to save all possible pairs of contig/sample in the database: only pairs relative to a contig present in a sample should be stored in the database. The definition of a presence can be tweaked via the --min_coverage parameter: only contig/sample where at least x% of the contig received reads are kept in the database. The default is 50%, meaning a contig is considered present in a sample only if more than half of the contig received reads.
+
+To reduce further the size of the database, values per feature are compressed for each feature rather than saving all positions. This avoids absurd saving like constant coverage -> RLE
+
+3 parameters can be tweaked.
+
+- 
+
+- 
+
+
 
 For each sample, Rust computations are performed for all contigs detected as present in the BAM file (i.e., those exceeding the --min_coverage threshold). After computation, the final database is further reduced through a compression step. Coverage metrics are compressed using run-length encoding (RLE): consecutive positions with similar values (within the --compress_ratio threshold) are stored as a single entry, preserving the overall signal while drastically reducing storage size. For phagetermini and assemblycheck metrics, values are compared to the local coverage and discarded if they fall below the --compress_ratio threshold, ensuring that only meaningful peaks are retained. When consecutive positions remain after filtering, RLE is applied to group them.
 

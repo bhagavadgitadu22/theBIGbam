@@ -52,16 +52,16 @@ def calculating_all_features_parallel(list_modules, bam_files, output_db, min_co
 def add_calculate_args(parser):
     parser.add_argument("-t", "--threads", required=True, help="Number of threads available")
     parser.add_argument("-g", "--genbank", help="Path to genbank file (optional; if not provided, no gene annotations will be stored)")
-    parser.add_argument("-a", "--assembly", help="Path to assembly FASTA file (only needed for autoblast when genbank lacks sequence data)")
     parser.add_argument("-b", "--bam_files", required=True, help="Path to bam file or directory containing mapping files (BAM format)")
-    parser.add_argument("-m", "--modules", required=False, default=None, help="List of modules to compute (comma-separated). If not provided, all modules are computed. Options: Coverage, Mapping metrics per position, Long-read metrics, Paired-read metrics, Phage termini")
+    parser.add_argument("--circular", action="store_true", help="Set if assembly was doubled during mapping (enables modulo logic)")
     parser.add_argument("-o", "--output", required=True, help="Output database file path (.db)")
+    parser.add_argument("-m", "--modules", required=False, default=None, help="List of modules to compute (comma-separated). If not provided, all modules are computed. Options: Coverage, Mapping metrics per position, Long-read metrics, Paired-read metrics, Phage termini")
+    parser.add_argument("-a", "--assembly", help="Path to assembly FASTA file (only needed for autoblast when genbank lacks sequence data)")
     parser.add_argument("--annotation_tool", default="", help="Optional: to color the contigs specify the annotation tool used (options allowed: pharokka)")
     parser.add_argument('-s', '--sequencing_type', choices=['long', 'paired-short', 'single-short'], help='Sequencing type (long or short allowed)')
     parser.add_argument("--min_coverage", type=int, default=50, help="Minimum alignment-length coverage proportion for contig inclusion (default 50%% change threshold)")
     parser.add_argument('--variation_percentage', type=float, default=50, help='Run-length encoding ratio for independent features like coverage (default: 50%%)')
     parser.add_argument('--coverage_percentage', type=float, default=10, help='Compressing ratio for features depending on coverage: only values above this %% of the local coverage are kept (default: 10%%)')
-    parser.add_argument("--circular", action="store_true", help="Set if assembly was doubled during mapping (enables modulo logic)")
     parser.add_argument("--max-samples-in-memory", type=int, default=10, help="Max samples to hold in memory during processing (default: 10). Lower for large datasets to reduce memory usage.")
 
 VALID_MODULES = ["Coverage", "Mapping metrics per position", "Long-read metrics", "Paired-read metrics", "Phage termini"]

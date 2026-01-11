@@ -34,13 +34,15 @@ mgfeatureviewer mapping-all-samples --csv "${DIR}/mapping_rows.csv" -o "${DIR}/b
 
 ## Assembly annotation
 
-MGFeatureViewer requires a genbank file containing all your contigs of interest. 
+MGFeatureViewer requires a genbank file (.gbk extension) containing all your contigs of interest. 
 
 If you performed mappings for your different samples against several assemblies (typically one assembly per sample), you can concatenate all those assemblies into a single genbank file (example `cat assemblies/*.gbk > all_assemblies.gbk`). That can be useful if you want to annotate your contigs with several different software (typically bakta for bacteria and pharokka for phages).
 
 To avoid potential pitfalls down the read because of the use of different annotation software or conflicting metadata, MGFeatureViewer provides a utility to re-annotate your assemblies in a consistent manner. You can either provide a fasta file containing all your contigs of interest with the --assembly option or the same csv file used for mapping with the --csv option (only the 4th column assembly will be used then to identify all the contig files).
 
 For the moment, you can pick between 2 annotation softares using the --annotation_tool option: bakta for bacteria and pharokka for phages. If your assemblies contain 
+
+TODO: complete
 
 Examples of commands to annotate your contigs of interest:
 

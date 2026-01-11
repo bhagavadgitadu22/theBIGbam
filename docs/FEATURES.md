@@ -180,6 +180,8 @@ Soft/hard clipping occurs when part of a read does not align to the reference. T
 
 Features designed for detecting phage DNA packaging sites and terminus types. These are particularly useful for analyzing bacteriophage genomes.
 
+(see the [PhageTerm publication](https://www.nature.com/articles/s41598-017-07910-5))
+
 ### Subplot: Reads Termini
 
 These features count where reads physically start and end, which can reveal DNA packaging cut sites.
