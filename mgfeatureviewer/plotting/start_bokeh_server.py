@@ -637,6 +637,7 @@ def modify_doc_factory(db_path):
             completions = [c for c in completions if c in var_allowed]
 
         update_widget_completions(widgets['contig_select'], completions, widgets['contig_originally_disabled'])
+        update_section_titles()
 
     def refresh_sample_options():
         # Skip if locked (during view transitions to avoid cascading updates)
@@ -660,6 +661,26 @@ def modify_doc_factory(db_path):
             completions = [s for s in completions if s in var_allowed]
 
         update_widget_completions(widgets['sample_select'], completions, widgets['sample_originally_disabled'])
+        update_section_titles()
+
+    def update_section_titles():
+        """Update Filtering, Contigs, and Samples section titles with current counts."""
+        filtered_contigs = set(widgets['contig_select'].completions)
+        filtered_samples = set(widgets['sample_select'].completions)
+
+        # Count presences (valid contig/sample pairs within filtered sets)
+        presences_count = sum(
+            1 for contig in filtered_contigs
+            for sample in widgets['contig_to_samples'].get(contig, set())
+            if sample in filtered_samples
+        )
+
+        contigs_count = len(filtered_contigs)
+        samples_count = len(filtered_samples)
+
+        filtering_title.text = f"<b>Filtering</b> ({presences_count} contig/sample pairs)"
+        contig_title.text = f"<b>Contigs</b> ({contigs_count} available)"
+        sample_title.text = f"<b>Samples</b> ({samples_count} available)"
 
     ## Views function
     # Enforce single-variable selection when in "All samples" view
@@ -974,7 +995,7 @@ def modify_doc_factory(db_path):
             title="Coverage percentage (%)",
             sizing_mode="stretch_width"
         )
-        coverage_percentage_slider.on_change('value', lambda attr, old, new: (refresh_contig_options(), refresh_sample_options()))
+        coverage_percentage_slider.on_change('value_throttled', lambda attr, old, new: (refresh_contig_options(), refresh_sample_options()))
         filtering_children.append(coverage_percentage_slider)
 
         cov_mean_min = 0
@@ -984,7 +1005,7 @@ def modify_doc_factory(db_path):
             title="Coverage mean",
             sizing_mode="stretch_width"
         )
-        coverage_mean_slider.on_change('value', lambda attr, old, new: (refresh_contig_options(), refresh_sample_options()))
+        coverage_mean_slider.on_change('value_throttled', lambda attr, old, new: (refresh_contig_options(), refresh_sample_options()))
         filtering_children.append(coverage_mean_slider)
 
         cov_var_min = 0
@@ -995,7 +1016,7 @@ def modify_doc_factory(db_path):
             title="Coverage variation (%)",
             sizing_mode="stretch_width"
         )
-        coverage_variation_slider.on_change('value', lambda attr, old, new: (refresh_contig_options(), refresh_sample_options()))
+        coverage_variation_slider.on_change('value_throttled', lambda attr, old, new: (refresh_contig_options(), refresh_sample_options()))
         filtering_children.append(coverage_variation_slider)
 
         # Completeness range sliders (if Completeness table has data)
@@ -1005,21 +1026,21 @@ def modify_doc_factory(db_path):
                 title="Left completeness (%)",
                 sizing_mode="stretch_width"
             )
-            prevalence_left_slider.on_change('value', lambda attr, old, new: (refresh_contig_options(), refresh_sample_options()))
+            prevalence_left_slider.on_change('value_throttled', lambda attr, old, new: (refresh_contig_options(), refresh_sample_options()))
 
             prevalence_right_slider = RangeSlider(
                 start=0, end=100, value=(0, 100), step=1,
                 title="Right completeness (%)",
                 sizing_mode="stretch_width"
             )
-            prevalence_right_slider.on_change('value', lambda attr, old, new: (refresh_contig_options(), refresh_sample_options()))
+            prevalence_right_slider.on_change('value_throttled', lambda attr, old, new: (refresh_contig_options(), refresh_sample_options()))
 
             pct_completeness_slider = RangeSlider(
                 start=0, end=100, value=(0, 100), step=1,
                 title="Whole completeness (%)",
                 sizing_mode="stretch_width"
             )
-            pct_completeness_slider.on_change('value', lambda attr, old, new: (refresh_contig_options(), refresh_sample_options()))
+            pct_completeness_slider.on_change('value_throttled', lambda attr, old, new: (refresh_contig_options(), refresh_sample_options()))
 
             conta_max = max(100, widgets['whole_contamination_max'])
             pct_contamination_slider = RangeSlider(
@@ -1027,7 +1048,7 @@ def modify_doc_factory(db_path):
                 title="Whole contamination (%)",
                 sizing_mode="stretch_width"
             )
-            pct_contamination_slider.on_change('value', lambda attr, old, new: (refresh_contig_options(), refresh_sample_options()))
+            pct_contamination_slider.on_change('value_throttled', lambda attr, old, new: (refresh_contig_options(), refresh_sample_options()))
 
             filtering_children.extend([
                 prevalence_left_slider,
@@ -1107,7 +1128,7 @@ def modify_doc_factory(db_path):
     length_slider = None
     if len(widgets["contigs"]) > 1:
         length_slider = RangeSlider(start=min_len, end=max_len, value=(min_len, max_len), step=1, title="Contig length")
-        length_slider.on_change('value', lambda attr, old, new: refresh_contig_options())
+        length_slider.on_change('value_throttled', lambda attr, old, new: refresh_contig_options())
 
     # Create collapsible Filtering section
     contig_toggle_btn = Button(label="▼", width=20, height=20, button_type="primary", align="center", margin=0, stylesheets=[toggle_stylesheet])
@@ -1298,6 +1319,9 @@ def modify_doc_factory(db_path):
     apply_button = Button(label="APPLY", align="center", stylesheets=[stylesheet], css_classes=["apply-btn"])
     apply_button.on_click(lambda: apply_clicked())
 
+
+    ## Initialize section titles with counts
+    update_section_titles()
 
     ## Put together all DOM elements
     # Create visual separators (horizontal lines) using background color
