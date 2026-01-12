@@ -72,35 +72,29 @@ def build_controls(conn):
     contigs = [r[0] for r in rows]
     contig_lengths = {r[0]: r[1] for r in rows}  # Dictionary mapping contig_name -> length
     
-    # If only one contig, pre-fill and disable the field
-    contig_select = AutocompleteInput(value=contigs[0] if len(contigs) == 1 else "", 
-                                      completions=contigs, 
+    # If only one contig in database, pre-fill the field
+    contig_select = AutocompleteInput(value=contigs[0] if len(contigs) == 1 else "",
+                                      completions=contigs,
                                       min_characters=0,
                                       case_sensitive=False,
                                       restrict=False,
                                       max_completions=20,
                                       placeholder="Type to search contigs...",
-                                      sizing_mode="stretch_width",
-                                      disabled=len(contigs) == 1)
-    if len(contigs) == 1:
-        contig_select.styles = {'background-color': '#e0e0e0'}
+                                      sizing_mode="stretch_width")
 
     # Widget Selector for Samples (autocomplete with max 20 suggestions)
     cur.execute("SELECT Sample_name FROM Sample ORDER BY Sample_name")
     samples = [r[0] for r in cur.fetchall()]
     
-    # If only one sample, pre-fill and disable the field
-    sample_select = AutocompleteInput(value=samples[0] if len(samples) == 1 else "", 
+    # If only one sample in database, pre-fill the field
+    sample_select = AutocompleteInput(value=samples[0] if len(samples) == 1 else "",
                                       completions=samples,
                                       min_characters=0,
                                       case_sensitive=False,
                                       restrict=False,
                                       max_completions=20,
                                       placeholder="Type to search samples...",
-                                      sizing_mode="stretch_width",
-                                      disabled=len(samples) == 1)
-    if len(samples) == 1:
-        sample_select.styles = {'background-color': '#e0e0e0'}
+                                      sizing_mode="stretch_width")
     
     # Build presence mappings: sample -> contigs and contig -> samples
     cur.execute("""
@@ -231,8 +225,6 @@ def build_controls(conn):
         'contig_lengths': contig_lengths,
         'samples': samples,
         'variables': variables,
-        'contig_originally_disabled': len(contigs) == 1,
-        'sample_originally_disabled': len(samples) == 1,
         'phage_mechanisms': phage_mechanisms_list,
         'has_completeness': has_completeness,
         'coverage_mean_max': coverage_mean_max,
@@ -587,30 +579,19 @@ def modify_doc_factory(db_path):
 
         return allowed_samples
 
-    def update_widget_completions(widget, completions, originally_disabled=False):
-        """Update widget completions. Auto-fill and disable when filtering reduces to 1 option."""
+    def update_widget_completions(widget, completions):
+        """Update widget completions. Clear value if not in completions."""
         widget.completions = completions
-        
-        if len(completions) == 1:
-            # Only one option after filtering: fill it, disable, and gray background
-            widget.value = completions[0]
-            widget.disabled = True
-            widget.styles = {'background-color': '#e0e0e0'}
-        else:
-            # Multiple options: re-enable (unless originally disabled), restore normal background
-            if not originally_disabled:
-                widget.disabled = False
-                widget.styles = {}
-            # Clear value if it's not in the new completions
-            if widget.value not in completions:
-                widget.value = ""
+        # Clear value if it's not in the new completions
+        if widget.value not in completions:
+            widget.value = ""
     
     def refresh_contig_options():
         # Skip if locked (during view transitions to avoid cascading updates)
         if global_toggle_lock.get('locked', False):
             return
-        # Start with presence filter if active
-        if 0 in filter_contigs.active and views.active == 0:
+        # Apply presence filter only if a sample is selected (One Sample view)
+        if views.active == 0 and widgets['sample_select'].value:
             sel_sample = widgets['sample_select'].value
             allowed = widgets['sample_to_contigs'].get(sel_sample, set())
             completions = [c for c in orig_contigs if c in allowed]
@@ -636,15 +617,15 @@ def modify_doc_factory(db_path):
             var_allowed = get_variable_filtered_contigs_any_sample()
             completions = [c for c in completions if c in var_allowed]
 
-        update_widget_completions(widgets['contig_select'], completions, widgets['contig_originally_disabled'])
+        update_widget_completions(widgets['contig_select'], completions)
         update_section_titles()
 
     def refresh_sample_options():
         # Skip if locked (during view transitions to avoid cascading updates)
         if global_toggle_lock.get('locked', False):
             return
-        # Start with presence filter if active
-        if 0 in filter_samples.active and views.active == 0:
+        # Apply presence filter only if a contig is selected (One Sample view)
+        if views.active == 0 and widgets['contig_select'].value:
             sel_contig = widgets['contig_select'].value
             allowed = widgets['contig_to_samples'].get(sel_contig, set())
             completions = [s for s in orig_samples if s in allowed]
@@ -660,7 +641,7 @@ def modify_doc_factory(db_path):
             var_allowed = get_variable_filtered_samples()
             completions = [s for s in completions if s in var_allowed]
 
-        update_widget_completions(widgets['sample_select'], completions, widgets['sample_originally_disabled'])
+        update_widget_completions(widgets['sample_select'], completions)
         update_section_titles()
 
     def update_section_titles():
@@ -735,15 +716,7 @@ def modify_doc_factory(db_path):
         separator_samples.visible = not is_all
         sample_header.visible = not is_all
         above_sample_content.visible = not is_all
-        filter_samples.visible = not is_all
         widgets['sample_select'].visible = not is_all
-
-        # Contig section: keep visible but hide filter checkbox in All samples mode
-        filter_contigs.visible = not is_all
-
-        if is_all:
-            filter_contigs.active = []
-            filter_samples.active = []
 
         # Toggle visibility between the two variables sections
         # Each section maintains its own state independently
@@ -983,6 +956,18 @@ def modify_doc_factory(db_path):
     coverage_mean_slider = None
     coverage_variation_slider = None
 
+    # Add "Contig filters" subsection (if multiple contigs)
+    min_len = min(widgets['contig_lengths'].values())
+    max_len = max(widgets['contig_lengths'].values())
+    length_slider = None
+    if len(widgets["contigs"]) > 1:
+        contig_filters_title = Div(text="<b>Contig filters:</b>")
+        filtering_children.append(contig_filters_title)
+
+        length_slider = RangeSlider(start=min_len, end=max_len, value=(min_len, max_len), step=1, title="Contig length", sizing_mode="stretch_width")
+        length_slider.on_change('value_throttled', lambda attr, old, new: refresh_contig_options())
+        filtering_children.append(length_slider)
+
     # Add "Per module" filtering subsection (if phage mechanisms or completeness data exists)
     has_module_filters = widgets['phage_mechanisms'] or widgets['has_completeness']
     if has_module_filters:
@@ -1101,10 +1086,7 @@ def modify_doc_factory(db_path):
     sample_title = Div(text="<b>Samples</b>", align="center")
     sample_header = row(sample_toggle_btn, sample_title, sizing_mode="stretch_width", align="center")
 
-    filter_samples = CheckboxGroup(labels=["Only show samples present with selected contig"], active=[])
-    filter_samples.on_change('active', lambda attr, old, new: refresh_sample_options())
-
-    above_sample_children = [filter_samples]
+    above_sample_children = []
     above_sample_content = column(
         *above_sample_children,
         visible=True, sizing_mode="stretch_width"
@@ -1119,25 +1101,12 @@ def modify_doc_factory(db_path):
     orig_contigs = list(widgets['contigs'])
     orig_samples = list(widgets['samples'])
 
-    filter_contigs = CheckboxGroup(labels=["Only show contigs present with selected sample"], active=[])
-    filter_contigs.on_change('active', lambda attr, old, new: refresh_contig_options())
-
-    # Length filter slider (only if multiple contigs)
-    min_len = min(widgets['contig_lengths'].values())
-    max_len = max(widgets['contig_lengths'].values())
-    length_slider = None
-    if len(widgets["contigs"]) > 1:
-        length_slider = RangeSlider(start=min_len, end=max_len, value=(min_len, max_len), step=1, title="Contig length")
-        length_slider.on_change('value_throttled', lambda attr, old, new: refresh_contig_options())
-
-    # Create collapsible Filtering section
+    # Create Contigs section header
     contig_toggle_btn = Button(label="▼", width=20, height=20, button_type="primary", align="center", margin=0, stylesheets=[toggle_stylesheet])
     contig_toggle_btn.styles = {'padding': '0px', 'line-height': '20px'}
     contig_title = Div(text="<b>Contigs</b>", align="center")
     contig_header = row(contig_toggle_btn, contig_title, sizing_mode="stretch_width", align="center")
-    above_contig_children = [filter_contigs]
-    if length_slider is not None:
-        above_contig_children.append(length_slider)
+    above_contig_children = []
     
     above_contig_content = column(
         *above_contig_children,
