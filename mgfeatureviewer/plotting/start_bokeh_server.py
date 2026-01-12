@@ -74,7 +74,7 @@ def build_controls(conn):
     
     # If only one contig in database, pre-fill the field
     contig_select = AutocompleteInput(value=contigs[0] if len(contigs) == 1 else "",
-                                      completions=contigs,
+                                      completions=[""] + contigs,
                                       min_characters=0,
                                       case_sensitive=False,
                                       restrict=False,
@@ -88,14 +88,14 @@ def build_controls(conn):
     
     # If only one sample in database, pre-fill the field
     sample_select = AutocompleteInput(value=samples[0] if len(samples) == 1 else "",
-                                      completions=samples,
+                                      completions=[""] + samples,
                                       min_characters=0,
                                       case_sensitive=False,
                                       restrict=False,
                                       max_completions=20,
                                       placeholder="Type to search samples...",
                                       sizing_mode="stretch_width")
-    
+
     # Build presence mappings: sample -> contigs and contig -> samples
     cur.execute("""
     SELECT Contig.Contig_name, Sample.Sample_name FROM Presences
@@ -581,9 +581,10 @@ def modify_doc_factory(db_path):
 
     def update_widget_completions(widget, completions):
         """Update widget completions. Clear value if not in completions."""
-        widget.completions = completions
-        # Clear value if it's not in the new completions
-        if widget.value not in completions:
+        # Always add empty option at top to work around Bokeh AutocompleteInput click bug
+        widget.completions = [""] + completions
+        # Clear value if it's not in the new completions (empty is always valid)
+        if widget.value and widget.value not in completions:
             widget.value = ""
     
     def refresh_contig_options():
@@ -646,8 +647,8 @@ def modify_doc_factory(db_path):
 
     def update_section_titles():
         """Update Filtering, Contigs, and Samples section titles with current counts."""
-        filtered_contigs = set(widgets['contig_select'].completions)
-        filtered_samples = set(widgets['sample_select'].completions)
+        filtered_contigs = set(widgets['contig_select'].completions) - {""}
+        filtered_samples = set(widgets['sample_select'].completions) - {""}
 
         # Count presences (valid contig/sample pairs within filtered sets)
         presences_count = sum(
