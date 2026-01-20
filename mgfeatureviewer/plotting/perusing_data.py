@@ -15,8 +15,8 @@ def build_summary_data(conn, contig_name, sample_names):
     coverage_cols = {
         "Coverage_percentage": "Aligned fraction (%)", "Coverage_mean": "Coverage mean", "Coverage_median": "Coverage median",
         "Coverage_sd": "Coverage sd", "Coverage_variation": "Coverage variation", 
-        "Coverage_mean_corrected_by_read_number": "Coverage mean (2)", "Coverage_mean_corrected_by_read_mapped": "Coverage mean (2)",
-        "Coverage_median_corrected_by_read_number": "Coverage median (3)", "Coverage_median_corrected_by_read_mapped": "Coverage median (3)"
+        "Coverage_mean_corrected_by_read_number": "Coverage mean (2)", "Coverage_median_corrected_by_read_number": "Coverage median (2)", 
+        "Coverage_mean_corrected_by_read_mapped": "Coverage mean (3)", "Coverage_median_corrected_by_read_mapped": "Coverage median (3)"
     }
 
     completeness_cols = {
