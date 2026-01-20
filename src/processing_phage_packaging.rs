@@ -31,7 +31,7 @@ pub struct PhageTerminiConfig {
 impl Default for PhageTerminiConfig {
     fn default() -> Self {
         Self {
-            min_aligned_fraction: 100,
+            min_aligned_fraction: 90,
             min_events: 10,
             min_frequency: 10,
             max_distance_peaks: 20,
