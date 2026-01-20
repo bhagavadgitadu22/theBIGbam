@@ -44,7 +44,7 @@ Coverage Mean = Sum of coverage at all positions / Contig length
 **How it's computed:**
 
 ```
-Coverage Variation = 100 * (1 / (n-1)) × Σ((coverage(i+1) - coverage(i)) / coverage_mean)^2
+Coverage Variation = (1 / (n-1)) × Σ((coverage(i+1) - coverage(i)))^2 / coverage_mean
 ```
 
 Where n is the contig length and the sum runs over all consecutive position pairs.

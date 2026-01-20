@@ -355,6 +355,73 @@ impl DbWriter {
         direct_appender.flush().context("Failed to flush Contig_DirectRepeats appender")?;
         inverted_appender.flush().context("Failed to flush Contig_InvertedRepeats appender")?;
         eprintln!("Wrote {} direct repeats and {} inverted repeats to database", direct_count, inverted_count);
+
+        // Calculate and update duplication percentages for all contigs
+        drop(direct_appender);
+        drop(inverted_appender);
+        self.update_duplication_percentages(&conn, repeats)?;
+
+        Ok(())
+    }
+
+    /// Calculate and update Duplication_percentage for all contigs based on repeat data.
+    /// For each contig, merges overlapping repeat intervals (both copies) and calculates
+    /// the percentage of the contig covered by repeats.
+    fn update_duplication_percentages(&self, conn: &Connection, repeats: &[RepeatsData]) -> Result<()> {
+        // Build a map of contig_id -> contig_length from the database
+        let contig_lengths: HashMap<i64, i64> = {
+            let mut stmt = conn.prepare("SELECT Contig_id, Contig_length FROM Contig")?;
+            let rows = stmt.query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))?;
+            rows.filter_map(|r| r.ok()).collect()
+        };
+
+        // Group repeat intervals by contig
+        let mut intervals_by_contig: HashMap<i64, Vec<(i32, i32)>> = HashMap::new();
+        for rep in repeats {
+            if let Some(&contig_id) = self.contig_name_to_id.get(&rep.contig_name) {
+                // Add both copies of the repeat (first copy and second copy)
+                // Normalize so start <= end
+                let (start1, end1) = (rep.position1.min(rep.position2), rep.position1.max(rep.position2));
+                let (start2, end2) = (rep.position1prime.min(rep.position2prime), rep.position1prime.max(rep.position2prime));
+
+                intervals_by_contig.entry(contig_id).or_default().push((start1, end1));
+                intervals_by_contig.entry(contig_id).or_default().push((start2, end2));
+            }
+        }
+
+        // Set Duplication_percentage to 0 for all contigs without repeats
+        let contig_ids_with_repeats: HashSet<i64> = intervals_by_contig.keys().copied().collect();
+        for &contig_id in contig_lengths.keys() {
+            if !contig_ids_with_repeats.contains(&contig_id) {
+                conn.execute(
+                    "UPDATE Contig SET Duplication_percentage = 0 WHERE Contig_id = ?1",
+                    params![contig_id],
+                )?;
+            }
+        }
+
+        // Calculate and update duplication percentage for each contig with repeats
+        for (contig_id, intervals) in intervals_by_contig {
+            let contig_length = *contig_lengths
+                .get(&contig_id)
+                .expect("contig_id not found");
+
+            // Merge overlapping intervals
+            let merged = merge_intervals(intervals);
+
+            // Sum the total base pairs covered by merged intervals
+            let total_bp: i64 = merged.iter().map(|(start, end)| (*end - *start + 1) as i64).sum();
+
+            // Calculate percentage (rounded to integer)
+            let percentage = ((total_bp as f64 / contig_length as f64) * 100.0).round() as i32;
+
+            // Update the Contig table
+            conn.execute(
+                "UPDATE Contig SET Duplication_percentage = ?1 WHERE Contig_id = ?2",
+                params![percentage, contig_id],
+            )?;
+        }
+
         Ok(())
     }
 
@@ -389,7 +456,8 @@ fn create_core_tables(conn: &Connection) -> Result<()> {
             Contig_id INTEGER PRIMARY KEY,
             Contig_name TEXT UNIQUE,
             Contig_length INTEGER,
-            Annotation_tool TEXT
+            Annotation_tool TEXT,
+            Duplication_percentage INTEGER
         )",
         [],
     )
@@ -549,11 +617,13 @@ fn insert_contigs(conn: &Connection, contigs: &[ContigInfo]) -> Result<()> {
         .context("Failed to create Contig appender")?;
 
     for (i, contig) in contigs.iter().enumerate() {
+        let null_int: Option<i32> = None;
         appender.append_row(params![
             (i + 1) as i64,
             &contig.name,
             contig.length as i64,
-            &contig.annotation_tool
+            &contig.annotation_tool,
+            null_int  // Duplication_percentage - set later from autoblast
         ])
         .with_context(|| format!("Failed to append contig: {}", contig.name))?;
     }
@@ -771,6 +841,41 @@ fn create_views(conn: &Connection, created_tables: &HashSet<String>) -> Result<(
     )
     .context("Failed to create Explicit_presences VIEW")?;
 
+    // Explicit_completeness VIEW - derives completeness from clipping prevalence
+    // Completeness = 1 - clipping_prevalence (higher clipping = lower completeness)
+    conn.execute(
+        "CREATE VIEW Explicit_completeness AS
+         SELECT
+             c.Contig_name,
+             s.Sample_name,
+             COALESCE(100 - comp.Prevalence_clippings_left, 100) AS Prevalence_completeness_left,
+             COALESCE(comp.Distance_contaminated_left, 0) AS Distance_contaminated_left,
+             COALESCE(comp.Min_missing_left, 0) AS Min_missing_left,
+             COALESCE(100 - comp.Prevalence_clippings_right, 100) AS Prevalence_completeness_right,
+             COALESCE(comp.Distance_contaminated_right, 0) AS Distance_contaminated_right,
+             COALESCE(comp.Min_missing_right, 0) AS Min_missing_right,
+             COALESCE(comp.Total_mismatches, 0) AS Total_mismatches,
+             COALESCE(comp.Total_deletions, 0) AS Total_deletions,
+             COALESCE(comp.Total_insertions, 0) AS Total_insertions,
+             COALESCE(comp.Total_reads_clipped, 0) AS Total_reads_clipped,
+             COALESCE(comp.Total_reference_clipped, 0) AS Total_reference_clipped,
+             COALESCE(comp.Total_mismatches, 0) + COALESCE(comp.Total_insertions, 0) + COALESCE(comp.Total_reads_clipped, 0) AS Score_completeness,
+             CASE WHEN c.Contig_length > 0 THEN ROUND(
+                100 - (
+                    (COALESCE(comp.Total_mismatches, 0) + COALESCE(comp.Total_insertions, 0) + COALESCE(comp.Total_reads_clipped, 0)) * 100 / c.Contig_length
+                )
+             )::INTEGER ELSE 100 END AS Percentage_completeness,
+             COALESCE(comp.Total_mismatches, 0) + COALESCE(comp.Total_deletions, 0) + COALESCE(comp.Total_reference_clipped, 0) AS Score_contamination,
+             CASE WHEN c.Contig_length > 0 THEN ROUND(
+                (COALESCE(comp.Total_mismatches, 0) + COALESCE(comp.Total_deletions, 0) + COALESCE(comp.Total_reference_clipped, 0)) * 100 / c.Contig_length
+             )::INTEGER ELSE 100 END AS Percentage_contamination
+         FROM Completeness comp
+         JOIN Contig c ON comp.Contig_id = c.Contig_id
+         JOIN Sample s ON comp.Sample_id = s.Sample_id",
+        [],
+    )
+    .context("Failed to create Explicit_completeness VIEW")?;
+
     // Explicit_phage_mechanisms VIEW
     conn.execute(
         "CREATE VIEW Explicit_phage_mechanisms AS
@@ -791,41 +896,6 @@ fn create_views(conn: &Connection, created_tables: &HashSet<String>) -> Result<(
         [],
     )
     .context("Failed to create Explicit_phage_mechanisms VIEW")?;
-
-    // Explicit_completeness VIEW - derives completeness from clipping prevalence
-    // Completeness = 1 - clipping_prevalence (higher clipping = lower completeness)
-    conn.execute(
-        "CREATE VIEW Explicit_completeness AS
-         SELECT
-             c.Contig_name,
-             s.Sample_name,
-             100 - comp.Prevalence_clippings_left AS Prevalence_completeness_left,
-             comp.Distance_contaminated_left,
-             comp.Min_missing_left,
-             100 - comp.Prevalence_clippings_right AS Prevalence_completeness_right,
-             comp.Distance_contaminated_right,
-             comp.Min_missing_right,
-             comp.Total_mismatches,
-             comp.Total_deletions,
-             comp.Total_insertions,
-             comp.Total_reads_clipped,
-             comp.Total_reference_clipped,
-             COALESCE(comp.Total_mismatches, 0) + COALESCE(comp.Total_insertions, 0) + COALESCE(comp.Total_reads_clipped, 0) AS Score_completeness,
-             CASE WHEN c.Contig_length > 0 THEN ROUND(
-                100 - (
-                    (COALESCE(comp.Total_mismatches, 0) + COALESCE(comp.Total_insertions, 0) + COALESCE(comp.Total_reads_clipped, 0)) * 100 / c.Contig_length
-                )
-             )::INTEGER ELSE NULL END AS Percentage_completeness,
-             COALESCE(comp.Total_mismatches, 0) + COALESCE(comp.Total_deletions, 0) + COALESCE(comp.Total_reference_clipped, 0) AS Score_contamination,
-             CASE WHEN c.Contig_length > 0 THEN ROUND(
-                (COALESCE(comp.Total_mismatches, 0) + COALESCE(comp.Total_deletions, 0) + COALESCE(comp.Total_reference_clipped, 0)) * 100 / c.Contig_length
-             )::INTEGER ELSE NULL END AS Percentage_contamination
-         FROM Completeness comp
-         JOIN Contig c ON comp.Contig_id = c.Contig_id
-         JOIN Sample s ON comp.Sample_id = s.Sample_id",
-        [],
-    )
-    .context("Failed to create Explicit_completeness VIEW")?;
 
     Ok(())
 }
@@ -871,6 +941,35 @@ fn cleanup_unused_variables(conn: &Connection, created_tables: &HashSet<String>)
     }
 
     Ok(())
+}
+
+/// Merge overlapping intervals into non-overlapping intervals.
+/// Takes a vector of (start, end) intervals and returns merged intervals.
+/// Assumes start <= end for each interval.
+fn merge_intervals(mut intervals: Vec<(i32, i32)>) -> Vec<(i32, i32)> {
+    if intervals.is_empty() {
+        return Vec::new();
+    }
+
+    // Sort by start position
+    intervals.sort_by_key(|&(start, _)| start);
+
+    let mut merged: Vec<(i32, i32)> = Vec::new();
+    let mut current = intervals[0];
+
+    for &(start, end) in &intervals[1..] {
+        if start <= current.1 + 1 {
+            // Overlapping or adjacent: extend the current interval
+            current.1 = current.1.max(end);
+        } else {
+            // No overlap: save current and start a new interval
+            merged.push(current);
+            current = (start, end);
+        }
+    }
+    merged.push(current);
+
+    merged
 }
 
 /// Repeats data from self-BLAST results.

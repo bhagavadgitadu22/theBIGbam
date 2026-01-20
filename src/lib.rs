@@ -25,7 +25,7 @@ pub mod circular;
 pub mod compress;
 pub mod db;
 pub mod features;
-pub mod genbank;
+pub mod parser;
 pub mod processing;
 pub mod processing_completeness;
 pub mod processing_phage_packaging;
@@ -37,7 +37,7 @@ pub use cigar::{Cigar, CigarElement, CigarOp, MdTag};
 pub use circular::{increment_circular, increment_range};
 pub use compress::compress_signal_with_reference;
 pub use features::{process_read, FeatureArrays, ModuleFlags};
-pub use genbank::parse_genbank;
+pub use parser::{parse_annotations, parse_genbank, parse_gff3};
 pub use processing::{run_all_samples, ProcessConfig};
 pub use processing_phage_packaging::PhageTerminiConfig;
 pub use types::{

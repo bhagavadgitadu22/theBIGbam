@@ -51,7 +51,7 @@ def calculating_all_features_parallel(list_modules, bam_files, output_db, min_co
 
 def add_calculate_args(parser):
     parser.add_argument("-t", "--threads", required=True, help="Number of threads available")
-    parser.add_argument("-g", "--genbank", help="Path to genbank file (optional; if not provided, no gene annotations will be stored)")
+    parser.add_argument("-g", "--genbank", help="Path to annotation file: GenBank (.gbk, .gbff) or GFF3 (.gff) format (optional; if not provided, no gene annotations will be stored)")
     parser.add_argument("-b", "--bam_files", required=True, help="Path to bam file or directory containing mapping files (BAM format)")
     parser.add_argument("--circular", action="store_true", help="Set if assembly was doubled during mapping (enables modulo logic)")
     parser.add_argument("-o", "--output", required=True, help="Output database file path (.db)")
@@ -98,7 +98,13 @@ def run_calculate_args(args):
         sys.exit(f"ERROR: Output file '{output_db}' already exists. Please provide a new path to avoid overwriting.")
 
     if genbank_path and not os.path.exists(genbank_path):
-        sys.exit(f"ERROR: GenBank file not found: {genbank_path}")
+        sys.exit(f"ERROR: Annotation file not found: {genbank_path}")
+
+    # Validate annotation file extension
+    if genbank_path:
+        valid_extensions = ('.gbk', '.gbff', '.gb', '.genbank', '.gff', '.gff3')
+        if not genbank_path.lower().endswith(valid_extensions):
+            sys.exit(f"ERROR: Unsupported annotation file format. Supported extensions: {', '.join(valid_extensions)}")
 
     if assembly_path and not os.path.exists(assembly_path):
         sys.exit(f"ERROR: Assembly file not found: {assembly_path}")

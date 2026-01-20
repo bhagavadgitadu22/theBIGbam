@@ -8,13 +8,13 @@ import panel as pn
 
 from bokeh.layouts import column, row
 from bokeh.models import Div, InlineStyleSheet, Tooltip
-from bokeh.models.callbacks import CustomJS
 from bokeh.models.widgets import AutocompleteInput, CheckboxGroup, HelpButton, Button, RadioButtonGroup, CheckboxButtonGroup, Select, TextInput
 from bokeh.models.plots import GridPlot
 
 # Import the plotting function from the repo
 from .plotting_data_per_sample import generate_bokeh_plot_per_sample
 from .plotting_data_all_samples import generate_bokeh_plot_all_samples
+from .perusing_data import build_summary_data, generate_summary_table
 
 def build_controls(conn):
 
@@ -90,11 +90,26 @@ def build_controls(conn):
     except Exception:
         pass
 
+    # Get Duplication_percentage min/max from Contig table
+    duplication_percentage_min = 0
+    duplication_percentage_max = 100
+    has_duplication_data = False
+    try:
+        cur.execute("SELECT MIN(Duplication_percentage), MAX(Duplication_percentage) FROM Contig WHERE Duplication_percentage IS NOT NULL")
+        result = cur.fetchone()
+        if result and result[0] is not None and result[1] is not None:
+            duplication_percentage_min = result[0]
+            duplication_percentage_max = result[1]
+            has_duplication_data = True
+    except Exception:
+        pass
+
     # Widget Selector for Contigs (autocomplete with max 20 suggestions)
-    cur.execute("SELECT Contig_name, Contig_length FROM Contig ORDER BY Contig_name")
+    cur.execute("SELECT Contig_name, Contig_length, Duplication_percentage FROM Contig ORDER BY Contig_name")
     rows = cur.fetchall()
     contigs = [r[0] for r in rows]
     contig_lengths = {r[0]: r[1] for r in rows}  # Dictionary mapping contig_name -> length
+    contig_duplications = {r[0]: r[2] for r in rows}  # Dictionary mapping contig_name -> duplication percentage (can be None)
     
     # If only one contig in database, pre-fill the field
     contig_select = AutocompleteInput(value=contigs[0] if len(contigs) == 1 else "",
@@ -247,6 +262,7 @@ def build_controls(conn):
         'variables_labels': variables_labels,
         'contigs': contigs,
         'contig_lengths': contig_lengths,
+        'contig_duplications': contig_duplications,
         'samples': samples,
         'variables': variables,
         'phage_mechanisms': phage_mechanisms_list,
@@ -255,7 +271,10 @@ def build_controls(conn):
         'coverage_median_max': coverage_median_max,
         'coverage_variation_max': coverage_variation_max,
         'coverage_sd_max': coverage_sd_max,
-        'whole_contamination_max': whole_contamination_max
+        'whole_contamination_max': whole_contamination_max,
+        'duplication_percentage_min': duplication_percentage_min,
+        'duplication_percentage_max': duplication_percentage_max,
+        'has_duplication_data': has_duplication_data
     }
     return widgets
 
@@ -284,7 +303,8 @@ def create_layout(db_path):
             end=end,
             value=value,
             step=step,
-            sizing_mode="stretch_width"
+            sizing_mode="stretch_width",
+            margin=(0, 10, 0, 0)
         )
         if on_change:
             slider.param.watch(on_change, 'value_throttled')
@@ -593,14 +613,24 @@ def create_layout(db_path):
 
         return allowed_contigs
 
-    def get_module_filtered_samples():
-        """Apply module-based filters (coverage, completeness, phage mechanism) to get allowed samples."""
+    def get_module_filtered_samples(contig_name=None):
+        """Apply module-based filters (coverage, completeness, phage mechanism) to get allowed samples.
+
+        Args:
+            contig_name: Optional contig name to filter by. If provided, only considers
+                         filter values for that specific contig.
+        """
         allowed_samples = set(orig_samples)
         cur = conn.cursor()
 
         # Apply coverage filters using Explicit_presences view (single combined query)
         conditions = []
         params = []
+
+        # Add contig filter if specified
+        if contig_name:
+            conditions.append("Contig_name = ?")
+            params.append(contig_name)
 
         if coverage_percentage_slider is not None:
             min_val, max_val = coverage_percentage_slider.value
@@ -648,6 +678,11 @@ def create_layout(db_path):
         conditions = []
         params = []
 
+        # Add contig filter if specified
+        if contig_name:
+            conditions.append("Contig_name = ?")
+            params.append(contig_name)
+
         if prevalence_left_slider is not None:
             min_val, max_val = prevalence_left_slider.value
             if min_val > 0 or max_val < 100:
@@ -681,12 +716,20 @@ def create_layout(db_path):
 
         # Apply phage mechanism filter using Explicit_phage_mechanisms view
         if phage_mechanism_filter is not None and phage_mechanism_filter.value:
-            query = """
-                SELECT DISTINCT Sample_name
-                FROM Explicit_phage_mechanisms
-                WHERE Phage_packaging_mechanism = ?
-            """
-            cur.execute(query, (phage_mechanism_filter.value,))
+            if contig_name:
+                query = """
+                    SELECT DISTINCT Sample_name
+                    FROM Explicit_phage_mechanisms
+                    WHERE Phage_packaging_mechanism = ? AND Contig_name = ?
+                """
+                cur.execute(query, (phage_mechanism_filter.value, contig_name))
+            else:
+                query = """
+                    SELECT DISTINCT Sample_name
+                    FROM Explicit_phage_mechanisms
+                    WHERE Phage_packaging_mechanism = ?
+                """
+                cur.execute(query, (phage_mechanism_filter.value,))
             matching = {row[0] for row in cur.fetchall()}
             allowed_samples &= matching
 
@@ -716,6 +759,20 @@ def create_layout(db_path):
         if length_slider is not None:
             min_length, max_length = length_slider.value
             completions = [c for c in completions if min_length <= widgets['contig_lengths'].get(c, 0) <= max_length]
+
+        # Apply duplication percentage filter
+        if duplication_slider is not None:
+            min_dup, max_dup = duplication_slider.value
+            dup_min_default = widgets['duplication_percentage_min']
+            dup_max_default = widgets['duplication_percentage_max']
+            # Only filter if slider is not at default (full range)
+            if min_dup > dup_min_default or max_dup < dup_max_default:
+                def passes_dup_filter(contig):
+                    dup = widgets['contig_duplications'].get(contig)
+                    if dup is None:
+                        return False  # Exclude contigs without duplication data when filter is active
+                    return min_dup <= dup <= max_dup
+                completions = [c for c in completions if passes_dup_filter(c)]
 
         # Apply module-based filters (phage mechanisms, completeness)
         module_allowed = get_module_filtered_contigs()
@@ -981,8 +1038,8 @@ def create_layout(db_path):
                 # Compute filtered samples (same logic as refresh_sample_options)
                 # Start with samples that have the selected contig
                 filtered_samples = [s for s in orig_samples if s in widgets['contig_to_samples'].get(contig, set())]
-                # Apply module-based filters (coverage, completeness, phage mechanism)
-                module_allowed = get_module_filtered_samples()
+                # Apply module-based filters (coverage, completeness, phage mechanism) for this specific contig
+                module_allowed = get_module_filtered_samples(contig_name=contig)
                 filtered_samples = [s for s in filtered_samples if s in module_allowed]
                 # Apply variable-based filters
                 var_allowed = get_variable_filtered_samples()
@@ -1013,6 +1070,71 @@ def create_layout(db_path):
             tb = traceback.format_exc()
             print(f"[start_bokeh_server] Exception: {tb}", flush=True)
             main_placeholder.children = [Div(text=f"<pre>Error building plot:\n{tb}</pre>")]
+
+    ## Peruse button callback function
+    def peruse_clicked():
+        """Display summary tables showing coverage, completeness, and phage mechanism data."""
+        try:
+            contig = widgets['contig_select'].value
+
+            # Check if contig is selected
+            if not contig:
+                main_placeholder.children = [Div(text="<i>Please select a contig first.</i>")]
+                return
+
+            is_all = (views.active == 1)
+
+            if is_all:
+                # All Samples view: get filtered samples
+                # Start with samples that have the selected contig
+                filtered_samples = [s for s in orig_samples if s in widgets['contig_to_samples'].get(contig, set())]
+                # Apply module-based filters for this specific contig
+                module_allowed = get_module_filtered_samples(contig_name=contig)
+                filtered_samples = [s for s in filtered_samples if s in module_allowed]
+                # Apply variable-based filters
+                var_allowed = get_variable_filtered_samples()
+                filtered_samples = [s for s in filtered_samples if s in var_allowed]
+
+                if not filtered_samples:
+                    main_placeholder.children = [Div(text="<i>No samples match current filters.</i>")]
+                    return
+
+                sample_names = filtered_samples
+            else:
+                # One Sample view: use selected sample
+                sample = widgets['sample_select'].value
+                if not sample:
+                    main_placeholder.children = [Div(text="<i>Please select a sample first.</i>")]
+                    return
+                sample_names = [sample]
+
+            # Get contig info
+            cur = conn.cursor()
+            cur.execute("SELECT Contig_length, Duplication_percentage FROM Contig WHERE Contig_name = ?", (contig,))
+            result = cur.fetchone()
+            contig_length = result[0] if result else "unknown"
+            contig_duplication = result[1] if result else "unknown"
+
+            # Build data
+            content = build_summary_data(conn, contig, sample_names)
+
+            if content is None or len(content) == 0:
+                main_placeholder.children = [Div(text="<i>No data available for this contig/sample combination.</i>")]
+                return
+
+            # Create main header
+            header_div = Div(text=f"<h2>{contig} ({contig_length} bp, {contig_duplication} % duplication)</h2><h3>Summary:</h3>")
+
+            # Build content list
+            content = [header_div] + content
+
+            # Display
+            main_placeholder.children = [column(*content, sizing_mode="stretch_width")]
+
+        except Exception as e:
+            tb = traceback.format_exc()
+            print(f"[start_bokeh_server] Peruse exception: {tb}", flush=True)
+            main_placeholder.children = [Div(text=f"<pre>Error displaying data:\n{tb}</pre>")]
 
     ### Creating all DOM elements
     # Open DuckDB database connection to build widgets depending on data
@@ -1075,17 +1197,31 @@ def create_layout(db_path):
     min_len = min(widgets['contig_lengths'].values())
     max_len = max(widgets['contig_lengths'].values())
     length_slider = None
+    duplication_slider = None
     if len(widgets["contigs"]) > 1:
         contig_toggle_btn = Button(label="▶", width=20, height=20, button_type="primary", align="center", margin=0, stylesheets=[toggle_stylesheet])
         contig_filters_title = Div(text="Contig filters", align="center")
         contig_filters_header = row(contig_toggle_btn, contig_filters_title, sizing_mode="stretch_width", align="center")
 
+        contig_filters_children = []
+
         length_slider = create_editable_range_slider(
             "Contig length", min_len, max_len, (min_len, max_len), step=1,
             on_change=lambda event: refresh_contig_options()
         )
+        contig_filters_children.append(length_slider)
 
-        contig_filters_content = pn.Column(length_slider, visible=False, sizing_mode="stretch_width")
+        # Add duplication percentage slider if data exists
+        if widgets['has_duplication_data']:
+            dup_min = widgets['duplication_percentage_min']
+            dup_max = widgets['duplication_percentage_max']
+            duplication_slider = create_editable_range_slider(
+                "Duplication (%)", dup_min, dup_max, (dup_min, dup_max), step=1,
+                on_change=lambda event: refresh_contig_options()
+            )
+            contig_filters_children.append(duplication_slider)
+
+        contig_filters_content = pn.Column(*contig_filters_children, visible=False, sizing_mode="stretch_width")
         contig_toggle_btn.on_click(make_toggle_callback(contig_toggle_btn, contig_filters_content))
 
         filtering_children.append(contig_filters_header)
@@ -1101,7 +1237,7 @@ def create_layout(db_path):
 
         coverage_filters_children = []
 
-        correction_label = Div(text="Harmonise coverage mean between samples:", margin=(5, 0, 0, 10))
+        correction_label = Div(text="Harmonise coverage mean/median between samples:", margin=(5, 0, 0, 10))
         correction_filter = Select(
                 options=["No correction", "Correct by number of mapped reads", "Correct by number of reads"],
                 value="No correction",   # default = no filter (empty = all)
@@ -1161,7 +1297,7 @@ def create_layout(db_path):
             correction_filter.on_change('value', lambda attr, old, new: (update_coverage_mean_slider(), update_coverage_median_slider()))
 
         coverage_percentage_slider = create_editable_range_slider(
-            "Coverage percentage (%)", 0, 100, (0, 100), step=1,
+            "Aligned fraction (%)", 0, 100, (0, 100), step=1,
             on_change=lambda event: (refresh_contig_options(), refresh_sample_options())
         )
         coverage_filters_children.append(coverage_percentage_slider)
@@ -1200,16 +1336,6 @@ def create_layout(db_path):
 
         completeness_filters_children = []
 
-        prevalence_left_slider = create_editable_range_slider(
-            "Left completeness (%)", 0, 100, (0, 100), step=1,
-            on_change=lambda event: (refresh_contig_options(), refresh_sample_options())
-        )
-
-        prevalence_right_slider = create_editable_range_slider(
-            "Right completeness (%)", 0, 100, (0, 100), step=1,
-            on_change=lambda event: (refresh_contig_options(), refresh_sample_options())
-        )
-
         pct_completeness_slider = create_editable_range_slider(
             "Whole completeness (%)", 0, 100, (0, 100), step=1,
             on_change=lambda event: (refresh_contig_options(), refresh_sample_options())
@@ -1221,11 +1347,21 @@ def create_layout(db_path):
             on_change=lambda event: (refresh_contig_options(), refresh_sample_options())
         )
 
+        prevalence_left_slider = create_editable_range_slider(
+            "Left completeness (%)", 0, 100, (0, 100), step=1,
+            on_change=lambda event: (refresh_contig_options(), refresh_sample_options())
+        )
+
+        prevalence_right_slider = create_editable_range_slider(
+            "Right completeness (%)", 0, 100, (0, 100), step=1,
+            on_change=lambda event: (refresh_contig_options(), refresh_sample_options())
+        )
+
         completeness_filters_children.extend([
-            prevalence_left_slider,
-            prevalence_right_slider,
             pct_completeness_slider,
-            pct_contamination_slider
+            pct_contamination_slider,
+            prevalence_left_slider,
+            prevalence_right_slider
         ])
 
         # Create completeness filters content container (collapsible)
@@ -1486,9 +1622,14 @@ def create_layout(db_path):
 
         toggles.on_change("active", make_variable_callback(mc, toggles, lock))
 
-    ## Create final Apply button
-    apply_button = Button(label="APPLY", align="center", stylesheets=[stylesheet], css_classes=["apply-btn"])
+    ## Create final Apply and Peruse data buttons
+    apply_button = Button(label="APPLY", align="center", sizing_mode="stretch_width", stylesheets=[stylesheet], css_classes=["apply-btn"])
     apply_button.on_click(lambda: apply_clicked())
+
+    peruse_button = Button(label="PERUSE DATA", align="center", sizing_mode="stretch_width", stylesheets=[stylesheet], css_classes=["apply-btn"])
+    peruse_button.on_click(lambda: peruse_clicked())
+
+    buttons_row = row(peruse_button, apply_button, sizing_mode="stretch_width", spacing=10)
 
 
     ## Initialize section titles with counts
@@ -1505,11 +1646,11 @@ def create_layout(db_path):
     # Include both variables sections - visibility is toggled by on_view_change
     controls_children = [logo, views, separator_filtering, filtering_header, filtering_content,
                          separator_contigs, contig_header, above_contig_content, widgets['contig_select'], below_contig_content,
-                         separator_samples, sample_header, above_sample_content, widgets['sample_select'], 
+                         separator_samples, sample_header, above_sample_content, widgets['sample_select'],
                          separator_variables,
                          variables_section_one,  # One Sample view (with module checkboxes)
                          variables_section_all,  # All Samples view (title headers only)
-                         apply_button]
+                         buttons_row]
 
     controls_column = pn.Column(*controls_children, width=350, sizing_mode="stretch_height", css_classes=["left-col"])
 

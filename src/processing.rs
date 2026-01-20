@@ -28,7 +28,7 @@ use crate::compress::{
 };
 use crate::db::{DbWriter, CompletenessData, RepeatsData};
 use crate::features::{FeatureArrays, ModuleFlags};
-use crate::genbank::parse_genbank;
+use crate::parser::parse_annotations;
 use crate::types::{
     ContigInfo, FeaturePoint, PackagingData, PlotType, PresenceData, SequencingType
 };
@@ -707,10 +707,11 @@ pub fn process_sample(
                     .windows(2)
                     .map(|w| {
                         let diff = w[1] as f64 - w[0] as f64;
-                        diff * diff / mean_cov
+                        diff * diff
                     })
-                    .sum();
-                (1000000.0 * sum_squared_diff / (n - 1) as f64) as f32
+                    .sum::<f64>() / (n - 1) as f64;
+                let root_diff = sum_squared_diff.sqrt() / mean_cov;
+                (root_diff * 1000000.0) as f32
             } else {
                 0.0
             };
@@ -847,7 +848,7 @@ pub fn run_all_samples(
         eprintln!("Found {} contigs from BAM files", contigs.len());
         (contigs, Vec::new())
     } else {
-        parse_genbank(genbank_path, annotation_tool)?
+        parse_annotations(genbank_path, annotation_tool)?
     };
     eprintln!(
         "Found {} contigs with {} annotations",
