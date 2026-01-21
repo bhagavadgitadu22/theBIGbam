@@ -845,6 +845,16 @@ def create_layout(db_path):
         filtered_contigs = set(widgets['contig_select'].completions) - {""}
         filtered_samples = set(widgets['sample_select'].completions) - {""}
 
+        # If a contig is selected, only count pairs for that contig
+        selected_contig = widgets['contig_select'].value
+        if selected_contig:
+            filtered_contigs = {selected_contig}
+
+        # If a sample is selected, only count pairs for that sample
+        selected_sample = widgets['sample_select'].value
+        if selected_sample:
+            filtered_samples = {selected_sample}
+
         # Count presences (valid contig/sample pairs within filtered sets)
         presences_count = sum(
             1 for contig in filtered_contigs
