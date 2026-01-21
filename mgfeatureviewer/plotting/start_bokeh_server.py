@@ -514,14 +514,24 @@ def create_layout(db_path):
         return "Coverage_median"
 
     ## Helper functions for module-based filtering (phage mechanisms, completeness, coverage)
-    def get_module_filtered_contigs():
-        """Apply module-based filters (coverage, completeness, phage mechanism) to get allowed contigs."""
+    def get_module_filtered_contigs(sample_name=None):
+        """Apply module-based filters (coverage, completeness, phage mechanism) to get allowed contigs.
+
+        Args:
+            sample_name: Optional sample name to filter by. If provided, only considers
+                         filter values for that specific sample.
+        """
         allowed_contigs = set(orig_contigs)
         cur = conn.cursor()
 
         # Apply coverage filters using Explicit_presences view (single combined query)
         conditions = []
         params = []
+
+        # Add sample filter if specified
+        if sample_name:
+            conditions.append("Sample_name = ?")
+            params.append(sample_name)
 
         if coverage_percentage_slider is not None:
             min_val, max_val = coverage_percentage_slider.value
@@ -569,6 +579,11 @@ def create_layout(db_path):
         conditions = []
         params = []
 
+        # Add sample filter if specified
+        if sample_name:
+            conditions.append("Sample_name = ?")
+            params.append(sample_name)
+
         if prevalence_left_slider is not None:
             min_val, max_val = prevalence_left_slider.value
             if min_val > 0 or max_val < 100:
@@ -602,12 +617,20 @@ def create_layout(db_path):
 
         # Apply phage mechanism filter using Explicit_phage_mechanisms view
         if phage_mechanism_filter is not None and phage_mechanism_filter.value:
-            query = """
-                SELECT DISTINCT Contig_name
-                FROM Explicit_phage_mechanisms
-                WHERE Phage_packaging_mechanism = ?
-            """
-            cur.execute(query, (phage_mechanism_filter.value,))
+            if sample_name:
+                query = """
+                    SELECT DISTINCT Contig_name
+                    FROM Explicit_phage_mechanisms
+                    WHERE Phage_packaging_mechanism = ? AND Sample_name = ?
+                """
+                cur.execute(query, (phage_mechanism_filter.value, sample_name))
+            else:
+                query = """
+                    SELECT DISTINCT Contig_name
+                    FROM Explicit_phage_mechanisms
+                    WHERE Phage_packaging_mechanism = ?
+                """
+                cur.execute(query, (phage_mechanism_filter.value,))
             matching = {row[0] for row in cur.fetchall()}
             allowed_contigs &= matching
 
@@ -774,8 +797,9 @@ def create_layout(db_path):
                     return min_dup <= dup <= max_dup
                 completions = [c for c in completions if passes_dup_filter(c)]
 
-        # Apply module-based filters (phage mechanisms, completeness)
-        module_allowed = get_module_filtered_contigs()
+        # Apply module-based filters (phage mechanisms, completeness) for the selected sample
+        sel_sample = widgets['sample_select'].value if views.active == 0 else None
+        module_allowed = get_module_filtered_contigs(sample_name=sel_sample)
         completions = [c for c in completions if c in module_allowed]
 
         # Apply variable-based filters
@@ -803,8 +827,9 @@ def create_layout(db_path):
         else:
             completions = list(orig_samples)
 
-        # Apply module-based filters (phage mechanisms, completeness)
-        module_allowed = get_module_filtered_samples()
+        # Apply module-based filters (phage mechanisms, completeness) for the selected contig
+        sel_contig = widgets['contig_select'].value if views.active == 0 else None
+        module_allowed = get_module_filtered_samples(contig_name=sel_contig)
         completions = [s for s in completions if s in module_allowed]
 
         # Apply variable-based filters (only in "One sample" view)
