@@ -3,7 +3,7 @@ requires = ["maturin>=1.4,<2.0"]
 build-backend = "maturin"
 
 [project]
-name = "mgfeatureviewer"
+name = "thebigbam"
 version = "0.1.0"
 description = "Interactive and static plotting of mapping-derived features for microbial genomes"
 readme = "README.md"
@@ -30,15 +30,15 @@ dev = [
 ]
 
 [project.scripts]
-mgfeatureviewer = "mgfeatureviewer.cli:main"
+thebigbam = "thebigbam.cli:main"
 
 [tool.maturin]
 # Build with the "python" feature enabled for PyO3 bindings
 features = ["python"]
 # Module name for the Rust extension (separate from the Python package)
-module-name = "mgfeatureviewer_rs"
+module-name = "thebigbam_rs"
 # Explicitly include the Python package
-python-packages = ["mgfeatureviewer"]
+python-packages = ["thebigbam"]
 # Include static files in the package
 include = ["static/*"]
 # Strip debug symbols

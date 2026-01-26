@@ -3,11 +3,11 @@ import os
 import sys
 
 # Import command modules so we can share arg definitions and run functions
-from mgfeatureviewer.utils import (
+from thebigbam.utils import (
     read_mapping, assembly_annotation
 )
-from mgfeatureviewer.database import add_variable, calculating_data
-from mgfeatureviewer.plotting import plotting_data_all_samples, plotting_data_per_sample, start_bokeh_server
+from theigbam.database import add_variable, calculating_data
+from thebigbam.plotting import plotting_data_all_samples, plotting_data_per_sample, start_bokeh_server
 
 # Path helpers
 BASE_DIR = os.path.dirname(__file__)
@@ -30,7 +30,7 @@ SCRIPTS = {
 }
 
 def build_argparser():
-    p = argparse.ArgumentParser(prog="mgfeatureviewer", description="MGFeatureViewer command-line front-end")
+    p = argparse.ArgumentParser(prog="thebigbam", description="theBIGbam command-line front-end")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     # modify database commands
@@ -254,7 +254,7 @@ def main(argv=None):
     # DB inspection commands (call into package functions)
     if args.cmd == 'list-variables':
         try:
-            from mgfeatureviewer.database import database_getters
+            from thebigbam.database import database_getters
             database_getters.list_variables(args.db, args.detailed)
             return 0
         except Exception as e:
@@ -263,7 +263,7 @@ def main(argv=None):
 
     if args.cmd == 'list-samples':
         try:
-            from mgfeatureviewer.database import database_getters
+            from thebigbam.database import database_getters
             database_getters.list_samples(args.db)
             return 0
         except Exception as e:
@@ -272,7 +272,7 @@ def main(argv=None):
 
     if args.cmd == 'list-contigs':
         try:
-            from mgfeatureviewer.database import database_getters
+            from thebigbam.database import database_getters
             database_getters.list_contigs(args.db)
             return 0
         except Exception as e:

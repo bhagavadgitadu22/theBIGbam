@@ -1,5 +1,5 @@
 """
-Integration tests for MGFeatureViewer pipeline.
+Integration tests for theBIGbam pipeline.
 
 Tests the calculate command with generated BAM files.
 """
@@ -61,7 +61,7 @@ def verify_database(db_path: str):
 def run_calculate(bam_dir: str, output_db: str, circular: bool):
     """Run calculate command on BAM files."""
     cmd = [
-        "mgfeatureviewer", "calculate",
+        "thebigbam", "calculate",
         "-b", bam_dir,
         "-m", "coverage,phagetermini,assemblycheck",
         "-o", output_db,
@@ -341,7 +341,7 @@ TEST_DB_CIRCULAR_SIMPLE = os.path.join(os.path.dirname(__file__), "test_10kbp_ci
 def run_calculate_simple(bam_dir: str, output_db: str, circular: bool):
     """Run calculate command without coverage_percentage/variation_percentage options."""
     cmd = [
-        "mgfeatureviewer", "calculate",
+        "thebigbam", "calculate",
         "-b", bam_dir,
         "-m", "coverage,phagetermini,assemblycheck",
         "-o", output_db,

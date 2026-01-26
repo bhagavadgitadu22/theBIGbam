@@ -1,4 +1,4 @@
-name: mgfeatureviewer
+name: thebigbam
 channels:
   - conda-forge
   - bioconda

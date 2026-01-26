@@ -133,7 +133,7 @@ def main():
     parser.add_argument("-d", "--db", required=True, help="Path to DuckDB database file")
     parser.add_argument("-v", "--variable", required=True, help="Variable to compute (only one variable allowed)")
     parser.add_argument("--contig", required=True, help="Name of the contig to plot")
-    parser.add_argument("--html", required=False, default="MGFeatureViewer_all_samples.html", help="Name for output html files. A bokeh server will be started if not provided")
+    parser.add_argument("--html", required=False, default="thebigbam_all_samples.html", help="Name for output html files. A bokeh server will be started if not provided")
     parser.add_argument("--subplot_height", required=False, default=130, help="Height of each subplot (in pixels)")
     args = parser.parse_args()
 
@@ -155,7 +155,7 @@ def add_plot_all_args(parser):
     parser.add_argument("-v", "--variable", required=True, help="Variable to compute (only one variable allowed)")
     parser.add_argument("--contig", required=True, help="Name of the contig to plot")
     parser.add_argument("-g", "--genbank", help="Path to genbank file (optional; if provided, gene map will be plotted)")
-    parser.add_argument("--html", required=False, default="MGFeatureViewer_all_samples.html", help="Name for output html files. A bokeh server will be started if not provided")
+    parser.add_argument("--html", required=False, default="thebigbam_all_samples.html", help="Name for output html files. A bokeh server will be started if not provided")
     parser.add_argument("--subplot_height", required=False, default=130, help="Height of each subplot (in pixels)")
 
 def run_plot_all(args):

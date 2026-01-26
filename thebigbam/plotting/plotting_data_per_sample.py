@@ -703,7 +703,7 @@ def add_plot_per_sample_args(parser):
     parser.add_argument("--contig", required=True, help="Name of the contig to plot")
     parser.add_argument("--sample", required=True, help="Name of the sample to plot")
     parser.add_argument("-g", "--genbank", help="Path to genbank file (optional; if provided, gene map will be plotted)")
-    parser.add_argument("--html", required=False, default="MGFeatureViewer_per_sample.html", help="Name for output html files. A bokeh server will be started if not provided")
+    parser.add_argument("--html", required=False, default="thebigbam_per_sample.html", help="Name for output html files. A bokeh server will be started if not provided")
     parser.add_argument("--subplot_height", required=False, default=130, help="Height of each subplot (in pixels)")
 
 def run_plot_per_sample(args):

@@ -1,6 +1,6 @@
-# MGFeatureViewer Installation Guide
+# theBIGbam Installation Guide
 
-MGFeatureViewer is a hybrid Python/Rust tool that combines fast Rust-based BAM processing with interactive Python visualization. Installation requires three components:
+theBIGbam is a hybrid Python/Rust tool that combines fast Rust-based BAM processing with interactive Python visualization. Installation requires three components:
 
 1. **Rust toolchain** (to compile the fast calculation engine)
 2. **Python environment** (for the CLI and visualization)
@@ -29,7 +29,7 @@ rustc --version
 cargo --version
 ```
 
-TODO: if not works possibly you need rustup default stable from the MGFeatureViewer root?
+TODO: if not works possibly you need rustup default stable from the theBIGbam root?
 sudo apt install -y clang libclang-dev
 module load llvm was enough to make it work for me
 
@@ -42,24 +42,24 @@ python --version  # or python3 --version
 
 If not installed, download from [python.org](https://www.python.org/downloads/) or use your system package manager.
 
-### Step 3: Install MGFeatureViewer
+### Step 3: Install theBIGbam
 
 **For users (recommended):**
 ```bash
-git clone https://github.com/bhagavadgitadu22/MGFeatureViewer
-cd MGFeatureViewer
+git clone https://github.com/bhagavadgitadu22/theBIGbam
+cd theBIGbam
 pip install .
 ```
 
 This will:
 - Compile the Rust code (takes 5-10 minutes first time)
 - Install Python dependencies (bokeh, biopython, pysam, etc.)
-- Create the `mgfeatureviewer` command
+- Create the `thebigbam` command
 
 **For developers:**
 ```bash
-git clone https://github.com/bhagavadgitadu22/MGFeatureViewer
-cd MGFeatureViewer
+git clone https://github.com/bhagavadgitadu22/theBIGbam
+cd theBIGbam
 pip install maturin
 maturin develop --release
 ```
@@ -76,8 +76,8 @@ This installs in "editable" mode - changes to Python code take effect immediatel
 
 **Using conda/mamba (easiest):**
 ```bash
-mamba env create -f mgfeatureviewer_env.yaml
-conda activate mgfeatureviewer
+mamba env create -f thebigbam_env.yaml
+conda activate thebigbam
 pip install .  # Re-install in conda environment
 ```
 
@@ -93,10 +93,10 @@ Alternatively, install these tools individually via your system package manager 
 
 ```bash
 # Check main command works
-mgfeatureviewer -h
+thebigbam -h
 
 # Run quick test with example data
-mgfeatureviewer calculate \
+thebigbam calculate \
   -g examples/inputs/HK97/HK97_GCF_000848825.1_pharokka.gbk \
   -b examples/inputs/HK97/ \
   -m coverage \
@@ -105,7 +105,7 @@ mgfeatureviewer calculate \
   -t 2
 
 # Visualize interactively the test data
-mgfeatureviewer serve --db examples/outputs/HK97/test.db --port 5006
+thebigbam serve --db examples/outputs/HK97/test.db --port 5006
 # Open browser to http://localhost:5006
 ```
 
@@ -122,7 +122,7 @@ mgfeatureviewer serve --db examples/outputs/HK97/test.db --port 5006
 
 **Python import errors:**
 - Ensure you're in the correct environment if using conda
-- Try reinstalling: `pip uninstall mgfeatureviewer && pip install .`
+- Try reinstalling: `pip uninstall thebigbam && pip install .`
 - Or force rebuild: `pip install --force-reinstall --no-cache-dir .`
 
 **Slow compilation:**
@@ -133,7 +133,7 @@ mgfeatureviewer serve --db examples/outputs/HK97/test.db --port 5006
 ## Updating
 
 ```bash
-cd MGFeatureViewer
+cd theBIGbam
 git pull
 pip install --force-reinstall .
 ```
@@ -147,7 +147,7 @@ maturin develop --release
 ## Uninstalling
 
 ```bash
-pip uninstall mgfeatureviewer
+pip uninstall thebigbam
 ```
 
 The Rust toolchain and external tools (conda environment) remain installed and can be removed separately if desired.

@@ -3,7 +3,7 @@ I work in base environment (where I also installed minimap2...)
 
 To serve plots in cluster:
 ```bash
-mgfeatureviewer serve \
+thebigbam serve \
   --db examples/outputs/AKIRA/akira.db \
   --port 5006
 ssh -N -L 5006:localhost:5006 boutroux@jed.epfl.ch
@@ -11,7 +11,7 @@ ssh -N -L 5006:localhost:5006 boutroux@jed.epfl.ch
 
 To avoid recompiling everything everytime, I had to change the target dir for cargo builds:
 ```bash
-export CARGO_TARGET_DIR=~/.cargo-target/mgfeatureviewer
+export CARGO_TARGET_DIR=~/.cargo-target/thebigbam
 # OR maybe this helped: export PATH='/home/boutroux/.duckdb/cli/latest':$PATH
 maturin develop --release
 ```

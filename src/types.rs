@@ -1,4 +1,4 @@
-//! Type definitions for MGFeatureViewer Rust Calculator.
+//! Type definitions for theBIGbam Rust Calculator.
 //!
 //! This module contains all the struct and enum definitions used throughout the application,
 //! as well as the single source of truth for feature/variable configuration.
@@ -203,20 +203,20 @@ pub const VARIABLES: &[VariableConfig] = &[
     VariableConfig { name: "mapq", subplot: "MAPQ", module: "Coverage", module_order: 4, plot_type: PlotType::Curve, color: "#77dd77", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Mapping quality", help: None },
         
     // Per position errors from reads (Assembly check)
-    VariableConfig { name: "left_clippings", subplot: "Clippings", module: "Mapping metrics per position", module_order: 1, plot_type: PlotType::Bars, color: "#8e43e7", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Left clippings", help: Some("Extra bases are missing on the left of the contig") },
-    VariableConfig { name: "right_clippings", subplot: "Clippings", module: "Mapping metrics per position", module_order: 1, plot_type: PlotType::Bars, color: "#9CE743", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Right clippings", help: Some("Extra bases are missing on the right of the contig") },
-    VariableConfig { name: "insertions", subplot: "Indels", module: "Mapping metrics per position", module_order: 2, plot_type: PlotType::Bars, color: "#e50001", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Insertions", help: Some("Extra bases are present in the read but not in the contig") },
-    VariableConfig { name: "deletions", subplot: "Indels", module: "Mapping metrics per position", module_order: 2, plot_type: PlotType::Bars, color: "#00E5E4", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Deletions", help: Some("A stretch of the contig has no corresponding bases in the read") },
-    VariableConfig { name: "mismatches", subplot: "Mismatches", module: "Mapping metrics per position", module_order: 3, plot_type: PlotType::Bars, color: "#5a0f0b", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Mismatches", help: None },
+    VariableConfig { name: "left_clippings", subplot: "Clippings", module: "Misalignment", module_order: 1, plot_type: PlotType::Bars, color: "#8e43e7", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Left clippings", help: Some("Extra bases are missing on the left of the contig") },
+    VariableConfig { name: "right_clippings", subplot: "Clippings", module: "Misalignment", module_order: 1, plot_type: PlotType::Bars, color: "#9CE743", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Right clippings", help: Some("Extra bases are missing on the right of the contig") },
+    VariableConfig { name: "insertions", subplot: "Indels", module: "Misalignment", module_order: 2, plot_type: PlotType::Bars, color: "#e50001", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Insertions", help: Some("Extra bases are present in the read but not in the contig") },
+    VariableConfig { name: "deletions", subplot: "Indels", module: "Misalignment", module_order: 2, plot_type: PlotType::Bars, color: "#00E5E4", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Deletions", help: Some("A stretch of the contig has no corresponding bases in the read") },
+    VariableConfig { name: "mismatches", subplot: "Mismatches", module: "Misalignment", module_order: 3, plot_type: PlotType::Bars, color: "#5a0f0b", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Mismatches", help: None },
     
     // Per read metrics (long reads)
-    VariableConfig { name: "read_lengths", subplot: "Read lengths", module: "Long-read metrics", module_order: 1, plot_type: PlotType::Curve, color: "#ed8b00", alpha: 0.8, fill_alpha: 0.4, size: 1.0, title: "Read lengths", help: None },
+    VariableConfig { name: "read_lengths", subplot: "Read lengths", module: "Long-reads", module_order: 1, plot_type: PlotType::Curve, color: "#ed8b00", alpha: 0.8, fill_alpha: 0.4, size: 1.0, title: "Read lengths", help: None },
 
     // Per read metrics (paired-reads)  
-    VariableConfig { name: "insert_sizes", subplot: "Insert sizes", module: "Paired-read metrics", module_order: 1, plot_type: PlotType::Curve, color: "#ed8b00", alpha: 0.8, fill_alpha: 0.4, size: 1.0, title: "Insert sizes", help: None },
-    VariableConfig { name: "non_inward_pairs", subplot: "Non-inward pairs", module: "Paired-read metrics", module_order: 2, plot_type: PlotType::Curve, color: "#c94009", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Non-inward pairs", help: None },
-    VariableConfig { name: "mate_not_mapped", subplot: "Missing mates", module: "Paired-read metrics", module_order: 3, plot_type: PlotType::Curve, color: "#302DD2", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Mate unmapped", help: None },
-    VariableConfig { name: "mate_on_another_contig", subplot: "Missing mates", module: "Paired-read metrics", module_order: 4, plot_type: PlotType::Curve, color: "#CFD22D", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Mate mapped on another contig", help: None },
+    VariableConfig { name: "insert_sizes", subplot: "Insert sizes", module: "Paired-reads", module_order: 1, plot_type: PlotType::Curve, color: "#ed8b00", alpha: 0.8, fill_alpha: 0.4, size: 1.0, title: "Insert sizes", help: None },
+    VariableConfig { name: "non_inward_pairs", subplot: "Non-inward pairs", module: "Paired-reads", module_order: 2, plot_type: PlotType::Curve, color: "#c94009", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Non-inward pairs", help: None },
+    VariableConfig { name: "mate_not_mapped", subplot: "Missing mates", module: "Paired-reads", module_order: 3, plot_type: PlotType::Curve, color: "#302DD2", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Mate unmapped", help: None },
+    VariableConfig { name: "mate_on_another_contig", subplot: "Missing mates", module: "Paired-reads", module_order: 4, plot_type: PlotType::Curve, color: "#CFD22D", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Mate mapped on another contig", help: None },
 
     // Phage termini module - for detecting phage DNA packaging sites
     VariableConfig { name: "reads_starts", subplot: "Reads termini", module: "Phage termini", module_order: 2, plot_type: PlotType::Bars, color: "#215732", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Read starts", help: None },

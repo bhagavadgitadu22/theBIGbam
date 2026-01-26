@@ -1,13 +1,13 @@
 [package]
-name = "mgfeatureviewer_calc"
+name = "thebigbam_calc"
 version = "0.1.0"
 edition = "2021"
 
 [lib]
-name = "mgfeatureviewer_rs"
+name = "thebigbam_rs"
 crate-type = ["cdylib", "rlib"]
 
-# Binary removed - use Python CLI instead: mgfeatureviewer calculate ...
+# Binary removed - use Python CLI instead: thebigbam calculate ...
 # (Python CLI calls Rust via PyO3 bindings, avoiding duplicate argument parsing)
 
 [features]

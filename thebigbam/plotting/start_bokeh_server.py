@@ -1196,7 +1196,7 @@ def create_layout(db_path):
 
     # Create main elements
     ## Views section
-    logo = Div(text=f"""<img src="data:image/png;base64,{logo_b64}" style="width:100%; max-width:600px; padding: 0 20%;">""")
+    logo = Div(text=f"""<img src="data:image/png;base64,{logo_b64}" style="width:100%; max-width:800px; padding: 0 15%;">""")
     views = RadioButtonGroup(labels=["ONE SAMPLE", "ALL SAMPLES"], active=0, sizing_mode="stretch_width", stylesheets=[stylesheet])
 
     # Global lock for toggles when enforcing "All samples" view (single-variable mode)
@@ -1711,7 +1711,7 @@ def run_serve(args):
         create_app,
         port=args.port,
         show=True,
-        title="MGFeatureViewer",
+        title="theBIGbam",
         static_dirs={'assets': static_path}
     )
     return 0

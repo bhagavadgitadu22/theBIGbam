@@ -5,7 +5,7 @@ from multiprocessing import cpu_count
 
 # Import Rust bindings (required)
 try:
-    import mgfeatureviewer_rs as _rust
+    import thebigbam_rs as _rust
     HAS_RUST = True
 except ImportError:
     HAS_RUST = False
@@ -15,7 +15,7 @@ except ImportError:
 def calculating_all_features_parallel(list_modules, bam_files, output_db, min_coverage, curve_ratio, bar_ratio, circular=False, n_sample_cores=None, sequencing_type=None, genbank_path=None, annotation_tool="", max_samples_in_memory=10, autoblast_file=None):
     """Process all BAM files in parallel using Rust bindings."""
     if not HAS_RUST:
-        sys.exit("ERROR: Rust bindings (mgfeatureviewer_rs) are required but not available. Please install them first.")
+        sys.exit("ERROR: Rust bindings (thebigbam_rs) are required but not available. Please install them first.")
 
     if n_sample_cores is None:
         n_sample_cores = max(1, cpu_count() - 1)
@@ -118,7 +118,7 @@ def run_calculate_args(args):
     # Run autoblast if Phage termini module is requested
     autoblast_file = None
     if "Phage termini" in requested_modules and genbank_path:
-        from mgfeatureviewer.utils.autoblast import perform_autoblast, extract_fasta_from_genbank
+        from thebigbam.utils.autoblast import perform_autoblast, extract_fasta_from_genbank
         print("Running autoblast for Phage termini analysis...", flush=True)
 
         # Determine FASTA source: use assembly file if provided, otherwise extract from genbank

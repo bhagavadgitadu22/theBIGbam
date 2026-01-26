@@ -1,11 +1,11 @@
-//! MGFeatureViewer Rust Library
+//! theBIGbam Rust Library
 //!
 //! This module provides both a Rust library and Python bindings (via PyO3).
 //!
 //! ## Python Usage
 //!
 //! ```python
-//! import mgfeatureviewer_rs as mgfv
+//! import thebigbam_rs as mgfv
 //!
 //! # Process all BAM files in parallel (main API)
 //! result = mgfv.process_all_samples(
@@ -141,11 +141,11 @@ mod python {
         Ok(result)
     }
 
-    /// MGFeatureViewer Rust bindings for Python.
+    /// theBIGbam Rust bindings for Python.
     #[pymodule]
-    fn mgfeatureviewer_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    fn thebigbam_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(process_all_samples, m)?)?;
-        m.add("__doc__", "MGFeatureViewer Rust bindings - fast BAM processing")?;
+        m.add("__doc__", "theBIGbam Rust bindings - fast BAM processing")?;
         Ok(())
     }
 }

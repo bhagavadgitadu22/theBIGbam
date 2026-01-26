@@ -1,5 +1,5 @@
 """
-Pytest configuration and fixtures for MGFeatureViewer tests.
+Pytest configuration and fixtures for theBIGbam tests.
 
 This module provides fixtures for generating test BAM files from FASTQ data.
 BAMs are generated once and cached in the tests/ directory.
@@ -36,9 +36,9 @@ def get_bam_name(fastq_name: str, circular: bool) -> str:
     return f"{base}{suffix}.bam"
 
 def generate_bam(r1_path: str, r2_path: str | None, seq_type: str, circular: bool, output_bam: str) -> None:
-    """Generate a BAM file using mgfeatureviewer mapping-per-sample command."""
+    """Generate a BAM file using thebigbam mapping-per-sample command."""
     cmd = [
-        "mgfeatureviewer", "mapping-per-sample",
+        "thebigbam", "mapping-per-sample",
         "-r1", r1_path,
         "-a", REFERENCE,
         "--sequencing-type", seq_type,

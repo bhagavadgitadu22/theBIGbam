@@ -1537,23 +1537,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mgfeatureviewer_calc"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "atty",
- "clap",
- "duckdb",
- "gb-io",
- "indicatif",
- "pyo3",
- "rayon",
- "rust-htslib",
- "thiserror 2.0.17",
- "walkdir",
-]
-
-[[package]]
 name = "minimal-lexical"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2520,6 +2503,23 @@ name = "target-lexicon"
 version = "0.12.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "61c41af27dd6d1e27b1b16b489db798443478cef1f06a660c96db617ba5de3b1"
+
+[[package]]
+name = "thebigbam_calc"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "atty",
+ "clap",
+ "duckdb",
+ "gb-io",
+ "indicatif",
+ "pyo3",
+ "rayon",
+ "rust-htslib",
+ "thiserror 2.0.17",
+ "walkdir",
+]
 
 [[package]]
 name = "thiserror"

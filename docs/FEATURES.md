@@ -1,6 +1,6 @@
 # # What features are inferred from your data?
 
-This document describes all features computed by MGFeatureViewer and stored in the DuckDB database. Features are organized by **module** as they appear in the visualization interface.
+This document describes all features computed by theBIGbam and stored in the DuckDB database. Features are organized by **module** as they appear in the visualization interface.
 
 6 modules exist at the moment: 5 are defined from the mappings files and the Genome module is defined from the optional annotation file.
 
@@ -270,4 +270,4 @@ Features describing intrinsic genomic properties, independent of sequencing data
 - [Assembly Check Metrics](ASSEMBLY_CHECK.md) - Filtering metrics based on these features
 - [Phage Packaging](PHAGE_PACKAGING.md) - How packaging mechanisms are detected from terminus patterns
 
-This document describes all features computed by MGFeatureViewer and stored in the DuckDB database. Features are organized by **module** and **subplot** as they appear in the visualization interface.
+This document describes all features computed by theBIGbam and stored in the DuckDB database. Features are organized by **module** and **subplot** as they appear in the visualization interface.
