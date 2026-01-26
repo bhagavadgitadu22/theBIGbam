@@ -1,6 +1,6 @@
-# theBIGbam
-
-![image](static/LOGO.png)
+<div align="center">
+  <img src="static/LOGO.png" alt="image" width="300" />
+</div>
 
 Interactive visualization of mapping-derived features for genomes. Designed to work efficiently even with large metagenomic datasets.
 
@@ -14,7 +14,7 @@ Built with **Rust** for fast BAM processing and **Python/Bokeh** for interactive
 
 ---
 
-## Quick Start
+# Quick Start
 
 You need Rust and Python installed. Install Rust following instructions at: https://rust-lang.org/tools/install/
 
@@ -24,13 +24,13 @@ Then in command-line:
 pip install git+https://github.com/bhagavadgitadu22/theBIGbam
 ```
 
-# Check main command works
+## Check main command works
 
 ```bash
 thebigbam -h
 ```
 
-# Run quick test with example data
+## Run quick test with example data
 
 ```bash
 thebigbam calculate \
@@ -42,7 +42,7 @@ thebigbam calculate \
  -t 2
 ```
 
-# Visualize interactively the test data
+## Visualize interactively the test data
 
 ```bash
 thebigbam serve --db examples/outputs/HK97/test.db --port 5006
@@ -54,20 +54,20 @@ See [the installation guide](docs/INSTALL.md) for more detailed instructions.
 
 ---
 
-## Main usage
+# Main usage
 
 theBIGbam consists of two main steps: 
 
 - Generation of a DuckDB database summarizing your genomic and mapping features with Rust, using your input files
 - Interactive visualization of the DuckDB database content using Python and Bokeh
 
-### Database computation
+## Database computation
 
 This is the core of theBIGbam. It takes a list of BAM files containing read mappings against contigs of interest and extracts relevant features to store them in a DuckDB database. Individual read information is discarded in favor of lightweight per-position averages.
 
 A genbank file containing annotations of your contigs of interest can also be provided to be added in the database.
 
-#### Quick usage with the HK97 test data
+### Quick usage with the HK97 test data
 
 Calculate command takes at least a directory of mapping files (-b) and an output path for the database (-o):
 
@@ -85,9 +85,9 @@ Here several optional parameters are added:
 
 - -t option to specify the number of threads available to speed up computation
 
-#### What input files do I need?
+### What input files do I need?
 
-##### Mapping files:
+#### Mapping files:
 
 **Parameter:** --bam_files DIRECTORY, short-version -b
 
@@ -109,13 +109,13 @@ Alternatively, if you do not have sorted mapping files with MD tags (.bam extens
 
 **Warning:** If you use those mapping scripts with the --circular option, do not forget to specify the --circular flag as well when computing the database.
 
-##### Annotation file:
+#### Annotation file:
 
 **Parameter (optional, strongly recommended):** --genbank FILE, short-version -g
 
 Annotation assembly file should be a GENBANK file (.gbk extension) made with the tool of your choice: bakta for bacteria, pharokka or phold for phages, eggnog-mapper, etc.
 
-#### Which features can I calculate?
+### Which features can I calculate?
 
 **Parameter (optional):** --modules COMMA-SEPARATED LIST, short version -m
 
@@ -133,13 +133,13 @@ If an annotation file is provided, the **Genome** module is also computed. It ke
 
 A more detailed explanation of the modules and the features it contains is available in [the features section](docs/FEATURES.md).
 
-#### Database compression
+### Database compression
 
 **Parameters (optional):** --min_coverage, --variation_percentage, --coverage_percentage
 
 Discarding the reads to only keep the main features of the mappings (like the coverage per position) already allows the DuckDB database to be way lighter than the original BAM file. The database itself is also structured to be as light as possible. 
 
-First, the database is organised per contig per sample (qualified as a contig/sample pair thereafter). Only pairs relative to a contig present in a sample are stored in the database. The definition of a presence can be tweaked via the --min_coverage parameter: only contig/sample where at least x% of the contig received reads are kept in the database. The default is 50%, meaning a contig is considered present in a sample only if more than half of the contig received reads.
+First, the database is organised per contig per sample (qualified as a contig/sample pair thereafter). Only pairs relative to a contig present in a sample are stored in the database. The definition of a presence can be tweaked via the **--min_coverage** parameter: only contig/sample where at least x% of the contig received reads are kept in the database. The default is 50%, meaning a contig is considered present in a sample only if more than half of the contig received reads.
 
 To further reduce the size of the database, values per feature are compressed rather than saving all positions. The type of compression depends on the type of plots:
 
@@ -147,15 +147,15 @@ To further reduce the size of the database, values per feature are compressed ra
   
   $∣x[i]−x[i−1]∣>0.5×min(x[i],x[i−1])$
   
-  The allowed percentage of variation can be adjusted using the --variation_percentage parameter (default 50% ie 0.5).
+  The allowed percentage of variation can be adjusted using the **--variation_percentage** parameter (default 50% ie 0.5).
 
-- Only positions with values above a defined percentage of the local coverage are retained for Bar plots (Misalignment and Phage termini module except for "Coverage reduced" feature). For each position, values are compared to the local coverage and discarded if they fall below the --compress_ratio threshold (default 10% ie 0.1), ensuring that only meaningful peaks are preserved.
+- Only positions with values above a defined percentage of the local coverage are retained for Bar plots (Misalignment and Phage termini module except for "Coverage reduced" feature). For each position, values are compared to the local coverage and discarded if they fall below the **--compress_ratio** threshold (default 10% ie 0.1), ensuring that only meaningful peaks are preserved.
 
 The output is a DuckDB database that is typically ~100× smaller than the original BAM files, while retaining the essential characteristics of the mapping data.
 
-### Visualisation
+## Visualization
 
-Once you have computed your database, you can visualize it interactively using `thebigbam serve` command. This starts a local web server that hosts the interactive plots.
+Once the database has been computed, it can be visualized interactively using `thebigbam serve` command. This starts a local web server that hosts the interactive plots.
 
 Example command:
 
@@ -165,10 +165,38 @@ cp examples/outputs/HK97/HK97.db ~/HK97.db
 thebigbam serve --db ~/HK97.db --port 5006
 ```
 
-The visualisation has 2 modes: per-sample and all-samples. "One sample" mode allows you to explore all computed features for a single sample, while all-samples mode enables comparison of a specific feature across multiple samples.
+When accessing the web server (http://localhost:5006), you will be presented with a web interface:
+
+<div align="center">
+  <img src="static/VISUALIZATION.png" alt="image" width="800" />
+</div>
+
+### One Sample selection panel
+
+You are initially in the **One Sample** view, which allows exploration of all computed features for a single sample. Several sections on the left panel control what is plotted:
+
+- **Filtering**: Only pairs of contig/samples matching the selected filters are available in the **Contigs** and **Samples** sections. For instance, if the contig length filter is set to >10 kbp, only contigs longer than this threshold will appear in the **Contigs** section, and only samples containing at least one such contig will appear in the **Samples** section. To consult the list of filters available have a look at [the filtering page](docs/FILTERS.md).
+
+- **Contigs**: Select the contig you want to explore
+
+- **Samples**: Select the sample you want to explore
+
+- **Variables**: Select the features to plot. You can either use the checkboxes to select all features from a module or click individual features within a module
+
+Finally, click **Apply** to visualize the requested features for the selected contig and sample. Alternatively, click **Peruse Data** to display tables containing the metrics and feature values.
+
+### All Samples view selection panel
+
+**All Samples** view enables comparison of a specific feature across multiple samples. Compared to the **One Sample** view, the **Samples** section is omitted, and only a single feature can be selected in the **Variables** section.
+
+## Plotting
+
+
 
 TODO: explain what we can do in this visualisation (filtering, zooming, exporting...)
 TODO: also possibility to export from the server directly
+
+## Saving specific plots
 
 Instead of exploring the plots interactively in your browser, you can also generate standalone HTML files containing the plots. You need to provide the database path, the contig of interest, the sample name or the feature to plot (for per-sample and all-samples plots, respectively).
 
@@ -179,8 +207,6 @@ thebigbam plot-per-sample -d examples/outputs/HK97/HK97.db -v "Coverage,Phage te
 
 thebigbam plot-all-samples -d examples/outputs/HK97/HK97.db -v "Primary alignments" --contig NC_002167.1 --html examples/outputs/HK97/HK97_illumina_all_samples.html
 ```
-
-TODO: check filtering.md that includes metrics explanation for what you could look for, interpretation.md
 
 ---
 

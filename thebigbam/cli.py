@@ -6,7 +6,7 @@ import sys
 from thebigbam.utils import (
     read_mapping, assembly_annotation
 )
-from theigbam.database import add_variable, calculating_data
+from thebigbam.database import add_variable, calculating_data
 from thebigbam.plotting import plotting_data_all_samples, plotting_data_per_sample, start_bokeh_server
 
 # Path helpers

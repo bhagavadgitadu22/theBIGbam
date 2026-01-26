@@ -271,3 +271,9 @@ Features describing intrinsic genomic properties, independent of sequencing data
 - [Phage Packaging](PHAGE_PACKAGING.md) - How packaging mechanisms are detected from terminus patterns
 
 This document describes all features computed by theBIGbam and stored in the DuckDB database. Features are organized by **module** and **subplot** as they appear in the visualization interface.
+
+
+
+
+
+ADD images explaining different modules!!!
