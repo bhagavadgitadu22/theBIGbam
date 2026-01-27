@@ -12,7 +12,7 @@ except ImportError:
     _rust = None
 
 
-def calculating_all_features_parallel(list_modules, bam_files, output_db, min_coverage, curve_ratio, bar_ratio, circular=False, n_sample_cores=None, sequencing_type=None, genbank_path=None, annotation_tool="", max_samples_in_memory=10, autoblast_file=None):
+def calculating_all_features_parallel(list_modules, bam_files, output_db, min_coverage, curve_ratio, bar_ratio, contig_variation_percentage=0.1, circular=False, n_sample_cores=None, sequencing_type=None, genbank_path=None, annotation_tool="", max_samples_in_memory=10, autoblast_file=None):
     """Process all BAM files in parallel using Rust bindings."""
     if not HAS_RUST:
         sys.exit("ERROR: Rust bindings (thebigbam_rs) are required but not available. Please install them first.")
@@ -34,6 +34,7 @@ def calculating_all_features_parallel(list_modules, bam_files, output_db, min_co
             min_coverage=float(min_coverage),
             curve_ratio=float(curve_ratio),
             bar_ratio=float(bar_ratio),
+            contig_variation_percentage=float(contig_variation_percentage),
             circular=circular,
             create_indexes=True,
             max_samples_in_memory=max_samples_in_memory,
@@ -55,16 +56,17 @@ def add_calculate_args(parser):
     parser.add_argument("-b", "--bam_files", required=True, help="Path to bam file or directory containing mapping files (BAM format)")
     parser.add_argument("--circular", action="store_true", help="Set if assembly was doubled during mapping (enables modulo logic)")
     parser.add_argument("-o", "--output", required=True, help="Output database file path (.db)")
-    parser.add_argument("-m", "--modules", required=False, default=None, help="List of modules to compute (comma-separated). If not provided, all modules are computed. Options: Coverage, Mapping metrics per position, Long-read metrics, Paired-read metrics, Phage termini")
+    parser.add_argument("-m", "--modules", required=False, default=None, help="List of modules to compute (comma-separated). If not provided, all modules are computed. Options: Coverage, Misalignment, Long-reads, Paired-reads, Phage termini")
     parser.add_argument("-a", "--assembly", help="Path to assembly FASTA file (only needed for autoblast when genbank lacks sequence data)")
     parser.add_argument("--annotation_tool", default="", help="Optional: to color the contigs specify the annotation tool used (options allowed: pharokka)")
     parser.add_argument('-s', '--sequencing_type', choices=['long', 'paired-short', 'single-short'], help='Sequencing type (long or short allowed)')
     parser.add_argument("--min_coverage", type=int, default=50, help="Minimum alignment-length coverage proportion for contig inclusion (default 50%% change threshold)")
     parser.add_argument('--variation_percentage', type=float, default=50, help='Run-length encoding ratio for independent features like coverage (default: 50%%)')
     parser.add_argument('--coverage_percentage', type=float, default=10, help='Compressing ratio for features depending on coverage: only values above this %% of the local coverage are kept (default: 10%%)')
+    parser.add_argument('--contig_variation_percentage', type=float, default=10, help='Run-length encoding ratio for contig-level features like GC content (default: 10%%)')
     parser.add_argument("--max-samples-in-memory", type=int, default=10, help="Max samples to hold in memory during processing (default: 10). Lower for large datasets to reduce memory usage.")
 
-VALID_MODULES = ["Coverage", "Mapping metrics per position", "Long-read metrics", "Paired-read metrics", "Phage termini"]
+VALID_MODULES = ["Coverage", "Misalignment", "Long-reads", "Paired-reads", "Phage termini"]
 
 def run_calculate_args(args):
     annotation_tool = args.annotation_tool
@@ -90,6 +92,7 @@ def run_calculate_args(args):
     min_coverage = args.min_coverage
     variation_percentage = args.variation_percentage
     coverage_percentage = args.coverage_percentage
+    contig_variation_percentage = args.contig_variation_percentage
     circular = args.circular
     n_cores = int(args.threads)
 
@@ -162,7 +165,8 @@ def run_calculate_args(args):
 
     print("\nCalculating values for all requested features from mapping files...", flush=True)
     calculating_all_features_parallel(
-        requested_modules, bam_files, output_db, min_coverage, variation_percentage, coverage_percentage, circular, n_cores,
+        requested_modules, bam_files, output_db, min_coverage, variation_percentage, coverage_percentage,
+        contig_variation_percentage=contig_variation_percentage, circular=circular, n_sample_cores=n_cores,
         sequencing_type=args.sequencing_type, genbank_path=genbank_path, annotation_tool=annotation_tool if genbank_path else "",
         max_samples_in_memory=max_samples_in_memory, autoblast_file=autoblast_file
     )

@@ -93,7 +93,7 @@ def build_argparser():
     sp.add_argument('--meta', action='store_true', help='Pass --meta to annotator for multi-organism assemblies')
     
     # Calculation inputs
-    sp.add_argument('-m', '--modules', help='Comma-separated modules. Options: Coverage, Mapping metrics per position, Long-read metrics, Paired-read metrics, Phage termini. If not provided, all modules are computed.')
+    sp.add_argument('-m', '--modules', help='Comma-separated modules. Options: Coverage, Misalignment, Long-reads, Paired-reads, Phage termini. If not provided, all modules are computed.')
     sp.add_argument('--min_coverage', type=int, default=50, help='Minimum coverage for contig inclusion (default: 50%%)')
     sp.add_argument('--variation_percentage', type=float, default=50, help='Run-length encoding ratio for independent features like coverage (default: 50%%)')
     sp.add_argument('--coverage_percentage', type=float, default=10, help='Compressing ratio for features depending on coverage: only values above this %% of the local coverage are kept (default: 10%%)')

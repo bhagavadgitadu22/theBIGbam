@@ -72,7 +72,7 @@ A genbank file containing annotations of your contigs of interest can also be pr
 Calculate command takes at least a directory of mapping files (-b) and an output path for the database (-o):
 
 ```sh
-thebigbam calculate -b examples/inputs/HK97/bams --circular -g examples/inputs/HK97/HK97_GCF_000848825.1_pharokka.gbk --annotation_tool pharokka -m "Coverage","Mapping metrics per position"-o examples/outputs/HK97/HK97.db -t 4 
+thebigbam calculate -b examples/inputs/HK97/bams --circular -g examples/inputs/HK97/HK97_GCF_000848825.1_pharokka.gbk --annotation_tool pharokka -m "Coverage","Misalignment"-o examples/outputs/HK97/HK97.db -t 4 
 ```
 
 Here several optional parameters are added:
@@ -125,8 +125,8 @@ theBIGbam performs fast Rust-based computations on your BAM files to extract rel
 
 - **Coverage**: computes per-position coverage for primary, secondary, and supplementary reads, as well as the mapping quality (MAPQ)
 - **Misalignment:** computes per-position number of clippings, insertions, deletions and mismatches
-- **Long-read metrics:** computes per-position average length of reads
-- **Paired-read metrics:** computes per-position average insert size of reads along with the number of incorrect pair orientations (non-inward pairs, mate unmapped or mapping or another contig)
+- **Long-reads:** computes per-position average length of reads
+- **Paired-reads:** computes per-position average insert size of reads along with the number of incorrect pair orientations (non-inward pairs, mate unmapped or mapping or another contig)
 - **Phage termini:** compute per-position coverage for primary-reads starting with an exact match. Among those reads, the number of mapped reads starting and ending is computed along with the tau ratio calculating the proportion of reads terminating at each position relative to the coverage
 
 If an annotation file is provided, the **Genome** module is also computed. It keeps track of the contig annotations (positions of the coding sequences and their functions) and calculates the repeats contained within each contig using an autoblast.
@@ -171,13 +171,15 @@ When accessing the web server (http://localhost:5006), you will be presented wit
   <img src="static/VISUALIZATION.png" alt="image" width="800" />
 </div>
 
-### One Sample selection panel
+### Selection panel
 
-You are initially in the **One Sample** view, which allows exploration of all computed features for a single sample. Several sections on the left panel control what is plotted:
+#### One Sample mode
 
-- **Filtering**: Only pairs of contig/samples matching the selected filters are available in the **Contigs** and **Samples** sections. For instance, if the contig length filter is set to >10 kbp, only contigs longer than this threshold will appear in the **Contigs** section, and only samples containing at least one such contig will appear in the **Samples** section. To consult the list of filters available have a look at [the filtering page](docs/FILTERS.md).
+You are initially in the **One Sample** mode, which allows exploration of all computed features for a single sample. Several sections on the left panel control what is plotted:
 
-- **Contigs**: Select the contig you want to explore
+- **Filtering**: Only pairs of contig/samples matching the selected filters are available in the **Contigs** and **Samples** sections. For instance, if the contig length filter is set to >10 kbp, only contigs longer than this threshold will appear in the **Contigs** section, and only samples containing at least one such contig will appear in the **Samples** section. To consult the list of filters available have a look at [the filtering page](docs/FILTERS.md)
+
+- **Contigs**: Select the contig you want to explore. If a GenBank file was provided when creating the database, genomic features can be selected for plotting by clicking on the contig features. Currently, gene maps and repeats are supported
 
 - **Samples**: Select the sample you want to explore
 
@@ -185,18 +187,17 @@ You are initially in the **One Sample** view, which allows exploration of all co
 
 Finally, click **Apply** to visualize the requested features for the selected contig and sample. Alternatively, click **Peruse Data** to display tables containing the metrics and feature values.
 
-### All Samples view selection panel
+#### All Samples mode
 
-**All Samples** view enables comparison of a specific feature across multiple samples. Compared to the **One Sample** view, the **Samples** section is omitted, and only a single feature can be selected in the **Variables** section.
+**All Samples** mode enables comparison of a specific feature across multiple samples. Compared to the **One Sample** mode, the **Samples** section is omitted, and only a single feature can be selected in the **Variables** section.
 
-## Plotting
+### Plotting
 
+All plots leverage the full capabilities of Bokeh: you can pan, zoom, and hover over specific points to inspect local values (genomic position in base pairs and corresponding y-values).
 
+Buttons in the top-right section allow you to disable pan, zoom, or hover interactions, reset the plots to their original state, and **export the current view as a PNG image**.
 
-TODO: explain what we can do in this visualisation (filtering, zooming, exporting...)
-TODO: also possibility to export from the server directly
-
-## Saving specific plots
+### Saving specific plots
 
 Instead of exploring the plots interactively in your browser, you can also generate standalone HTML files containing the plots. You need to provide the database path, the contig of interest, the sample name or the feature to plot (for per-sample and all-samples plots, respectively).
 
@@ -207,6 +208,8 @@ thebigbam plot-per-sample -d examples/outputs/HK97/HK97.db -v "Coverage,Phage te
 
 thebigbam plot-all-samples -d examples/outputs/HK97/HK97.db -v "Primary alignments" --contig NC_002167.1 --html examples/outputs/HK97/HK97_illumina_all_samples.html
 ```
+
+TODO: check those commands work
 
 ---
 

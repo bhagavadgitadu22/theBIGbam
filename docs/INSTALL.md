@@ -1,4 +1,4 @@
-# theBIGbam Installation Guide
+# Installation Guide
 
 theBIGbam is a hybrid Python/Rust tool that combines fast Rust-based BAM processing with interactive Python visualization. Installation requires three components:
 
@@ -13,17 +13,20 @@ theBIGbam is a hybrid Python/Rust tool that combines fast Rust-based BAM process
 Rust is needed to compile the fast calculation engine. This is a one-time setup.
 
 **Linux, macOS, or WSL:**
+
 ```bash
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 source $HOME/.cargo/env  # Add Rust to your PATH
 ```
 
 **Windows:**
+
 1. Download [rustup-init.exe](https://rustup.rs/)
 2. Run the installer and follow prompts
 3. Restart your terminal
 
 **Verify Rust installation:**
+
 ```bash
 rustc --version
 cargo --version
@@ -36,6 +39,7 @@ module load llvm was enough to make it work for me
 ### Step 2: Install Python 3.9+
 
 Check if you have Python installed:
+
 ```bash
 python --version  # or python3 --version
 ```
@@ -45,6 +49,7 @@ If not installed, download from [python.org](https://www.python.org/downloads/) 
 ### Step 3: Install theBIGbam
 
 **For users (recommended):**
+
 ```bash
 git clone https://github.com/bhagavadgitadu22/theBIGbam
 cd theBIGbam
@@ -52,11 +57,13 @@ pip install .
 ```
 
 This will:
+
 - Compile the Rust code (takes 5-10 minutes first time)
 - Install Python dependencies (bokeh, biopython, pysam, etc.)
 - Create the `thebigbam` command
 
 **For developers:**
+
 ```bash
 git clone https://github.com/bhagavadgitadu22/theBIGbam
 cd theBIGbam
@@ -69,12 +76,14 @@ This installs in "editable" mode - changes to Python code take effect immediatel
 ### Step 4: (Optional) Install External Tools
 
 **Only needed if you want to:**
+
 - Map reads to assemblies (minimap2, samtools)
 - Annotate genomes (pharokka, bakta)
 
 **If you already have BAM files and GenBank annotations, skip this step.**
 
 **Using conda/mamba (easiest):**
+
 ```bash
 mamba env create -f thebigbam_env.yaml
 conda activate thebigbam
@@ -82,6 +91,7 @@ pip install .  # Re-install in conda environment
 ```
 
 This installs:
+
 - **minimap2** - Read aligner
 - **samtools** - BAM file manipulation
 - **seqkit** - Sequence file manipulation
@@ -112,20 +122,24 @@ thebigbam serve --db examples/outputs/HK97/test.db --port 5006
 ## Common Issues
 
 **"rust-htslib" compilation errors:**
+
 - On Linux: Install development headers: `sudo apt-get install libbz2-dev liblzma-dev zlib1g-dev`
 - On macOS: `brew install xz bzip2 zlib`
 
 **"maturin: command not found" or build fails:**
+
 - Make sure Rust is installed: `rustc --version`
 - Install maturin: `pip install maturin`
 - Try: `maturin develop --release`
 
 **Python import errors:**
+
 - Ensure you're in the correct environment if using conda
 - Try reinstalling: `pip uninstall thebigbam && pip install .`
 - Or force rebuild: `pip install --force-reinstall --no-cache-dir .`
 
 **Slow compilation:**
+
 - First-time compilation takes 5-10 minutes
 - Subsequent installs are faster (~1 minute) due to caching
 - For less optimization but faster compile use: `maturin develop  # Without --release`
@@ -139,6 +153,7 @@ pip install --force-reinstall .
 ```
 
 For developers:
+
 ```bash
 git pull
 maturin develop --release

@@ -1,8 +1,8 @@
-# # What features are inferred from your data?
+# # Computed features
 
-This document describes all features computed by theBIGbam and stored in the DuckDB database. Features are organized by **module** as they appear in the visualization interface.
+This document describes all features computed from the mapping files by theBIGbam and stored in the DuckDB database. Features are organized by **module** as they appear in the visualization interface. Within a module, each subplot displays one or two features that are plotted together.
 
-6 modules exist at the moment: 5 are defined from the mappings files and the Genome module is defined from the optional annotation file.
+In addition, genomic features are stored when an optional annotation file is provided.
 
 ---
 
@@ -10,169 +10,55 @@ This document describes all features computed by theBIGbam and stored in the Duc
 
 Features describing read alignment depth and quality across the genome.
 
-### Subplot: Primary Alignments
+![image](../static/COVERAGE_MODULE.png)
 
-#### Primary Reads
-
-- **Description:** The number of reads covering each position, counting only primary alignments
-- **How it's computed:** For each position, count reads where this is the best alignment (not secondary or supplementary). This is the standard "coverage" or "read depth"
-- **Display:** Shown as a continuous curve
-
-### Subplot: Alignments by Strand
-
-#### Primary Reads (+ only)
-
-- **Description:** Coverage from reads aligned to the forward strand only
-- **How it's computed:** Count of primary reads at each position where the read maps to the plus strand
-- **Use case:** Strand bias can indicate certain library preparation artifacts or biological features like transcription
-
-#### Primary Reads (- only)
-
-- **Description:** Coverage from reads aligned to the reverse strand only
-- **How it's computed:** Count of primary reads at each position where the read maps to the minus strand
-- **Use case:** Compare with forward strand to detect strand imbalances
-
-### Subplot: Other Alignments
-
-#### Secondary Reads
-
-- **Description:** Count of secondary alignments at each position
-- **How it's computed:** Reads flagged as secondary (SAM flag 0x100) - alternative alignments when a read maps to multiple locations
-- **Interpretation:** High secondary alignment counts indicate repetitive or ambiguous regions where reads could map to multiple places
-
-#### Supplementary Reads
-
-- **Description:** Count of supplementary alignments at each position
-- **How it's computed:** Reads flagged as supplementary (SAM flag 0x800) - chimeric alignments where different parts of the read map to different locations
-- **Interpretation:** High supplementary counts may indicate structural variants, chimeric sequences, or assembly errors
-
-### Subplot: MAPQ
-
-#### Mapping Quality
-
-- **Description:** Average confidence of read alignments at each position
-- **How it's computed:** `Average MAPQ = Sum of MAPQ values / Number of primary reads`
-- **Value range:** 0-60 (typically), where higher values indicate more confident alignments
-- **Interpretation:**
-  - **High MAPQ (>30):** Reads align uniquely and confidently
-  - **Low MAPQ (<10):** Reads could map to multiple locations; the alignment is ambiguous
-  - Note: MAPQ scoring varies between aligners (BWA, Bowtie2, minimap2, etc.)
+| Subplot              | Feature               | Description                                                                                                                          | Use case                                                                                                          |
+| -------------------- | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------- |
+| Primary alignments   | Primary reads         | The number of reads covering each position, counting only primary alignments                                                         |                                                                                                                   |
+| Alignments by strand | Strand + and strand - | Separation of primary alignments by strand (+ and -)                                                                                 | Strand bias can indicate certain library preparation artifacts or biological features like transcription          |
+| Other alignments     | Secondary             | Reads flagged as secondary (SAM flag 0x100) - alternative alignments when a read maps to multiple locations                          | High secondary alignment counts indicate repetitive or ambiguous regions where reads could map to multiple places |
+| Other alignments     | Supplementary         | Reads flagged as supplementary (SAM flag 0x800) - chimeric alignments where different parts of the read map to different locations   | High supplementary counts may indicate structural variants, chimeric sequences, or assembly errors                |
+| MAPQ                 | MAPQ                  | Average confidence of read alignments at each position. Warning: MAPQ scoring varies between aligners (BWA, Bowtie2, minimap2, etc.) | Evaluate alignment confidence variability                                                                         |
 
 ---
 
-## Long-read Metrics Module
+## Misalignment module
+
+Features describing alignment anomalies that may indicate assembly issues or microdiversity.
+
+![image](../static/MISALIGNMENT_MODULE.png) 
+
+| Subplot    | Feature                  | Description                                                                                                                                                                                                                                                                                                                                                 | Use case                                                                                                                                                                                                                                                                  |
+| ---------- | ------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Clippings  | Left and right clippings | Soft/hard clipping occurs when part of a read does not align to the reference. The clipped portion represents sequence in the read that has no corresponding match in the reference. At each position, reads with soft/hard clipping at their left (5') and right (3') end are counted, along with mean, median, and standard deviation of clipping lengths | Indicates sequence present in reads but missing from the left or right side of the reference at this position. Common at contig ends if the assembly is incomplete. Warning: can also be caused by adapter contamination be certain your reads were properly preprocessed |
+| Indels     | Insertions               | Sequence present in the reference but absent from reads. Determined from 'I' operations in CIGAR strings. Mean, median, and standard deviation of insertion lengths are also determined                                                                                                                                                                     | Could indicate true insertions in the sequenced sample, missing sequence in the reference assembly, sequencing errors (especially in homopolymer regions)                                                                                                                 |
+| Indels     | Deletions                | Sequence present in the reference but absent from reads. Determined from 'D' operations in CIGAR strings.                                                                                                                                                                                                                                                   | Could indicate true deletions in the sequenced sample, extra sequence incorrectly included in the reference, alignment artifacts                                                                                                                                          |
+| Mismatches | Mismatches               | Count of base substitutions at each position. Computed from from the MD tag in BAM files, count positions where the read base differs from the reference base                                                                                                                                                                                               | SNPs (true variation between sample and reference), sequencing errors, alignment errors in repetitive regions                                                                                                                                                             |
+
+---
+
+## Long-reads module
 
 Features specific to long-read sequencing data (PacBio, Nanopore).
 
-### Subplot: Read Lengths
-
-#### Read Lengths
-
-- **Description:** Average length of reads covering each position
-- **How it's computed:** `Average = Sum of read lengths at position / Count of reads at position`
-- **Use case:** Identify regions covered by shorter or longer reads. Unusually short reads in a region might indicate fragmentation or alignment issues
+| Subplot      | Feature      | Description                                    | Use case                                                                                                                                |
+| ------------ | ------------ | ---------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| Read lengths | Read lengths | Average length of reads covering each position | Identify regions covered by shorter or longer reads. Unusually short reads in a region might indicate fragmentation or alignment issues |
 
 ---
 
-## Paired-read Metrics Module
+## Paired-reads module
 
 Features specific to paired-end/mate-pair sequencing data (Illumina).
 
-### Subplot: Insert Sizes
+![image](../static/PAIRED_READ_MODULE.png)
 
-#### Insert Sizes
-
-- **Description:** Average distance between read pairs at each position
-- **How it's computed:** For properly paired reads, compute `Average = Sum of insert sizes / Count of proper pairs`
-- **Interpretation:**
-  - Consistent insert sizes indicate normal library structure
-  - Deviations from the expected insert size may indicate structural variants (insertions/deletions)
-
-### Subplot: Non-inward Pairs
-
-#### Non-inward Pairs
-
-- **Description:** Count of reads where the mate is on the same contig but in an unexpected orientation
-- **How it's computed:** Count reads where the mate maps to the same contig but the pair orientation is not the expected inward-facing (FR) orientation
-- **Interpretation:** High counts suggest:
-  - Inversions in the sample relative to the reference
-  - Tandem duplications
-  - Assembly errors
-
-### Subplot: Mate Not Mapped
-
-#### Missing Mates (unmapped)
-
-- **Description:** Count of reads whose mate failed to align anywhere
-- **How it's computed:** Count reads where the mate unmapped flag (0x8) is set
-- **Interpretation:** High counts may indicate:
-  - Sequence not present in the reference
-  - Poor quality mate reads
-  - Contamination in the library
-
-### Subplot: Mate on Another Contig
-
-#### Missing Mates (other contig)
-
-- **Description:** Count of reads whose mate aligned to a different contig
-- **How it's computed:** Count reads where the mate reference ID differs from the read's reference ID
-- **Interpretation:** Can indicate:
-  - Chimeric molecules in the library
-  - Misassemblies where contigs should be joined
-  - Mobile elements or prophages integrated at this position
-
----
-
-## Mapping Metrics Per Position Module
-
-Features describing alignment anomalies that may indicate assembly issues or biological variation.
-
-### Subplot: Clippings
-
-Soft/hard clipping occurs when part of a read does not align to the reference. The clipped portion represents sequence in the read that has no corresponding match in the reference.
-
-#### Left Clippings
-
-- **Description:** Count and length of clipped bases at the 5' end of reads
-- **How it's computed:** At each position, count reads with soft/hard clipping at their left (5') end. Also computes mean, median, and standard deviation of clipping lengths
-- **Interpretation:** Indicates sequence present in reads but missing from the left side of the reference at this position. Common at contig ends if the assembly is incomplete
-
-#### Right Clippings
-
-- **Description:** Count and length of clipped bases at the 3' end of reads
-- **How it's computed:** At each position, count reads with soft/hard clipping at their right (3') end. Also computes mean, median, and standard deviation of clipping lengths
-- **Interpretation:** Indicates sequence present in reads but missing from the right side of the reference at this position
-
-### Subplot: Indels
-
-#### Insertions
-
-- **Description:** Count and length of insertion events at each position
-- **How it's computed:** From CIGAR strings, count 'I' operations. Also computes mean, median, and standard deviation of insertion lengths
-- **Interpretation:** Sequence present in the reads but absent from the reference. Could indicate:
-  - True insertions in the sequenced sample
-  - Missing sequence in the reference assembly
-  - Sequencing errors (especially in homopolymer regions)
-
-#### Deletions
-
-- **Description:** Count of deletion events at each position
-- **How it's computed:** From CIGAR strings, count 'D' operations
-- **Interpretation:** Sequence present in the reference but absent from reads. Could indicate:
-  - True deletions in the sequenced sample
-  - Extra sequence incorrectly included in the reference
-  - Alignment artifacts
-
-### Subplot: Mismatches
-
-#### Mismatches
-
-- **Description:** Count of base substitutions at each position
-- **How it's computed:** From the MD tag in BAM files, count positions where the read base differs from the reference base
-- **Interpretation:** Could indicate:
-  - SNPs (true variation between sample and reference)
-  - Sequencing errors
-  - Alignment errors in repetitive regions
+| Subplot          | Feature                | Description                                                                                                                    | Use case                                                                                                                                                    |
+| ---------------- | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Insert sizes     | Insert sizes           | Average distance between read pairs at each position                                                                           | Consistent insert sizes indicate normal library structure. Deviations from the expected insert size may indicate structural variants (insertions/deletions) |
+| Non-inward pairs | Non-inward pairs       | Count reads where the mate maps to the same contig but the pair orientation is not the expected inward-facing (FR) orientation | High counts suggest inversions in the sample relative to the reference, tandem duplications, assembly errors                                                |
+| Mate not mapped  | Unmapped mates         | Count reads where the mate unmapped flag (0x8) is set                                                                          | High counts may indicate sequence not present in the reference, poor quality mate reads, contamination in the library                                       |
+| Mate not mapped  | Mate on another contig | Count reads where the mate reference ID differs from the read's reference ID                                                   | Can indicate chimeric molecules in the library, misassemblies where contigs should be joined, mobile elements or prophages integrated at this position      |
 
 ---
 
@@ -184,7 +70,11 @@ Features designed for detecting phage DNA packaging sites and terminus types. Th
 
 ### Subplot: Reads Termini
 
-These features count where reads physically start and end, which can reveal DNA packaging cut sites.
+| Subplot       | Feature                    | Description                                                                                                                             | Use case                                                                                                                                                    |
+| ------------- | -------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Reads termini | Read starts and reads ends | These features count where reads start and end, which can reveal DNA packaging cut sites. Count of read 5' and 3' ends at each position | Consistent insert sizes indicate normal library structure. Deviations from the expected insert size may indicate structural variants (insertions/deletions) |
+
+These features count where reads start and end, which can reveal DNA packaging cut sites.
 
 #### Read Starts
 
@@ -240,6 +130,8 @@ These features count where reads physically start and end, which can reveal DNA 
 
 ## Genome module
 
+TODO: if only assembly file repeats ok
+
 Features describing intrinsic genomic properties, independent of sequencing data.
 
 ### Subplot: Repeats
@@ -271,9 +163,5 @@ Features describing intrinsic genomic properties, independent of sequencing data
 - [Phage Packaging](PHAGE_PACKAGING.md) - How packaging mechanisms are detected from terminus patterns
 
 This document describes all features computed by theBIGbam and stored in the DuckDB database. Features are organized by **module** and **subplot** as they appear in the visualization interface.
-
-
-
-
 
 ADD images explaining different modules!!!

@@ -20,6 +20,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Mutex;
 
+use crate::gc_content::GCContentRun;
 use crate::types::{feature_table_name, ContigInfo, FeatureAnnotation, FeaturePoint, PackagingData, PresenceData, VARIABLES};
 
 /// Thread-safe database connection wrapper for sequential writes.
@@ -230,8 +231,8 @@ impl DbWriter {
 
         for v in VARIABLES {
             // Skip primary_reads - it's a VIEW
-            // Skip direct_repeats/inverted_repeats - stored in Contig_* tables
-            if v.name == "primary_reads" || v.name == "direct_repeats" || v.name == "inverted_repeats" {
+            // Skip contig-level variables stored in Contig_* tables (not per-sample)
+            if v.name == "primary_reads" || v.name == "direct_repeats" || v.name == "inverted_repeats" || v.name == "gc_content" {
                 continue;
             }
 
@@ -425,6 +426,39 @@ impl DbWriter {
         Ok(())
     }
 
+    /// Write GC content data to the database.
+    /// This is called once during database creation (not per-sample).
+    pub fn write_gc_content(&self, gc_data: &[GCContentData]) -> Result<()> {
+        if gc_data.is_empty() {
+            return Ok(());
+        }
+
+        let conn = self.conn.lock().unwrap();
+        let mut appender = conn.appender("Contig_GCContent")
+            .context("Failed to create Contig_GCContent appender")?;
+
+        let mut total_runs = 0;
+
+        for data in gc_data {
+            if let Some(&contig_id) = self.contig_name_to_id.get(&data.contig_name) {
+                for run in &data.runs {
+                    appender.append_row(params![
+                        contig_id,
+                        run.start_pos,
+                        run.end_pos,
+                        run.gc_percentage as i32
+                    ])?;
+                    total_runs += 1;
+                }
+            }
+        }
+
+        appender.flush().context("Failed to flush Contig_GCContent appender")?;
+        eprintln!("Wrote {} GC content runs to database", total_runs);
+
+        Ok(())
+    }
+
     /// Finalize the database after all samples are processed.
     pub fn finalize(self) -> Result<()> {
         let conn = self.conn.into_inner().unwrap();
@@ -535,6 +569,19 @@ fn create_core_tables(conn: &Connection) -> Result<()> {
         [],
     )
     .context("Failed to create Contig_InvertedRepeats table")?;
+
+    // Contig_GCContent table - stores GC content (contig-level, sample-independent)
+    // GC_percentage stored as INTEGER (0-100)
+    conn.execute(
+        "CREATE TABLE Contig_GCContent (
+            Contig_id INTEGER,
+            First_position INTEGER,
+            Last_position INTEGER,
+            GC_percentage INTEGER
+        )",
+        [],
+    )
+    .context("Failed to create Contig_GCContent table")?;
 
     // Completeness table - clipping prevalences stored as INTEGER (×100), totals as INTEGER
     // Note: Prevalence_clippings_* stores clipping_count/coverage (raw clipping prevalence)
@@ -661,10 +708,11 @@ fn insert_annotations(conn: &Connection, annotations: &[FeatureAnnotation]) -> R
 /// Create Variable metadata entries only. Feature tables are created lazily.
 fn create_variable_tables(conn: &Connection) -> Result<()> {
     for (i, v) in VARIABLES.iter().enumerate() {
-        // Special case: repeat data is stored in separate Contig_* tables
+        // Special case: contig-level data is stored in separate Contig_* tables
         let table_name = match v.name {
             "direct_repeats" => "Contig_DirectRepeats".to_string(),
             "inverted_repeats" => "Contig_InvertedRepeats".to_string(),
+            "gc_content" => "Contig_GCContent".to_string(),
             _ => feature_table_name(v.name),
         };
 
@@ -911,9 +959,9 @@ fn cleanup_unused_variables(conn: &Connection, created_tables: &HashSet<String>)
     let mut deleted_count = 0;
     for (var_name, table_name) in rows {
         // Skip special cases:
-        // - direct_repeats/inverted_repeats: data stored in Contig_* tables (always exist)
+        // - direct_repeats/inverted_repeats/gc_content: data stored in Contig_* tables (always exist)
         // - primary_reads: is a VIEW, not a table (depends on plus/minus tables)
-        if var_name == "direct_repeats" || var_name == "inverted_repeats" {
+        if var_name == "direct_repeats" || var_name == "inverted_repeats" || var_name == "gc_content" {
             continue;
         }
 
@@ -988,6 +1036,14 @@ pub struct RepeatsData {
     pub pident: f64,
     /// True if direct repeat (same orientation), false if inverted repeat
     pub is_direct: bool,
+}
+
+/// GC content data for a contig.
+/// Contains pre-computed GC content runs with RLE compression.
+#[derive(Clone, Debug)]
+pub struct GCContentData {
+    pub contig_name: String,
+    pub runs: Vec<GCContentRun>,
 }
 
 /// Completeness data for a contig.

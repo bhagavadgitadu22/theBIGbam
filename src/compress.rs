@@ -103,12 +103,13 @@ pub fn compress_signal_with_reference(
 
     for i in 1..n {
         let val = values[i];
-        
-        // Self-referential threshold for curves
-        let threshold = if run_value.abs() < 1e-9 {
+
+        // RLE formula: |x[i] - x[i-1]| <= ratio × min(|x[i]|, |x[i-1]|)
+        let min_abs = val.abs().min(run_value.abs());
+        let threshold = if min_abs < 1e-9 {
             curve_ratio
         } else {
-            curve_ratio * run_value.abs()
+            curve_ratio * min_abs
         };
 
         if (val - run_value).abs() <= threshold {

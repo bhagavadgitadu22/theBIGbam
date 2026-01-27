@@ -26,7 +26,8 @@ use crate::compress::{
     add_compressed_feature, add_compressed_feature_with_reference,
     add_compressed_feature_with_stats, merge_identical_runs, 
 };
-use crate::db::{DbWriter, CompletenessData, RepeatsData};
+use crate::db::{DbWriter, CompletenessData, GCContentData, RepeatsData};
+use crate::gc_content::compute_gc_content;
 use crate::features::{FeatureArrays, ModuleFlags};
 use crate::parser::parse_annotations;
 use crate::types::{
@@ -47,6 +48,8 @@ pub struct ProcessConfig {
     /// Relative tolerance for RLE compression (e.g., 0.1 = 10% change threshold)
     pub curve_ratio: f64,
     pub bar_ratio: f64,
+    /// RLE compression tolerance for contig-level features like GC content (default 0.1%)
+    pub contig_variation_percentage: f64,
     /// Circular genome flag: if true, assembly was doubled during mapping (enables modulo logic)
     pub circular: bool,
     /// Sequencing type: if None, auto-detect per sample; if Some, use for all samples
@@ -209,7 +212,7 @@ fn validate_all_samples(
             if check_missing_md_tags(&mut check_bam) {
                 eprintln!(
                     "Warning: in sample '{}', BAM file is missing MD tags. \
-                     MD tags are required for: Mapping metrics per position, Phage termini. \
+                     MD tags are required for: Misalignment, Phage termini. \
                      Consider using 'samtools calmd' to add them.",
                     sample_name
                 );
@@ -390,7 +393,7 @@ fn add_features_from_arrays(
         mismatch_runs = add_compressed_feature_with_reference(&mismatches_f64, Some(&primary_reads_f64), "mismatches", contig_name, config, output);
     }
 
-    // Paired-read metrics module
+    // Paired-reads module
     if flags.paired_read_metrics && seq_type.is_short_paired() {
         let non_inward_f64: Vec<f64> = arrays.non_inward_pairs.iter().map(|&x| x as f64).collect();
         let non_inward_runs = compress_signal_with_reference(&non_inward_f64, Some(&primary_reads_f64), PlotType::Curve, config.curve_ratio, config.bar_ratio);
@@ -441,7 +444,7 @@ fn add_features_from_arrays(
         add_compressed_feature(&values, "insert_sizes", contig_name, config, output);
     }
 
-    // Long-read metrics module
+    // Long-reads module
     if flags.long_read_metrics && seq_type.is_long() {
         let values: Vec<f64> = arrays
             .sum_read_lengths
@@ -828,6 +831,7 @@ fn extract_contigs_from_bams(bam_files: &[PathBuf], circular: bool) -> Result<Ve
             name,
             length,
             annotation_tool: String::new(),
+            sequence: None, // BAM headers don't contain sequence data
         })
         .collect();
     
@@ -897,6 +901,26 @@ pub fn run_all_samples(
     } else {
         Vec::new()
     };
+
+    // Compute and write GC content from sequence data (if available)
+    // Uses 100bp sliding window and configurable RLE compression (default 0.1%)
+    let gc_data: Vec<GCContentData> = contigs
+        .iter()
+        .filter_map(|contig| {
+            contig.sequence.as_ref().map(|seq| {
+                let runs = compute_gc_content(seq, 100, config.contig_variation_percentage);
+                GCContentData {
+                    contig_name: contig.name.clone(),
+                    runs,
+                }
+            })
+        })
+        .collect();
+
+    if !gc_data.is_empty() {
+        eprintln!("\n### Computing GC content for {} contigs...", gc_data.len());
+        db_writer.write_gc_content(&gc_data)?;
+    }
 
     eprintln!("\n### Processing {} samples with {} threads", bam_files.len(), config.threads);
     eprintln!("Modules: {}\n", modules.join(", "));

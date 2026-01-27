@@ -27,7 +27,7 @@
 ## On assembly check features:
 
 - !important! Better index is number of bp unmatched divide by number of basepairs matched? -> average completeness
-- !important! Add mapping metrics per position conclusions:
+- !important! Add misalignment conclusions:
   For example: contig likely complete (no major clippings and insertions)
   contig likely misassembled (clippings, insertions, deletions, mismatches that represent more than 50%)
   -> status but also minimal estimation of bases missing and bases added and bases changed

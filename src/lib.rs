@@ -12,7 +12,7 @@
 //!     genbank_path="annotation.gbk",
 //!     bam_dir="/path/to/bams",
 //!     output_dir="/path/to/output",
-//!     modules=["Coverage", "Mapping metrics per position", "Long-read metrics", "Paired-read metrics", "Phage termini"],
+//!     modules=["Coverage", "Misalignment", "Long-reads", "Paired-reads", "Phage termini"],
 //!     threads=8,
 //!     annotation_tool="pharokka",
 //! )
@@ -25,6 +25,7 @@ pub mod circular;
 pub mod compress;
 pub mod db;
 pub mod features;
+pub mod gc_content;
 pub mod parser;
 pub mod processing;
 pub mod processing_completeness;
@@ -64,7 +65,7 @@ mod python {
     ///     genbank_path: Path to the GenBank annotation file (empty string to skip)
     ///     bam_files: List of BAM file paths to process
     ///     output_db: Output database file path (.db)
-    ///     modules: List of modules to compute: "Coverage", "Mapping metrics per position", "Long-read metrics", "Paired-read metrics", "Phage termini"
+    ///     modules: List of modules to compute: "Coverage", "Misalignment", "Long-reads", "Paired-reads", "Phage termini"
     ///     threads: Number of threads to use
     ///     annotation_tool: Annotation tool name (e.g., "pharokka")
     ///     min_coverage: Minimum coverage percentage for contig inclusion (default 50.0)
@@ -78,7 +79,7 @@ mod python {
     ///         - "samples_failed": int
     ///         - "total_time": float (seconds)
     #[pyfunction]
-    #[pyo3(signature = (genbank_path, bam_files, output_db, modules, threads, sequencing_type=None, annotation_tool="", min_coverage=50.0, curve_ratio=10.0, bar_ratio=10.0, circular=false, create_indexes=true, max_samples_in_memory=10, autoblast_file=""))]
+    #[pyo3(signature = (genbank_path, bam_files, output_db, modules, threads, sequencing_type=None, annotation_tool="", min_coverage=50.0, curve_ratio=10.0, bar_ratio=10.0, contig_variation_percentage=10.0, circular=false, create_indexes=true, max_samples_in_memory=10, autoblast_file=""))]
     fn process_all_samples<'py>(
         py: Python<'py>,
         genbank_path: &str,
@@ -91,6 +92,7 @@ mod python {
         min_coverage: f64,
         curve_ratio: f64,
         bar_ratio: f64,
+        contig_variation_percentage: f64,
         circular: bool,
         create_indexes: bool,
         max_samples_in_memory: usize,
@@ -108,6 +110,7 @@ mod python {
             min_coverage,
             curve_ratio,
             bar_ratio,
+            contig_variation_percentage,
             circular,
             sequencing_type: seq_type,
             phagetermini_config: PhageTerminiConfig::default(),

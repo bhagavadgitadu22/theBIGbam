@@ -178,7 +178,7 @@ def build_controls(conn):
 
     # Get modules that have at least one variable with data
     # Define the display order for modules
-    MODULE_ORDER = ["Genome", "Coverage", "Mapping metrics per position", "Long-read metrics", "Paired-read metrics", "Phage termini"]
+    MODULE_ORDER = ["Genome", "Coverage", "Misalignment", "Long-reads", "Paired-reads", "Phage termini"]
 
     cur.execute("SELECT DISTINCT Module FROM Variable WHERE Feature_table_name IN ({})".format(
         ','.join('?' * len(tables_with_data))

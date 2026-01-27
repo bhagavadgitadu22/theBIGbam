@@ -368,6 +368,69 @@ def get_repeats_data(cur, contig_id, variable_name="direct_repeats"):
     }]
 
 
+### Function to get GC content (contig-level, sample-independent)
+def get_gc_content_data(cur, contig_id):
+    """Get GC content data for plotting, formatted for make_bokeh_subplot().
+
+    Args:
+        cur: DuckDB cursor
+        contig_id: Contig ID
+
+    Returns:
+        List with one feature dict formatted for make_bokeh_subplot()
+    """
+    # Get variable info from database
+    cur.execute(
+        "SELECT \"Type\", Color, Alpha, Fill_alpha, \"Size\", Title "
+        "FROM Variable WHERE Variable_name='gc_content'"
+    )
+    var_row = cur.fetchone()
+    if not var_row:
+        return []  # Variable not found
+
+    type_picked, color, alpha, fill_alpha, size, title = var_row
+
+    # Check if table exists and has data
+    try:
+        cur.execute(
+            "SELECT First_position, Last_position, GC_percentage "
+            "FROM Contig_GCContent WHERE Contig_id=? ORDER BY First_position",
+            (contig_id,)
+        )
+        rows = cur.fetchall()
+    except Exception:
+        return []  # Table doesn't exist or no data
+
+    if not rows:
+        return []
+
+    x_coords = []
+    y_coords = []
+    first_pos_coords = []
+    last_pos_coords = []
+
+    for first_pos, last_pos, gc_pct in rows:
+        midpoint = (first_pos + last_pos) / 2.0
+        x_coords.append(midpoint)
+        y_coords.append(gc_pct)
+        first_pos_coords.append(first_pos)
+        last_pos_coords.append(last_pos)
+
+    return [{
+        "type": type_picked,
+        "color": color,
+        "alpha": alpha,
+        "fill_alpha": fill_alpha,
+        "size": size,
+        "title": title,
+        "x": x_coords,
+        "y": y_coords,
+        "first_pos": first_pos_coords,
+        "last_pos": last_pos_coords,
+        "has_stats": False,
+    }]
+
+
 def merge_rle_segments(plus_rows, minus_rows):
     """Merge two RLE-encoded arrays by summing overlapping values.
 
@@ -598,7 +661,7 @@ def generate_bokeh_plot_per_sample(conn, list_features, contig_name, sample_name
     # --- Add one subplot per feature requested ---
     # Requested features are variables like 'coverage', 'reads_starts', etc.
     subplots = []
-    requested_features, include_repeats = parse_requested_features(list_features)
+    requested_features, include_repeats, include_gc_content = parse_requested_features(list_features)
 
     # Add Repeats subplots if requested (contig-level, sample-independent)
     if include_repeats:
@@ -620,6 +683,17 @@ def generate_bokeh_plot_per_sample(conn, list_features, contig_name, sample_name
                     subplots.append(inverted_subplot)
         except Exception as e:
             print(f"Error processing Inverted Repeats: {e}", flush=True)
+
+    # Add GC content subplot if requested (contig-level, sample-independent)
+    if include_gc_content:
+        try:
+            gc_feature_dict = get_gc_content_data(cur, contig_id)
+            if gc_feature_dict:
+                gc_subplot = make_bokeh_subplot(gc_feature_dict, subplot_size, shared_xrange)
+                if gc_subplot is not None:
+                    subplots.append(gc_subplot)
+        except Exception as e:
+            print(f"Error processing GC Content: {e}", flush=True)
 
     # Add other requested features
     for feature in requested_features:
@@ -665,17 +739,23 @@ def parse_requested_features(list_features):
     - "coverage" or "Coverage" -> primary_reads, secondary_reads, supplementary_reads
     - "phagetermini" or "Phage termini" -> coverage_reduced, reads_starts, reads_ends, tau + Repeats
     - "assemblycheck" or "Assembly check" -> all assembly check features
+    - "genome" or "Genome" -> Repeats + GC content
 
-    Returns tuple of (deduplicated list of individual feature names, include_repeats bool).
+    Returns tuple of (deduplicated list of individual feature names, include_repeats bool, include_gc_content bool).
     """
     features = []
     include_repeats = False
+    include_gc_content = False
 
     for item in list_features:
         item_lower = item.lower().strip()
 
+        # Module: Genome
+        if item_lower in ["genome"]:
+            include_repeats = True
+            include_gc_content = True
         # Module: Coverage
-        if item_lower in ["coverage"]:
+        elif item_lower in ["coverage"]:
             features.extend(["Primary alignments", "Other alignments", "Other alignments"])
         # Module: Phage termini / phagetermini
         elif item_lower in ["phage termini", "phagetermini", "phage_termini"]:
@@ -687,6 +767,9 @@ def parse_requested_features(list_features):
         # Handle "Repeats" specifically (also accept legacy "duplications")
         elif item_lower in ["repeats", "repeat", "duplications", "duplication"]:
             include_repeats = True
+        # Handle "GC content" specifically
+        elif item_lower in ["gc_content", "gc content", "gccontent", "gc"]:
+            include_gc_content = True
         # Individual feature
         else:
             features.append(item)
@@ -694,12 +777,12 @@ def parse_requested_features(list_features):
     # Deduplicate while preserving order
     seen = set()
     deduped_features = [f for f in features if not (f in seen or seen.add(f))]
-    return deduped_features, include_repeats
+    return deduped_features, include_repeats, include_gc_content
 
 ### Main function
 def add_plot_per_sample_args(parser):
     parser.add_argument("--db", required=True, help="Path to DuckDB database file")
-    parser.add_argument("--variables", required=True, help="List of variables or full modules to compute (comma-separated) (options allowed for modules: coverage, phagetermini, assemblycheck)")
+    parser.add_argument("--variables", required=True, help="List of variables or full modules to compute (comma-separated) (options allowed for modules: Coverage, Misalignment, Long-reads, Paired-reads, Phage termini)")
     parser.add_argument("--contig", required=True, help="Name of the contig to plot")
     parser.add_argument("--sample", required=True, help="Name of the sample to plot")
     parser.add_argument("-g", "--genbank", help="Path to genbank file (optional; if provided, gene map will be plotted)")

@@ -388,7 +388,7 @@ impl FeatureArrays {
 pub struct ModuleFlags {
     /// Calculate basic coverage (read depth)
     pub coverage: bool,
-    /// Calculate mapping metrics per position (clippings, indels, mismatches)
+    /// Calculate misalignment metrics per position (clippings, indels, mismatches)
     pub mapping_metrics: bool,
     /// Calculate long-read specific metrics (read_lengths)
     pub long_read_metrics: bool,
@@ -403,8 +403,8 @@ impl ModuleFlags {
     ///
     /// # Arguments
     /// * `modules` - List of module names matching types.rs Variable.module values:
-    ///   "Coverage", "Mapping metrics per position", "Long-read metrics",
-    ///   "Paired-read metrics", "Phage termini"
+    ///   "Coverage", "Misalignment", "Long-reads",
+    ///   "Paired-reads", "Phage termini"
     ///
     /// # Note
     /// Coverage is automatically enabled when dependent modules are requested
@@ -412,9 +412,9 @@ impl ModuleFlags {
     pub fn from_modules(modules: &[String]) -> Self {
         let has = |name: &str| modules.iter().any(|m| m.eq_ignore_ascii_case(name));
 
-        let mapping_metrics = has("Mapping metrics per position");
-        let long_read_metrics = has("Long-read metrics");
-        let paired_read_metrics = has("Paired-read metrics");
+        let mapping_metrics = has("Misalignment");
+        let long_read_metrics = has("Long-reads");
+        let paired_read_metrics = has("Paired-reads");
 
         Self {
             // Coverage needed if explicitly requested or if dependent modules are enabled
@@ -577,7 +577,7 @@ pub fn process_read(
     }
 
     // -------------------------------------------------------------------------
-    // Long-read metrics module - primary mappings only
+    // Long-reads module - primary mappings only
     // -------------------------------------------------------------------------
     if flags.long_read_metrics && seq_type.is_long() && !is_secondary && !is_supplementary {
         // --- Read lengths ---
@@ -602,7 +602,7 @@ pub fn process_read(
     }
 
     // -------------------------------------------------------------------------
-    // Paired-read metrics module - primary mappings only
+    // Paired-reads module - primary mappings only
     // -------------------------------------------------------------------------
     if flags.paired_read_metrics && seq_type.is_short_paired() && !is_secondary && !is_supplementary {
         // --- Insert sizes and mate orientation issues ---

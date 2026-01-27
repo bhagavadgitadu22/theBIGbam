@@ -180,10 +180,18 @@ pub fn parse_genbank(
             .unwrap_or_else(|| format!("contig_{}", contig_id));
         let length = seq.seq.len();
 
+        // Extract sequence bytes for GC content computation
+        let sequence = if seq.seq.is_empty() {
+            None
+        } else {
+            Some(seq.seq.clone())
+        };
+
         contigs.push(ContigInfo {
             name: name.clone(),
             length,
             annotation_tool: annotation_tool.to_string(),
+            sequence,
         });
 
         // Extract features
@@ -402,6 +410,7 @@ pub fn parse_gff3(
             name: name.clone(),
             length,
             annotation_tool: annotation_tool.to_string(),
+            sequence: None, // GFF3 doesn't contain sequence data
         });
     }
 
