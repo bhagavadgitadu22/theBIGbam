@@ -1980,7 +1980,7 @@ def create_layout(db_path):
     below_contig_children = []
     
     # Create position range inputs
-    from_position_input = TextInput(value="0", placeholder="Start position", sizing_mode="stretch_width")
+    from_position_input = TextInput(value="0", placeholder="Start position", sizing_mode="stretch_width", margin=(0, 0, 0, 0))
     to_position_input = TextInput(value="", placeholder="End position", sizing_mode="stretch_width", margin=(0, 10, 0, 0))
     
     position_label_from = Div(text="From", width=40, margin=(5, 5, 5, 0))
