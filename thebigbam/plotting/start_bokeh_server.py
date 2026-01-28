@@ -1520,7 +1520,7 @@ def create_layout(db_path):
         category_select = Select(
             options=categories,
             value=initial_category,
-            width=110,
+            width=70,
             margin=(0, 2, 0, 0)
         )
 
@@ -1536,11 +1536,12 @@ def create_layout(db_path):
         comparison_select = Select(
             options=["=", "!="] if initial_is_text else ["=", ">", "<", "!="],
             value="=",
+            width=50,
             margin=(0, 2, 0, 0)
         )
 
         # Container for the dynamic input widget
-        input_container = column(sizing_mode="stretch_width", margin=(0, 2, 0, 0))
+        input_container = column(width=90, margin=(0, 2, 0, 0))
 
         def refresh_on_filter_change():
             """Refresh contig and sample options when Filtering2 values change."""
@@ -1557,14 +1558,14 @@ def create_layout(db_path):
                 case_sensitive=False,
                 placeholder="Value...",
                 search_strategy="includes",
-                sizing_mode="stretch_width",
+                width=90,
                 margin=(0, 2, 0, 0)
             )
             input_container.children = [initial_input.get_root()]
             # Add callback for Panel AutocompleteInput
             initial_input.param.watch(lambda event: refresh_on_filter_change(), 'value')
         else:
-            initial_input = Spinner(value=0, placeholder="Value...", width=80, margin=(0, 2, 0, 0))
+            initial_input = Spinner(value=0, placeholder="Value...", width=90, margin=(0, 2, 0, 0))
             input_container.children = [initial_input]
             # Add callback for Bokeh Spinner
             initial_input.on_change('value', lambda attr, old, new: refresh_on_filter_change())
@@ -1601,7 +1602,7 @@ def create_layout(db_path):
                     case_sensitive=False,
                     placeholder="Value...",
                     search_strategy="includes",
-                    sizing_mode="stretch_width",
+                    width=90,
                     margin=(0, 2, 0, 0)
                 )
                 input_container.children = [new_input.get_root()]
@@ -1610,7 +1611,7 @@ def create_layout(db_path):
                 # Add callback for Panel AutocompleteInput
                 new_input.param.watch(lambda event: refresh_on_filter_change(), 'value')
             else:
-                new_input = Spinner(value=0, placeholder="Value...", width=80, margin=(0, 2, 0, 0))
+                new_input = Spinner(value=0, placeholder="Value...", width=90, margin=(0, 2, 0, 0))
                 input_container.children = [new_input]
                 current_input_ref['widget'] = new_input
                 current_input_ref['is_panel'] = False
