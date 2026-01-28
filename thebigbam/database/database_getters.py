@@ -1,5 +1,123 @@
 import duckdb
 
+
+def get_filtering_metadata(db_path: str) -> dict:
+    """
+    Get column metadata for Filtering2 UI.
+
+    Returns cached metadata for Filtering2.
+    Structure: {
+        category: {
+            'source': 'table_or_view_name',
+            'columns': {
+                col_name: {
+                    'type': 'text' | 'numeric',
+                    'distinct_values': [...] | None  # Only for text columns
+                }
+            }
+        }
+    }
+    """
+    conn = duckdb.connect(db_path, read_only=True)
+
+    # Define category mappings
+    category_config = {
+        'Contig': {
+            'source': 'Contig',
+            'exclude': ['Contig_id', 'Contig_name']
+        },
+        'Sample': {
+            'source': 'Sample',
+            'exclude': ['Sample_id', 'Sample_name']
+        },
+        'Presences': {
+            'source': 'Explicit_presences',
+            'exclude': ['Contig_name', 'Sample_name']
+        },
+        'Completeness': {
+            'source': 'Explicit_completeness',
+            'exclude': ['Contig_name', 'Sample_name']
+        },
+        'Termini': {
+            'source': 'Explicit_phage_mechanisms',
+            'exclude': ['Contig_name', 'Sample_name']
+        }
+    }
+
+    # Text type names in DuckDB
+    text_types = {'VARCHAR', 'TEXT', 'STRING'}
+
+    result = {}
+    for category, config in category_config.items():
+        source = config['source']
+        exclude = set(config['exclude'])
+
+        # Check if table/view exists
+        try:
+            cols_info = conn.execute(f"DESCRIBE {source}").fetchall()
+        except Exception:
+            # Table/view doesn't exist, skip this category
+            continue
+
+        columns = {}
+        for col_name, col_type, *_ in cols_info:
+            if col_name in exclude:
+                continue
+
+            is_text = any(t in col_type.upper() for t in text_types)
+            col_data = {'type': 'text' if is_text else 'numeric'}
+
+            # For text columns, get distinct values
+            if is_text:
+                try:
+                    distinct = conn.execute(
+                        f"SELECT DISTINCT \"{col_name}\" FROM {source} WHERE \"{col_name}\" IS NOT NULL ORDER BY \"{col_name}\""
+                    ).fetchall()
+                    col_data['distinct_values'] = [row[0] for row in distinct]
+                except Exception:
+                    col_data['distinct_values'] = []
+
+            columns[col_name] = col_data
+
+        if columns:  # Only add category if it has columns
+            result[category] = {
+                'source': source,
+                'columns': columns
+            }
+
+    # Add annotation columns to Contig category from Contig_annotation table
+    if 'Contig' in result:
+        annotation_exclude = {'Contig_id', 'Start', 'End', 'Strand', 'Type'}
+        try:
+            ann_cols_info = conn.execute("DESCRIBE Contig_annotation").fetchall()
+            for col_name, col_type, *_ in ann_cols_info:
+                if col_name in annotation_exclude:
+                    continue
+
+                is_text = any(t in col_type.upper() for t in text_types)
+                col_data = {
+                    'type': 'text' if is_text else 'numeric',
+                    'source': 'Contig_annotation'  # Mark as annotation column
+                }
+
+                # For text columns, get distinct values
+                if is_text:
+                    try:
+                        distinct = conn.execute(
+                            f'SELECT DISTINCT "{col_name}" FROM Contig_annotation WHERE "{col_name}" IS NOT NULL ORDER BY "{col_name}"'
+                        ).fetchall()
+                        col_data['distinct_values'] = [row[0] for row in distinct]
+                    except Exception:
+                        col_data['distinct_values'] = []
+
+                result['Contig']['columns'][col_name] = col_data
+        except Exception:
+            pass  # Contig_annotation table doesn't exist
+
+    conn.close()
+    return result
+
+
 def list_variables(db_path, detailed=False):
     """Print variables and detailed metadata from Variable table (excluding Feature_table_name)."""
     conn = duckdb.connect(db_path, read_only=True)

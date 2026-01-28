@@ -3,7 +3,7 @@ import duckdb
 from Bio.Seq import Seq
 from Bio.SeqRecord import SeqRecord
 from Bio.SeqFeature import SeqFeature, FeatureLocation
-from bokeh.models import Range1d, ColumnDataSource, HoverTool, WheelZoomTool, NumeralTickFormatter, Label
+from bokeh.models import Range1d, ColumnDataSource, HoverTool, WheelZoomTool, NumeralTickFormatter, Label, TapTool
 from bokeh.layouts import gridplot
 from bokeh.plotting import output_file, save, figure
 from dna_features_viewer import BiopythonTranslator
@@ -117,9 +117,12 @@ def make_bokeh_genemap(conn, contig_id, locus_name, locus_size, annotation_tool,
     annotation_fig = graphic_record.plot_with_bokeh(figure_width=30, figure_height=40)
     annotation_fig.height = subplot_size
 
+    # Remove tap tool added by DNAFeaturesViewer
+    annotation_fig.tools = [t for t in annotation_fig.tools if not isinstance(t, TapTool)]
+
     # Disable scientific notation on x-axis
     annotation_fig.xaxis.formatter = NumeralTickFormatter(format="0,0")
-
+    
     wheel = WheelZoomTool(dimensions='width')  # only x-axis
     annotation_fig.add_tools(wheel)
     annotation_fig.toolbar.active_scroll = wheel

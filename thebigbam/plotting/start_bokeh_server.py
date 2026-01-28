@@ -8,13 +8,14 @@ import panel as pn
 
 from bokeh.layouts import column, row
 from bokeh.models import Div, InlineStyleSheet, Tooltip
-from bokeh.models.widgets import CheckboxGroup, HelpButton, Button, RadioButtonGroup, CheckboxButtonGroup, Select, TextInput
+from bokeh.models.widgets import CheckboxGroup, HelpButton, Button, RadioButtonGroup, CheckboxButtonGroup, Select, TextInput, Spinner
 from bokeh.models.plots import GridPlot
 
 # Import the plotting function from the repo
 from .plotting_data_per_sample import generate_bokeh_plot_per_sample
 from .plotting_data_all_samples import generate_bokeh_plot_all_samples
 from .perusing_data import build_summary_data, generate_summary_table
+from ..database.database_getters import get_filtering_metadata
 
 def build_controls(conn):
 
@@ -845,6 +846,157 @@ def create_layout(db_path):
 
         return allowed_samples
 
+    def get_filtering_filtered_pairs():
+        """Apply Filtering query rows to get allowed contig/sample pairs.
+
+        Returns set of (contig_name, sample_name) tuples that match all conditions.
+        Returns None if no filters are active (meaning all pairs are allowed).
+        """
+        if not or_sections:
+            return None
+
+        # Check if any filter has a meaningful value
+        has_active_filter = False
+        for section_data in or_sections:
+            for row_data in section_data['rows']:
+                input_ref = row_data['input_ref']
+                value = input_ref['widget'].value
+                # Skip empty values
+                if value is None or value == "":
+                    continue
+                if input_ref['is_panel'] and isinstance(value, str) and value.strip() == "":
+                    continue
+                if not input_ref['is_panel'] and value == 0:
+                    continue
+                has_active_filter = True
+                break
+            if has_active_filter:
+                break
+
+        if not has_active_filter:
+            return None
+
+        cur = conn.cursor()
+
+        # Source table mapping from filtering_metadata
+        source_table_map = {
+            'Contig': 'Contig',
+            'Sample': 'Sample',
+            'Presences': 'Explicit_presences',
+            'Completeness': 'Explicit_completeness',
+            'Termini': 'Explicit_phage_mechanisms'
+        }
+
+        def get_pairs_for_condition(category, column_name, operator, value):
+            """Query database for contig/sample pairs matching a single condition."""
+            source = source_table_map.get(category)
+            if not source:
+                return set()
+
+            # Check if this column is from Contig_annotation table
+            col_info = filtering_metadata.get(category, {}).get('columns', {}).get(column_name, {})
+            col_source = col_info.get('source')
+
+            if col_source == 'Contig_annotation':
+                # Annotation column - join with Contig_annotation table
+                query = f'''
+                    SELECT DISTINCT c.Contig_name, s.Sample_name
+                    FROM Contig_annotation ca
+                    JOIN Contig c ON ca.Contig_id = c.Contig_id
+                    CROSS JOIN Sample s
+                    JOIN Presences p ON c.Contig_id = p.Contig_id AND s.Sample_id = p.Sample_id
+                    WHERE ca."{column_name}" {operator} ?
+                '''
+            elif category == 'Contig':
+                # Contig table has no Sample_name, cross-join with all samples
+                query = f'''
+                    SELECT DISTINCT c.Contig_name, s.Sample_name
+                    FROM Contig c
+                    CROSS JOIN Sample s
+                    JOIN Presences p ON c.Contig_id = p.Contig_id AND s.Sample_id = p.Sample_id
+                    WHERE c."{column_name}" {operator} ?
+                '''
+            elif category == 'Sample':
+                # Sample table has no Contig_name, cross-join with all contigs
+                query = f'''
+                    SELECT DISTINCT c.Contig_name, s.Sample_name
+                    FROM Sample s
+                    CROSS JOIN Contig c
+                    JOIN Presences p ON c.Contig_id = p.Contig_id AND s.Sample_id = p.Sample_id
+                    WHERE s."{column_name}" {operator} ?
+                '''
+            else:
+                # Tables with both Contig_name and Sample_name (views)
+                query = f'''
+                    SELECT DISTINCT Contig_name, Sample_name
+                    FROM {source}
+                    WHERE "{column_name}" {operator} ?
+                '''
+
+            try:
+                cur.execute(query, [value])
+                return {(row[0], row[1]) for row in cur.fetchall()}
+            except Exception as e:
+                print(f"[get_filtering_filtered_pairs] Query error: {e}")
+                return set()
+
+        def evaluate_section(section_data):
+            """Evaluate all rows in a section using AND/OR logic based on Select widgets."""
+            if not section_data['rows']:
+                return None
+
+            result_pairs = None
+
+            for i, row_data in enumerate(section_data['rows']):
+                category = row_data['category_select'].value
+                column_name = row_data['subcategory_select'].value
+                operator = row_data['comparison_select'].value
+                input_ref = row_data['input_ref']
+
+                value = input_ref['widget'].value
+
+                # Skip rows with no value
+                if value is None or value == "":
+                    continue
+                if input_ref['is_panel'] and isinstance(value, str) and value.strip() == "":
+                    continue
+                if not input_ref['is_panel'] and value == 0:
+                    continue
+
+                pairs = get_pairs_for_condition(category, column_name, operator, value)
+
+                if result_pairs is None:
+                    result_pairs = pairs
+                else:
+                    # Check the AND/OR select widget for this row
+                    and_div = row_data.get('and_div')
+                    if and_div is not None and and_div.value == "OR":
+                        result_pairs = result_pairs | pairs  # OR logic
+                    else:
+                        result_pairs = result_pairs & pairs  # AND logic (default)
+
+            return result_pairs
+
+        # Evaluate all sections using AND/OR logic between sections
+        final_pairs = None
+
+        for i, section_data in enumerate(or_sections):
+            section_pairs = evaluate_section(section_data)
+
+            if section_pairs is None:
+                continue
+
+            if final_pairs is None:
+                final_pairs = section_pairs
+            else:
+                # Check inter-section AND/OR - look at the Select widget between sections
+                # The inter-section Select widgets are in filtering_content.children
+                # They appear before each section except the first
+                # For now, default to AND between sections
+                final_pairs = final_pairs & section_pairs
+
+        return final_pairs
+
     def update_widget_completions(widget, completions):
         """Update widget completions. Clear value if not in completions."""
         # Always add empty option at top to work around Bokeh AutocompleteInput click bug
@@ -899,6 +1051,12 @@ def create_layout(db_path):
             var_allowed = get_variable_filtered_contigs_any_sample()
             completions = [c for c in completions if c in var_allowed]
 
+        # Apply Filtering2 query builder filters
+        filtered_pairs = get_filtering_filtered_pairs()
+        if filtered_pairs is not None:
+            allowed_contigs = {pair[0] for pair in filtered_pairs}
+            completions = [c for c in completions if c in allowed_contigs]
+
         update_widget_completions(widgets['contig_select'], completions)
         update_section_titles()
 
@@ -923,6 +1081,12 @@ def create_layout(db_path):
         if views.active == 0:
             var_allowed = get_variable_filtered_samples()
             completions = [s for s in completions if s in var_allowed]
+
+        # Apply Filtering2 query builder filters
+        filtered_pairs = get_filtering_filtered_pairs()
+        if filtered_pairs is not None:
+            allowed_samples = {pair[1] for pair in filtered_pairs}
+            completions = [s for s in completions if s in allowed_samples]
 
         update_widget_completions(widgets['sample_select'], completions)
         update_section_titles()
@@ -1317,225 +1481,321 @@ def create_layout(db_path):
     views.on_change('active', on_view_change)
 
 
-    ## Build Filtering2 section (advanced search with AND/OR logic)
-    filtering2_title = Div(text="<b>Filtering2</b>")
-    filtering2_header = filtering2_title
+    ## Build Filtering section (dynamic query builder with AND/OR logic)
+    filtering_toggle_btn = Button(label="▼", width=20, height=20, button_type="primary", align="center", margin=0, stylesheets=[toggle_stylesheet])
+    filtering_title = Div(text="<b>Filtering</b>", align="center")
+    filtering_header = row(filtering_toggle_btn, filtering_title, sizing_mode="stretch_width", align="center")
+
+    # Cache filtering metadata once when document loads
+    filtering_metadata = get_filtering_metadata(db_path)
 
     # Store all OR sections in a list for dynamic management
     or_sections = []
-    
+
     def count_total_query_rows():
         """Count total number of query rows across all OR sections."""
         total = 0
         for section_data in or_sections:
             total += len(section_data['rows'])
         return total
-    
+
     def create_query_row(section_data):
-        """Create a single query row with cascading selects, comparison, text input and remove button."""
-        # Define category to subcategory mapping
-        category_map = {
-            "Category 1": ["Sub 1A", "Sub 1B", "Sub 1C"],
-            "Category 2": ["Sub 2A", "Sub 2B"],
-            "Category 3": ["Sub 3A", "Sub 3B", "Sub 3C", "Sub 3D"]
-        }
-        
+        """Create a single query row with cascading selects, comparison, dynamic input and remove button."""
+        # Get categories from metadata
+        categories = list(filtering_metadata.keys())
+        if not categories:
+            categories = ["No data"]
+
+        initial_category = categories[0]
+        initial_columns = list(filtering_metadata.get(initial_category, {}).get('columns', {}).keys())
+        if not initial_columns:
+            initial_columns = ["No columns"]
+        initial_column = initial_columns[0]
+
+        # Determine initial column type
+        initial_col_info = filtering_metadata.get(initial_category, {}).get('columns', {}).get(initial_column, {})
+        initial_is_text = initial_col_info.get('type') == 'text'
+
         # First level select (categories)
         category_select = Select(
-            options=list(category_map.keys()),
-            value="Category 1",
-            width=90,
-            # margin is first top, then right, bottom, left
+            options=categories,
+            value=initial_category,
+            width=110,
             margin=(0, 2, 0, 0)
         )
-        
-        # Second level select (subcategories) - initially shows Category 1's subcategories
+
+        # Second level select (columns)
         subcategory_select = Select(
-            options=category_map["Category 1"],
-            value=category_map["Category 1"][0],
+            options=initial_columns,
+            value=initial_column,
             sizing_mode="stretch_width",
             margin=(0, 2, 0, 0)
         )
-        
-        # Comparison operator select
+
+        # Comparison operator select - "=" and "!=" for text, all operators for numeric
         comparison_select = Select(
-            options=["=", ">", "<", "!="],
+            options=["=", "!="] if initial_is_text else ["=", ">", "<", "!="],
             value="=",
             margin=(0, 2, 0, 0)
         )
-        
-        # Text input for value
-        query_input = TextInput(value="", placeholder="Value...", width=70, margin=(0, 2, 0, 0))
-        
+
+        # Container for the dynamic input widget
+        input_container = column(sizing_mode="stretch_width", margin=(0, 2, 0, 0))
+
+        def refresh_on_filter_change():
+            """Refresh contig and sample options when Filtering2 values change."""
+            refresh_contig_options()
+            refresh_sample_options()
+
+        # Create initial input widget based on column type
+        if initial_is_text:
+            distinct_values = initial_col_info.get('distinct_values', [])
+            initial_input = pn.widgets.AutocompleteInput(
+                value="",
+                options=distinct_values,
+                min_characters=0,
+                case_sensitive=False,
+                placeholder="Value...",
+                search_strategy="includes",
+                sizing_mode="stretch_width",
+                margin=(0, 2, 0, 0)
+            )
+            input_container.children = [initial_input.get_root()]
+            # Add callback for Panel AutocompleteInput
+            initial_input.param.watch(lambda event: refresh_on_filter_change(), 'value')
+        else:
+            initial_input = Spinner(value=0, placeholder="Value...", width=80, margin=(0, 2, 0, 0))
+            input_container.children = [initial_input]
+            # Add callback for Bokeh Spinner
+            initial_input.on_change('value', lambda attr, old, new: refresh_on_filter_change())
+
         # Remove button
         minus_btn = Button(label="−", width=30, height=30, stylesheets=[stylesheet], margin=(0, 10, 0, 0))
-        
-        # Cascading dropdown: update subcategory options when category changes
+
+        # Store reference to current input widget (for later retrieval)
+        current_input_ref = {'widget': initial_input, 'is_panel': initial_is_text}
+
+        def update_input_widget(col_name):
+            """Update the input widget based on column type."""
+            category = category_select.value
+            col_info = filtering_metadata.get(category, {}).get('columns', {}).get(col_name, {})
+            is_text = col_info.get('type') == 'text'
+
+            # Update comparison options based on type
+            if is_text:
+                comparison_select.options = ["=", "!="]
+                if comparison_select.value not in comparison_select.options:
+                    comparison_select.value = "="
+            else:
+                comparison_select.options = ["=", ">", "<", "!="]
+                if comparison_select.value not in comparison_select.options:
+                    comparison_select.value = "="
+
+            # Create new input widget
+            if is_text:
+                distinct_values = col_info.get('distinct_values', [])
+                new_input = pn.widgets.AutocompleteInput(
+                    value="",
+                    options=distinct_values,
+                    min_characters=0,
+                    case_sensitive=False,
+                    placeholder="Value...",
+                    search_strategy="includes",
+                    sizing_mode="stretch_width",
+                    margin=(0, 2, 0, 0)
+                )
+                input_container.children = [new_input.get_root()]
+                current_input_ref['widget'] = new_input
+                current_input_ref['is_panel'] = True
+                # Add callback for Panel AutocompleteInput
+                new_input.param.watch(lambda event: refresh_on_filter_change(), 'value')
+            else:
+                new_input = Spinner(value=0, placeholder="Value...", width=80, margin=(0, 2, 0, 0))
+                input_container.children = [new_input]
+                current_input_ref['widget'] = new_input
+                current_input_ref['is_panel'] = False
+                # Add callback for Bokeh Spinner
+                new_input.on_change('value', lambda attr, old, new: refresh_on_filter_change())
+
         def update_subcategories(attr, old, new):
-            if new in category_map:
-                subcategory_select.options = category_map[new]
-                subcategory_select.value = category_map[new][0]
-        
+            """Update column options when category changes."""
+            columns = list(filtering_metadata.get(new, {}).get('columns', {}).keys())
+            if not columns:
+                columns = ["No columns"]
+            subcategory_select.options = columns
+            subcategory_select.value = columns[0]
+            # Update input widget for new column
+            update_input_widget(columns[0])
+
+        def update_input_on_column_change(attr, old, new):
+            """Update input widget when column changes."""
+            update_input_widget(new)
+
         category_select.on_change('value', update_subcategories)
-        
-        query_row = row(category_select, subcategory_select, comparison_select, query_input, minus_btn, 
+        subcategory_select.on_change('value', update_input_on_column_change)
+        # Add callback to comparison_select to refresh when operator changes
+        comparison_select.on_change('value', lambda attr, old, new: refresh_on_filter_change())
+
+        query_row = row(category_select, subcategory_select, comparison_select, input_container, minus_btn,
                        sizing_mode="stretch_width", margin=(5, 0, 5, 0))
-        
+
         # Store reference to this row
         row_data = {
             'query_row': query_row,
             'category_select': category_select,
             'subcategory_select': subcategory_select,
             'comparison_select': comparison_select,
-            'input': query_input,
+            'input_ref': current_input_ref,
             'and_div': None  # Will be set when AND is added above this row
         }
-        
+
         def remove_row_callback():
             # Don't allow removal if this is the only query row across all sections
             if count_total_query_rows() <= 1:
                 return
-            
+
             # Find which section this row belongs to
-            for section_data in or_sections:
-                if row_data in section_data['rows']:
-                    idx = section_data['rows'].index(row_data)
-                    
+            for sec_data in or_sections:
+                if row_data in sec_data['rows']:
                     # Remove the row
-                    section_data['rows'].remove(row_data)
-                    
+                    sec_data['rows'].remove(row_data)
+
                     # Rebuild the section
-                    rebuild_section(section_data)
-                    
+                    rebuild_section(sec_data)
+
                     # If section is now empty, remove it
-                    if len(section_data['rows']) == 0:
-                        or_sections.remove(section_data)
-                        rebuild_filtering2_content()
-                    
+                    if len(sec_data['rows']) == 0:
+                        or_sections.remove(sec_data)
+                        rebuild_filtering_content()
+
+                    # Refresh filter options after row removal
+                    refresh_on_filter_change()
                     break
-        
+
         minus_btn.on_click(remove_row_callback)
         return row_data
-    
+
     def rebuild_section(section_data):
         """Rebuild a section's content with all its query rows and the Add AND button."""
         section_children = []
-        
+
         for i, row_data in enumerate(section_data['rows']):
             # Add AND div before each row except the first
             if i > 0:
                 select_widget = Select(
-                options=["AND", "OR"],
+                    options=["AND", "OR"],
                     value="AND",
                     margin=(5, 0, 5, 0)
                 )
+                # Add callback to refresh when AND/OR changes
+                select_widget.on_change('value', lambda attr, old, new: (refresh_contig_options(), refresh_sample_options()))
                 section_children.append(select_widget)
                 row_data['and_div'] = select_widget
             else:
                 row_data['and_div'] = None
-            
+
             section_children.append(row_data['query_row'])
-        
+
         # Add the "+ Add AND" button
         section_children.append(section_data['add_and_btn'])
-        
+
         # Update the section column's children
         section_data['column'].children = section_children
-    
+
     def create_or_section():
         """Create a new OR section with one query row and Add AND/OR button."""
         section_column = column(
             sizing_mode="stretch_width",
             styles={'border-left': '3px solid #00b17c', 'padding-left': '10px', 'margin-left': '5px'}
         )
-        
+
         add_and_btn = Button(
-            label="+ Add AND/OR", 
+            label="+ Add AND/OR",
             margin=(5, 0, 5, 0),
             stylesheets=[stylesheet]
         )
-        
+
         section_data = {
             'column': section_column,
             'rows': [],
             'add_and_btn': add_and_btn
         }
-        
+
         def add_and_or_callback():
             # Create a new query row
             new_row = create_query_row(section_data)
             section_data['rows'].append(new_row)
             rebuild_section(section_data)
-        
+
         add_and_btn.on_click(add_and_or_callback)
-        
+
         # Create initial query row
         initial_row = create_query_row(section_data)
         section_data['rows'].append(initial_row)
-        
+
         rebuild_section(section_data)
-        
+
         return section_data
-    
+
     # Create the global "+ Add AND/OR" button
     global_add_btn = Button(
-        label="+ Add AND/OR", 
+        label="+ Add AND/OR",
         margin=(10, 0, 5, 0),
         stylesheets=[pink_buttons_stylesheet]
     )
-    
+
     # Store reference to the button widget for replacement
     global_widget_state = {'widget': global_add_btn}
-    
-    def rebuild_filtering2_content():
-        """Rebuild the entire Filtering2 content with all OR sections."""
+
+    def rebuild_filtering_content():
+        """Rebuild the entire Filtering content with all OR sections."""
         content_children = []
-        
+
         for i, section_data in enumerate(or_sections):
             # Add OR div before each section except the first
             if i > 0:
                 select_widget = Select(
-                options=["AND", "OR"],
+                    options=["AND", "OR"],
                     value="AND",
                     margin=(5, 0, 5, 0)
                 )
+                # Add callback to refresh when AND/OR changes
+                select_widget.on_change('value', lambda attr, old, new: (refresh_contig_options(), refresh_sample_options()))
                 content_children.append(select_widget)
-            
+
             content_children.append(section_data['column'])
-        
+
         # Add the current global widget (button or select) at the end
         content_children.append(global_widget_state['widget'])
-        
-        filtering2_content.children = content_children
-    
+
+        filtering_content.children = content_children
+
     def global_add_and_or_callback():
         # Create a new section
         new_section = create_or_section()
         or_sections.append(new_section)
-        rebuild_filtering2_content()
-    
+        rebuild_filtering_content()
+
     global_add_btn.on_click(global_add_and_or_callback)
-    
+
     # Create initial OR section
     initial_section = create_or_section()
     or_sections.append(initial_section)
-    
+
     # Create the main content container (using Bokeh column, not Panel)
-    filtering2_content = column(
+    filtering_content = column(
         sizing_mode="stretch_width"
     )
-    
+
     # Initial build of content
-    rebuild_filtering2_content()
+    rebuild_filtering_content()
+
+    # Add toggle callback for collapsible Filtering section
+    filtering_toggle_btn.on_click(make_toggle_callback(filtering_toggle_btn, filtering_content))
 
 
-    ## Build filtering section
-    filtering_title = Div(text="<b>Filtering</b>")
-    filtering_header = filtering_title  # No toggle button - always visible
-
-    filtering_children = []
-
-    # Initialize module filter variables (will be set below if applicable)
+    # Initialize slider variables to None (these were used by the old Filtering section
+    # but are still referenced by get_module_filtered_contigs/samples functions)
     phage_mechanism_filter = None
     prevalence_left_slider = None
     prevalence_right_slider = None
@@ -1547,255 +1807,10 @@ def create_layout(db_path):
     coverage_median_slider = None
     coverage_variation_slider = None
     coverage_sd_slider = None
-
-    # Add "Contig filters" collapsible subsection (if multiple contigs)
-    min_len = min(widgets['contig_lengths'].values())
-    max_len = max(widgets['contig_lengths'].values())
     length_slider = None
     duplication_slider = None
-    if len(widgets["contigs"]) > 1:
-        contig_toggle_btn = Button(label="▶", width=20, height=20, button_type="primary", align="center", margin=0, stylesheets=[toggle_stylesheet])
-        contig_filters_title = Div(text="Contig filters", align="center")
-        contig_filters_header = row(contig_toggle_btn, contig_filters_title, sizing_mode="stretch_width", align="center")
-
-        contig_filters_children = []
-
-        length_slider = create_editable_range_slider(
-            "Contig length", min_len, max_len, (min_len, max_len), step=1,
-            on_change=lambda event: refresh_contig_options()
-        )
-        contig_filters_children.append(length_slider)
-
-        # Add duplication percentage slider if data exists
-        if widgets['has_duplication_data']:
-            dup_min = widgets['duplication_percentage_min']
-            dup_max = widgets['duplication_percentage_max']
-            duplication_slider = create_editable_range_slider(
-                "Duplication (%)", dup_min, dup_max, (dup_min, dup_max), step=1,
-                on_change=lambda event: refresh_contig_options()
-            )
-            contig_filters_children.append(duplication_slider)
-
-        # Add annotation filters (annotation_inputs already initialized at top of create_layout)
-        for column_name, values in widgets.get('annotation_filters', {}).items():
-            label_div = Div(text=f"Contains {column_name}:", margin=(5, 0, 0, 10))
-            annotation_input = pn.widgets.AutocompleteInput(
-                value="",
-                options=values,
-                min_characters=0,
-                case_sensitive=False,
-                placeholder=f"Filter by {column_name}...",
-                search_strategy="includes",
-                sizing_mode="stretch_width"
-            )
-            annotation_input.param.watch(lambda event: (refresh_contig_options(), refresh_sample_options()), 'value')
-            
-            annotation_inputs[column_name] = annotation_input
-            contig_filters_children.append(label_div)
-            contig_filters_children.append(annotation_input.get_root())
-
-        contig_filters_content = pn.Column(*contig_filters_children, visible=False, sizing_mode="stretch_width")
-        contig_toggle_btn.on_click(make_toggle_callback(contig_toggle_btn, contig_filters_content))
-
-        filtering_children.append(contig_filters_header)
-        filtering_children.append(contig_filters_content)
-
-    # Add "Coverage filters" collapsible subsection (always available if any module filters exist)
-    has_module_filters = widgets['phage_mechanisms'] or widgets['has_completeness']
-    if has_module_filters:
-        # Create collapsible Coverage filters section
-        coverage_toggle_btn = Button(label="▶", width=20, height=20, button_type="primary", align="center", margin=0, stylesheets=[toggle_stylesheet])
-        coverage_filters_title = Div(text="Coverage filters", align="center")
-        coverage_filters_header = row(coverage_toggle_btn, coverage_filters_title, sizing_mode="stretch_width", align="center")
-
-        coverage_filters_children = []
-
-        correction_label = Div(text="Harmonise coverage mean/median between samples:", margin=(5, 0, 0, 10))
-        correction_filter = Select(
-                options=["No correction", "Correct by number of mapped reads", "Correct by number of reads"],
-                value="No correction",   # default = no filter (empty = all)
-                sizing_mode="stretch_width",
-            )
-        coverage_filters_children.append(correction_label)
-        coverage_filters_children.append(correction_filter)
-
-        # Coverage patterns sliders (always available from Presences table)
-        cov_mean_min = 0
-        cov_mean_max = widgets['coverage_mean_max']
-        coverage_mean_slider = create_editable_range_slider(
-            "Coverage mean", cov_mean_min, cov_mean_max, (cov_mean_min, cov_mean_max), step=1,
-            on_change=lambda event: (refresh_contig_options(), refresh_sample_options())
-        )
-        coverage_filters_children.append(coverage_mean_slider)
-
-        # Function to update coverage_mean_slider range when correction method changes
-        def update_coverage_mean_slider():
-            cov_col = get_coverage_mean_column()
-            cur = conn.cursor()
-            cur.execute(f"SELECT MIN({cov_col}), MAX({cov_col}) FROM Explicit_presences WHERE {cov_col} IS NOT NULL")
-            result = cur.fetchone()
-            if result and result[0] is not None and result[1] is not None:
-                new_max = result[1]
-                coverage_mean_slider.start = 0
-                coverage_mean_slider.end = new_max
-                coverage_mean_slider.value = (0, new_max)
-            refresh_contig_options()
-            refresh_sample_options()
-
-        # Coverage median slider
-        cov_median_min = 0
-        cov_median_max = widgets['coverage_median_max']
-        coverage_median_slider = create_editable_range_slider(
-            "Coverage median", cov_median_min, cov_median_max, (cov_median_min, cov_median_max), step=1,
-            on_change=lambda event: (refresh_contig_options(), refresh_sample_options())
-        )
-        coverage_filters_children.append(coverage_median_slider)
-
-        # Function to update coverage_median_slider range when correction method changes
-        def update_coverage_median_slider():
-            cov_col = get_coverage_median_column()
-            cur = conn.cursor()
-            cur.execute(f"SELECT MIN({cov_col}), MAX({cov_col}) FROM Explicit_presences WHERE {cov_col} IS NOT NULL")
-            result = cur.fetchone()
-            if result and result[0] is not None and result[1] is not None:
-                new_max = result[1]
-                coverage_median_slider.start = 0
-                coverage_median_slider.end = new_max
-                coverage_median_slider.value = (0, new_max)
-            refresh_contig_options()
-            refresh_sample_options()
-
-        # Wire up correction_filter to update sliders when changed
-        if hasattr(correction_filter, 'on_change'):
-            correction_filter.on_change('value', lambda attr, old, new: (update_coverage_mean_slider(), update_coverage_median_slider()))
-
-        coverage_percentage_slider = create_editable_range_slider(
-            "Aligned fraction (%)", 0, 100, (0, 100), step=1,
-            on_change=lambda event: (refresh_contig_options(), refresh_sample_options())
-        )
-        coverage_filters_children.append(coverage_percentage_slider)
-
-        cov_var_min = 0.0
-        cov_var_max = widgets['coverage_variation_max']
-        # Slider shows normalized variance (stored value / 1000000)
-        coverage_variation_slider = create_editable_range_slider(
-            "Coverage variation", cov_var_min, cov_var_max, (cov_var_min, cov_var_max), step=0.01,
-            on_change=lambda event: (refresh_contig_options(), refresh_sample_options())
-        )
-        coverage_filters_children.append(coverage_variation_slider)
-
-        cov_sd_min = 0.0
-        cov_sd_max = widgets['coverage_sd_max']
-        # Slider shows coefficient of variation (stored value / 1000000)
-        coverage_sd_slider = create_editable_range_slider(
-            "Coverage SD", cov_sd_min, cov_sd_max, (cov_sd_min, cov_sd_max), step=0.01,
-            on_change=lambda event: (refresh_contig_options(), refresh_sample_options())
-        )
-        coverage_filters_children.append(coverage_sd_slider)
-
-        # Create coverage filters content container (collapsible)
-        coverage_filters_content = pn.Column(*coverage_filters_children, visible=False, sizing_mode="stretch_width")
-        coverage_toggle_btn.on_click(make_toggle_callback(coverage_toggle_btn, coverage_filters_content))
-
-        filtering_children.append(coverage_filters_header)
-        filtering_children.append(coverage_filters_content)
-
-    # Add "Completeness filters" collapsible subsection (if Completeness table has data)
-    if widgets['has_completeness']:
-        # Create collapsible Completeness filters section
-        completeness_toggle_btn = Button(label="▶", width=20, height=20, button_type="primary", align="center", margin=0, stylesheets=[toggle_stylesheet])
-        completeness_filters_title = Div(text="Completeness filters", align="center")
-        completeness_filters_header = row(completeness_toggle_btn, completeness_filters_title, sizing_mode="stretch_width", align="center")
-
-        completeness_filters_children = []
-
-        pct_completeness_slider = create_editable_range_slider(
-            "Whole completeness (%)", 0, 100, (0, 100), step=1,
-            on_change=lambda event: (refresh_contig_options(), refresh_sample_options())
-        )
-
-        conta_max = max(100, widgets['whole_contamination_max'])
-        pct_contamination_slider = create_editable_range_slider(
-            "Whole contamination (%)", 0, conta_max, (0, conta_max), step=1,
-            on_change=lambda event: (refresh_contig_options(), refresh_sample_options())
-        )
-
-        prevalence_left_slider = create_editable_range_slider(
-            "Left completeness (%)", 0, 100, (0, 100), step=1,
-            on_change=lambda event: (refresh_contig_options(), refresh_sample_options())
-        )
-
-        prevalence_right_slider = create_editable_range_slider(
-            "Right completeness (%)", 0, 100, (0, 100), step=1,
-            on_change=lambda event: (refresh_contig_options(), refresh_sample_options())
-        )
-
-        circularising_slider = create_editable_range_slider(
-            "Circularising reads (%)", 0, 100, (0, 100), step=1,
-            on_change=lambda event: (refresh_contig_options(), refresh_sample_options())
-        )
-
-        completeness_filters_children.extend([
-            pct_completeness_slider,
-            pct_contamination_slider,
-            prevalence_left_slider,
-            prevalence_right_slider,
-            circularising_slider
-        ])
-
-        # Create completeness filters content container (collapsible)
-        completeness_filters_content = pn.Column(*completeness_filters_children, visible=False, sizing_mode="stretch_width")
-        completeness_toggle_btn.on_click(make_toggle_callback(completeness_toggle_btn, completeness_filters_content))
-
-        filtering_children.append(completeness_filters_header)
-        filtering_children.append(completeness_filters_content)
-
-    # Add "Phage mechanisms" collapsible subsection (if PhageMechanisms table has data)
-    if widgets['phage_mechanisms']:
-        phage_toggle_btn = Button(label="▶", width=20, height=20, button_type="primary", align="center", margin=0, stylesheets=[toggle_stylesheet])
-        phage_title = Div(text="Phage mechanisms", align="center")
-        phage_header = row(phage_toggle_btn, phage_title, sizing_mode="stretch_width", align="center")
-
-        phage_mechanism_filter = Select(
-            options=[""] + widgets['phage_mechanisms'],
-            value="",   # default = no filter (empty = all)
-            sizing_mode="stretch_width",
-        )
-        phage_mechanism_filter.on_change('value', lambda attr, old, new: (refresh_contig_options(), refresh_sample_options()))
-
-        phage_content = pn.Column(phage_mechanism_filter, visible=False, sizing_mode="stretch_width")
-        phage_toggle_btn.on_click(make_toggle_callback(phage_toggle_btn, phage_content))
-
-        filtering_children.append(phage_header)
-        filtering_children.append(phage_content)
-
-    # Add "Per variable" collapsible filtering subsection
-    combined_help = "Filter by variable characteristics.\n\n#Points: Filter by number of data points.\n  - One sample view: Show contigs where more/less than threshold points exist for the variable in selected sample\n  - All samples view: Show contigs where at least one sample has more/less than threshold points\n\nMax: Filter by maximum value.\n  - One sample view: Show contigs where the variable reaches above/below threshold value in selected sample\n  - All samples view: Show contigs where the variable reaches above/below threshold value in at least one sample"
-    tooltip = Tooltip(content=combined_help, position="right")
-    help_per_variable = HelpButton(tooltip=tooltip, width=20, height=20, align="center", button_type="light", stylesheets=[toggle_stylesheet])
-    per_variable_toggle_btn = Button(label="▶", width=20, height=20, button_type="primary", align="center", margin=0, stylesheets=[toggle_stylesheet])
-    per_variable_title = Div(text="Per variable", align="center")
-    per_variable_header = row(per_variable_toggle_btn, per_variable_title, help_per_variable, sizing_mode="stretch_width", align="center")
-
-    # Store all variable filter rows for dynamic management (already initialized above)
-    variable_filters_column = column(sizing_mode="stretch_width")
-
-    # Create initial filter row
+    correction_filter = None
     variable_filter_rows = []
-    initial_row = create_variable_filter_row()
-    variable_filter_rows.append(initial_row)
-    variable_filters_column.children = [initial_row]
-
-    per_variable_content = pn.Column(variable_filters_column, visible=False, sizing_mode="stretch_width")
-    per_variable_toggle_btn.on_click(make_toggle_callback(per_variable_toggle_btn, per_variable_content))
-
-    filtering_children.append(per_variable_header)
-    filtering_children.append(per_variable_content)
-
-    filtering_content = pn.Column(
-        *filtering_children,
-        visible=True, sizing_mode="stretch_width"  # Always visible, no toggle
-    )
 
 
     ## Build Sample section
@@ -2047,7 +2062,6 @@ def create_layout(db_path):
 
     ## Put together all DOM elements
     # Create visual separators (horizontal lines) using background color
-    separator_filtering2 = Div(text="", height=1, sizing_mode="stretch_width", styles={'background-color': '#333', 'margin': '10px 0'})
     separator_filtering = Div(text="", height=1, sizing_mode="stretch_width", styles={'background-color': '#333', 'margin': '10px 0'})
     separator_samples = Div(text="", height=1, sizing_mode="stretch_width", styles={'background-color': '#333', 'margin': '10px 0'})
     separator_contigs = Div(text="", height=1, sizing_mode="stretch_width", styles={'background-color': '#333', 'margin': '10px 0'})
@@ -2055,8 +2069,7 @@ def create_layout(db_path):
 
     # Gene map is now part of the Genome module's CheckboxButtonGroup
     # Include both variables sections - visibility is toggled by on_view_change
-    controls_children = [logo, views, separator_filtering2, filtering2_header, filtering2_content,
-                         separator_filtering, filtering_header, filtering_content,
+    controls_children = [logo, views, separator_filtering, filtering_header, filtering_content,
                          separator_contigs, contig_header, above_contig_content, widgets['contig_select'], below_contig_content,
                          separator_samples, sample_header, above_sample_content, widgets['sample_select'],
                          separator_variables,
