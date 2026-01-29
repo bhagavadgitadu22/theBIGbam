@@ -1988,7 +1988,7 @@ def create_layout(db_path):
             genome_hdr = genome_title
 
         genome_cbg_one.visible = True
-        genome_section = column(genome_hdr, genome_cbg_one, visible=True, sizing_mode="stretch_width")
+        genome_section = column(genome_hdr, genome_cbg_one, visible=True, sizing_mode="stretch_width", margin=(0, 5, 0, 5))
 
     # Add Genome section to contig_content
     below_contig_children = []
@@ -1997,7 +1997,7 @@ def create_layout(db_path):
     from_position_input = TextInput(value="0", placeholder="Start position", sizing_mode="stretch_width", margin=(0, 0, 0, 0))
     to_position_input = TextInput(value="", placeholder="End position", sizing_mode="stretch_width", margin=(0, 10, 0, 0))
     
-    position_label_from = Div(text="From", width=40, margin=(5, 5, 5, 0))
+    position_label_from = Div(text="From", width=40, margin=(5, 5, 5, 10))
     position_label_to = Div(text="to", width=25, margin=(5, 5, 5, 5))
     
     position_row = row(

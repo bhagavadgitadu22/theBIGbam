@@ -24,7 +24,7 @@ def get_filtering_metadata(db_path: str) -> dict:
     category_config = {
         'Contig': {
             'source': 'Contig',
-            'exclude': ['Contig_id', 'Contig_name']
+            'exclude': ['Contig_id', 'Contig_name', 'Annotation_tool']
         },
         'Sample': {
             'source': 'Sample',
@@ -32,11 +32,11 @@ def get_filtering_metadata(db_path: str) -> dict:
         },
         'Presences': {
             'source': 'Explicit_presences',
-            'exclude': ['Contig_name', 'Sample_name']
+            'exclude': ['Contig_name', 'Sample_name', 'Read_number_correction_ratio', 'Read_mapped_correction_ratio']
         },
         'Completeness': {
             'source': 'Explicit_completeness',
-            'exclude': ['Contig_name', 'Sample_name']
+            'exclude': ['Contig_name', 'Sample_name', 'Score_completeness', 'Score_contamination']
         },
         'Termini': {
             'source': 'Explicit_phage_mechanisms',
