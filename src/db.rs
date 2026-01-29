@@ -468,7 +468,7 @@ impl DbWriter {
     pub fn update_contig_gc_stats(&self, gc_data: &[GCContentData]) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "UPDATE Contig SET GC_average = ?, GC_sd = ?, GC_median = ? WHERE Contig_name = ?"
+            "UPDATE Contig SET GC_mean = ?, GC_sd = ?, GC_median = ? WHERE Contig_name = ?"
         )?;
 
         for data in gc_data {
@@ -516,7 +516,7 @@ fn create_core_tables(conn: &Connection) -> Result<()> {
             Contig_length INTEGER,
             Annotation_tool TEXT,
             Duplication_percentage INTEGER,
-            GC_average REAL,
+            GC_mean REAL,
             GC_sd REAL,
             GC_median REAL
         )",
@@ -536,14 +536,14 @@ fn create_core_tables(conn: &Connection) -> Result<()> {
     )
     .context("Failed to create Sample table")?;
 
-    // Coverage_percentage, Coverage_variation, and Coverage_sd stored as INTEGER (scaled)
+    // Aligned_fraction_percentage, Coverage_variation, and Coverage_sd stored as INTEGER (scaled)
     // Coverage_mean and Coverage_median stored as INTEGER (rounded)
     // No Presence_id needed - (Contig_id, Sample_id) is the natural key
     conn.execute(
         "CREATE TABLE Presences (
             Contig_id INTEGER,
             Sample_id INTEGER,
-            Coverage_percentage INTEGER,
+            Aligned_fraction_percentage INTEGER,
             Coverage_variation INTEGER,
             Coverage_sd INTEGER,
             Coverage_mean INTEGER,
@@ -558,9 +558,9 @@ fn create_core_tables(conn: &Connection) -> Result<()> {
         "CREATE TABLE PhageMechanisms (
             Contig_id INTEGER,
             Sample_id INTEGER,
-            Phage_packaging_mechanism TEXT,
-            Phage_left_terminus TEXT,
-            Phage_right_terminus TEXT,
+            Packaging_mechanism TEXT,
+            Left_termini TEXT,
+            Right_termini TEXT,
             Duplication BOOLEAN
         )",
         [],
@@ -611,23 +611,23 @@ fn create_core_tables(conn: &Connection) -> Result<()> {
     .context("Failed to create Contig_GCContent table")?;
 
     // Completeness table - clipping prevalences stored as INTEGER (×100), totals as INTEGER
-    // Note: Prevalence_clippings_* stores clipping_count/coverage (raw clipping prevalence)
+    // Note: Left/Right_clippings_percentage stores clipping_count/coverage (raw clipping prevalence)
     // The Explicit_completeness VIEW derives completeness as: 1 - clipping_prevalence
     conn.execute(
         "CREATE TABLE Completeness (
             Contig_id INTEGER,
             Sample_id INTEGER,
-            Prevalence_clippings_left INTEGER,
+            Left_clippings_percentage INTEGER,
             Distance_contaminated_left INTEGER,
             Min_missing_left INTEGER,
-            Prevalence_clippings_right INTEGER,
+            Right_clippings_percentage INTEGER,
             Distance_contaminated_right INTEGER,
             Min_missing_right INTEGER,
-            Total_mismatches INTEGER,
-            Total_deletions INTEGER,
-            Total_insertions INTEGER,
-            Total_reads_clipped INTEGER,
-            Total_reference_clipped INTEGER,
+            Mismatch_frequency INTEGER,
+            Deletion_frequency INTEGER,
+            Insertion_frequency INTEGER,
+            Read_based_clipping_frequency INTEGER,
+            Reference_based_clippings_frequency INTEGER,
             Circularising_reads INTEGER,
             Circularising_reads_percentage INTEGER
         )",
@@ -701,7 +701,7 @@ fn insert_contigs(conn: &Connection, contigs: &[ContigInfo]) -> Result<()> {
             contig.length as i64,
             &contig.annotation_tool,
             null_int,   // Duplication_percentage - set later from autoblast
-            null_real,  // GC_average - set later from GC content computation
+            null_real,  // GC_mean - set later from GC content computation
             null_real,  // GC_sd - set later from GC content computation
             null_real,  // GC_median - set later from GC content computation
         ])
@@ -904,17 +904,17 @@ fn create_views(conn: &Connection, created_tables: &HashSet<String>) -> Result<(
          SELECT
              c.Contig_name,
              s.Sample_name,
-             p.Coverage_percentage,
+             p.Aligned_fraction_percentage,
              p.Coverage_variation / 1000000.0 AS Coverage_variation,
              p.Coverage_sd / 1000000.0 AS Coverage_sd,
              p.Coverage_mean,
              p.Coverage_median,
              CAST(s.Number_of_reads AS REAL) / (SELECT MIN(Number_of_reads) FROM Sample WHERE Number_of_reads > 0) AS Read_number_correction_ratio,
              CAST(s.Number_of_mapped_reads AS REAL) / (SELECT MIN(Number_of_mapped_reads) FROM Sample WHERE Number_of_mapped_reads > 0) AS Read_mapped_correction_ratio,
-             p.Coverage_mean / (CAST(s.Number_of_reads AS REAL) / (SELECT MIN(Number_of_reads) FROM Sample WHERE Number_of_reads > 0)) AS Coverage_mean_corrected_by_read_number,
-             p.Coverage_mean / (CAST(s.Number_of_mapped_reads AS REAL) / (SELECT MIN(Number_of_mapped_reads) FROM Sample WHERE Number_of_mapped_reads > 0)) AS Coverage_mean_corrected_by_read_mapped,
-             p.Coverage_median / (CAST(s.Number_of_reads AS REAL) / (SELECT MIN(Number_of_reads) FROM Sample WHERE Number_of_reads > 0)) AS Coverage_median_corrected_by_read_number,
-             p.Coverage_median / (CAST(s.Number_of_mapped_reads AS REAL) / (SELECT MIN(Number_of_mapped_reads) FROM Sample WHERE Number_of_mapped_reads > 0)) AS Coverage_median_corrected_by_read_mapped
+             p.Coverage_mean / (CAST(s.Number_of_reads AS REAL) / (SELECT MIN(Number_of_reads) FROM Sample WHERE Number_of_reads > 0)) AS Coverage_mean_corrected_by_number_of_reads,
+             p.Coverage_mean / (CAST(s.Number_of_mapped_reads AS REAL) / (SELECT MIN(Number_of_mapped_reads) FROM Sample WHERE Number_of_mapped_reads > 0)) AS Coverage_mean_corrected_by_number_of_mapped_reads,
+             p.Coverage_median / (CAST(s.Number_of_reads AS REAL) / (SELECT MIN(Number_of_reads) FROM Sample WHERE Number_of_reads > 0)) AS Coverage_median_corrected_by_number_of_reads,
+             p.Coverage_median / (CAST(s.Number_of_mapped_reads AS REAL) / (SELECT MIN(Number_of_mapped_reads) FROM Sample WHERE Number_of_mapped_reads > 0)) AS Coverage_median_corrected_by_number_of_mapped_reads
          FROM Presences p
          JOIN Contig c ON p.Contig_id = c.Contig_id
          JOIN Sample s ON p.Sample_id = s.Sample_id",
@@ -929,27 +929,27 @@ fn create_views(conn: &Connection, created_tables: &HashSet<String>) -> Result<(
          SELECT
              c.Contig_name,
              s.Sample_name,
-             COALESCE(100 - comp.Prevalence_clippings_left, 100) AS Prevalence_completeness_left,
+             COALESCE(100 - comp.Left_clippings_percentage, 100) AS Left_completeness_percentage,
              COALESCE(comp.Distance_contaminated_left, 0) AS Distance_contaminated_left,
              COALESCE(comp.Min_missing_left, 0) AS Min_missing_left,
-             COALESCE(100 - comp.Prevalence_clippings_right, 100) AS Prevalence_completeness_right,
+             COALESCE(100 - comp.Right_clippings_percentage, 100) AS Right_completeness_percentage,
              COALESCE(comp.Distance_contaminated_right, 0) AS Distance_contaminated_right,
              COALESCE(comp.Min_missing_right, 0) AS Min_missing_right,
-             COALESCE(comp.Total_mismatches, 0) AS Total_mismatches,
-             COALESCE(comp.Total_deletions, 0) AS Total_deletions,
-             COALESCE(comp.Total_insertions, 0) AS Total_insertions,
-             COALESCE(comp.Total_reads_clipped, 0) AS Total_reads_clipped,
-             COALESCE(comp.Total_reference_clipped, 0) AS Total_reference_clipped,
-             COALESCE(comp.Total_mismatches, 0) + COALESCE(comp.Total_insertions, 0) + COALESCE(comp.Total_reads_clipped, 0) AS Score_completeness,
+             COALESCE(comp.Mismatch_frequency, 0) AS Mismatch_frequency,
+             COALESCE(comp.Deletion_frequency, 0) AS Deletion_frequency,
+             COALESCE(comp.Insertion_frequency, 0) AS Insertion_frequency,
+             COALESCE(comp.Read_based_clipping_frequency, 0) AS Read_based_clipping_frequency,
+             COALESCE(comp.Reference_based_clippings_frequency, 0) AS Reference_based_clippings_frequency,
+             COALESCE(comp.Mismatch_frequency, 0) + COALESCE(comp.Insertion_frequency, 0) + COALESCE(comp.Read_based_clipping_frequency, 0) AS Score_completeness,
              CASE WHEN c.Contig_length > 0 THEN ROUND(
                 100 - (
-                    (COALESCE(comp.Total_mismatches, 0) + COALESCE(comp.Total_insertions, 0) + COALESCE(comp.Total_reads_clipped, 0)) * 100 / c.Contig_length
+                    (COALESCE(comp.Mismatch_frequency, 0) + COALESCE(comp.Insertion_frequency, 0) + COALESCE(comp.Read_based_clipping_frequency, 0)) * 100 / c.Contig_length
                 )
-             )::INTEGER ELSE 100 END AS Percentage_completeness,
-             COALESCE(comp.Total_mismatches, 0) + COALESCE(comp.Total_deletions, 0) + COALESCE(comp.Total_reference_clipped, 0) AS Score_contamination,
+             )::INTEGER ELSE 100 END AS Whole_completeness_percentage,
+             COALESCE(comp.Mismatch_frequency, 0) + COALESCE(comp.Deletion_frequency, 0) + COALESCE(comp.Reference_based_clippings_frequency, 0) AS Score_contamination,
              CASE WHEN c.Contig_length > 0 THEN ROUND(
-                (COALESCE(comp.Total_mismatches, 0) + COALESCE(comp.Total_deletions, 0) + COALESCE(comp.Total_reference_clipped, 0)) * 100 / c.Contig_length
-             )::INTEGER ELSE 100 END AS Percentage_contamination,
+                (COALESCE(comp.Mismatch_frequency, 0) + COALESCE(comp.Deletion_frequency, 0) + COALESCE(comp.Reference_based_clippings_frequency, 0)) * 100 / c.Contig_length
+             )::INTEGER ELSE 100 END AS Whole_contamination_percentage,
              COALESCE(comp.Circularising_reads, 0) AS Circularising_reads,
              COALESCE(comp.Circularising_reads_percentage, 0) AS Circularising_reads_percentage
          FROM Completeness comp
@@ -965,9 +965,9 @@ fn create_views(conn: &Connection, created_tables: &HashSet<String>) -> Result<(
          SELECT
              c.Contig_name,
              s.Sample_name,
-             m.Phage_packaging_mechanism,
-             m.Phage_left_terminus,
-             m.Phage_right_terminus,
+             m.Packaging_mechanism,
+             m.Left_termini,
+             m.Right_termini,
              CASE WHEN m.Duplication = true THEN 'DTR'
                   WHEN m.Duplication = false THEN 'ITR'
                   ELSE NULL END AS Duplication

@@ -13,26 +13,26 @@ def build_summary_data(conn, contig_name, sample_names):
     """
     # Define column groups for each subsection
     coverage_cols = {
-        "Coverage_percentage": "Aligned fraction (%)", "Coverage_mean": "Coverage mean", "Coverage_median": "Coverage median",
+        "Aligned_fraction_percentage": "Aligned fraction (%)", "Coverage_mean": "Coverage mean", "Coverage_median": "Coverage median",
         "Coverage_sd": "Coverage sd", "Coverage_variation": "Coverage variation", 
-        "Coverage_mean_corrected_by_read_number": "Coverage mean (2)", "Coverage_median_corrected_by_read_number": "Coverage median (2)", 
-        "Coverage_mean_corrected_by_read_mapped": "Coverage mean (3)", "Coverage_median_corrected_by_read_mapped": "Coverage median (3)"
+        "Coverage_mean_corrected_by_number_of_reads": "Coverage mean (2)", "Coverage_median_corrected_by_number_of_reads": "Coverage median (2)", 
+        "Coverage_mean_corrected_by_number_of_mapped_reads": "Coverage mean (3)", "Coverage_median_corrected_by_number_of_mapped_reads": "Coverage median (3)"
     }
 
     completeness_cols = {
-        "Percentage_completeness": "Completeness (%)", "Percentage_contamination": "Contamination (%)",
-        "Total_mismatches": "Mismatches (bp)", "Total_insertions": "Insertions* (bp)", "Total_deletions": "Deletions** (bp)", 
-        "Total_reads_clipped": "Read clippings (bp)", "Total_reference_clipped": "Reference clippings (bp)"
+        "Whole_completeness_percentage": "Completeness (%)", "Whole_contamination_percentage": "Contamination (%)",
+        "Mismatch_frequency": "Mismatches (bp)", "Insertion_frequency": "Insertions* (bp)", "Deletion_frequency": "Deletions** (bp)",
+        "Read_based_clipping_frequency": "Read clippings (bp)", "Reference_based_clippings_frequency": "Reference clippings (bp)"
     }
 
     side_completeness_cols = {
-        "Prevalence_completeness_left": "Left completeness (%)", "Distance_contaminated_left": "Left expansion* (bp)", "Min_missing_left": "Left collapse** (bp)",
-        "Prevalence_completeness_right": "Right completeness (%)", "Distance_contaminated_right": "Right expansion* (bp)", "Min_missing_right": "Right collapse** (bp)",
+        "Left_completeness_percentage": "Left completeness (%)", "Distance_contaminated_left": "Left expansion* (bp)", "Min_missing_left": "Left collapse** (bp)",
+        "Right_completeness_percentage": "Right completeness (%)", "Distance_contaminated_right": "Right expansion* (bp)", "Min_missing_right": "Right collapse** (bp)",
         "Circularising_reads": "Circularising reads", "Circularising_reads_percentage": "Circularising reads (%)",
     }
 
     phage_cols = {
-        "Phage_packaging_mechanism": "Mechanism", "Phage_left_terminus": "Left termini", "Phage_right_terminus": "Right termini"
+        "Packaging_mechanism": "Mechanism", "Left_termini": "Left termini", "Right_termini": "Right termini"
     }
 
     cur = conn.cursor()

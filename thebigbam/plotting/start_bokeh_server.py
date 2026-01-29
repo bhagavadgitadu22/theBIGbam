@@ -25,7 +25,7 @@ def build_controls(conn):
     # Check if PhageMechanisms table exists and has data
     phage_mechanisms_list = []
     try:
-        cur.execute("SELECT DISTINCT Phage_packaging_mechanism FROM PhageMechanisms WHERE Phage_packaging_mechanism IS NOT NULL")
+        cur.execute("SELECT DISTINCT Packaging_mechanism FROM PhageMechanisms WHERE Packaging_mechanism IS NOT NULL")
         phage_mechanisms_list = [r[0] for r in cur.fetchall()]
     except Exception:
         pass  # Table doesn't exist or has no data
@@ -84,7 +84,7 @@ def build_controls(conn):
 
     whole_contamination_max = 100.0
     try:
-        cur.execute("SELECT MAX(Percentage_contamination) FROM Explicit_completeness WHERE Percentage_contamination IS NOT NULL")
+        cur.execute("SELECT MAX(Whole_contamination_percentage) FROM Explicit_completeness WHERE Whole_contamination_percentage IS NOT NULL")
         result = cur.fetchone()
         if result and result[0] is not None:
             whole_contamination_max = result[0]
@@ -527,9 +527,9 @@ def create_layout(db_path):
             if correction_filter is not None and hasattr(correction_filter, 'value'):
                 val = correction_filter.value
                 if val == "Correct by number of reads":
-                    return "Coverage_mean_corrected_by_read_number"
+                    return "Coverage_mean_corrected_by_number_of_reads"
                 elif val == "Correct by number of mapped reads":
-                    return "Coverage_mean_corrected_by_read_mapped"
+                    return "Coverage_mean_corrected_by_number_of_mapped_reads"
         except NameError:
             pass
         return "Coverage_mean"
@@ -541,9 +541,9 @@ def create_layout(db_path):
             if correction_filter is not None and hasattr(correction_filter, 'value'):
                 val = correction_filter.value
                 if val == "Correct by number of reads":
-                    return "Coverage_median_corrected_by_read_number"
+                    return "Coverage_median_corrected_by_number_of_reads"
                 elif val == "Correct by number of mapped reads":
-                    return "Coverage_median_corrected_by_read_mapped"
+                    return "Coverage_median_corrected_by_number_of_mapped_reads"
         except NameError:
             pass
         return "Coverage_median"
@@ -571,7 +571,7 @@ def create_layout(db_path):
         if coverage_percentage_slider is not None:
             min_val, max_val = coverage_percentage_slider.value
             if min_val > 0 or max_val < 100:
-                conditions.append("Coverage_percentage >= ? AND Coverage_percentage <= ?")
+                conditions.append("Aligned_fraction_percentage >= ? AND Aligned_fraction_percentage <= ?")
                 params.extend([min_val, max_val])
 
         if coverage_mean_slider is not None:
@@ -622,26 +622,26 @@ def create_layout(db_path):
         if prevalence_left_slider is not None:
             min_val, max_val = prevalence_left_slider.value
             if min_val > 0 or max_val < 100:
-                conditions.append("Prevalence_completeness_left >= ? AND Prevalence_completeness_left <= ?")
+                conditions.append("Left_completeness_percentage >= ? AND Left_completeness_percentage <= ?")
                 params.extend([min_val, max_val])
 
         if prevalence_right_slider is not None:
             min_val, max_val = prevalence_right_slider.value
             if min_val > 0 or max_val < 100:
-                conditions.append("Prevalence_completeness_right >= ? AND Prevalence_completeness_right <= ?")
+                conditions.append("Right_completeness_percentage >= ? AND Right_completeness_percentage <= ?")
                 params.extend([min_val, max_val])
 
         if pct_completeness_slider is not None:
             min_val, max_val = pct_completeness_slider.value
             if min_val > 0 or max_val < 100:
-                conditions.append("Percentage_completeness >= ? AND Percentage_completeness <= ?")
+                conditions.append("Whole_completeness_percentage >= ? AND Whole_completeness_percentage <= ?")
                 params.extend([min_val, max_val])
 
         if pct_contamination_slider is not None:
             min_val, max_val = pct_contamination_slider.value
             conta_max = widgets['whole_contamination_max']
             if min_val > 0 or max_val < conta_max:
-                conditions.append("Percentage_contamination >= ? AND Percentage_contamination <= ?")
+                conditions.append("Whole_contamination_percentage >= ? AND Whole_contamination_percentage <= ?")
                 params.extend([min_val, max_val])
 
         if circularising_slider is not None:
@@ -662,14 +662,14 @@ def create_layout(db_path):
                 query = """
                     SELECT DISTINCT Contig_name
                     FROM Explicit_phage_mechanisms
-                    WHERE Phage_packaging_mechanism = ? AND Sample_name = ?
+                    WHERE Packaging_mechanism = ? AND Sample_name = ?
                 """
                 cur.execute(query, (phage_mechanism_filter.value, sample_name))
             else:
                 query = """
                     SELECT DISTINCT Contig_name
                     FROM Explicit_phage_mechanisms
-                    WHERE Phage_packaging_mechanism = ?
+                    WHERE Packaging_mechanism = ?
                 """
                 cur.execute(query, (phage_mechanism_filter.value,))
             matching = {row[0] for row in cur.fetchall()}
@@ -712,7 +712,7 @@ def create_layout(db_path):
         if coverage_percentage_slider is not None:
             min_val, max_val = coverage_percentage_slider.value
             if min_val > 0 or max_val < 100:
-                conditions.append("Coverage_percentage >= ? AND Coverage_percentage <= ?")
+                conditions.append("Aligned_fraction_percentage >= ? AND Aligned_fraction_percentage <= ?")
                 params.extend([min_val, max_val])
 
         if coverage_mean_slider is not None:
@@ -763,26 +763,26 @@ def create_layout(db_path):
         if prevalence_left_slider is not None:
             min_val, max_val = prevalence_left_slider.value
             if min_val > 0 or max_val < 100:
-                conditions.append("Prevalence_completeness_left >= ? AND Prevalence_completeness_left <= ?")
+                conditions.append("Left_completeness_percentage >= ? AND Left_completeness_percentage <= ?")
                 params.extend([min_val, max_val])
 
         if prevalence_right_slider is not None:
             min_val, max_val = prevalence_right_slider.value
             if min_val > 0 or max_val < 100:
-                conditions.append("Prevalence_completeness_right >= ? AND Prevalence_completeness_right <= ?")
+                conditions.append("Right_completeness_percentage >= ? AND Right_completeness_percentage <= ?")
                 params.extend([min_val, max_val])
 
         if pct_completeness_slider is not None:
             min_val, max_val = pct_completeness_slider.value
             if min_val > 0 or max_val < 100:
-                conditions.append("Percentage_completeness >= ? AND Percentage_completeness <= ?")
+                conditions.append("Whole_completeness_percentage >= ? AND Whole_completeness_percentage <= ?")
                 params.extend([min_val, max_val])
 
         if pct_contamination_slider is not None:
             min_val, max_val = pct_contamination_slider.value
             conta_max = widgets['whole_contamination_max']
             if min_val > 0 or max_val < conta_max:
-                conditions.append("Percentage_contamination >= ? AND Percentage_contamination <= ?")
+                conditions.append("Whole_contamination_percentage >= ? AND Whole_contamination_percentage <= ?")
                 params.extend([min_val, max_val])
 
         if circularising_slider is not None:
@@ -803,14 +803,14 @@ def create_layout(db_path):
                 query = """
                     SELECT DISTINCT Sample_name
                     FROM Explicit_phage_mechanisms
-                    WHERE Phage_packaging_mechanism = ? AND Contig_name = ?
+                    WHERE Packaging_mechanism = ? AND Contig_name = ?
                 """
                 cur.execute(query, (phage_mechanism_filter.value, contig_name))
             else:
                 query = """
                     SELECT DISTINCT Sample_name
                     FROM Explicit_phage_mechanisms
-                    WHERE Phage_packaging_mechanism = ?
+                    WHERE Packaging_mechanism = ?
                 """
                 cur.execute(query, (phage_mechanism_filter.value,))
             matching = {row[0] for row in cur.fetchall()}
@@ -846,13 +846,20 @@ def create_layout(db_path):
 
         return allowed_samples
 
+    _filtering_cache = {'result': None, 'valid': False}
+
     def get_filtering_filtered_pairs():
         """Apply Filtering query rows to get allowed contig/sample pairs.
 
         Returns set of (contig_name, sample_name) tuples that match all conditions.
         Returns None if no filters are active (meaning all pairs are allowed).
         """
+        if _filtering_cache['valid']:
+            return _filtering_cache['result']
+
         if not or_sections:
+            _filtering_cache['result'] = None
+            _filtering_cache['valid'] = True
             return None
 
         # Check if any filter has a meaningful value
@@ -874,6 +881,8 @@ def create_layout(db_path):
                 break
 
         if not has_active_filter:
+            _filtering_cache['result'] = None
+            _filtering_cache['valid'] = True
             return None
 
         cur = conn.cursor()
@@ -989,12 +998,14 @@ def create_layout(db_path):
             if final_pairs is None:
                 final_pairs = section_pairs
             else:
-                # Check inter-section AND/OR - look at the Select widget between sections
-                # The inter-section Select widgets are in filtering_content.children
-                # They appear before each section except the first
-                # For now, default to AND between sections
-                final_pairs = final_pairs & section_pairs
+                # Check inter-section AND/OR select widget
+                if i - 1 < len(inter_section_selects) and inter_section_selects[i - 1].value == "OR":
+                    final_pairs = final_pairs | section_pairs
+                else:
+                    final_pairs = final_pairs & section_pairs
 
+        _filtering_cache['result'] = final_pairs
+        _filtering_cache['valid'] = True
         return final_pairs
 
     def update_widget_completions(widget, completions):
@@ -1036,20 +1047,11 @@ def create_layout(db_path):
                     return min_dup <= dup <= max_dup
                 completions = [c for c in completions if passes_dup_filter(c)]
 
-        # Apply module-based filters (phage mechanisms, completeness) for the selected sample
-        sel_sample = widgets['sample_select'].value if views.active == 0 else None
-        module_allowed = get_module_filtered_contigs(sample_name=sel_sample)
-        completions = [c for c in completions if c in module_allowed]
-
-        # Apply variable-based filters
-        if views.active == 0:
-            # "One sample" view: filter contigs based on selected sample's data
-            var_allowed = get_variable_filtered_contigs()
-            completions = [c for c in completions if c in var_allowed]
-        else:
-            # "All samples" view: filter contigs where at least one sample has sufficient data
-            var_allowed = get_variable_filtered_contigs_any_sample()
-            completions = [c for c in completions if c in var_allowed]
+        # NOTE: Module-based filters (get_module_filtered_contigs) and variable-based filters
+        # (get_variable_filtered_contigs) are skipped here because all slider variables
+        # (coverage_percentage_slider, coverage_mean_slider, etc.) are None,
+        # annotation_inputs is {}, phage_mechanism_filter is None, and
+        # variable_filter_rows is [], making these calls always return the full set.
 
         # Apply Filtering2 query builder filters
         filtered_pairs = get_filtering_filtered_pairs()
@@ -1058,7 +1060,6 @@ def create_layout(db_path):
             completions = [c for c in completions if c in allowed_contigs]
 
         update_widget_completions(widgets['contig_select'], completions)
-        update_section_titles()
 
     def refresh_sample_options():
         # Skip if locked (during view transitions to avoid cascading updates)
@@ -1072,15 +1073,8 @@ def create_layout(db_path):
         else:
             completions = list(orig_samples)
 
-        # Apply module-based filters (phage mechanisms, completeness) for the selected contig
-        sel_contig = widgets['contig_select'].value if views.active == 0 else None
-        module_allowed = get_module_filtered_samples(contig_name=sel_contig)
-        completions = [s for s in completions if s in module_allowed]
-
-        # Apply variable-based filters (only in "One sample" view)
-        if views.active == 0:
-            var_allowed = get_variable_filtered_samples()
-            completions = [s for s in completions if s in var_allowed]
+        # NOTE: Module-based filters (get_module_filtered_samples) and variable-based filters
+        # (get_variable_filtered_samples) are skipped here — see note in refresh_contig_options.
 
         # Apply Filtering2 query builder filters
         filtered_pairs = get_filtering_filtered_pairs()
@@ -1089,7 +1083,6 @@ def create_layout(db_path):
             completions = [s for s in completions if s in allowed_samples]
 
         update_widget_completions(widgets['sample_select'], completions)
-        update_section_titles()
 
     def update_section_titles():
         """Update Filtering, Contigs, and Samples section titles with current counts."""
@@ -1184,9 +1177,11 @@ def create_layout(db_path):
         global_toggle_lock['locked'] = False
 
         # Refresh options after view change
+        _filtering_cache['valid'] = False
         refresh_contig_options()
         if not is_all:
             refresh_sample_options()
+        update_section_titles()
 
     def create_variable_filter_row():
         """Create a new row of variable filter widgets."""
@@ -1261,9 +1256,11 @@ def create_layout(db_path):
         minus_btn.on_click(remove_row_callback)
         
         # Create a shared callback that refreshes both contig and sample options
-        def refresh_on_filter_change(attr, old, new):
+        def refresh_on_filter_change(attr=None, old=None, new=None):
+            _filtering_cache['valid'] = False
             refresh_contig_options()
             refresh_sample_options()
+            update_section_titles()
         
         # Attach to all inputs (var_input is Panel widget, others are Bokeh)
         type_select.on_change('value', refresh_on_filter_change)
@@ -1338,12 +1335,11 @@ def create_layout(db_path):
                 # Compute filtered samples (same logic as refresh_sample_options)
                 # Start with samples that have the selected contig
                 filtered_samples = [s for s in orig_samples if s in widgets['contig_to_samples'].get(contig, set())]
-                # Apply module-based filters (coverage, completeness, phage mechanism) for this specific contig
-                module_allowed = get_module_filtered_samples(contig_name=contig)
-                filtered_samples = [s for s in filtered_samples if s in module_allowed]
-                # Apply variable-based filters
-                var_allowed = get_variable_filtered_samples()
-                filtered_samples = [s for s in filtered_samples if s in var_allowed]
+                # Apply Filtering2 query builder conditions
+                filtering_pairs = get_filtering_filtered_pairs()
+                if filtering_pairs is not None:
+                    allowed_samples = {pair[1] for pair in filtering_pairs}
+                    filtered_samples = [s for s in filtered_samples if s in allowed_samples]
 
                 print(f"[start_bokeh_server] Generating plot for all samples with variable={selected_var}, contig={contig}, genome_features={genome_features}, filtered_samples={len(filtered_samples)}")
                 grid = generate_bokeh_plot_all_samples(conn, selected_var, contig, xstart=xstart, xend=xend, genbank_path=genbank_path, genome_features=genome_features if genome_features else None, allowed_samples=set(filtered_samples))
@@ -1388,12 +1384,11 @@ def create_layout(db_path):
                 # All Samples view: get filtered samples
                 # Start with samples that have the selected contig
                 filtered_samples = [s for s in orig_samples if s in widgets['contig_to_samples'].get(contig, set())]
-                # Apply module-based filters for this specific contig
-                module_allowed = get_module_filtered_samples(contig_name=contig)
-                filtered_samples = [s for s in filtered_samples if s in module_allowed]
-                # Apply variable-based filters
-                var_allowed = get_variable_filtered_samples()
-                filtered_samples = [s for s in filtered_samples if s in var_allowed]
+                # Apply Filtering2 query builder conditions
+                filtering_pairs = get_filtering_filtered_pairs()
+                if filtering_pairs is not None:
+                    allowed_samples = {pair[1] for pair in filtering_pairs}
+                    filtered_samples = [s for s in filtered_samples if s in allowed_samples]
 
                 if not filtered_samples:
                     main_placeholder.children = [Div(text="<i>No samples match current filters.</i>")]
@@ -1491,6 +1486,8 @@ def create_layout(db_path):
 
     # Store all OR sections in a list for dynamic management
     or_sections = []
+    # Store inter-section AND/OR Select widgets
+    inter_section_selects = []
 
     def count_total_query_rows():
         """Count total number of query rows across all OR sections."""
@@ -1507,10 +1504,11 @@ def create_layout(db_path):
             categories = ["No data"]
 
         initial_category = categories[0]
-        initial_columns = list(filtering_metadata.get(initial_category, {}).get('columns', {}).keys())
-        if not initial_columns:
-            initial_columns = ["No columns"]
-        initial_column = initial_columns[0]
+        initial_columns_raw = list(filtering_metadata.get(initial_category, {}).get('columns', {}).keys())
+        if not initial_columns_raw:
+            initial_columns_raw = ["No columns"]
+        initial_columns = [(c, c.replace("_", " ").replace("percentage", "(%)")) for c in initial_columns_raw]
+        initial_column = initial_columns_raw[0]
 
         # Determine initial column type
         initial_col_info = filtering_metadata.get(initial_category, {}).get('columns', {}).get(initial_column, {})
@@ -1545,8 +1543,10 @@ def create_layout(db_path):
 
         def refresh_on_filter_change():
             """Refresh contig and sample options when Filtering2 values change."""
+            _filtering_cache['valid'] = False
             refresh_contig_options()
             refresh_sample_options()
+            update_section_titles()
 
         # Create initial input widget based on column type
         if initial_is_text:
@@ -1623,7 +1623,7 @@ def create_layout(db_path):
             columns = list(filtering_metadata.get(new, {}).get('columns', {}).keys())
             if not columns:
                 columns = ["No columns"]
-            subcategory_select.options = columns
+            subcategory_select.options = [(c, c.replace("_", " ").replace("percentage", "(%)")) for c in columns]
             subcategory_select.value = columns[0]
             # Update input widget for new column
             update_input_widget(columns[0])
@@ -1689,7 +1689,12 @@ def create_layout(db_path):
                     margin=(5, 0, 5, 0)
                 )
                 # Add callback to refresh when AND/OR changes
-                select_widget.on_change('value', lambda attr, old, new: (refresh_contig_options(), refresh_sample_options()))
+                def _on_and_or_change(attr, old, new):
+                    _filtering_cache['valid'] = False
+                    refresh_contig_options()
+                    refresh_sample_options()
+                    update_section_titles()
+                select_widget.on_change('value', _on_and_or_change)
                 section_children.append(select_widget)
                 row_data['and_div'] = select_widget
             else:
@@ -1751,6 +1756,7 @@ def create_layout(db_path):
     def rebuild_filtering_content():
         """Rebuild the entire Filtering content with all OR sections."""
         content_children = []
+        inter_section_selects.clear()
 
         for i, section_data in enumerate(or_sections):
             # Add OR div before each section except the first
@@ -1761,7 +1767,13 @@ def create_layout(db_path):
                     margin=(5, 0, 5, 0)
                 )
                 # Add callback to refresh when AND/OR changes
-                select_widget.on_change('value', lambda attr, old, new: (refresh_contig_options(), refresh_sample_options()))
+                def _on_and_or_change(attr, old, new):
+                    _filtering_cache['valid'] = False
+                    refresh_contig_options()
+                    refresh_sample_options()
+                    update_section_titles()
+                select_widget.on_change('value', _on_and_or_change)
+                inter_section_selects.append(select_widget)
                 content_children.append(select_widget)
 
             content_children.append(section_data['column'])
@@ -1826,7 +1838,7 @@ def create_layout(db_path):
     )
 
     sample_toggle_btn.on_click(make_toggle_callback(sample_toggle_btn, above_sample_content))
-    widgets['sample_select'].param.watch(lambda event: refresh_contig_options(), 'value')
+    widgets['sample_select'].param.watch(lambda event: (refresh_contig_options(), update_section_titles()), 'value')
 
 
     ## Build Contig section
@@ -1850,6 +1862,7 @@ def create_layout(db_path):
     def on_contig_change(event):
         new = event.new
         refresh_sample_options()
+        update_section_titles()
         # Update position inputs when contig changes
         if new and new in widgets['contig_lengths']:
             from_position_input.value = "0"

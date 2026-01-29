@@ -4,7 +4,7 @@ from bokeh.models import Range1d
 from bokeh.layouts import gridplot
 from bokeh.plotting import output_file, save
 
-from .plotting_data_per_sample import get_contig_info, get_feature_data, get_repeats_data, make_bokeh_subplot, make_bokeh_genemap
+from .plotting_data_per_sample import get_contig_info, get_feature_data, get_feature_data_batch, get_variable_metadata, get_repeats_data, get_gc_content_data, make_bokeh_subplot, make_bokeh_genemap
 
 ### Function to generate the bokeh plot
 def generate_bokeh_plot_all_samples(conn, variable, contig_name, xstart=None, xend=None, subplot_size=130, genbank_path=None, genome_features=None, allowed_samples=None):
@@ -72,6 +72,13 @@ def generate_bokeh_plot_all_samples(conn, variable, contig_name, xstart=None, xe
                             inverted_subplot = make_bokeh_subplot(inverted_feature_dict, subplot_size, shared_xrange)
                             if inverted_subplot is not None:
                                 genome_subplots.append(inverted_subplot)
+                # Handle GC content specially - contig-level table without Sample_id
+                elif feature_lower in ["gc_content", "gc content", "gccontent", "gc"]:
+                    gc_feature_dict = get_gc_content_data(cur, contig_id, xstart, xend)
+                    if gc_feature_dict:
+                        gc_subplot = make_bokeh_subplot(gc_feature_dict, subplot_size, shared_xrange)
+                        if gc_subplot is not None:
+                            genome_subplots.append(gc_subplot)
                 else:
                     # Other Genome features - try to get data (may fail if sample-dependent)
                     list_feature_dict = get_feature_data(cur, genome_feature, contig_id, sample_id=None, xstart=xstart, xend=xend)
@@ -87,19 +94,20 @@ def generate_bokeh_plot_all_samples(conn, variable, contig_name, xstart=None, xe
 
     # --- Add one subplot per sample for the main variable ---
     # Requested features are variables like 'coverage', 'reads_starts', etc.
+    # Batch-fetch data for all samples in one query, then create subplots
     subplots = []
-    for sample_id, sample_name in zip(sample_ids, sample_names):
-        try:
-            list_feature_dict = get_feature_data(cur, variable, contig_id, sample_id, xstart, xend)
+    try:
+        var_metadata = get_variable_metadata(cur, variable)
+        batch_results = get_feature_data_batch(cur, variable, contig_id, sample_ids, xstart, xend, variable_metadata=var_metadata)
+        for sample_id, sample_name in zip(sample_ids, sample_names):
+            list_feature_dict = batch_results.get(sample_id, [])
             if not list_feature_dict:
                 continue
-
             subplot_feature = make_bokeh_subplot(list_feature_dict, subplot_size, shared_xrange, sample_title=sample_name)
             if subplot_feature is not None:
                 subplots.append(subplot_feature)
-        except Exception as e:
-            print(f"Error processing variable '{variable}' for sample '{sample_name}': {e}", flush=True)
-            continue
+    except Exception as e:
+        print(f"Error batch-processing variable '{variable}': {e}", flush=True)
 
     # --- Combine all figures in a single grid with one shared toolbar ---
     all_plots = []

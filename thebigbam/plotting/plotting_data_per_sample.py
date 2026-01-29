@@ -521,11 +521,16 @@ def merge_rle_segments(plus_rows, minus_rows):
         seg_end = sorted_bounds[i + 1] - 1
 
         # Sum values from both strands that cover this segment
+        # Both arrays are sorted by first position, so we can break early
         value = 0
         for first, last, val in plus_rows:
+            if first > seg_end:
+                break
             if first <= seg_start and last >= seg_end:
                 value += val
         for first, last, val in minus_rows:
+            if first > seg_end:
+                break
             if first <= seg_start and last >= seg_end:
                 value += val
 
@@ -534,8 +539,27 @@ def merge_rle_segments(plus_rows, minus_rows):
     return result
 
 
+### Function to get variable metadata (rendering info from Variable table)
+def get_variable_metadata(cur, feature):
+    """Get rendering metadata from the Variable table for a given subplot/feature.
+
+    Args:
+        cur: DuckDB cursor
+        feature: Subplot name to query
+
+    Returns:
+        List of tuples: (Type, Color, Alpha, Fill_alpha, Size, Title, Feature_table_name)
+    """
+    cur.execute(
+        "SELECT \"Type\", Color, Alpha, Fill_alpha, \"Size\", Title, Feature_table_name "
+        "FROM Variable WHERE Subplot=?",
+        (feature,)
+    )
+    return cur.fetchall()
+
+
 ### Function to get features of one variable
-def get_feature_data(cur, feature, contig_id, sample_id, xstart=None, xend=None):
+def get_feature_data(cur, feature, contig_id, sample_id, xstart=None, xend=None, variable_metadata=None):
     """Get feature data for plotting.
 
     Args:
@@ -545,14 +569,13 @@ def get_feature_data(cur, feature, contig_id, sample_id, xstart=None, xend=None)
         sample_id: Sample ID
         xstart: Optional start position for filtering (only fetch data intersecting this range)
         xend: Optional end position for filtering (only fetch data intersecting this range)
+        variable_metadata: Optional cached result from get_variable_metadata(); avoids re-querying Variable table
     """
     # Get rendering info from Variable table (Type and Size are quoted - reserved words in DuckDB)
-    cur.execute(
-        "SELECT \"Type\", Color, Alpha, Fill_alpha, \"Size\", Title, Feature_table_name "
-        "FROM Variable WHERE Subplot=?",
-        (feature,)
-    )
-    rows = cur.fetchall()
+    if variable_metadata is not None:
+        rows = variable_metadata
+    else:
+        rows = get_variable_metadata(cur, feature)
 
     # list_feature_dict has several elements if multiple variables share the same subplot
     # example the clippings (right vs left)
@@ -601,22 +624,6 @@ def get_feature_data(cur, feature, contig_id, sample_id, xstart=None, xend=None)
                 tuple(params)
             )
             minus_rows = cur.fetchall()
-
-            # Clip plus and minus rows before merging to ensure boundaries are respected
-            if xstart is not None and xend is not None:
-                clipped_plus = []
-                for first_pos, last_pos, value in plus_rows:
-                    clipped_first = max(first_pos, xstart)
-                    clipped_last = min(last_pos, xend)
-                    clipped_plus.append((clipped_first, clipped_last, value))
-                plus_rows = clipped_plus
-
-                clipped_minus = []
-                for first_pos, last_pos, value in minus_rows:
-                    clipped_first = max(first_pos, xstart)
-                    clipped_last = min(last_pos, xend)
-                    clipped_minus.append((clipped_first, clipped_last, value))
-                minus_rows = clipped_minus
 
             data_rows = merge_rle_segments(plus_rows, minus_rows)
         # Query Feature_* table (RLE format: First_position, Last_position, Value, and optionally Mean, Median, Std)
@@ -735,6 +742,249 @@ def get_feature_data(cur, feature, contig_id, sample_id, xstart=None, xend=None)
             list_feature_dict.append(feature_dict)
 
     return list_feature_dict
+
+
+### Function to get features for multiple samples in a single batch
+def _expand_rle_rows(data_rows, type_picked, has_stats, is_scaled, xstart, xend):
+    """Expand RLE rows into plot coordinates (shared logic for single and batch).
+
+    Args:
+        data_rows: List of tuples (First_position, Last_position, Value[, Mean, Median, Std])
+        type_picked: Plot type ('bars' or 'curve')
+        has_stats: Whether rows include statistics columns
+        is_scaled: Whether values need to be divided by 100
+        xstart: Optional start position for clipping
+        xend: Optional end position for clipping
+
+    Returns:
+        Dict with x, y, and optional width/stats coordinate lists, or None if no data
+    """
+    # Clip feature positions to requested range
+    if xstart is not None and xend is not None:
+        clipped_rows = []
+        for row in data_rows:
+            if has_stats:
+                first_pos, last_pos, value, mean, median, std = row
+                clipped_first = max(first_pos, xstart)
+                clipped_last = min(last_pos, xend)
+                clipped_rows.append((clipped_first, clipped_last, value, mean, median, std))
+            else:
+                first_pos, last_pos, value = row
+                clipped_first = max(first_pos, xstart)
+                clipped_last = min(last_pos, xend)
+                clipped_rows.append((clipped_first, clipped_last, value))
+        data_rows = clipped_rows
+
+    x_coords = []
+    y_coords = []
+    mean_coords = []
+    median_coords = []
+    std_coords = []
+    width_coords = []
+    first_pos_coords = []
+    last_pos_coords = []
+
+    for row in data_rows:
+        if has_stats:
+            first_pos, last_pos, value, mean, median, std = row
+        else:
+            first_pos, last_pos, value = row
+            mean = median = std = None
+
+        if is_scaled:
+            value = value / 100.0 if value is not None else None
+
+        if type_picked == "bars":
+            midpoint = (first_pos + last_pos) / 2.0
+            width = last_pos - first_pos + 1
+            x_coords.append(midpoint)
+            y_coords.append(value)
+            width_coords.append(width)
+            first_pos_coords.append(first_pos)
+            last_pos_coords.append(last_pos)
+            if has_stats:
+                mean_coords.append(mean)
+                median_coords.append(median)
+                std_coords.append(std)
+        else:
+            if first_pos == last_pos:
+                x_coords.append(first_pos)
+                y_coords.append(value)
+                if has_stats:
+                    mean_coords.append(mean)
+                    median_coords.append(median)
+                    std_coords.append(std)
+            else:
+                x_coords.extend([first_pos, last_pos])
+                y_coords.extend([value, value])
+                if has_stats:
+                    mean_coords.extend([mean, mean])
+                    median_coords.extend([median, median])
+                    std_coords.extend([std, std])
+
+    if not x_coords:
+        return None
+
+    result = {"x": x_coords, "y": y_coords, "has_stats": has_stats}
+    if type_picked == "bars":
+        result["width"] = width_coords
+        result["first_pos"] = first_pos_coords
+        result["last_pos"] = last_pos_coords
+    if has_stats:
+        result["mean"] = mean_coords
+        result["median"] = median_coords
+        result["std"] = std_coords
+    return result
+
+
+def get_feature_data_batch(cur, feature, contig_id, sample_ids, xstart=None, xend=None, variable_metadata=None):
+    """Get feature data for multiple samples in a single batch query.
+
+    Instead of running N separate queries (one per sample), runs one query with
+    WHERE Sample_id IN (...) and partitions results in Python.
+
+    Args:
+        cur: DuckDB cursor
+        feature: Subplot name to query
+        contig_id: Contig ID
+        sample_ids: List of sample IDs to fetch data for
+        xstart: Optional start position for filtering
+        xend: Optional end position for filtering
+        variable_metadata: Optional cached result from get_variable_metadata()
+
+    Returns:
+        Dict mapping sample_id to list_feature_dict (same format as get_feature_data returns)
+    """
+    if variable_metadata is not None:
+        rows = variable_metadata
+    else:
+        rows = get_variable_metadata(cur, feature)
+
+    # Result: {sample_id: list_feature_dict}
+    result = {sid: [] for sid in sample_ids}
+
+    if not sample_ids:
+        return result
+
+    # Build the IN clause placeholders
+    placeholders = ", ".join(["?"] * len(sample_ids))
+
+    for row in rows:
+        type_picked, color, alpha, fill_alpha, size, title, feature_table = row
+
+        features_with_stats = ["left_clippings", "right_clippings", "insertions"]
+        has_stats = feature_table in [f"Feature_{f}" for f in features_with_stats]
+        scaled_features = ["Feature_tau", "Feature_mapq"]
+        is_scaled = feature_table in scaled_features
+
+        # Build position filter
+        position_filter = ""
+        extra_params = []
+        if xstart is not None and xend is not None:
+            position_filter = " AND Last_position >= ? AND First_position <= ?"
+            extra_params = [xstart, xend]
+
+        if feature_table == "Feature_primary_reads":
+            # Batch query for plus strand
+            params = list(sample_ids) + [contig_id] + extra_params
+            cur.execute(
+                f"SELECT Sample_id, First_position, Last_position, Value "
+                f"FROM Feature_primary_reads_plus_only "
+                f"WHERE Sample_id IN ({placeholders}) AND Contig_id=?{position_filter} "
+                f"ORDER BY Sample_id, First_position",
+                tuple(params)
+            )
+            all_plus = cur.fetchall()
+
+            # Batch query for minus strand
+            cur.execute(
+                f"SELECT Sample_id, First_position, Last_position, Value "
+                f"FROM Feature_primary_reads_minus_only "
+                f"WHERE Sample_id IN ({placeholders}) AND Contig_id=?{position_filter} "
+                f"ORDER BY Sample_id, First_position",
+                tuple(params)
+            )
+            all_minus = cur.fetchall()
+
+            # Group by sample_id
+            plus_by_sample = {sid: [] for sid in sample_ids}
+            for sid, first, last, val in all_plus:
+                if sid in plus_by_sample:
+                    plus_by_sample[sid].append((first, last, val))
+
+            minus_by_sample = {sid: [] for sid in sample_ids}
+            for sid, first, last, val in all_minus:
+                if sid in minus_by_sample:
+                    minus_by_sample[sid].append((first, last, val))
+
+            # Merge and expand per sample
+            for sid in sample_ids:
+                data_rows = merge_rle_segments(plus_by_sample[sid], minus_by_sample[sid])
+                expanded = _expand_rle_rows(data_rows, type_picked, has_stats, is_scaled, xstart, xend)
+                if expanded is not None:
+                    feature_dict = {
+                        "type": type_picked, "color": color, "alpha": alpha,
+                        "fill_alpha": fill_alpha, "size": size, "title": title,
+                    }
+                    feature_dict.update(expanded)
+                    result[sid].append(feature_dict)
+
+        elif has_stats:
+            params = list(sample_ids) + [contig_id] + extra_params
+            cur.execute(
+                f"SELECT Sample_id, First_position, Last_position, Value, Mean, Median, Std "
+                f"FROM {feature_table} "
+                f"WHERE Sample_id IN ({placeholders}) AND Contig_id=?{position_filter} "
+                f"ORDER BY Sample_id, First_position",
+                tuple(params)
+            )
+            all_rows = cur.fetchall()
+
+            # Group by sample_id
+            rows_by_sample = {sid: [] for sid in sample_ids}
+            for sid, first, last, val, mean, median, std in all_rows:
+                if sid in rows_by_sample:
+                    rows_by_sample[sid].append((first, last, val, mean, median, std))
+
+            for sid in sample_ids:
+                expanded = _expand_rle_rows(rows_by_sample[sid], type_picked, has_stats, is_scaled, xstart, xend)
+                if expanded is not None:
+                    feature_dict = {
+                        "type": type_picked, "color": color, "alpha": alpha,
+                        "fill_alpha": fill_alpha, "size": size, "title": title,
+                    }
+                    feature_dict.update(expanded)
+                    result[sid].append(feature_dict)
+
+        else:
+            params = list(sample_ids) + [contig_id] + extra_params
+            cur.execute(
+                f"SELECT Sample_id, First_position, Last_position, Value "
+                f"FROM {feature_table} "
+                f"WHERE Sample_id IN ({placeholders}) AND Contig_id=?{position_filter} "
+                f"ORDER BY Sample_id, First_position",
+                tuple(params)
+            )
+            all_rows = cur.fetchall()
+
+            # Group by sample_id
+            rows_by_sample = {sid: [] for sid in sample_ids}
+            for sid, first, last, val in all_rows:
+                if sid in rows_by_sample:
+                    rows_by_sample[sid].append((first, last, val))
+
+            for sid in sample_ids:
+                expanded = _expand_rle_rows(rows_by_sample[sid], type_picked, has_stats, is_scaled, xstart, xend)
+                if expanded is not None:
+                    feature_dict = {
+                        "type": type_picked, "color": color, "alpha": alpha,
+                        "fill_alpha": fill_alpha, "size": size, "title": title,
+                    }
+                    feature_dict.update(expanded)
+                    result[sid].append(feature_dict)
+
+    return result
+
 
 ### Function to generate the bokeh plot
 def generate_bokeh_plot_per_sample(conn, list_features, contig_name, sample_name, xstart=None, xend=None, subplot_size=100, genbank_path=None):
