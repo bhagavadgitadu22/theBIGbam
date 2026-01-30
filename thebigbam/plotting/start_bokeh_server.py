@@ -14,7 +14,6 @@ from bokeh.models.plots import GridPlot
 # Import the plotting function from the repo
 from .plotting_data_per_sample import generate_bokeh_plot_per_sample
 from .plotting_data_all_samples import generate_bokeh_plot_all_samples
-from .perusing_data import build_summary_data, generate_summary_table
 from ..database.database_getters import get_filtering_metadata
 
 def build_controls(conn):
@@ -1016,10 +1015,8 @@ def create_layout(db_path):
         if widget.value and widget.value not in completions:
             widget.value = ""
     
-    def refresh_contig_options():
-        # Skip if locked (during view transitions to avoid cascading updates)
-        if global_toggle_lock.get('locked', False):
-            return
+    def refresh_contig_options_unlocked():
+        """Core logic — does NOT check the lock."""
         # Apply presence filter only if a sample is selected (One Sample view)
         if views.active == 0 and widgets['sample_select'].value:
             sel_sample = widgets['sample_select'].value
@@ -1061,10 +1058,13 @@ def create_layout(db_path):
 
         update_widget_completions(widgets['contig_select'], completions)
 
-    def refresh_sample_options():
-        # Skip if locked (during view transitions to avoid cascading updates)
+    def refresh_contig_options():
         if global_toggle_lock.get('locked', False):
             return
+        refresh_contig_options_unlocked()
+
+    def refresh_sample_options_unlocked():
+        """Core logic — does NOT check the lock."""
         # Apply presence filter only if a contig is selected (One Sample view)
         if views.active == 0 and widgets['contig_select'].value:
             sel_contig = widgets['contig_select'].value
@@ -1083,6 +1083,11 @@ def create_layout(db_path):
             completions = [s for s in completions if s in allowed_samples]
 
         update_widget_completions(widgets['sample_select'], completions)
+
+    def refresh_sample_options():
+        if global_toggle_lock.get('locked', False):
+            return
+        refresh_sample_options_unlocked()
 
     def update_section_titles():
         """Update Filtering, Contigs, and Samples section titles with current counts."""
@@ -1173,14 +1178,14 @@ def create_layout(db_path):
         variables_section_one.visible = not is_all
         variables_section_all.visible = is_all
 
-        # Unlock callbacks
-        global_toggle_lock['locked'] = False
-
-        # Refresh options after view change
+        # Refresh options while still locked (suppresses cascading callbacks)
         _filtering_cache['valid'] = False
-        refresh_contig_options()
+        refresh_contig_options_unlocked()
         if not is_all:
-            refresh_sample_options()
+            refresh_sample_options_unlocked()
+
+        # Unlock AFTER refreshes complete
+        global_toggle_lock['locked'] = False
         update_section_titles()
 
     def create_variable_filter_row():
@@ -1258,8 +1263,10 @@ def create_layout(db_path):
         # Create a shared callback that refreshes both contig and sample options
         def refresh_on_filter_change(attr=None, old=None, new=None):
             _filtering_cache['valid'] = False
-            refresh_contig_options()
-            refresh_sample_options()
+            global_toggle_lock['locked'] = True
+            refresh_contig_options_unlocked()
+            refresh_sample_options_unlocked()
+            global_toggle_lock['locked'] = False
             update_section_titles()
         
         # Attach to all inputs (var_input is Panel widget, others are Bokeh)
@@ -1290,6 +1297,7 @@ def create_layout(db_path):
             
             # Validate contig is selected
             if not contig:
+                peruse_button.visible = False
                 main_placeholder.children = [Div(text="<pre>Error: Please select a contig.</pre>")]
                 return
             
@@ -1301,11 +1309,13 @@ def create_layout(db_path):
                 xstart = int(from_position_input.value) if from_position_input.value.strip() else 0
                 xend = int(to_position_input.value) if to_position_input.value.strip() else contig_length
             except ValueError:
+                peruse_button.visible = False
                 main_placeholder.children = [Div(text="<pre>Error: Invalid position range - positions must be integers.</pre>")]
                 return
             
             # Validate position range (1-indexed, positions must be within contig bounds)
             if xstart < 0 or xend > contig_length or xstart >= xend:
+                peruse_button.visible = False
                 main_placeholder.children = [Div(text=f"<pre>Error: Invalid position range - positions must satisfy 0 ≤ start &lt; end ≤ {contig_length}.</pre>")]
                 return
 
@@ -1360,76 +1370,207 @@ def create_layout(db_path):
                 print(f"[start_bokeh_server] Generating plot for sample={sample}, contig={contig}, features={requested_features}")
                 grid = generate_bokeh_plot_per_sample(conn, requested_features, contig, sample, xstart=xstart, xend=xend, genbank_path=genbank_path)
 
-            main_placeholder.children = [grid]
+            # Create toolbar-style row with buttons positioned top-right
+            from bokeh.models import Spacer
+            toolbar_row = row(
+                Spacer(sizing_mode="stretch_width"),  # Push buttons to right
+                peruse_button,
+                download_contig_button,
+                download_metrics_button,
+                download_data_button,
+                margin=(0, 0, 5, 0)
+            )
+            peruse_button.visible = True  # Show button when plot exists
+            download_contig_button.visible = True  # Show download button when plot exists
+            download_metrics_button.visible = True  # Show download metrics button when plot exists
+            download_data_button.visible = True  # Show download data button when plot exists
+            
+            # Stack toolbar row above grid
+            main_placeholder.children = [column(toolbar_row, grid, sizing_mode="stretch_both")]
 
         except Exception as e:
+            peruse_button.visible = False
+            download_contig_button.visible = False
+            download_metrics_button.visible = False
+            download_data_button.visible = False
             tb = traceback.format_exc()
             print(f"[start_bokeh_server] Exception: {tb}", flush=True)
             main_placeholder.children = [Div(text=f"<pre>Error building plot:\n{tb}</pre>")]
 
     ## Peruse button callback function
     def peruse_clicked():
-        """Display summary tables showing coverage, completeness, and phage mechanism data."""
-        try:
-            contig = widgets['contig_select'].value
+        """Generate and open summary tables in a new browser window."""
+        from .perusing_data import generate_and_open_peruse_html
+        
+        contig = widgets['contig_select'].value
 
-            # Check if contig is selected
-            if not contig:
-                main_placeholder.children = [Div(text="<i>Please select a contig first.</i>")]
+        # Check if contig is selected
+        if not contig:
+            print("[start_bokeh_server] Peruse: No contig selected", flush=True)
+            return
+
+        is_all = (views.active == 1)
+
+        if is_all:
+            # All Samples view: get filtered samples
+            filtered_samples = [s for s in orig_samples if s in widgets['contig_to_samples'].get(contig, set())]
+            # Apply Filtering2 query builder conditions
+            filtering_pairs = get_filtering_filtered_pairs()
+            if filtering_pairs is not None:
+                allowed_samples = {pair[1] for pair in filtering_pairs}
+                filtered_samples = [s for s in filtered_samples if s in allowed_samples]
+
+            if not filtered_samples:
+                print("[start_bokeh_server] Peruse: No samples match filters", flush=True)
                 return
 
-            is_all = (views.active == 1)
+            sample_names = filtered_samples
+        else:
+            # One Sample view: use selected sample
+            sample = widgets['sample_select'].value
+            if not sample:
+                print("[start_bokeh_server] Peruse: No sample selected", flush=True)
+                return
+            sample_names = [sample]
 
-            if is_all:
-                # All Samples view: get filtered samples
-                # Start with samples that have the selected contig
-                filtered_samples = [s for s in orig_samples if s in widgets['contig_to_samples'].get(contig, set())]
-                # Apply Filtering2 query builder conditions
-                filtering_pairs = get_filtering_filtered_pairs()
-                if filtering_pairs is not None:
-                    allowed_samples = {pair[1] for pair in filtering_pairs}
-                    filtered_samples = [s for s in filtered_samples if s in allowed_samples]
+        # Generate and open HTML in new window
+        generate_and_open_peruse_html(conn, contig, sample_names)
 
-                if not filtered_samples:
-                    main_placeholder.children = [Div(text="<i>No samples match current filters.</i>")]
-                    return
+    ## Download contig summary callback function
+    def download_contig_clicked():
+        """Generate and download contig summary as CSV."""
+        from .downloading_data import download_contig_summary_csv
+        
+        contig = widgets['contig_select'].value
 
-                sample_names = filtered_samples
-            else:
-                # One Sample view: use selected sample
-                sample = widgets['sample_select'].value
-                if not sample:
-                    main_placeholder.children = [Div(text="<i>Please select a sample first.</i>")]
-                    return
-                sample_names = [sample]
+        # Check if contig is selected
+        if not contig:
+            print("[start_bokeh_server] Download: No contig selected", flush=True)
+            return
 
-            # Get contig info
-            cur = conn.cursor()
-            cur.execute("SELECT Contig_length, Duplication_percentage FROM Contig WHERE Contig_name = ?", (contig,))
-            result = cur.fetchone()
-            contig_length = result[0] if result else "unknown"
-            contig_duplication = result[1] if result else "unknown"
+        # Generate and download CSV
+        download_contig_summary_csv(conn, contig)
 
-            # Build data
-            content = build_summary_data(conn, contig, sample_names)
+    ## Download metrics summary callback function
+    def download_metrics_clicked():
+        """Generate and download metrics summary as CSV."""
+        from .downloading_data import download_metrics_summary_csv
+        
+        contig = widgets['contig_select'].value
 
-            if content is None or len(content) == 0:
-                main_placeholder.children = [Div(text="<i>No data available for this contig/sample combination.</i>")]
+        # Check if contig is selected
+        if not contig:
+            print("[start_bokeh_server] Download metrics: No contig selected", flush=True)
+            return
+
+        is_all = (views.active == 1)
+
+        if is_all:
+            # All Samples view: get filtered samples
+            filtered_samples = [s for s in orig_samples if s in widgets['contig_to_samples'].get(contig, set())]
+            # Apply Filtering2 query builder conditions
+            filtering_pairs = get_filtering_filtered_pairs()
+            if filtering_pairs is not None:
+                allowed_samples = {pair[1] for pair in filtering_pairs}
+                filtered_samples = [s for s in filtered_samples if s in allowed_samples]
+
+            if not filtered_samples:
+                print("[start_bokeh_server] Download metrics: No samples match filters", flush=True)
                 return
 
-            # Create main header
-            header_div = Div(text=f"<h2>{contig} ({contig_length} bp, {contig_duplication} % duplication)</h2><h3>Summary:</h3>")
+            sample_names = filtered_samples
+            # Filename for all samples view
+            safe_contig = "".join(c if c.isalnum() or c in "-_" else "_" for c in contig)
+            filename = f"{safe_contig}_in_all_samples_metrics.csv"
+        else:
+            # One Sample view: use selected sample
+            sample = widgets['sample_select'].value
+            if not sample:
+                print("[start_bokeh_server] Download metrics: No sample selected", flush=True)
+                return
+            sample_names = [sample]
+            # Filename for one sample view
+            safe_contig = "".join(c if c.isalnum() or c in "-_" else "_" for c in contig)
+            safe_sample = "".join(c if c.isalnum() or c in "-_" else "_" for c in sample)
+            filename = f"{safe_contig}_in_{safe_sample}_metrics.csv"
 
-            # Build content list
-            content = [header_div] + content
+        # Generate and download CSV
+        download_metrics_summary_csv(conn, contig, sample_names, filename)
 
-            # Display
-            main_placeholder.children = [column(*content, sizing_mode="stretch_width")]
+    ## Download data callback function
+    def download_data_clicked():
+        """Generate and download feature data as CSV."""
+        from .downloading_data import download_feature_data_csv
+        
+        contig = widgets['contig_select'].value
 
-        except Exception as e:
-            tb = traceback.format_exc()
-            print(f"[start_bokeh_server] Peruse exception: {tb}", flush=True)
-            main_placeholder.children = [Div(text=f"<pre>Error displaying data:\n{tb}</pre>")]
+        # Check if contig is selected
+        if not contig:
+            print("[start_bokeh_server] Download data: No contig selected", flush=True)
+            return
+
+        is_all = (views.active == 1)
+        active_variables_widgets = widgets['variables_widgets_all'] if is_all else widgets['variables_widgets_one']
+
+        if is_all:
+            # All Samples view: get the selected variable and filtered samples
+            selected_var = None
+            for cbg in active_variables_widgets:
+                if cbg.active and selected_var is None:
+                    selected_var = cbg.labels[cbg.active[-1]]
+            
+            if not selected_var:
+                print("[start_bokeh_server] Download data: No variable selected", flush=True)
+                return
+            
+            # Get filtered samples
+            filtered_samples = [s for s in orig_samples if s in widgets['contig_to_samples'].get(contig, set())]
+            filtering_pairs = get_filtering_filtered_pairs()
+            if filtering_pairs is not None:
+                allowed_samples = {pair[1] for pair in filtering_pairs}
+                filtered_samples = [s for s in filtered_samples if s in allowed_samples]
+
+            if not filtered_samples:
+                print("[start_bokeh_server] Download data: No samples match filters", flush=True)
+                return
+
+            # Filename for all samples view
+            safe_contig = "".join(c if c.isalnum() or c in "-_" else "_" for c in contig)
+            safe_var = "".join(c if c.isalnum() or c in "-_" else "_" for c in selected_var)
+            filename = f"{safe_contig}_in_all_samples_data_for_{safe_var}.csv"
+            
+            # Download with sample_name column
+            download_feature_data_csv(conn, contig, filtered_samples, [selected_var], filename, is_all_samples=True)
+        else:
+            # One Sample view: get selected sample and all selected features
+            sample = widgets['sample_select'].value
+            if not sample:
+                print("[start_bokeh_server] Download data: No sample selected", flush=True)
+                return
+            
+            # Collect all selected features
+            requested_features = []
+            for cbg in active_variables_widgets:
+                for idx in cbg.active:
+                    requested_features.append(cbg.labels[idx])
+            
+            # Also collect from Genome module if available
+            if genome_cbg_one is not None:
+                for idx in genome_cbg_one.active:
+                    if genome_cbg_one.labels[idx] != "Gene map":  # Skip gene map
+                        requested_features.append(genome_cbg_one.labels[idx])
+            
+            if not requested_features:
+                print("[start_bokeh_server] Download data: No features selected", flush=True)
+                return
+            
+            # Filename for one sample view
+            safe_contig = "".join(c if c.isalnum() or c in "-_" else "_" for c in contig)
+            safe_sample = "".join(c if c.isalnum() or c in "-_" else "_" for c in sample)
+            filename = f"{safe_contig}_in_{safe_sample}_data.csv"
+            
+            # Download with feature_name column
+            download_feature_data_csv(conn, contig, [sample], requested_features, filename, is_all_samples=False)
 
     ### Creating all DOM elements
     # Open DuckDB database connection to build widgets depending on data
@@ -1462,7 +1603,7 @@ def create_layout(db_path):
 
     # Create main elements
     ## Views section
-    logo = Div(text=f"""<img src="data:image/png;base64,{logo_b64}" style="width:100%; max-width:800px; padding: 0 15%;">""")
+    logo = Div(text=f"""<img src="data:image/png;base64,{logo_b64}" style="width:100%; max-width:800px; padding: 0 25%;">""")
     views = RadioButtonGroup(labels=["ONE SAMPLE", "ALL SAMPLES"], active=0, sizing_mode="stretch_width", stylesheets=[stylesheet])
 
     # Global lock for toggles when enforcing "All samples" view (single-variable mode)
@@ -1544,8 +1685,10 @@ def create_layout(db_path):
         def refresh_on_filter_change():
             """Refresh contig and sample options when Filtering2 values change."""
             _filtering_cache['valid'] = False
-            refresh_contig_options()
-            refresh_sample_options()
+            global_toggle_lock['locked'] = True
+            refresh_contig_options_unlocked()
+            refresh_sample_options_unlocked()
+            global_toggle_lock['locked'] = False
             update_section_titles()
 
         # Create initial input widget based on column type
@@ -1691,8 +1834,10 @@ def create_layout(db_path):
                 # Add callback to refresh when AND/OR changes
                 def _on_and_or_change(attr, old, new):
                     _filtering_cache['valid'] = False
-                    refresh_contig_options()
-                    refresh_sample_options()
+                    global_toggle_lock['locked'] = True
+                    refresh_contig_options_unlocked()
+                    refresh_sample_options_unlocked()
+                    global_toggle_lock['locked'] = False
                     update_section_titles()
                 select_widget.on_change('value', _on_and_or_change)
                 section_children.append(select_widget)
@@ -1769,8 +1914,10 @@ def create_layout(db_path):
                 # Add callback to refresh when AND/OR changes
                 def _on_and_or_change(attr, old, new):
                     _filtering_cache['valid'] = False
-                    refresh_contig_options()
-                    refresh_sample_options()
+                    global_toggle_lock['locked'] = True
+                    refresh_contig_options_unlocked()
+                    refresh_sample_options_unlocked()
+                    global_toggle_lock['locked'] = False
                     update_section_titles()
                 select_widget.on_change('value', _on_and_or_change)
                 inter_section_selects.append(select_widget)
@@ -1838,7 +1985,12 @@ def create_layout(db_path):
     )
 
     sample_toggle_btn.on_click(make_toggle_callback(sample_toggle_btn, above_sample_content))
-    widgets['sample_select'].param.watch(lambda event: (refresh_contig_options(), update_section_titles()), 'value')
+    def _on_sample_change(event):
+        global_toggle_lock['locked'] = True
+        refresh_contig_options_unlocked()
+        global_toggle_lock['locked'] = False
+        update_section_titles()
+    widgets['sample_select'].param.watch(_on_sample_change, 'value')
 
 
     ## Build Contig section
@@ -1861,7 +2013,9 @@ def create_layout(db_path):
 
     def on_contig_change(event):
         new = event.new
-        refresh_sample_options()
+        global_toggle_lock['locked'] = True
+        refresh_sample_options_unlocked()
+        global_toggle_lock['locked'] = False
         update_section_titles()
         # Update position inputs when contig changes
         if new and new in widgets['contig_lengths']:
@@ -2065,10 +2219,48 @@ def create_layout(db_path):
     apply_button = Button(label="APPLY", align="center", sizing_mode="stretch_width", stylesheets=[stylesheet], css_classes=["apply-btn"])
     apply_button.on_click(lambda: apply_clicked())
 
-    peruse_button = Button(label="PERUSE DATA", align="center", sizing_mode="stretch_width", stylesheets=[stylesheet], css_classes=["apply-btn"])
+    # Peruse button will be positioned in the plot area, styled to match toolbar
+    peruse_button = Button(
+        label="SHOW SUMMARY", 
+        height=30,
+        stylesheets=[stylesheet], 
+        css_classes=["apply-btn"],
+        visible=False  # Hidden until plot is generated
+    )
     peruse_button.on_click(lambda: peruse_clicked())
 
-    buttons_row = row(peruse_button, apply_button, sizing_mode="stretch_width", spacing=10)
+    # Download contig summary button
+    download_contig_button = Button(
+        label="DOWNLOAD CONTIG SUMMARY", 
+        height=30,
+        stylesheets=[stylesheet], 
+        css_classes=["apply-btn"],
+        visible=False  # Hidden until plot is generated
+    )
+    download_contig_button.on_click(lambda: download_contig_clicked())
+
+    # Download metrics summary button
+    download_metrics_button = Button(
+        label="DOWNLOAD METRICS SUMMARY", 
+        height=30,
+        stylesheets=[stylesheet], 
+        css_classes=["apply-btn"],
+        visible=False  # Hidden until plot is generated
+    )
+    download_metrics_button.on_click(lambda: download_metrics_clicked())
+
+    # Download feature data button
+    download_data_button = Button(
+        label="DOWNLOAD DATA", 
+        height=30,
+        stylesheets=[stylesheet], 
+        css_classes=["apply-btn"],
+        visible=False  # Hidden until plot is generated
+    )
+    download_data_button.on_click(lambda: download_data_clicked())
+
+    # Only Apply button in left panel now
+    buttons_row = apply_button
 
 
     ## Initialize section titles with counts
@@ -2093,6 +2285,7 @@ def create_layout(db_path):
 
     controls_column = pn.Column(*controls_children, sizing_mode="stretch_height", css_classes=["left-col"])
 
+    peruse_button.visible = False  # Initially hidden
     main_placeholder = column(Div(text="<i>No plot yet. Select one sample, one contig and at least one variable in \"One sample\" mode or one contig and one variable in \"All samples\" mode and click Apply.</i>"), sizing_mode="stretch_both")
 
     # Wrap everything in a Flex container

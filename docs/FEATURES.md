@@ -1,6 +1,8 @@
 # # Computed features
 
-This document describes all features computed from the mapping files by theBIGbam and stored in the DuckDB database. Features are organized by **module** as they appear in the visualization interface. Within a module, each subplot displays one or two features that are plotted together.
+This document describes all features computed from the mapping files by theBIGbam and stored in the DuckDB database. Most features are defined by the SAM/BAM standard and documented in the [SAM specification](https://samtools.github.io/hts-specs/SAMv1.pdf). You can consult it for additional information.
+
+Features are organized by **module** as they appear in the visualization interface. Within a module, each subplot displays 1 or 2 features that are plotted together.
 
 In addition, genomic features are stored when an optional annotation file is provided.
 
@@ -12,13 +14,15 @@ Features describing read alignment depth and quality across the genome.
 
 ![image](../static/COVERAGE_MODULE.png)
 
-| Subplot              | Feature               | Description                                                                                                                          | Use case                                                                                                          |
-| -------------------- | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------- |
-| Primary alignments   | Primary reads         | The number of reads covering each position, counting only primary alignments                                                         |                                                                                                                   |
-| Alignments by strand | Strand + and strand - | Separation of primary alignments by strand (+ and -)                                                                                 | Strand bias can indicate certain library preparation artifacts or biological features like transcription          |
-| Other alignments     | Secondary             | Reads flagged as secondary (SAM flag 0x100) - alternative alignments when a read maps to multiple locations                          | High secondary alignment counts indicate repetitive or ambiguous regions where reads could map to multiple places |
-| Other alignments     | Supplementary         | Reads flagged as supplementary (SAM flag 0x800) - chimeric alignments where different parts of the read map to different locations   | High supplementary counts may indicate structural variants, chimeric sequences, or assembly errors                |
-| MAPQ                 | MAPQ                  | Average confidence of read alignments at each position. Warning: MAPQ scoring varies between aligners (BWA, Bowtie2, minimap2, etc.) | Evaluate alignment confidence variability                                                                         |
+| Subplot              | Feature               | Description                                                                                                                                                                                                                                                                         | Use case                                                                                                          |
+| -------------------- | --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| Primary alignments   | Primary reads         | The number of reads covering each position, counting only primary alignments                                                                                                                                                                                                        |                                                                                                                   |
+| Alignments by strand | Strand + and strand - | Separation of primary alignments by strand (+ and -)                                                                                                                                                                                                                                | Strand bias can indicate certain library preparation artifacts or biological features like transcription          |
+| Other alignments     | Secondary             | Reads flagged as secondary (SAM flag 0x100) - alternative alignments when a read maps to multiple locations                                                                                                                                                                         | High secondary alignment counts indicate repetitive or ambiguous regions where reads could map to multiple places |
+| Other alignments     | Supplementary         | Reads flagged as supplementary (SAM flag 0x800) - chimeric alignments where different parts of the read map to different locations                                                                                                                                                  | High supplementary counts may indicate structural variants, chimeric sequences, or assembly errors                |
+| MAPQ                 | MAPQ                  | Average confidence of read alignments at each position. **Warning:** MAPQ scoring varies between aligners (BWA, Bowtie2, minimap2, etc.), See this [blog](https://sequencing.qcfail.com/articles/mapq-values-are-really-useful-but-their-implementation-is-a-mess/) for more detail | Evaluate alignment confidence variability                                                                         |
+
+**Warning:** Secondary reads and MAPQ are not realiable when using thebigbam mapping with `--circular`  option. Because this option doubles the contig length during mapping, reads that do not span the contig junction can map equally well to two positions. This results in an artificially high number of secondary alignments and reduced MAPQ values.
 
 ---
 
@@ -28,12 +32,12 @@ Features describing alignment anomalies that may indicate assembly issues or mic
 
 ![image](../static/MISALIGNMENT_MODULE.png) 
 
-| Subplot    | Feature                  | Description                                                                                                                                                                                                                                                                                                                                                 | Use case                                                                                                                                                                                                                                                                  |
-| ---------- | ------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Clippings  | Left and right clippings | Soft/hard clipping occurs when part of a read does not align to the reference. The clipped portion represents sequence in the read that has no corresponding match in the reference. At each position, reads with soft/hard clipping at their left (5') and right (3') end are counted, along with mean, median, and standard deviation of clipping lengths | Indicates sequence present in reads but missing from the left or right side of the reference at this position. Common at contig ends if the assembly is incomplete. Warning: can also be caused by adapter contamination be certain your reads were properly preprocessed |
-| Indels     | Insertions               | Sequence present in the reference but absent from reads. Determined from 'I' operations in CIGAR strings. Mean, median, and standard deviation of insertion lengths are also determined                                                                                                                                                                     | Could indicate true insertions in the sequenced sample, missing sequence in the reference assembly, sequencing errors (especially in homopolymer regions)                                                                                                                 |
-| Indels     | Deletions                | Sequence present in the reference but absent from reads. Determined from 'D' operations in CIGAR strings.                                                                                                                                                                                                                                                   | Could indicate true deletions in the sequenced sample, extra sequence incorrectly included in the reference, alignment artifacts                                                                                                                                          |
-| Mismatches | Mismatches               | Count of base substitutions at each position. Computed from from the MD tag in BAM files, count positions where the read base differs from the reference base                                                                                                                                                                                               | SNPs (true variation between sample and reference), sequencing errors, alignment errors in repetitive regions                                                                                                                                                             |
+| Subplot    | Feature                  | Description                                                                                                                                                                                                                                                                                                                                                 | Use case                                                                                                                                                                                                                                                                      |
+| ---------- | ------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Clippings  | Left and right clippings | Soft/hard clipping occurs when part of a read does not align to the reference. The clipped portion represents sequence in the read that has no corresponding match in the reference. At each position, reads with soft/hard clipping at their left (5') and right (3') end are counted, along with mean, median, and standard deviation of clipping lengths | Indicates sequence present in reads but missing from the left or right side of the reference at this position. Common at contig ends if the assembly is incomplete. **Warning:** can also be caused by adapter contamination be certain your reads were properly preprocessed |
+| Indels     | Insertions               | Sequence present in the reference but absent from reads. Determined from 'I' operations in CIGAR strings. Mean, median, and standard deviation of insertion lengths are also determined                                                                                                                                                                     | Could indicate true insertions in the sequenced sample, missing sequence in the reference assembly, sequencing errors (especially in homopolymer regions)                                                                                                                     |
+| Indels     | Deletions                | Sequence present in the reference but absent from reads. Determined from 'D' operations in CIGAR strings.                                                                                                                                                                                                                                                   | Could indicate true deletions in the sequenced sample, extra sequence incorrectly included in the reference, alignment artifacts                                                                                                                                              |
+| Mismatches | Mismatches               | Count of base substitutions at each position. Computed from from the MD tag in BAM files, count positions where the read base differs from the reference base                                                                                                                                                                                               | SNPs (true variation between sample and reference), sequencing errors, alignment errors in repetitive regions                                                                                                                                                                 |
 
 ---
 
@@ -62,7 +66,7 @@ Features specific to paired-end/mate-pair sequencing data (Illumina).
 
 ---
 
-## Phage Termini Module
+## Termini Module
 
 Features designed for detecting phage DNA packaging sites and terminus types. These are particularly useful for analyzing bacteriophage genomes.
 
@@ -134,19 +138,10 @@ TODO: if only assembly file repeats ok
 
 Features describing intrinsic genomic properties, independent of sequencing data.
 
-### Subplot: Repeats
-
-#### Direct Repeats
-
-- **Description:** Regions of the genome that are repeated in the same orientation
-- **How it's computed:** Detected by self-BLAST of the contig sequence, identifying segments that appear multiple times in the same 5'→3' direction
-- **Biological relevance:** Terminal direct repeats (DTR) are characteristic of certain phage packaging mechanisms. Internal direct repeats may indicate mobile elements or gene duplications
-
-#### Inverted Repeats
-
-- **Description:** Regions of the genome that are repeated in opposite orientations
-- **How it's computed:** Detected by self-BLAST, identifying segments where one copy is the reverse complement of another
-- **Biological relevance:** Inverted terminal repeats (ITR) are found in certain phages and transposons. Internal inverted repeats can form secondary structures (hairpins)
+| Subplot | Feature          | Description                                                                                                                                                                                 | Use case                                                                                                                                                          |
+| ------- | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Repeats | Direct repeats   | Regions of the genome that are repeated in the same orientation. Detected by self-BLAST of the contig sequence, identifying segments that appear multiple times in the same 5'→3' direction | Terminal direct repeats (DTR) are characteristic of certain phage packaging mechanisms. Internal direct repeats may indicate mobile elements or gene duplications |
+| Repeats | Inverted repeats | Regions of the genome that are repeated in opposite orientations. Detected by self-BLAST, identifying segments where one copy is the reverse complement of another                          | Inverted terminal repeats (ITR) are found in certain phages and transposons. Internal inverted repeats can form secondary structures (hairpins)                   |
 
 ## Database Storage Notes
 
@@ -163,5 +158,3 @@ Features describing intrinsic genomic properties, independent of sequencing data
 - [Phage Packaging](PHAGE_PACKAGING.md) - How packaging mechanisms are detected from terminus patterns
 
 This document describes all features computed by theBIGbam and stored in the DuckDB database. Features are organized by **module** and **subplot** as they appear in the visualization interface.
-
-ADD images explaining different modules!!!

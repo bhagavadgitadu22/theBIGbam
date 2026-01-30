@@ -558,6 +558,30 @@ def get_variable_metadata(cur, feature):
     return cur.fetchall()
 
 
+def get_variable_metadata_batch(cur, subplot_list):
+    """Batch fetch variable metadata for multiple subplots in one query.
+
+    Returns:
+        Dict mapping subplot_name -> list of metadata tuples
+        (same tuple format as get_variable_metadata returns)
+    """
+    if not subplot_list:
+        return {}
+    placeholders = ', '.join(['?'] * len(subplot_list))
+    cur.execute(
+        f'SELECT Subplot, "Type", Color, Alpha, Fill_alpha, "Size", Title, Feature_table_name '
+        f'FROM Variable WHERE Subplot IN ({placeholders}) '
+        f'ORDER BY Module_order',
+        tuple(subplot_list)
+    )
+    result = {}
+    for row in cur.fetchall():
+        subplot_name = row[0]
+        metadata_tuple = row[1:]  # matches get_variable_metadata format
+        result.setdefault(subplot_name, []).append(metadata_tuple)
+    return result
+
+
 ### Function to get features of one variable
 def get_feature_data(cur, feature, contig_id, sample_id, xstart=None, xend=None, variable_metadata=None):
     """Get feature data for plotting.
@@ -1059,10 +1083,16 @@ def generate_bokeh_plot_per_sample(conn, list_features, contig_name, sample_name
         except Exception as e:
             print(f"Error processing GC Content: {e}", flush=True)
 
+    # Pre-fetch metadata for all features in one query
+    metadata_cache = get_variable_metadata_batch(cur, requested_features)
+
     # Add other requested features
     for feature in requested_features:
         try:
-            list_feature_dict = get_feature_data(cur, feature, contig_id, sample_id, xstart, xend)
+            list_feature_dict = get_feature_data(
+                cur, feature, contig_id, sample_id, xstart, xend,
+                variable_metadata=metadata_cache.get(feature)
+            )
             subplot_feature = make_bokeh_subplot(list_feature_dict, subplot_size, shared_xrange, feature_name=feature)
             if subplot_feature is not None:
                 subplots.append(subplot_feature)

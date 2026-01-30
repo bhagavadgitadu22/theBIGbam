@@ -135,7 +135,7 @@ A more detailed explanation of the modules and the features it contains is avail
 
 ### Database compression
 
-**Parameters (optional):** --min_coverage, --variation_percentage, --coverage_percentage
+**Parameters (optional):** --min_coverage, --variation_percentage, --contig_variation_percentage, --coverage_percentage, 
 
 Discarding the reads to only keep the main features of the mappings (like the coverage per position) already allows the DuckDB database to be way lighter than the original BAM file. The database itself is also structured to be as light as possible. 
 
@@ -147,7 +147,9 @@ To further reduce the size of the database, values per feature are compressed ra
   
   $∣x[i]−x[i−1]∣>0.5×min(x[i],x[i−1])$
   
-  The allowed percentage of variation can be adjusted using the **--variation_percentage** parameter (default 50% ie 0.5).
+  The allowed percentage of variation can be adjusted using the **--variation_percentage** parameter (default 50% ie 0.5) for mapping-related features, and the **--contig_variation_percentage** parameter (default: 10% ie 0.1) for contig-related features.
+  
+  Contig features use a separate parameter with a lower default value because only one value needs to be computed per contig and per position (O(n²)), whereas mapping features require computing one value per contig, per position, and per sample in which the contig is present (O(n³)).
 
 - Only positions with values above a defined percentage of the local coverage are retained for Bar plots (Misalignment and Phage termini module except for "Coverage reduced" feature). For each position, values are compared to the local coverage and discarded if they fall below the **--compress_ratio** threshold (default 10% ie 0.1), ensuring that only meaningful peaks are preserved.
 
@@ -196,6 +198,8 @@ Finally, click **Apply** to visualize the requested features for the selected co
 All plots leverage the full capabilities of Bokeh: you can pan, zoom, and hover over specific points to inspect local values (genomic position in base pairs and corresponding y-values).
 
 Buttons in the top-right section allow you to disable pan, zoom, or hover interactions, reset the plots to their original state, and **export the current view as a PNG image**.
+
+TODO: add image with zoom on the tools
 
 ### Saving specific plots
 
