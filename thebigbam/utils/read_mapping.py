@@ -23,6 +23,7 @@ def add_mapping_per_sample_args(parser):
     parser.add_argument('--circular', action='store_true', help='Concatenate each contig to itself during the mapping to circularize it')
     parser.add_argument('-o', '--output', required=True, help='Output BAM path (will be written)')
     parser.add_argument('-t', '--threads', type=int, default=4, help='Threads to pass to minimap2 and samtools (default: 4)')
+    parser.add_argument('--keep-unmapped', action='store_true', help='Keep unmapped reads in the output BAM (default: discard them)')
 
 def run_mapping_per_sample(args):
     read2 = Path(args.read2) if getattr(args, 'read2', None) else None
@@ -34,10 +35,12 @@ def run_mapping_per_sample(args):
         read2,
         Path(args.output),
         circular=bool(getattr(args, 'circular', False)),
+        keep_unmapped=bool(getattr(args, 'keep_unmapped', False)),
     ) or 0
 
 def map_with_mapper(threads: int, assembly_file: Path, sequencing_type: str, read1: Path,
-                      read2: Optional[Path], output_file: Path, circular: bool = False) -> None:
+                      read2: Optional[Path], output_file: Path, circular: bool = False,
+                      keep_unmapped: bool = False) -> None:
     """Run mapper + samtools pipeline and produce final indexed BAM at `output_file`.
 
     This function expects `minimap2` and `samtools` to be on PATH.
@@ -88,7 +91,9 @@ def map_with_mapper(threads: int, assembly_file: Path, sequencing_type: str, rea
         #temp_files.append(sorted_bam)
 
         # Pipe: mapper | samtools view -bS -F 4 | samtools sort -o sorted_bam
-        view_cmd = ["samtools", "view", "-@", str(threads), "-F", "4", "-bS", "-"]
+        view_cmd = ["samtools", "view", "-@", str(threads), "-bS", "-"]
+        if not keep_unmapped:
+            view_cmd[3:3] = ["-F", "4"]
         sort_cmd = ["samtools", "sort", "-@", str(threads), "-o", str(sorted_bam), "-"]
         print("COMMAND_MAP:", " ".join(mapper_cmd), flush=True)
         print("COMMAND_VIEW:", " ".join(view_cmd), flush=True)
@@ -128,6 +133,7 @@ def add_mapping_all_args(parser):
     parser.add_argument('--circular', action='store_true', help='Concatenate each contig to itself during the mapping to circularize it')
     parser.add_argument('-o', '--output-dir', required=True, help='Directory to create and place outputs (must NOT exist)')
     parser.add_argument('-t', '--threads', type=int, default=4, help='Threads to pass to minimap2 and samtools (default: 4)')
+    parser.add_argument('--keep-unmapped', action='store_true', help='Keep unmapped reads in the output BAM (default: discard them)')
 
 def run_mapping_all(args):
     csv_path = Path(args.csv)
@@ -202,6 +208,7 @@ def run_mapping_all(args):
             assembly=str(assembly_to_use),
             sequencing_type=seqtype_to_use,
             circular=getattr(args, 'circular', False),
+            keep_unmapped=getattr(args, 'keep_unmapped', False),
             output=str(desired_bam),
             threads=args.threads,
         )
