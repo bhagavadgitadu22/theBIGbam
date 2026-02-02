@@ -107,15 +107,14 @@ thebigbam -h
 
 # Run quick test with example data
 thebigbam calculate \
-  -g examples/inputs/HK97/HK97_GCF_000848825.1_pharokka.gbk \
-  -b examples/inputs/HK97/ \
-  -m coverage \
-  -o test.db \
+  -g tests/HK97/HK97_GCF_000848825.1_pharokka.gbk \
+  -b tests/HK97/ \
+  -o tests/HK97/test.db \
   --circular \
   -t 2
 
 # Visualize interactively the test data
-thebigbam serve --db examples/outputs/HK97/test.db --port 5006
+thebigbam serve --db tests/HK97/test.db --port 5006
 # Open browser to http://localhost:5006
 ```
 

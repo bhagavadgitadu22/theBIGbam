@@ -1,8 +1,6 @@
-import argparse
 import duckdb
 from bokeh.models import Range1d
 from bokeh.layouts import gridplot
-from bokeh.plotting import output_file, save
 
 from .plotting_data_per_sample import get_contig_info, get_feature_data, get_feature_data_batch, get_variable_metadata, get_repeats_data, get_gc_content_data, make_bokeh_subplot, make_bokeh_genemap
 
@@ -122,64 +120,3 @@ def generate_bokeh_plot_all_samples(conn, variable, contig_name, xstart=None, xe
     grid = gridplot([[p] for p in all_plots], merge_tools=True, sizing_mode='stretch_width')
 
     return grid
-
-def save_html_plot_all_samples(db_path, variable, contig_name, subplot_size, output_filename, genbank_path=None):
-    # --- Save interactive HTML plot ---
-    output_file(filename = output_filename)
-    conn = duckdb.connect(db_path, read_only=True)
-    try:
-        grid = generate_bokeh_plot_all_samples(conn, variable, contig_name, subplot_size=subplot_size, genbank_path=genbank_path)
-        save(grid)
-    finally:
-        conn.close()
-
-### Main function
-def main():
-    # Parse command line arguments
-    print("Parsing arguments...", flush=True)
-    parser = argparse.ArgumentParser(description="Parse input files.")
-    parser.add_argument("-d", "--db", required=True, help="Path to DuckDB database file")
-    parser.add_argument("-v", "--variable", required=True, help="Variable to compute (only one variable allowed)")
-    parser.add_argument("--contig", required=True, help="Name of the contig to plot")
-    parser.add_argument("--html", required=False, default="thebigbam_all_samples.html", help="Name for output html files. A bokeh server will be started if not provided")
-    parser.add_argument("--subplot_height", required=False, default=130, help="Height of each subplot (in pixels)")
-    args = parser.parse_args()
-
-    # Path parameters
-    db_path = args.db
-    variable = args.variable
-    contig_name = args.contig
-    output_filename = args.html
-
-    # Optional plotting parameters
-    subplot_size = int(args.subplot_height)
-
-    # Reading values from database and plotting
-    print(f"Saving static HTML to {output_filename}...", flush=True)
-    save_html_plot_all_samples(db_path, variable, contig_name, subplot_size, output_filename)
-
-def add_plot_all_args(parser):
-    parser.add_argument("-d", "--db", required=True, help="Path to DuckDB database file")
-    parser.add_argument("-v", "--variable", required=True, help="Variable to compute (only one variable allowed)")
-    parser.add_argument("--contig", required=True, help="Name of the contig to plot")
-    parser.add_argument("-g", "--genbank", help="Path to genbank file (optional; if provided, gene map will be plotted)")
-    parser.add_argument("--html", required=False, default="thebigbam_all_samples.html", help="Name for output html files. A bokeh server will be started if not provided")
-    parser.add_argument("--subplot_height", required=False, default=130, help="Height of each subplot (in pixels)")
-
-def run_plot_all(args):
-    db_path = args.db
-    variable = args.variable
-    contig_name = args.contig
-    output_filename = args.html
-    subplot_size = int(args.subplot_height)
-    genbank_path = getattr(args, 'genbank', None)
-
-    print(f"Saving static HTML to {output_filename}...", flush=True)
-    save_html_plot_all_samples(db_path, variable, contig_name, subplot_size, output_filename, genbank_path)
-
-if __name__ == "__main__":
-    import argparse
-    parser = argparse.ArgumentParser()
-    add_plot_all_args(parser)
-    args = parser.parse_args()
-    run_plot_all(args)

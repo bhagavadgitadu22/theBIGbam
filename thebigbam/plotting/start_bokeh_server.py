@@ -202,6 +202,10 @@ def build_controls(conn):
     # Sort modules according to MODULE_ORDER, keeping any unknown modules at the end
     modules = sorted(modules_from_db, key=lambda m: MODULE_ORDER.index(m) if m in MODULE_ORDER else len(MODULE_ORDER))
 
+    # Identify custom contig-level subplots (Contig_* tables in Custom module)
+    cur.execute("SELECT Subplot FROM Variable WHERE Module='Custom' AND Feature_table_name LIKE 'Contig_%'")
+    custom_contig_subplots = [r[0] for r in cur.fetchall()]
+
     # For each module get variables (only those with data)
     # Create TWO sets of widgets: one for "One Sample" view, one for "All Samples" view
     module_names = []
@@ -223,6 +227,10 @@ def build_controls(conn):
         # For Genome module, add "Gene map" as the first option
         if module == "Genome":
             variables_checkbox = ["Gene map"] + variables_checkbox
+
+        # For Custom module, exclude contig-level subplots (they go in genome section)
+        if module == "Custom" and custom_contig_subplots:
+            variables_checkbox = [v for v in variables_checkbox if v not in custom_contig_subplots]
 
         # Skip this module if no variables with data
         if not variables_checkbox:
@@ -279,6 +287,7 @@ def build_controls(conn):
         'contig_duplications': contig_duplications,
         'samples': samples,
         'variables': variables,
+        'custom_contig_subplots': custom_contig_subplots,
         'phage_mechanisms': phage_mechanisms_list,
         'has_completeness': has_completeness,
         'coverage_mean_max': coverage_mean_max,
@@ -385,6 +394,9 @@ def create_layout(db_path):
                 return set()
             
             feature_table = result[0]
+            # Contig-level tables have no Sample_id column
+            if entity_type == "Sample" and feature_table.startswith("Contig_"):
+                return set()
             query = f"""
                 SELECT DISTINCT {entity_type}.{entity_type}_name
                 FROM {feature_table} ft
@@ -1324,6 +1336,11 @@ def create_layout(db_path):
                             continue
                         genome_features.append(genome_cbg_one.labels[idx])
 
+                # Collect custom contig-level features
+                if custom_contig_cbg is not None:
+                    for idx in custom_contig_cbg.active:
+                        genome_features.append(custom_contig_cbg.labels[idx])
+
                 # Get the selected variable from non-Genome modules
                 for cbg in active_variables_widgets:
                     if cbg.active and selected_var is None:
@@ -1346,6 +1363,11 @@ def create_layout(db_path):
             else:
                 # One-sample view: collect possibly-many requested features and call per-sample plot
                 requested_features = []
+
+                # Collect custom contig-level features first (so they plot at the top)
+                if custom_contig_cbg is not None:
+                    for idx in custom_contig_cbg.active:
+                        requested_features.append(custom_contig_cbg.labels[idx])
 
                 # Collect features from Variables section
                 for cbg in active_variables_widgets:
@@ -2207,22 +2229,33 @@ def create_layout(db_path):
 
     ## Build Genome module controls (placed in Contigs section, shared between views)
     genome_section = None
+    custom_contig_cbg = None
 
-    if genome_index_one is not None:
-        # Get Genome module info
-        genome_help_tooltip = widgets['helps_widgets'][genome_index_one]
+    # Build custom contig-level feature checkbox if any exist
+    if widgets['custom_contig_subplots']:
+        custom_contig_cbg = CheckboxButtonGroup(
+            labels=widgets['custom_contig_subplots'], active=[],
+            sizing_mode="stretch_width", orientation="vertical"
+        )
 
+    if genome_index_one is not None or custom_contig_cbg is not None:
         # Build simple Genome section header (no collapse needed - Contigs section handles that)
         genome_title = Div(text="<b>Plot genomic features:</b>", align="center")
-        
+
+        genome_help_tooltip = widgets['helps_widgets'][genome_index_one] if genome_index_one is not None else None
         if genome_help_tooltip is not None:
             help_btn = HelpButton(tooltip=genome_help_tooltip, width=20, height=20, align="center", button_type="light", stylesheets=[toggle_stylesheet])
             genome_hdr = row(genome_title, help_btn, sizing_mode="stretch_width", align="center")
         else:
             genome_hdr = genome_title
 
-        genome_cbg_one.visible = True
-        genome_section = column(genome_hdr, genome_cbg_one, visible=True, sizing_mode="stretch_width", margin=(0, 5, 0, 5))
+        genome_children = [genome_hdr]
+        if genome_cbg_one is not None:
+            genome_cbg_one.visible = True
+            genome_children.append(genome_cbg_one)
+        if custom_contig_cbg is not None:
+            genome_children.append(custom_contig_cbg)
+        genome_section = column(*genome_children, visible=True, sizing_mode="stretch_width", margin=(0, 5, 0, 5))
 
     # Add Genome section to contig_content
     below_contig_children = []
@@ -2297,7 +2330,7 @@ def create_layout(db_path):
         toggles.on_change("active", make_variable_callback(mc, toggles, lock))
 
     ## Create final Apply and Peruse data buttons
-    apply_button = Button(label="APPLY", align="center", sizing_mode="stretch_width", stylesheets=[stylesheet], css_classes=["apply-btn"])
+    apply_button = Button(label="APPLY", align="center", stylesheets=[stylesheet], css_classes=["apply-btn"])
     apply_button.on_click(lambda: apply_clicked())
 
     # Peruse button will be positioned in the plot area, styled to match toolbar

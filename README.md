@@ -34,10 +34,9 @@ thebigbam -h
 
 ```bash
 thebigbam calculate \
- -g examples/inputs/HK97/HK97_GCF_000848825.1_pharokka.gbk \
- -b examples/inputs/HK97/ \
- -m coverage,phagetermini,assemblycheck \
- -o examples/outputs/HK97/test.db \
+ -g tests/HK97/HK97_GCF_000848825.1_pharokka.gbk \
+ -b tests/HK97/ \
+ -o tests/HK97/test.db \
  --circular \
  -t 2
 ```
@@ -45,7 +44,7 @@ thebigbam calculate \
 ## Visualize interactively the test data
 
 ```bash
-thebigbam serve --db examples/outputs/HK97/test.db --port 5006
+thebigbam serve --db tests/HK97/test.db --port 5006
 ```
 
 Open browser to http://localhost:5006
@@ -199,21 +198,7 @@ All plots leverage the full capabilities of Bokeh: you can pan, zoom, and hover 
 
 Buttons in the top-right section allow you to disable pan, zoom, or hover interactions, reset the plots to their original state, and **export the current view as a PNG image**.
 
-TODO: add image with zoom on the tools
-
-### Saving specific plots
-
-Instead of exploring the plots interactively in your browser, you can also generate standalone HTML files containing the plots. You need to provide the database path, the contig of interest, the sample name or the feature to plot (for per-sample and all-samples plots, respectively).
-
-Example commands:
-
-```bash
-thebigbam plot-per-sample -d examples/outputs/HK97/HK97.db -v "Coverage,Phage termini,Assembly check,test" --contig NC_002167.1 --sample HK97_R1_illumina_mapped_on_HK97_GCF_000848825.1 --html examples/outputs/HK97/HK97_illumina_per_sample.html
-
-thebigbam plot-all-samples -d examples/outputs/HK97/HK97.db -v "Primary alignments" --contig NC_002167.1 --html examples/outputs/HK97/HK97_illumina_all_samples.html
-```
-
-TODO: check those commands work
+TODO: add image with zoom on the tools, explain the download possibilities as well
 
 ---
 

@@ -178,6 +178,75 @@ def list_contigs(db_path):
             print(f"{c}")
     conn.close()
 
+SAMPLE_INTERNAL_COLUMNS = {
+    'Sample_id', 'Sample_name', 'Sequencing_type',
+    'Number_of_reads', 'Number_of_mapped_reads',
+}
+
+CONTIG_INTERNAL_COLUMNS = {
+    'Contig_id', 'Contig_name', 'Contig_length', 'Annotation_tool',
+    'Duplication_percentage', 'GC_mean', 'GC_sd', 'GC_median',
+}
+
+
+def list_sample_metadata(db_path):
+    """Print user-added column names on the Sample table."""
+    conn = duckdb.connect(db_path, read_only=True)
+    cols = [r[0] for r in conn.execute("DESCRIBE Sample").fetchall()]
+    conn.close()
+    user_cols = [c for c in cols if c not in SAMPLE_INTERNAL_COLUMNS]
+    if not user_cols:
+        print("No user-added metadata columns on Sample table.")
+    else:
+        for c in user_cols:
+            print(c)
+
+
+def list_contig_metadata(db_path):
+    """Print user-added column names on the Contig table."""
+    conn = duckdb.connect(db_path, read_only=True)
+    cols = [r[0] for r in conn.execute("DESCRIBE Contig").fetchall()]
+    conn.close()
+    user_cols = [c for c in cols if c not in CONTIG_INTERNAL_COLUMNS]
+    if not user_cols:
+        print("No user-added metadata columns on Contig table.")
+    else:
+        for c in user_cols:
+            print(c)
+
+
+def remove_sample_metadata(db_path, colname):
+    """Remove a user-added column from the Sample table."""
+    if colname in SAMPLE_INTERNAL_COLUMNS:
+        print(f"Error: '{colname}' is a built-in column and cannot be removed.")
+        return
+    conn = duckdb.connect(db_path)
+    cols = [r[0] for r in conn.execute("DESCRIBE Sample").fetchall()]
+    if colname not in cols:
+        conn.close()
+        print(f"Error: column '{colname}' does not exist on Sample table.")
+        return
+    conn.execute(f'ALTER TABLE Sample DROP COLUMN "{colname}"')
+    conn.close()
+    print(f"Removed column '{colname}' from Sample table.")
+
+
+def remove_contig_metadata(db_path, colname):
+    """Remove a user-added column from the Contig table."""
+    if colname in CONTIG_INTERNAL_COLUMNS:
+        print(f"Error: '{colname}' is a built-in column and cannot be removed.")
+        return
+    conn = duckdb.connect(db_path)
+    cols = [r[0] for r in conn.execute("DESCRIBE Contig").fetchall()]
+    if colname not in cols:
+        conn.close()
+        print(f"Error: column '{colname}' does not exist on Contig table.")
+        return
+    conn.execute(f'ALTER TABLE Contig DROP COLUMN "{colname}"')
+    conn.close()
+    print(f"Removed column '{colname}' from Contig table.")
+
+
 def main(argv=None):
     import argparse
 

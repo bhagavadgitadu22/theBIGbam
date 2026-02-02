@@ -7,7 +7,7 @@ from thebigbam.utils import (
     read_mapping, assembly_annotation, add_sample_metadata, add_contig_metadata
 )
 from thebigbam.database import add_variable, calculating_data
-from thebigbam.plotting import plotting_data_all_samples, plotting_data_per_sample, start_bokeh_server
+from thebigbam.plotting import start_bokeh_server
 
 # Path helpers
 BASE_DIR = os.path.dirname(__file__)
@@ -15,16 +15,19 @@ BASE_DIR = os.path.dirname(__file__)
 SCRIPTS = {
     'calculate': "Run feature calculations over BAMs",
     'add-variable': "Add an external variable from CSV to DB",
+    'remove-variable': "Remove a Custom variable from DB",
     'add-sample-metadata': "Add sample metadata from CSV as new columns in Sample table",
     'add-contig-metadata': "Add contig metadata from CSV as new columns in Contig table",
 
-    'plot-per-sample': "Produce per-sample static HTML plot",
-    'plot-all-samples': "Produce all-samples static HTML plot",
     'serve': "Start interactive Bokeh server",
 
     'list-variables': 'List variables and metadata from DB',
     'list-samples': 'List samples from DB',
     'list-contigs': 'List contigs from DB',
+    'list-sample-metadata': 'List user-added metadata columns on Sample table',
+    'list-contig-metadata': 'List user-added metadata columns on Contig table',
+    'remove-sample-metadata': 'Remove a user-added metadata column from Sample table',
+    'remove-contig-metadata': 'Remove a user-added metadata column from Contig table',
 
     'mapping-per-sample': 'Map reads for a single sample (one CSV row)',
     'mapping-all-samples': 'Map reads for multiple samples listed in a CSV',
@@ -42,6 +45,9 @@ def build_argparser():
     sp = sub.add_parser('add-variable', help=SCRIPTS['add-variable'])
     add_variable.add_add_variable_args(sp)
 
+    sp = sub.add_parser('remove-variable', help=SCRIPTS['remove-variable'])
+    add_variable.add_remove_variable_args(sp)
+
     sp = sub.add_parser('add-sample-metadata', help=SCRIPTS['add-sample-metadata'])
     add_sample_metadata.add_add_sample_metadata_args(sp)
 
@@ -49,12 +55,6 @@ def build_argparser():
     add_contig_metadata.add_add_contig_metadata_args(sp)
 
     # plotting commands
-    sp = sub.add_parser('plot-per-sample', help=SCRIPTS['plot-per-sample'])
-    plotting_data_per_sample.add_plot_per_sample_args(sp)
-
-    sp = sub.add_parser('plot-all-samples', help=SCRIPTS['plot-all-samples'])
-    plotting_data_all_samples.add_plot_all_args(sp)
-
     sp = sub.add_parser('serve', help=SCRIPTS['serve'])
     start_bokeh_server.add_serve_args(sp)
 
@@ -68,6 +68,20 @@ def build_argparser():
 
     sp = sub.add_parser('list-contigs', help=SCRIPTS['list-contigs'])
     sp.add_argument('-d', '--db', required=True)
+
+    sp = sub.add_parser('list-sample-metadata', help=SCRIPTS['list-sample-metadata'])
+    sp.add_argument('-d', '--db', required=True)
+
+    sp = sub.add_parser('list-contig-metadata', help=SCRIPTS['list-contig-metadata'])
+    sp.add_argument('-d', '--db', required=True)
+
+    sp = sub.add_parser('remove-sample-metadata', help=SCRIPTS['remove-sample-metadata'])
+    sp.add_argument('-d', '--db', required=True)
+    sp.add_argument('--colname', required=True, help='Name of the column to remove')
+
+    sp = sub.add_parser('remove-contig-metadata', help=SCRIPTS['remove-contig-metadata'])
+    sp.add_argument('-d', '--db', required=True)
+    sp.add_argument('--colname', required=True, help='Name of the column to remove')
 
     # mapping commands (use shared add_*_args functions from mapping modules)
     sp = sub.add_parser('mapping-per-sample', help=SCRIPTS['mapping-per-sample'])
@@ -127,17 +141,14 @@ def main(argv=None):
     if args.cmd == 'add-variable':
         return add_variable.run_add_variable(args)
 
+    if args.cmd == 'remove-variable':
+        return add_variable.run_remove_variable(args)
+
     if args.cmd == 'add-sample-metadata':
         return add_sample_metadata.run_add_sample_metadata(args)
 
     if args.cmd == 'add-contig-metadata':
         return add_contig_metadata.run_add_contig_metadata(args)
-
-    if args.cmd == 'plot-per-sample':
-        return plotting_data_per_sample.run_plot_per_sample(args)
-
-    if args.cmd == 'plot-all-samples':
-        return plotting_data_all_samples.run_plot_all(args)
 
     if args.cmd == 'serve':
         return start_bokeh_server.run_serve(args)
@@ -291,6 +302,42 @@ def main(argv=None):
             return 0
         except Exception as e:
             print(f"Error listing contigs: {e}")
+            return 2
+
+    if args.cmd == 'list-sample-metadata':
+        try:
+            from thebigbam.database import database_getters
+            database_getters.list_sample_metadata(args.db)
+            return 0
+        except Exception as e:
+            print(f"Error listing sample metadata: {e}")
+            return 2
+
+    if args.cmd == 'list-contig-metadata':
+        try:
+            from thebigbam.database import database_getters
+            database_getters.list_contig_metadata(args.db)
+            return 0
+        except Exception as e:
+            print(f"Error listing contig metadata: {e}")
+            return 2
+
+    if args.cmd == 'remove-sample-metadata':
+        try:
+            from thebigbam.database import database_getters
+            database_getters.remove_sample_metadata(args.db, args.colname)
+            return 0
+        except Exception as e:
+            print(f"Error removing sample metadata: {e}")
+            return 2
+
+    if args.cmd == 'remove-contig-metadata':
+        try:
+            from thebigbam.database import database_getters
+            database_getters.remove_contig_metadata(args.db, args.colname)
+            return 0
+        except Exception as e:
+            print(f"Error removing contig metadata: {e}")
             return 2
 
     # fallback

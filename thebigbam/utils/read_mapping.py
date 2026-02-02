@@ -93,7 +93,7 @@ def map_with_mapper(threads: int, assembly_file: Path, sequencing_type: str, rea
         # Pipe: mapper | samtools view -bS -F 4 | samtools sort -o sorted_bam
         view_cmd = ["samtools", "view", "-@", str(threads), "-bS", "-"]
         if not keep_unmapped:
-            view_cmd[3:3] = ["-F", "4"]
+            view_cmd[-1:-1] = ["-F", "4"]
         sort_cmd = ["samtools", "sort", "-@", str(threads), "-o", str(sorted_bam), "-"]
         print("COMMAND_MAP:", " ".join(mapper_cmd), flush=True)
         print("COMMAND_VIEW:", " ".join(view_cmd), flush=True)

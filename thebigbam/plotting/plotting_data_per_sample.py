@@ -5,7 +5,7 @@ from Bio.SeqRecord import SeqRecord
 from Bio.SeqFeature import SeqFeature, FeatureLocation
 from bokeh.models import Range1d, ColumnDataSource, HoverTool, WheelZoomTool, NumeralTickFormatter, Label, TapTool
 from bokeh.layouts import gridplot
-from bokeh.plotting import output_file, save, figure
+from bokeh.plotting import figure
 from dna_features_viewer import BiopythonTranslator
 
 ### Custom translator for coloring and labeling features (with DNAFeaturesViewer python library)
@@ -625,6 +625,9 @@ def get_feature_data(cur, feature, contig_id, sample_id, xstart=None, xend=None,
         scaled_features = ["Feature_tau", "Feature_mapq"]
         is_scaled = feature_table in scaled_features
 
+        # Detect contig-level table (no Sample_id column)
+        is_contig_table = feature_table.startswith("Contig_")
+
         # Special handling for primary_reads: combine strand tables in Python
         # This avoids the OOM issues from the complex VIEW that computes on-the-fly
         if feature_table == "Feature_primary_reads":
@@ -634,7 +637,7 @@ def get_feature_data(cur, feature, contig_id, sample_id, xstart=None, xend=None,
             if xstart is not None and xend is not None:
                 position_filter = " AND Last_position >= ? AND First_position <= ?"
                 params.extend([xstart, xend])
-            
+
             cur.execute(
                 f"SELECT First_position, Last_position, Value FROM Feature_primary_reads_plus_only "
                 f"WHERE Sample_id=? AND Contig_id=?{position_filter} ORDER BY First_position",
@@ -658,7 +661,7 @@ def get_feature_data(cur, feature, contig_id, sample_id, xstart=None, xend=None,
             if xstart is not None and xend is not None:
                 position_filter = " AND Last_position >= ? AND First_position <= ?"
                 params.extend([xstart, xend])
-            
+
             cur.execute(
                 f"SELECT First_position, Last_position, Value, Mean, Median, Std FROM {feature_table} "
                 f"WHERE Sample_id=? AND Contig_id=?{position_filter} ORDER BY First_position",
@@ -668,16 +671,26 @@ def get_feature_data(cur, feature, contig_id, sample_id, xstart=None, xend=None,
         else:
             # Build position filter clause
             position_filter = ""
-            params = [sample_id, contig_id]
+            if is_contig_table:
+                params = [contig_id]
+            else:
+                params = [sample_id, contig_id]
             if xstart is not None and xend is not None:
                 position_filter = " AND Last_position >= ? AND First_position <= ?"
                 params.extend([xstart, xend])
-            
-            cur.execute(
-                f"SELECT First_position, Last_position, Value FROM {feature_table} "
-                f"WHERE Sample_id=? AND Contig_id=?{position_filter} ORDER BY First_position",
-                tuple(params)
-            )
+
+            if is_contig_table:
+                cur.execute(
+                    f"SELECT First_position, Last_position, Value FROM {feature_table} "
+                    f"WHERE Contig_id=?{position_filter} ORDER BY First_position",
+                    tuple(params)
+                )
+            else:
+                cur.execute(
+                    f"SELECT First_position, Last_position, Value FROM {feature_table} "
+                    f"WHERE Sample_id=? AND Contig_id=?{position_filter} ORDER BY First_position",
+                    tuple(params)
+                )
             data_rows = cur.fetchall()
 
         # Clip feature positions to requested range
@@ -901,6 +914,9 @@ def get_feature_data_batch(cur, feature, contig_id, sample_ids, xstart=None, xen
         scaled_features = ["Feature_tau", "Feature_mapq"]
         is_scaled = feature_table in scaled_features
 
+        # Detect contig-level table (no Sample_id column)
+        is_contig_table = feature_table.startswith("Contig_")
+
         # Build position filter
         position_filter = ""
         extra_params = []
@@ -981,31 +997,50 @@ def get_feature_data_batch(cur, feature, contig_id, sample_ids, xstart=None, xen
                     result[sid].append(feature_dict)
 
         else:
-            params = list(sample_ids) + [contig_id] + extra_params
-            cur.execute(
-                f"SELECT Sample_id, First_position, Last_position, Value "
-                f"FROM {feature_table} "
-                f"WHERE Sample_id IN ({placeholders}) AND Contig_id=?{position_filter} "
-                f"ORDER BY Sample_id, First_position",
-                tuple(params)
-            )
-            all_rows = cur.fetchall()
-
-            # Group by sample_id
-            rows_by_sample = {sid: [] for sid in sample_ids}
-            for sid, first, last, val in all_rows:
-                if sid in rows_by_sample:
-                    rows_by_sample[sid].append((first, last, val))
-
-            for sid in sample_ids:
-                expanded = _expand_rle_rows(rows_by_sample[sid], type_picked, has_stats, is_scaled, xstart, xend)
+            if is_contig_table:
+                # Contig-level table: query once (no Sample_id), duplicate for all samples
+                params = [contig_id] + extra_params
+                cur.execute(
+                    f"SELECT First_position, Last_position, Value FROM {feature_table} "
+                    f"WHERE Contig_id=?{position_filter} ORDER BY First_position",
+                    tuple(params)
+                )
+                contig_rows = cur.fetchall()
+                expanded = _expand_rle_rows(contig_rows, type_picked, has_stats, is_scaled, xstart, xend)
                 if expanded is not None:
-                    feature_dict = {
-                        "type": type_picked, "color": color, "alpha": alpha,
-                        "fill_alpha": fill_alpha, "size": size, "title": title,
-                    }
-                    feature_dict.update(expanded)
-                    result[sid].append(feature_dict)
+                    for sid in sample_ids:
+                        feature_dict = {
+                            "type": type_picked, "color": color, "alpha": alpha,
+                            "fill_alpha": fill_alpha, "size": size, "title": title,
+                        }
+                        feature_dict.update(expanded)
+                        result[sid].append(feature_dict)
+            else:
+                params = list(sample_ids) + [contig_id] + extra_params
+                cur.execute(
+                    f"SELECT Sample_id, First_position, Last_position, Value "
+                    f"FROM {feature_table} "
+                    f"WHERE Sample_id IN ({placeholders}) AND Contig_id=?{position_filter} "
+                    f"ORDER BY Sample_id, First_position",
+                    tuple(params)
+                )
+                all_rows = cur.fetchall()
+
+                # Group by sample_id
+                rows_by_sample = {sid: [] for sid in sample_ids}
+                for sid, first, last, val in all_rows:
+                    if sid in rows_by_sample:
+                        rows_by_sample[sid].append((first, last, val))
+
+                for sid in sample_ids:
+                    expanded = _expand_rle_rows(rows_by_sample[sid], type_picked, has_stats, is_scaled, xstart, xend)
+                    if expanded is not None:
+                        feature_dict = {
+                            "type": type_picked, "color": color, "alpha": alpha,
+                            "fill_alpha": fill_alpha, "size": size, "title": title,
+                        }
+                        feature_dict.update(expanded)
+                        result[sid].append(feature_dict)
 
     return result
 
@@ -1114,16 +1149,6 @@ def generate_bokeh_plot_per_sample(conn, list_features, contig_name, sample_name
 
     return grid
 
-def save_html_plot_per_sample(db_path, list_features, contig_name, sample_name, subplot_size, output_filename, genbank_path=None):
-    # --- Save interactive HTML plot ---
-    output_file(filename = output_filename)
-    conn = duckdb.connect(db_path, read_only=True)
-    try:
-        grid = generate_bokeh_plot_per_sample(conn, list_features, contig_name, sample_name, subplot_size=subplot_size, genbank_path=genbank_path)
-        save(grid)
-    finally:
-        conn.close()
-
 ### Parsing features
 def parse_requested_features(list_features):
     """Parse requested features, expanding modules to individual features.
@@ -1172,32 +1197,3 @@ def parse_requested_features(list_features):
     seen = set()
     deduped_features = [f for f in features if not (f in seen or seen.add(f))]
     return deduped_features, include_repeats, include_gc_content
-
-### Main function
-def add_plot_per_sample_args(parser):
-    parser.add_argument("--db", required=True, help="Path to DuckDB database file")
-    parser.add_argument("--variables", required=True, help="List of variables or full modules to compute (comma-separated) (options allowed for modules: Coverage, Misalignment, Long-reads, Paired-reads, Phage termini)")
-    parser.add_argument("--contig", required=True, help="Name of the contig to plot")
-    parser.add_argument("--sample", required=True, help="Name of the sample to plot")
-    parser.add_argument("-g", "--genbank", help="Path to genbank file (optional; if provided, gene map will be plotted)")
-    parser.add_argument("--html", required=False, default="thebigbam_per_sample.html", help="Name for output html files. A bokeh server will be started if not provided")
-    parser.add_argument("--subplot_height", required=False, default=130, help="Height of each subplot (in pixels)")
-
-def run_plot_per_sample(args):
-    db_path = args.db
-    list_features = args.variables.split(",")
-    contig_name = args.contig
-    sample_name = args.sample
-    output_filename = args.html
-    subplot_size = int(args.subplot_height)
-    genbank_path = getattr(args, 'genbank', None)
-
-    print(f"Saving static HTML to {output_filename}...", flush=True)
-    save_html_plot_per_sample(db_path, list_features, contig_name, sample_name, subplot_size, output_filename, genbank_path)
-
-if __name__ == "__main__":
-    import argparse
-    parser = argparse.ArgumentParser()
-    add_plot_per_sample_args(parser)
-    args = parser.parse_args()
-    run_plot_per_sample(args)
