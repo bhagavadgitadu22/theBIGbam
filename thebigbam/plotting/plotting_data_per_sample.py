@@ -452,7 +452,8 @@ def get_gc_content_data(cur, contig_id, xstart=None, xend=None):
             first_pos, last_pos, gc_pct = row
             clipped_first = max(first_pos, xstart)
             clipped_last = min(last_pos, xend)
-            clipped_rows.append((clipped_first, clipped_last, gc_pct))
+            if clipped_first <= clipped_last:
+                clipped_rows.append((clipped_first, clipped_last, gc_pct))
         rows = clipped_rows
 
     x_coords = []
@@ -701,12 +702,14 @@ def get_feature_data(cur, feature, contig_id, sample_id, xstart=None, xend=None,
                     first_pos, last_pos, value, mean, median, std = row
                     clipped_first = max(first_pos, xstart)
                     clipped_last = min(last_pos, xend)
-                    clipped_rows.append((clipped_first, clipped_last, value, mean, median, std))
+                    if clipped_first <= clipped_last:
+                        clipped_rows.append((clipped_first, clipped_last, value, mean, median, std))
                 else:
                     first_pos, last_pos, value = row
                     clipped_first = max(first_pos, xstart)
                     clipped_last = min(last_pos, xend)
-                    clipped_rows.append((clipped_first, clipped_last, value))
+                    if clipped_first <= clipped_last:
+                        clipped_rows.append((clipped_first, clipped_last, value))
             data_rows = clipped_rows
 
         # Expand RLE runs into individual points for plotting
@@ -804,12 +807,14 @@ def _expand_rle_rows(data_rows, type_picked, has_stats, is_scaled, xstart, xend)
                 first_pos, last_pos, value, mean, median, std = row
                 clipped_first = max(first_pos, xstart)
                 clipped_last = min(last_pos, xend)
-                clipped_rows.append((clipped_first, clipped_last, value, mean, median, std))
+                if clipped_first <= clipped_last:
+                    clipped_rows.append((clipped_first, clipped_last, value, mean, median, std))
             else:
                 first_pos, last_pos, value = row
                 clipped_first = max(first_pos, xstart)
                 clipped_last = min(last_pos, xend)
-                clipped_rows.append((clipped_first, clipped_last, value))
+                if clipped_first <= clipped_last:
+                    clipped_rows.append((clipped_first, clipped_last, value))
         data_rows = clipped_rows
 
     x_coords = []

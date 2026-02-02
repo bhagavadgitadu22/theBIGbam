@@ -2334,14 +2334,14 @@ def create_layout(db_path):
     apply_button.on_click(lambda: apply_clicked())
 
     # Peruse button will be positioned in the plot area, styled to match toolbar
-    peruse_button = Button(
-        label="SHOW SUMMARY", 
+    peruse_button = pn.widgets.Button(
+        name="SHOW SUMMARY",
         height=30,
-        stylesheets=[stylesheet], 
+        stylesheets=[stylesheet],
         css_classes=["apply-btn"],
         visible=False  # Hidden until plot is generated
     )
-    peruse_button.on_click(lambda: peruse_clicked())
+    peruse_button.on_click(lambda event: peruse_clicked())
 
     # Download contig summary - Panel FileDownload widget
     download_contig_button = pn.widgets.FileDownload(
