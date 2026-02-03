@@ -54,16 +54,18 @@ def download_contig_summary_csv(db_path, contig_name):
             temp_path = f.name.replace('\\', '/')  # Use forward slashes for DuckDB on Windows
         
         try:
+            # GC_sd and GC_skew_amplitude are stored as int × 100, decode them in query
             query = f"""
                 COPY (
-                    SELECT 
+                    SELECT
                         Contig_name as "Contig",
                         Contig_length as "Contig length",
                         Duplication_percentage as "Duplication (%)",
                         GC_mean as "GC mean",
-                        GC_sd as "GC sd", 
-                        GC_median as "GC median"
-                    FROM Contig 
+                        GC_sd / 100.0 as "GC sd",
+                        GC_skew_amplitude / 100.0 as "GC skew amplitude",
+                        Positive_GC_skew_windows_percentage / 100.0 as "Positive GC skew windows (%)"
+                    FROM Contig
                     WHERE Contig_name = '{safe_contig}'
                 ) TO '{temp_path}' (HEADER, DELIMITER ',')
             """

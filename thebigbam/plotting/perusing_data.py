@@ -19,13 +19,15 @@ def generate_and_open_peruse_html(conn, contig_name, sample_names):
     try:
         # Get contig info
         cur = conn.cursor()
-        cur.execute("SELECT Contig_length, Duplication_percentage, GC_mean, GC_sd, GC_median FROM Contig WHERE Contig_name = ?", (contig_name,))
+        cur.execute("SELECT Contig_length, Duplication_percentage, GC_mean, GC_sd, GC_skew_amplitude, Positive_GC_skew_windows_percentage FROM Contig WHERE Contig_name = ?", (contig_name,))
         result = cur.fetchone()
         contig_length = result[0] if result else "unknown"
         contig_duplication = result[1] if result else "unknown"
         gc_mean = result[2] if result and result[2] is not None else "N/A"
-        gc_sd = result[3] if result and result[3] is not None else "N/A"
-        gc_median = result[4] if result and result[4] is not None else "N/A"
+        # GC_sd and GC_skew_amplitude are stored as int × 100, decode them
+        gc_sd = result[3] / 100.0 if result and result[3] is not None else "N/A"
+        gc_skew_amplitude = result[4] / 100.0 if result and result[4] is not None else "N/A"
+        gc_skew_percent_positive = result[5] if result and result[5] is not None else "N/A"
 
         # Build data
         content = build_summary_data(conn, contig_name, sample_names)
@@ -44,7 +46,8 @@ def generate_and_open_peruse_html(conn, contig_name, sample_names):
                     <th style="border: 1px solid #ddd; padding: 8px; text-align: left;">Duplication (%)</th>
                     <th style="border: 1px solid #ddd; padding: 8px; text-align: left;">GC mean</th>
                     <th style="border: 1px solid #ddd; padding: 8px; text-align: left;">GC sd</th>
-                    <th style="border: 1px solid #ddd; padding: 8px; text-align: left;">GC median</th>
+                    <th style="border: 1px solid #ddd; padding: 8px; text-align: left;">GC skew amplitude</th>
+                    <th style="border: 1px solid #ddd; padding: 8px; text-align: left;">% positive GC skew</th>
                 </tr>
             </thead>
             <tbody>
@@ -54,7 +57,8 @@ def generate_and_open_peruse_html(conn, contig_name, sample_names):
                     <td style="border: 1px solid #ddd; padding: 8px;">{contig_duplication}</td>
                     <td style="border: 1px solid #ddd; padding: 8px;">{gc_mean}</td>
                     <td style="border: 1px solid #ddd; padding: 8px;">{gc_sd}</td>
-                    <td style="border: 1px solid #ddd; padding: 8px;">{gc_median}</td>
+                    <td style="border: 1px solid #ddd; padding: 8px;">{gc_skew_amplitude}</td>
+                    <td style="border: 1px solid #ddd; padding: 8px;">{gc_skew_percent_positive}</td>
                 </tr>
             </tbody>
         </table>

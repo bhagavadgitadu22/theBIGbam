@@ -27,7 +27,7 @@ use crate::compress::{
     add_compressed_feature_with_stats, merge_identical_runs, 
 };
 use crate::db::{DbWriter, CompletenessData, GCContentData, RepeatsData};
-use crate::gc_content::compute_gc_content;
+use crate::gc_content::{compute_gc_content, compute_gc_skew, GCParams};
 use crate::features::{FeatureArrays, ModuleFlags};
 use crate::parser::parse_annotations;
 use crate::types::{
@@ -56,6 +56,8 @@ pub struct ProcessConfig {
     pub sequencing_type: Option<SequencingType>,
     /// Phage termini detection configuration
     pub phagetermini_config: PhageTerminiConfig,
+    /// GC content and GC skew parameters
+    pub gc_params: GCParams,
 }
 
 impl ProcessConfig {
@@ -247,7 +249,7 @@ fn add_features_from_arrays(
             .iter()
             .filter(|d| {
                 d.contig_name == contig_name
-                    && d.pident >= 90.0
+                    && d.pident >= pt_config.min_identity_dtr as f64
                     && is_valid_terminal_repeat(d, contig_length, pt_config.max_distance_duplication)
             })
             .map(|d| {
@@ -832,7 +834,6 @@ fn extract_contigs_from_bams(bam_files: &[PathBuf], circular: bool) -> Result<Ve
         .map(|(name, length)| ContigInfo {
             name,
             length,
-            annotation_tool: String::new(),
             sequence: None, // BAM headers don't contain sequence data
         })
         .collect();
@@ -849,7 +850,6 @@ pub fn run_all_samples(
     bam_files: &[PathBuf],
     output_db: &Path,
     modules: &[String],
-    annotation_tool: &str,
     config: &ProcessConfig,
     _create_indexes: bool, // Ignored - DuckDB uses zone maps instead of indexes
     autoblast_file: &Path,
@@ -870,7 +870,7 @@ pub fn run_all_samples(
         eprintln!("Found {} contigs from BAM files", contigs.len());
         (contigs, Vec::new())
     } else {
-        parse_annotations(genbank_path, annotation_tool)?
+        parse_annotations(genbank_path)?
     };
     eprintln!(
         "Found {} contigs with {} annotations",
@@ -903,17 +903,21 @@ pub fn run_all_samples(
         Vec::new()
     };
 
-    // Compute and write GC content from sequence data (if available)
-    // Uses 100bp sliding window and configurable RLE compression (default 0.1%)
+    // Compute and write GC content and GC skew from sequence data (if available)
+    // Uses configurable window sizes (default 500bp for GC content, 1000bp for GC skew)
+    // and configurable RLE compression (default 0.1%)
     let gc_data: Vec<GCContentData> = contigs
         .iter()
         .filter_map(|contig| {
             contig.sequence.as_ref().map(|seq| {
-                let (runs, stats) = compute_gc_content(seq, 100, config.contig_variation_percentage);
+                let (runs, stats) = compute_gc_content(seq, config.gc_params.gc_content_window_size, config.contig_variation_percentage);
+                let (skew_runs, skew_stats) = compute_gc_skew(seq, config.gc_params.gc_skew_window_size, config.contig_variation_percentage);
                 GCContentData {
                     contig_name: contig.name.clone(),
                     runs,
+                    skew_runs,
                     stats,
+                    skew_stats,
                 }
             })
         })
@@ -922,6 +926,7 @@ pub fn run_all_samples(
     if !gc_data.is_empty() {
         eprintln!("\n### Computing GC content for {} contigs...", gc_data.len());
         db_writer.write_gc_content(&gc_data)?;
+        db_writer.write_gc_skew(&gc_data)?;
         db_writer.update_contig_gc_stats(&gc_data)?;
     }
 

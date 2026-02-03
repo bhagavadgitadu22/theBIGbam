@@ -1,6 +1,7 @@
 import argparse
 import os
 import sys
+from pathlib import Path
 
 # Import command modules so we can share arg definitions and run functions
 from thebigbam.utils import (
@@ -119,6 +120,7 @@ def build_argparser():
     sp.add_argument('--min_coverage', type=int, default=50, help='Minimum coverage for contig inclusion (default: 50%%)')
     sp.add_argument('--variation_percentage', type=float, default=50, help='Run-length encoding ratio for independent features like coverage (default: 50%%)')
     sp.add_argument('--coverage_percentage', type=float, default=10, help='Compressing ratio for features depending on coverage: only values above this %% of the local coverage are kept (default: 10%%)')
+    sp.add_argument('--contig_variation_percentage', type=float, default=10, help='Run-length encoding ratio for contig-level features like GC content (default: 10%%)')
 
     # Output
     sp.add_argument('-o', '--output', required=True, help='Output directory (must NOT exist)')
@@ -209,7 +211,7 @@ def main(argv=None):
                     raise ValueError("Either --csv or --read1 must be provided")
 
                 os.makedirs(map_outdir, exist_ok=True)
-                output_bam = os.path.join(map_outdir, f"{os.path.basename(args.assembly).split('.')[0]}.bam")
+                output_bam = os.path.join(map_outdir, f"{Path(args.assembly).stem}.bam")
 
                 map_ns = argparse.Namespace(
                     read1=args.read1,
@@ -256,12 +258,12 @@ def main(argv=None):
                 bam_files=map_outdir,
                 modules=args.modules,  # None means all modules
                 output=final_db,
-                annotation_tool=args.annotation_tool if args.annotation_tool else "",
                 sequencing_type=args.sequencing_type,
                 min_coverage=args.min_coverage,
                 variation_percentage=args.variation_percentage,
                 coverage_percentage=args.coverage_percentage,
                 circular=args.circular,
+                contig_variation_percentage=args.contig_variation_percentage,
                 max_samples_in_memory=10,  # Default value
             )
 

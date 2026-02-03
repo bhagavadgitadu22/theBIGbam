@@ -184,6 +184,8 @@ You are initially in the **One Sample** mode, which allows exploration of all co
 
 - **Contigs**: Select the contig you want to explore. If a GenBank file was provided when creating the database, genomic features can be selected for plotting by clicking on the contig features. Currently, gene maps and repeats are supported
 
+TODO: update list of features available and explain contigs part with figure
+
 - **Samples**: Select the sample you want to explore
 
 - **Variables**: Select the features to plot. You can either use the checkboxes to select all features from a module or click individual features within a module
@@ -193,6 +195,8 @@ Finally, click **Apply** to visualize the requested features for the selected co
 #### All Samples mode
 
 **All Samples** mode enables comparison of a specific feature across multiple samples. Compared to the **One Sample** mode, the **Samples** section is omitted, and only a single feature can be selected in the **Variables** section.
+
+TODO: add Contigs only mode as a simpler mode
 
 ### Plotting
 

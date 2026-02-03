@@ -12,7 +12,7 @@ except ImportError:
     _rust = None
 
 
-def calculating_all_features_parallel(list_modules, bam_files, output_db, min_coverage, curve_ratio, bar_ratio, contig_variation_percentage=0.1, circular=False, n_sample_cores=None, sequencing_type=None, genbank_path=None, annotation_tool="", autoblast_file=None):
+def calculating_all_features_parallel(list_modules, bam_files, output_db, min_coverage, curve_ratio, bar_ratio, contig_variation_percentage=0.1, circular=False, n_sample_cores=None, sequencing_type=None, genbank_path=None, autoblast_file=None):
     """Process all BAM files in parallel using Rust bindings."""
     if not HAS_RUST:
         sys.exit("ERROR: Rust bindings (thebigbam_rs) are required but not available. Please install them first.")
@@ -30,7 +30,6 @@ def calculating_all_features_parallel(list_modules, bam_files, output_db, min_co
             modules=list_modules,
             threads=n_sample_cores,
             sequencing_type=sequencing_type,
-            annotation_tool=annotation_tool,
             min_coverage=float(min_coverage),
             curve_ratio=float(curve_ratio),
             bar_ratio=float(bar_ratio),
@@ -57,7 +56,6 @@ def add_calculate_args(parser):
     parser.add_argument("-o", "--output", required=True, help="Output database file path (.db)")
     parser.add_argument("-m", "--modules", required=False, default=None, help="List of modules to compute (comma-separated). If not provided, all modules are computed. Options: Coverage, Misalignment, Long-reads, Paired-reads, Phage termini")
     parser.add_argument("-a", "--assembly", help="Path to assembly FASTA file (only needed for autoblast when genbank lacks sequence data)")
-    parser.add_argument("--annotation_tool", default="", help="Optional: to color the contigs specify the annotation tool used (options allowed: pharokka)")
     parser.add_argument('-s', '--sequencing_type', choices=['long', 'paired-short', 'single-short'], help='Sequencing type (long or short allowed)')
     parser.add_argument("--min_coverage", type=int, default=50, help="Minimum alignment-length coverage proportion for contig inclusion (default 50%% change threshold)")
     parser.add_argument('--variation_percentage', type=float, default=50, help='Run-length encoding ratio for independent features like coverage (default: 50%%)')
@@ -67,7 +65,6 @@ def add_calculate_args(parser):
 VALID_MODULES = ["Coverage", "Misalignment", "Long-reads", "Paired-reads", "Phage termini"]
 
 def run_calculate_args(args):
-    annotation_tool = args.annotation_tool
     genbank_path = getattr(args, 'genbank', None)
     assembly_path = getattr(args, 'assembly', None)
 
@@ -127,15 +124,15 @@ def run_calculate_args(args):
     if assembly_path and not os.path.exists(assembly_path):
         sys.exit(f"ERROR: Assembly file not found: {assembly_path}")
 
-    # Warn if "Phage termini" is requested without genbank
-    if "Phage termini" in requested_modules and not genbank_path:
-        print("WARNING: No annotation file was provided: phage packaging will not be determined properly for contigs harboring a terminal repeat at both ends. Rerun with an annotation file or at least an assembly file to perform the \"Phage termini\" module properly.", flush=True)
+    # Warn if "Phage termini" is requested without any sequence source
+    if "Phage termini" in requested_modules and not genbank_path and not assembly_path:
+        print("WARNING: No annotation/assembly file was provided: phage packaging will not be determined properly for contigs harboring a terminal repeat at both ends. Rerun with an annotation file or at least an assembly file.", flush=True)
 
-    # Run autoblast if Phage termini module is requested
+    # Run autoblast to identify contig repeats (whenever sequence data is available)
     autoblast_file = None
-    if "Phage termini" in requested_modules and genbank_path:
+    if genbank_path or assembly_path:
         from thebigbam.utils.autoblast import perform_autoblast, extract_fasta_from_genbank
-        print("Running autoblast for Phage termini analysis...", flush=True)
+        print("Running autoblast to identify contig repeats...", flush=True)
 
         # Determine FASTA source: use assembly file if provided, otherwise extract from genbank
         fasta_path = None
@@ -180,7 +177,7 @@ def run_calculate_args(args):
     calculating_all_features_parallel(
         requested_modules, bam_files, output_db, min_coverage, variation_percentage, coverage_percentage,
         contig_variation_percentage=contig_variation_percentage, circular=circular, n_sample_cores=n_cores,
-        sequencing_type=args.sequencing_type, genbank_path=genbank_path, annotation_tool=annotation_tool if genbank_path else "",
+        sequencing_type=args.sequencing_type, genbank_path=genbank_path,
         autoblast_file=autoblast_file
     )
 

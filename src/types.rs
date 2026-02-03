@@ -193,7 +193,8 @@ pub const VARIABLES: &[VariableConfig] = &[
     // Genome module - genomic properties
     VariableConfig { name: "direct_repeats", subplot: "Repeats", module: "Genome", module_order: 1, plot_type: PlotType::Bars, color: "#c1121f", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Direct repeats", help: Some("Direct repeats detected by self-BLAST (e.g., terminal repeats)") },   
     VariableConfig { name: "inverted_repeats", subplot: "Repeats", module: "Genome", module_order: 1, plot_type: PlotType::Bars, color: "#12C1B4", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Inverted repeats", help: Some("Inverted repeats detected by self-BLAST (e.g., terminal repeats)") },   
-    VariableConfig { name: "gc_content", subplot: "GC content", module: "Genome", module_order: 2, plot_type: PlotType::Curve, color: "#C3B1E1", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "GC content", help: None },   
+    VariableConfig { name: "gc_content", subplot: "GC content", module: "Genome", module_order: 2, plot_type: PlotType::Curve, color: "#693efe", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "GC content", help: None },   
+    VariableConfig { name: "gc_skew", subplot: "GC skew", module: "Genome", module_order: 3, plot_type: PlotType::Curve, color: "#C8A2C8", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "GC skew", help: None },   
     
     // Coverage module - basic read depth
     VariableConfig { name: "primary_reads", subplot: "Primary alignments", module: "Coverage", module_order: 1, plot_type: PlotType::Curve, color: "#333333", alpha: 0.8, fill_alpha: 0.4, size: 1.0, title: "Primary reads", help: None },
@@ -348,8 +349,6 @@ pub struct ContigInfo {
     pub name: String,
     /// Length in base pairs
     pub length: usize,
-    /// Tool used for annotation (e.g., "pharokka", "prokka")
-    pub annotation_tool: String,
     /// Sequence data for GC content computation (optional, may be large)
     pub sequence: Option<Vec<u8>>,
 }
@@ -378,6 +377,8 @@ pub struct FeatureAnnotation {
     pub function: Option<String>,
     /// PHROG database annotation (phage-specific) - integer ID
     pub phrog: Option<i32>,
+    /// Locus tag for isoform grouping (e.g., "GENE_001")
+    pub locus_tag: Option<String>,
 }
 
 /// A single data point for a calculated feature.

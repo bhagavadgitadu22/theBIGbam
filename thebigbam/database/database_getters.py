@@ -1,5 +1,8 @@
 import duckdb
 
+# Columns to exclude from annotation filtering UI (internal/metadata columns)
+ANNOTATION_EXCLUDED_COLUMNS = {'Contig_id', 'Start', 'End', 'Strand', 'Longest_isoform', 'Locus_tag'}
+
 
 def get_filtering_metadata(db_path: str) -> dict:
     """
@@ -24,7 +27,7 @@ def get_filtering_metadata(db_path: str) -> dict:
     category_config = {
         'Contig': {
             'source': 'Contig',
-            'exclude': ['Contig_id', 'Contig_name', 'Annotation_tool']
+            'exclude': ['Contig_id', 'Contig_name']
         },
         'Sample': {
             'source': 'Sample',
@@ -76,6 +79,20 @@ def get_filtering_metadata(db_path: str) -> dict:
                     col_data['distinct_values'] = [row[0] for row in distinct]
                 except Exception:
                     col_data['distinct_values'] = []
+                
+                # Skip columns with only NULL values (no distinct non-NULL values)
+                if not col_data['distinct_values']:
+                    continue
+            else:
+                # For numeric columns, check if there are any non-NULL values
+                try:
+                    has_values = conn.execute(
+                        f"SELECT 1 FROM {source} WHERE \"{col_name}\" IS NOT NULL LIMIT 1"
+                    ).fetchone()
+                    if not has_values:
+                        continue  # Skip columns with only NULL values
+                except Exception:
+                    continue
 
             columns[col_name] = col_data
 
@@ -87,11 +104,10 @@ def get_filtering_metadata(db_path: str) -> dict:
 
     # Add annotation columns to Contig category from Contig_annotation table
     if 'Contig' in result:
-        annotation_exclude = {'Contig_id', 'Start', 'End', 'Strand', 'Type'}
         try:
             ann_cols_info = conn.execute("DESCRIBE Contig_annotation").fetchall()
             for col_name, col_type, *_ in ann_cols_info:
-                if col_name in annotation_exclude:
+                if col_name in ANNOTATION_EXCLUDED_COLUMNS:
                     continue
 
                 is_text = any(t in col_type.upper() for t in text_types)
@@ -109,6 +125,20 @@ def get_filtering_metadata(db_path: str) -> dict:
                         col_data['distinct_values'] = [row[0] for row in distinct]
                     except Exception:
                         col_data['distinct_values'] = []
+                    
+                    # Skip columns with only NULL values
+                    if not col_data['distinct_values']:
+                        continue
+                else:
+                    # For numeric columns, check if there are any non-NULL values
+                    try:
+                        has_values = conn.execute(
+                            f'SELECT 1 FROM Contig_annotation WHERE "{col_name}" IS NOT NULL LIMIT 1'
+                        ).fetchone()
+                        if not has_values:
+                            continue  # Skip columns with only NULL values
+                    except Exception:
+                        continue
 
                 result['Contig']['columns'][col_name] = col_data
         except Exception:
@@ -184,8 +214,8 @@ SAMPLE_INTERNAL_COLUMNS = {
 }
 
 CONTIG_INTERNAL_COLUMNS = {
-    'Contig_id', 'Contig_name', 'Contig_length', 'Annotation_tool',
-    'Duplication_percentage', 'GC_mean', 'GC_sd', 'GC_median',
+    'Contig_id', 'Contig_name', 'Contig_length',
+    'Duplication_percentage', 'GC_mean', 'GC_sd', 'GC_skew_amplitude', 'Positive_GC_skew_windows_percentage',
 }
 
 

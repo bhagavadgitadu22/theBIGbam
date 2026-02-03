@@ -68,21 +68,19 @@ fn detect_format(path: &Path) -> Result<AnnotationFormat> {
 ///
 /// # Arguments
 /// * `path` - Path to the annotation file (.gbk, .gbff, .gff, .gff3)
-/// * `annotation_tool` - Name of the annotation tool (e.g., "pharokka", "bakta")
 ///
 /// # Returns
 /// A tuple of (contigs, annotations) where:
-/// - contigs: Vector of ContigInfo with name, length, and annotation_tool
+/// - contigs: Vector of ContigInfo with name and length
 /// - annotations: Vector of FeatureAnnotation with feature details
 pub fn parse_annotations(
     path: &Path,
-    annotation_tool: &str,
 ) -> Result<(Vec<ContigInfo>, Vec<FeatureAnnotation>)> {
     let format = detect_format(path)?;
 
     match format {
-        AnnotationFormat::GenBank => parse_genbank(path, annotation_tool),
-        AnnotationFormat::Gff3 => parse_gff3(path, annotation_tool),
+        AnnotationFormat::GenBank => parse_genbank(path),
+        AnnotationFormat::Gff3 => parse_gff3(path),
     }
 }
 
@@ -144,7 +142,6 @@ fn print_genbank_context(path: &Path, record_num: usize) {
 /// Handles `.gbk`, `.gbff`, and `.gb` files using the gb_io crate.
 pub fn parse_genbank(
     path: &Path,
-    annotation_tool: &str,
 ) -> Result<(Vec<ContigInfo>, Vec<FeatureAnnotation>)> {
     let file = File::open(path).context("Failed to open GenBank file")?;
     let reader = SeqReader::new(file);
@@ -190,7 +187,6 @@ pub fn parse_genbank(
         contigs.push(ContigInfo {
             name: name.clone(),
             length,
-            annotation_tool: annotation_tool.to_string(),
             sequence,
         });
 
@@ -226,6 +222,10 @@ pub fn parse_genbank(
                 .qualifier_values("phrog")
                 .next()
                 .and_then(|s| s.parse::<i32>().ok());
+            let locus_tag = feature
+                .qualifier_values("locus_tag")
+                .next()
+                .map(|s| s.to_string());
 
             annotations.push(FeatureAnnotation {
                 contig_id,
@@ -236,6 +236,7 @@ pub fn parse_genbank(
                 product,
                 function,
                 phrog,
+                locus_tag,
             });
         }
 
@@ -297,7 +298,6 @@ fn parse_gff3_attributes(attrs_str: &str) -> HashMap<String, String> {
 /// 2. Maximum feature end position (fallback)
 pub fn parse_gff3(
     path: &Path,
-    annotation_tool: &str,
 ) -> Result<(Vec<ContigInfo>, Vec<FeatureAnnotation>)> {
     let file = File::open(path).context("Failed to open GFF file")?;
     let reader = BufReader::new(file);
@@ -347,6 +347,9 @@ pub fn parse_gff3(
         let feature_type = fields[2].to_string();
 
         // Skip "source", "gene", and "region" features (like GenBank parser)
+        // "source": Describes the entire sequence/contig—metadata rather than an actual coding feature
+        // "gene": Often a parent/container feature in GFF3 that wraps CDS/mRNA children. You typically want just the actual coding regions
+        // "region": A generic feature type often used for metadata or structural regions, not functional genes
         if feature_type == "source" || feature_type == "gene" || feature_type == "region" {
             // But still track position for contig length
             if let (Ok(start), Ok(end)) = (fields[3].parse::<usize>(), fields[4].parse::<usize>()) {
@@ -409,7 +412,6 @@ pub fn parse_gff3(
         contigs.push(ContigInfo {
             name: name.clone(),
             length,
-            annotation_tool: annotation_tool.to_string(),
             sequence: None, // GFF3 doesn't contain sequence data
         });
     }
@@ -443,6 +445,12 @@ pub fn parse_gff3(
             .or_else(|| attrs.get("PHROG"))
             .and_then(|s| s.parse::<i32>().ok());
 
+        // Extract locus_tag for isoform grouping
+        let locus_tag = attrs
+            .get("locus_tag")
+            .or_else(|| attrs.get("locus-tag"))
+            .cloned();
+
         annotations.push(FeatureAnnotation {
             contig_id,
             start,
@@ -452,6 +460,7 @@ pub fn parse_gff3(
             product,
             function,
             phrog,
+            locus_tag,
         });
     }
 

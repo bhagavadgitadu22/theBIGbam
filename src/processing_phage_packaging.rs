@@ -16,26 +16,29 @@ pub struct Peak {
 pub struct PhageTerminiConfig {
     /// Minimum aligned fraction to evaluate the phage termini
     pub min_aligned_fraction: i32,
+    /// Minimum identity (%) for considering duplications as DTR/ITR
+    pub min_identity_dtr: i32,
+    /// Maximum distance (bp) from reference ends for duplication regions to be considered valid.
+    /// Duplications must have one region starting within this distance from position 1
+    /// and the other region ending within this distance from the contig end.
+    pub max_distance_duplication: i32,
     /// Minimum event count to consider a signal significant (applies to both peaks and clippings)
     pub min_events: i32,
     /// Minimum frequence of events to consider a signal significant (applies to both peaks and clippings)
     pub min_frequency: i32,
     /// Maximum distance (bp) between peaks to merge them
     pub max_distance_peaks: i32,
-    /// Maximum distance (bp) from reference ends for duplication regions to be considered valid.
-    /// Duplications must have one region starting within this distance from position 1
-    /// and the other region ending within this distance from the contig end.
-    pub max_distance_duplication: i32,
 }
 
 impl Default for PhageTerminiConfig {
     fn default() -> Self {
         Self {
             min_aligned_fraction: 90,
+            min_identity_dtr: 90,
+            max_distance_duplication: 100,
             min_events: 10,
             min_frequency: 10,
-            max_distance_peaks: 20,
-            max_distance_duplication: 100,
+            max_distance_peaks: 20
         }
     }
 }

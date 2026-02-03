@@ -195,7 +195,10 @@ def run_mapping_all(args):
             raise FileNotFoundError(f"Row {i}: assembly not found: {assembly_to_use}")
 
         path_read1 = Path(read1p)
-        basename_read1 = path_read1.name.replace("".join(path_read1.suffixes), "")
+        basename_read1 = path_read1.stem
+        # Strip double extensions like .fastq.gz, .fq.gz
+        if basename_read1.endswith(('.fastq', '.fq')):
+            basename_read1 = Path(basename_read1).stem
         basename_assembly = Path(assembly_to_use).stem
         desired_bam = outdir / f"{basename_read1}_mapped_on_{basename_assembly}.bam"
 

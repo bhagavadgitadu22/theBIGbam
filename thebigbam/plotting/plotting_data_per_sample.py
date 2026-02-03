@@ -1,5 +1,4 @@
-import argparse
-import duckdb
+import numpy as np
 from Bio.Seq import Seq
 from Bio.SeqRecord import SeqRecord
 from Bio.SeqFeature import SeqFeature, FeatureLocation
@@ -26,20 +25,44 @@ PHAROKKA_CDS_COLORS = {
 }
 
 # From https://github.com/oschwengers/bakta/blob/d6443639958750c3bece5822e84978271d1a4dc7/bakta/plot.py#L40
-BAKTA_TYPE_COLORS = {
+TYPE_COLORS = {
+    # grey for protein-coding genes
     'CDS': '#cccccc',
-    'tRNA': '#b2df8a',
-    'tmRNA': '#b2df8a',
-    'rRNA': '#fb8072',
-    'ncRNA': '#fdb462'
+    'mRNA': '#777777',
+    # green for RNA genes
+    'tRNA': '#66c2a5',
+    'tmRNA': '#99d8c9',
+    'rRNA': '#238b45',
+    'ncRNA': '#33a02c',
+    'precursor_RNA': '#a1d99b',
+    'misc_RNA': '#74c476',
+    # orange for regulatory / gene structure
+    'exon': '#fdae61',
+    "5'UTR": '#fee08b',
+    "3'UTR": '#f46d43',
+    # purple for genome architecture & mobility
+    'repeat_region': '#6a3d9a',
+    'mobile_element': '#cab2d6',
+    # other features
+    'misc_feature': '#3c5bfe',
+    'gap': '#e5049c',
+    'pseudogene': "#e31a1c"
+    # features not listed here will get black color by default
 }
 
 class CustomTranslator(BiopythonTranslator):
+
+    # Track seen unknown feature types at the class level
+    _seen_unknown_types = set()
+
     def compute_feature_color(self, feature):
         type_feature = feature.type
 
         if type_feature == "CDS":
-            if feature.qualifiers.get("annotation_tool", []) == "pharokka":
+            use_phage_colors = feature.qualifiers.get("use_phage_colors", False)
+
+            # Use phage colors if checkbox is checked
+            if use_phage_colors:
                 # Get the function field safely
                 function = feature.qualifiers.get("function")
                 if isinstance(function, list):  # Biopython often stores qualifiers as lists
@@ -50,34 +73,39 @@ class CustomTranslator(BiopythonTranslator):
 
                 function = function.lower()
 
-                color_scheme = PHAROKKA_CDS_COLORS
-                for key, color in color_scheme.items():
+                for key, color in PHAROKKA_CDS_COLORS.items():
                     if key in function:
                         return color
-            
+
             return "#cccccc"
-        
-        elif type_feature != "CDS":
-            if type_feature not in BAKTA_TYPE_COLORS:
-                print("Unknown type of feature:" , type_feature, flush=True)
+
+        else:
+            if type_feature not in TYPE_COLORS:
+                if type_feature not in CustomTranslator._seen_unknown_types:
+                    print("Unknown type of feature:", type_feature, flush=True)
+                    CustomTranslator._seen_unknown_types.add(type_feature)
                 return "#000000"
-            return BAKTA_TYPE_COLORS.get(type_feature, "#cccccc")
+            return TYPE_COLORS.get(type_feature, "#cccccc")
 
     def compute_feature_label(self, feature):
         return None  # fallback to None if missing or invalid
     
     def compute_feature_html(self, feature):
-        return feature.qualifiers.get("product", [])
+        type_feature = feature.type
+        if type_feature == "CDS":
+            return feature.qualifiers.get("product", [])
+        return feature.type
+        
     
 ### Plotting functions
 def get_contig_info(cur, contig_name):
-    cur.execute("SELECT Contig_id, Contig_name, Contig_length, Annotation_tool FROM Contig WHERE Contig_name=?", (contig_name,))
+    cur.execute("SELECT Contig_id, Contig_name, Contig_length FROM Contig WHERE Contig_name=?", (contig_name,))
     row = cur.fetchone()
     if row is None:
         raise ValueError(f"Contig not found: {contig_name}")
     return row
 
-def make_bokeh_genemap(conn, contig_id, locus_name, locus_size, annotation_tool, subplot_size, shared_xrange, xstart=None, xend=None):
+def make_bokeh_genemap(conn, contig_id, locus_name, locus_size, subplot_size, shared_xrange, xstart=None, xend=None, feature_types=None, use_phage_colors=False, plot_isoforms=True):
     cur = conn.cursor()
 
     # Build position filter clause for annotations
@@ -87,14 +115,27 @@ def make_bokeh_genemap(conn, contig_id, locus_name, locus_size, annotation_tool,
         position_filter = " AND \"End\" >= ? AND \"Start\" <= ?"
         params.extend([xstart, xend])
 
-    cur.execute(
-        f"SELECT \"Start\", \"End\", Strand, \"Type\", Product, \"Function\", Phrog FROM Contig_annotation WHERE Contig_id=?{position_filter}",
-        tuple(params)
-    )
+    # Build feature type filter
+    type_filter = ""
+    if feature_types:
+        placeholders = ','.join('?' * len(feature_types))
+        type_filter = f' AND "Type" IN ({placeholders})'
+        params.extend(feature_types)
+
+    # When plot_isoforms is False, filter to show only longest isoform per (locus_tag, Type) pair
+    # Features without locus_tag always display (Longest_isoform is NULL for them)
+    if not plot_isoforms:
+        # Use pre-computed Longest_isoform boolean column for efficient filtering
+        isoform_filter = " AND (Locus_tag IS NULL OR Longest_isoform = true)"
+        query = f'SELECT "Start", "End", Strand, "Type", Product, "Function", Phrog, Locus_tag FROM Contig_annotation WHERE Contig_id=?{position_filter}{type_filter}{isoform_filter}'
+    else:
+        query = f'SELECT "Start", "End", Strand, "Type", Product, "Function", Phrog, Locus_tag FROM Contig_annotation WHERE Contig_id=?{position_filter}{type_filter}'
+    
+    cur.execute(query, tuple(params))
     seq_ann_rows = cur.fetchall()
 
     sequence_annotations = []
-    for start, end, strand, ftype, product, function, phrog in seq_ann_rows:
+    for start, end, strand, ftype, product, function, phrog, locus_tag in seq_ann_rows:
         # Biopython FeatureLocation is 0-based half-open
         try:
             floc = FeatureLocation(start-1, end, strand=strand)
@@ -107,10 +148,16 @@ def make_bokeh_genemap(conn, contig_id, locus_name, locus_size, annotation_tool,
             qualifiers['function'] = function
         if phrog:
             qualifiers['phrog'] = phrog
-        qualifiers['annotation_tool'] = annotation_tool
+        if locus_tag:
+            qualifiers['locus_tag'] = locus_tag
+        qualifiers['use_phage_colors'] = use_phage_colors
         feat = SeqFeature(location=floc, type=ftype, qualifiers=qualifiers)
         sequence_annotations.append(feat)
-        
+
+    # Return None if no features to plot (avoids empty sequence error in dna_features_viewer)
+    if not sequence_annotations:
+        return None
+
     sequence_records = SeqRecord(Seq('N' * locus_size), id=locus_name, features=sequence_annotations)
     graphic_record = CustomTranslator().translate_record(sequence_records)
     # figure_width and figure_height for the arrow size
@@ -131,7 +178,7 @@ def make_bokeh_genemap(conn, contig_id, locus_name, locus_size, annotation_tool,
 
     return annotation_fig
 
-def make_bokeh_subplot(feature_dict, height, x_range, sample_title=None, feature_name=None):
+def make_bokeh_subplot(feature_dict, height, x_range, sample_title=None):
     # Create the figure first (even if empty)
     p = figure(
         height=height,
@@ -144,7 +191,7 @@ def make_bokeh_subplot(feature_dict, height, x_range, sample_title=None, feature
     
     # Check if we have data to plot
     # You need one dataset of the subplots to have at least one non-zero points
-    has_data = bool(feature_dict) and any(any(y > 0 for y in d["y"]) for d in feature_dict)
+    has_data = bool(feature_dict) and any(any(y != 0 for y in d["y"]) for d in feature_dict)
     title = ""
     if not has_data:
         return None
@@ -190,11 +237,12 @@ def make_bokeh_subplot(feature_dict, height, x_range, sample_title=None, feature
                 data_dict["mean"] = data_feature["mean"]
                 data_dict["median"] = data_feature["median"]
                 data_dict["std"] = data_feature["std"]
-            
+
             source = ColumnDataSource(data=data_dict)
 
             # Part specific to the type of subplot
             if type_picked == "curve":
+                # Set y1 to the minimum of zero and the minimum value in y to allow negative values
                 p.varea(
                     x='x',
                     y1=0,
@@ -202,7 +250,7 @@ def make_bokeh_subplot(feature_dict, height, x_range, sample_title=None, feature
                     source=source,
                     fill_color=color,
                     fill_alpha=fill_alpha,
-                    legend_label = title
+                    legend_label=title
                 )
                 p.line(
                     x='x',
@@ -211,7 +259,7 @@ def make_bokeh_subplot(feature_dict, height, x_range, sample_title=None, feature
                     line_color=color,
                     line_alpha=alpha,
                     line_width=size,
-                    legend_label = title
+                    legend_label=title
                 )
             elif type_picked == "bars":
                 # Use width from data if available (for RLE spans), otherwise use size parameter
@@ -269,7 +317,7 @@ def make_bokeh_subplot(feature_dict, height, x_range, sample_title=None, feature
     p.toolbar.logo = None
     p.xgrid.visible = False
 
-    p.y_range.start = 0
+    p.y_range.start = min(0, *(y for d in feature_dict for y in d["y"]))
     p.yaxis.axis_label = title
     p.yaxis.axis_label_text_font_size = "10pt"
     p.yaxis.axis_label_standoff = 0
@@ -306,8 +354,8 @@ def get_repeats_data(cur, contig_id, variable_name="direct_repeats", xstart=None
     """
     # Map variable name to table name
     table_map = {
-        "direct_repeats": "Contig_DirectRepeats",
-        "inverted_repeats": "Contig_InvertedRepeats",
+        "direct_repeats": "Contig_directRepeats",
+        "inverted_repeats": "Contig_invertedRepeats",
     }
     table_name = table_map.get(variable_name)
     if not table_name:
@@ -397,97 +445,6 @@ def get_repeats_data(cur, contig_id, variable_name="direct_repeats", xstart=None
         "length": length_coords,
         "has_stats": False,
         "is_duplication": True,  # Flag for special tooltip handling
-    }]
-
-
-### Function to get GC content (contig-level, sample-independent)
-def get_gc_content_data(cur, contig_id, xstart=None, xend=None):
-    """Get GC content data for plotting, formatted for make_bokeh_subplot().
-
-    Args:
-        cur: DuckDB cursor
-        contig_id: Contig ID
-        xstart: Optional start position for filtering (only fetch data intersecting this range)
-        xend: Optional end position for filtering (only fetch data intersecting this range)
-
-    Returns:
-        List with one feature dict formatted for make_bokeh_subplot()
-    """
-    # Get variable info from database
-    cur.execute(
-        "SELECT \"Type\", Color, Alpha, Fill_alpha, \"Size\", Title "
-        "FROM Variable WHERE Variable_name='gc_content'"
-    )
-    var_row = cur.fetchone()
-    if not var_row:
-        return []  # Variable not found
-
-    type_picked, color, alpha, fill_alpha, size, title = var_row
-
-    # Check if table exists and has data
-    try:
-        # Build position filter clause
-        position_filter = ""
-        params = [contig_id]
-        if xstart is not None and xend is not None:
-            position_filter = " AND Last_position >= ? AND First_position <= ?"
-            params.extend([xstart, xend])
-        
-        cur.execute(
-            f"SELECT First_position, Last_position, GC_percentage "
-            f"FROM Contig_GCContent WHERE Contig_id=?{position_filter} ORDER BY First_position",
-            tuple(params)
-        )
-        rows = cur.fetchall()
-    except Exception:
-        return []  # Table doesn't exist or no data
-
-    if not rows:
-        return []
-
-    # Clip GC content positions to requested range
-    if xstart is not None and xend is not None:
-        clipped_rows = []
-        for row in rows:
-            first_pos, last_pos, gc_pct = row
-            clipped_first = max(first_pos, xstart)
-            clipped_last = min(last_pos, xend)
-            if clipped_first <= clipped_last:
-                clipped_rows.append((clipped_first, clipped_last, gc_pct))
-        rows = clipped_rows
-
-    x_coords = []
-    y_coords = []
-    first_pos_coords = []
-    last_pos_coords = []
-
-    # Create step plot by adding points at both start and end of each window
-    # This maintains the GC percentage value across the entire sliding window range
-    for first_pos, last_pos, gc_pct in rows:
-        # Add point at start of window
-        x_coords.append(first_pos)
-        y_coords.append(gc_pct)
-        first_pos_coords.append(first_pos)
-        last_pos_coords.append(last_pos)
-        
-        # Add point at end of window (creates horizontal line across window)
-        x_coords.append(last_pos)
-        y_coords.append(gc_pct)
-        first_pos_coords.append(first_pos)
-        last_pos_coords.append(last_pos)
-
-    return [{
-        "type": type_picked,
-        "color": color,
-        "alpha": alpha,
-        "fill_alpha": fill_alpha,
-        "size": size,
-        "title": title,
-        "x": x_coords,
-        "y": y_coords,
-        "first_pos": first_pos_coords,
-        "last_pos": last_pos_coords,
-        "has_stats": False,
     }]
 
 
@@ -623,7 +580,9 @@ def get_feature_data(cur, feature, contig_id, sample_id, xstart=None, xend=None,
         has_stats = feature_table in [f"Feature_{f}" for f in features_with_stats]
 
         # Check if this feature stores scaled values (stored as INTEGER ×100)
-        scaled_features = ["Feature_tau", "Feature_mapq"]
+        # - tau and mapq are stored as value × 100
+        # - gc_skew is stored as value × 100 (range: -100 to +100 representing -1.0 to +1.0)
+        scaled_features = ["Feature_tau", "Feature_mapq", "Contig_GCSkew"]
         is_scaled = feature_table in scaled_features
 
         # Detect contig-level table (no Sample_id column)
@@ -1051,7 +1010,7 @@ def get_feature_data_batch(cur, feature, contig_id, sample_ids, xstart=None, xen
 
 
 ### Function to generate the bokeh plot
-def generate_bokeh_plot_per_sample(conn, list_features, contig_name, sample_name, xstart=None, xend=None, subplot_size=100, genbank_path=None):
+def generate_bokeh_plot_per_sample(conn, list_features, contig_name, sample_name, xstart=None, xend=None, subplot_size=100, genbank_path=None, feature_types=None, use_phage_colors=False, plot_isoforms=True):
     """Generate a Bokeh plot for a single sample.
 
     Args:
@@ -1063,11 +1022,14 @@ def generate_bokeh_plot_per_sample(conn, list_features, contig_name, sample_name
         xend: Optional x-axis end position
         subplot_size: Height of each subplot in pixels
         genbank_path: Optional genbank file path (if provided, gene map will be shown)
+        feature_types: Optional list of feature types to include in gene map (None = all)
+        use_phage_colors: Whether to use phage color scheme for CDS features
+        plot_isoforms: Whether to show all isoforms (True) or only longest per locus_tag (False)
     """
     cur = conn.cursor()
 
     # Get contig characteristics
-    contig_id, locus_name, locus_size, annotation_tool = get_contig_info(cur, contig_name)
+    contig_id, locus_name, locus_size = get_contig_info(cur, contig_name)
     print(f"Locus {locus_name} validated ({locus_size} bp)", flush=True)
 
     # --- Main gene annotation plot (only if genbank provided) ---
@@ -1076,7 +1038,7 @@ def generate_bokeh_plot_per_sample(conn, list_features, contig_name, sample_name
         shared_xrange.start = xstart
         shared_xrange.end = xend
 
-    annotation_fig = make_bokeh_genemap(conn, contig_id, locus_name, locus_size, annotation_tool, subplot_size, shared_xrange, xstart, xend) if genbank_path else None
+    annotation_fig = make_bokeh_genemap(conn, contig_id, locus_name, locus_size, subplot_size, shared_xrange, xstart, xend, feature_types=feature_types, use_phage_colors=use_phage_colors, plot_isoforms=plot_isoforms) if genbank_path else None
 
     # Get sample characteristics (optional – contig-level features work without a sample)
     sample_id = None
@@ -1091,7 +1053,7 @@ def generate_bokeh_plot_per_sample(conn, list_features, contig_name, sample_name
     # --- Add one subplot per feature requested ---
     # Requested features are variables like 'coverage', 'reads_starts', etc.
     subplots = []
-    requested_features, include_repeats, include_gc_content = parse_requested_features(list_features)
+    requested_features, include_repeats = parse_requested_features(list_features)
 
     # Add Repeats subplots if requested (contig-level, sample-independent)
     if include_repeats:
@@ -1113,30 +1075,39 @@ def generate_bokeh_plot_per_sample(conn, list_features, contig_name, sample_name
             if repeats_subplot is not None:
                 subplots.append(repeats_subplot)
 
-    # Add GC content subplot if requested (contig-level, sample-independent)
-    if include_gc_content:
-        try:
-            gc_feature_dict = get_gc_content_data(cur, contig_id, xstart, xend)
-            if gc_feature_dict:
-                gc_subplot = make_bokeh_subplot(gc_feature_dict, subplot_size, shared_xrange)
-                if gc_subplot is not None:
-                    subplots.append(gc_subplot)
-        except Exception as e:
-            print(f"Error processing GC Content: {e}", flush=True)
+    # Separate contig-level features (gc_content, gc_skew) from sample-dependent features
+    contig_level_features = ["gc_content", "gc_skew"]
+    contig_features = [f for f in requested_features if f in contig_level_features]
+    sample_features = [f for f in requested_features if f not in contig_level_features]
+
+    # Add contig-level features (don't require sample_id)
+    if contig_features:
+        metadata_cache = get_variable_metadata_batch(cur, contig_features)
+        for feature in contig_features:
+            try:
+                list_feature_dict = get_feature_data(
+                    cur, feature, contig_id, None, xstart, xend,
+                    variable_metadata=metadata_cache.get(feature)
+                )
+                subplot_feature = make_bokeh_subplot(list_feature_dict, subplot_size, shared_xrange)
+                if subplot_feature is not None:
+                    subplots.append(subplot_feature)
+            except Exception as e:
+                print(f"Error processing feature '{feature}': {e}", flush=True)
 
     # Add sample-dependent features only when a sample is selected
-    if sample_id is not None and requested_features:
+    if sample_id is not None and sample_features:
         # Pre-fetch metadata for all features in one query
-        metadata_cache = get_variable_metadata_batch(cur, requested_features)
+        metadata_cache = get_variable_metadata_batch(cur, sample_features)
 
         # Add other requested features
-        for feature in requested_features:
+        for feature in sample_features:
             try:
                 list_feature_dict = get_feature_data(
                     cur, feature, contig_id, sample_id, xstart, xend,
                     variable_metadata=metadata_cache.get(feature)
                 )
-                subplot_feature = make_bokeh_subplot(list_feature_dict, subplot_size, shared_xrange, feature_name=feature)
+                subplot_feature = make_bokeh_subplot(list_feature_dict, subplot_size, shared_xrange)
                 if subplot_feature is not None:
                     subplots.append(subplot_feature)
             except Exception as e:
@@ -1166,13 +1137,13 @@ def parse_requested_features(list_features):
     - "coverage" or "Coverage" -> primary_reads, secondary_reads, supplementary_reads
     - "phagetermini" or "Phage termini" -> coverage_reduced, reads_starts, reads_ends, tau + Repeats
     - "assemblycheck" or "Assembly check" -> all assembly check features
-    - "genome" or "Genome" -> Repeats + GC content
+    - "genome" or "Genome" -> Repeats + GC content + GC skew
 
-    Returns tuple of (deduplicated list of individual feature names, include_repeats bool, include_gc_content bool).
+    Returns tuple of (deduplicated list of individual feature names, include_repeats bool).
+    Note: gc_content and gc_skew are returned as regular features in the list.
     """
     features = []
     include_repeats = False
-    include_gc_content = False
 
     for item in list_features:
         item_lower = item.lower().strip()
@@ -1180,7 +1151,7 @@ def parse_requested_features(list_features):
         # Module: Genome
         if item_lower in ["genome"]:
             include_repeats = True
-            include_gc_content = True
+            features.extend(["gc_content", "gc_skew"])
         # Module: Coverage
         elif item_lower in ["coverage"]:
             features.extend(["Primary alignments", "Other alignments", "Other alignments"])
@@ -1194,9 +1165,12 @@ def parse_requested_features(list_features):
         # Handle "Repeats" specifically (also accept legacy "duplications")
         elif item_lower in ["repeats", "repeat", "duplications", "duplication"]:
             include_repeats = True
-        # Handle "GC content" specifically
+        # Handle "GC content" specifically - add as regular feature
         elif item_lower in ["gc_content", "gc content", "gccontent", "gc"]:
-            include_gc_content = True
+            features.append("gc_content")
+        # Handle "GC skew" specifically - add as regular feature
+        elif item_lower in ["gc_skew", "gc skew", "gcskew", "skew"]:
+            features.append("gc_skew")
         # Individual feature
         else:
             features.append(item)
@@ -1204,4 +1178,4 @@ def parse_requested_features(list_features):
     # Deduplicate while preserving order
     seen = set()
     deduped_features = [f for f in features if not (f in seen or seen.add(f))]
-    return deduped_features, include_repeats, include_gc_content
+    return deduped_features, include_repeats

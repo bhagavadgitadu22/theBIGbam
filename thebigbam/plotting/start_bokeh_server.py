@@ -8,13 +8,13 @@ import panel as pn
 
 from bokeh.layouts import column, row
 from bokeh.models import Div, InlineStyleSheet, Tooltip
-from bokeh.models.widgets import CheckboxGroup, HelpButton, Button, RadioButtonGroup, CheckboxButtonGroup, Select, TextInput, Spinner
+from bokeh.models.widgets import CheckboxGroup, HelpButton, Button, RadioButtonGroup, CheckboxButtonGroup, Select, TextInput, Spinner, MultiChoice
 from bokeh.models.plots import GridPlot
 
 # Import the plotting function from the repo
 from .plotting_data_per_sample import generate_bokeh_plot_per_sample
 from .plotting_data_all_samples import generate_bokeh_plot_all_samples
-from ..database.database_getters import get_filtering_metadata
+from ..database.database_getters import get_filtering_metadata, ANNOTATION_EXCLUDED_COLUMNS
 from .searchable_select import SearchableSelect
 
 def build_controls(conn):
@@ -107,11 +107,10 @@ def build_controls(conn):
 
     # Get annotation columns and their distinct values from Contig_annotation table
     annotation_filters = {}
-    excluded_columns = {'Contig_id', 'Start', 'End', 'Strand', 'Type'}
     try:
         # Get column names from Contig_annotation table
         cur.execute("PRAGMA table_info(Contig_annotation)")
-        columns = [row[1] for row in cur.fetchall() if row[1] not in excluded_columns]
+        columns = [row[1] for row in cur.fetchall() if row[1] not in ANNOTATION_EXCLUDED_COLUMNS]
         
         # Get distinct non-null values for each column
         for column in columns:
@@ -121,6 +120,14 @@ def build_controls(conn):
                 annotation_filters[column] = values
     except Exception:
         pass  # Table doesn't exist or has no data
+
+    # Get annotation feature types from Annotated_types table
+    annotation_types = []
+    try:
+        cur.execute("SELECT Type_name FROM Annotated_types ORDER BY Frequency DESC")
+        annotation_types = [r[0] for r in cur.fetchall()]
+    except Exception:
+        pass
 
     # Widget Selector for Contigs (autocomplete with max 20 suggestions)
     cur.execute("SELECT Contig_name, Contig_length, Duplication_percentage FROM Contig ORDER BY Contig_name")
@@ -140,6 +147,7 @@ def build_controls(conn):
     # Widget Selector for Samples (autocomplete with max 20 suggestions)
     cur.execute("SELECT Sample_name FROM Sample ORDER BY Sample_name")
     samples = [r[0] for r in cur.fetchall()]
+    has_samples = len(samples) > 0
     
     # If only one sample in database, pre-fill the field
     sample_select = SearchableSelect(
@@ -162,31 +170,19 @@ def build_controls(conn):
         contig_to_samples.setdefault(contig_name, set()).add(sample_name)
 
     # Modules and variables - only show those with data in database
-    # First, identify which feature tables have at least one row with non-zero value
+    # First, identify which feature tables exist (tables only exist if they have data)
     cur.execute("SELECT DISTINCT Feature_table_name FROM Variable")
     feature_tables = [r[0] for r in cur.fetchall()]
 
     tables_with_data = set()
     for table_name in feature_tables:
-        tables_with_data.add(table_name)
+        try:
+            cur.execute(f"SELECT 1 FROM \"{table_name}\" LIMIT 1")
+            tables_with_data.add(table_name)
+        except Exception:
+            pass  # Table doesn't exist
 
-    # Check if repeat tables have data
-    # Add table names to tables_with_data so repeat variables are included
-    try:
-        cur.execute("SELECT 1 FROM Contig_DirectRepeats LIMIT 1")
-        if cur.fetchone() is not None:
-            tables_with_data.add("Contig_DirectRepeats")
-    except Exception:
-        pass
-
-    try:
-        cur.execute("SELECT 1 FROM Contig_InvertedRepeats LIMIT 1")
-        if cur.fetchone() is not None:
-            tables_with_data.add("Contig_InvertedRepeats")
-    except Exception:
-        pass
-
-    # Get variables that have data (their feature table has rows)
+    # Get variables that have data (their feature table exists)
     cur.execute("SELECT DISTINCT Variable_name, Feature_table_name FROM Variable")
     variables = [r[0] for r in cur.fetchall() if r[1] in tables_with_data]
 
@@ -224,9 +220,8 @@ def build_controls(conn):
         )
         variables_checkbox = [r[0] for r in cur.fetchall()]
 
-        # For Genome module, add "Gene map" as the first option
-        if module == "Genome":
-            variables_checkbox = ["Gene map"] + variables_checkbox
+        # For Genome module, "Gene map" is handled separately (not in the checkbox group)
+        # So we don't add it here - it will get its own dedicated button
 
         # For Custom module, exclude contig-level subplots (they go in genome section)
         if module == "Custom" and custom_contig_subplots:
@@ -299,8 +294,10 @@ def build_controls(conn):
         'duplication_percentage_max': duplication_percentage_max,
         'has_duplication_data': has_duplication_data,
         'annotation_filters': annotation_filters,
+        'annotation_types': annotation_types,
         'full_contigs': contigs,  # Store full list for substring matching
-        'full_samples': samples   # Store full list for substring matching
+        'full_samples': samples,  # Store full list for substring matching
+        'has_samples': has_samples  # True if database has any samples
     }
     return widgets
 
@@ -879,8 +876,6 @@ def create_layout(db_path):
                     continue
                 if input_ref['is_panel'] and isinstance(value, str) and value.strip() == "":
                     continue
-                if not input_ref['is_panel'] and value == 0:
-                    continue
                 has_active_filter = True
                 break
             if has_active_filter:
@@ -974,8 +969,6 @@ def create_layout(db_path):
                 if value is None or value == "":
                     continue
                 if input_ref['is_panel'] and isinstance(value, str) and value.strip() == "":
-                    continue
-                if not input_ref['is_panel'] and value == 0:
                     continue
 
                 pairs = get_pairs_for_condition(category, column_name, operator, value)
@@ -1282,16 +1275,22 @@ def create_layout(db_path):
     ## Apply button function
     def apply_clicked():
         try:
-            sample = widgets['sample_select'].value
             contig = widgets['contig_select'].value
-            is_all = (views.active == 1)
+            has_samples = widgets['has_samples']
+            
+            # When no samples exist, treat as "One Sample" mode with no sample/variables
+            is_all = (views.active == 1) if has_samples else False
+            sample = widgets['sample_select'].value if has_samples else None
 
             # Select the correct widget set based on current view
             active_variables_widgets = widgets['variables_widgets_all'] if is_all else widgets['variables_widgets_one']
 
             # Genome module is shared between views (in Contigs section)
-            # Check if gene map should be shown (Gene map is first label in Genome module's cbg)
-            genbank_path = db_path if (genome_cbg_one is not None and 0 in genome_cbg_one.active) else None
+            # Gene map is shown if at least one feature type is selected in the multichoice
+            selected_feature_types = feature_type_multichoice.value if feature_type_multichoice is not None else None
+            genbank_path = db_path if (selected_feature_types and len(selected_feature_types) > 0) else None
+            use_phage_colors = (0 in phage_colors_cbg.active) if (phage_colors_cbg is not None and genbank_path) else False
+            plot_isoforms = (0 in plot_isoforms_cbg.active) if (plot_isoforms_cbg is not None and genbank_path) else True
 
             # Parse and validate position inputs
             xstart = None
@@ -1329,17 +1328,10 @@ def create_layout(db_path):
                 selected_var = None
                 genome_features = []
 
-                # Collect Genome features from shared genome_cbg_one (except Gene map)
-                if genome_cbg_one is not None:
-                    for idx in genome_cbg_one.active:
-                        if idx == 0:  # Skip Gene map (handled via genbank_path)
-                            continue
-                        genome_features.append(genome_cbg_one.labels[idx])
-
-                # Collect custom contig-level features
-                if custom_contig_cbg is not None:
-                    for idx in custom_contig_cbg.active:
-                        genome_features.append(custom_contig_cbg.labels[idx])
+                # Collect genomic features from combined_features_cbg (Genome features + Custom contig features)
+                if combined_features_cbg is not None:
+                    for idx in combined_features_cbg.active:
+                        genome_features.append(combined_features_cbg.labels[idx])
 
                 # Get the selected variable from non-Genome modules
                 for cbg in active_variables_widgets:
@@ -1359,28 +1351,23 @@ def create_layout(db_path):
                     filtered_samples = [s for s in filtered_samples if s in allowed_samples]
 
                 print(f"[start_bokeh_server] Generating plot for all samples with variable={selected_var}, contig={contig}, genome_features={genome_features}, filtered_samples={len(filtered_samples)}")
-                grid = generate_bokeh_plot_all_samples(conn, selected_var, contig, xstart=xstart, xend=xend, genbank_path=genbank_path, genome_features=genome_features if genome_features else None, allowed_samples=set(filtered_samples))
+                grid = generate_bokeh_plot_all_samples(conn, selected_var, contig, xstart=xstart, xend=xend, genbank_path=genbank_path, genome_features=genome_features if genome_features else None, allowed_samples=set(filtered_samples), feature_types=selected_feature_types, use_phage_colors=use_phage_colors)
             else:
                 # One-sample view: collect possibly-many requested features and call per-sample plot
                 requested_features = []
 
-                # Collect custom contig-level features first (so they plot at the top)
-                if custom_contig_cbg is not None:
-                    for idx in custom_contig_cbg.active:
-                        requested_features.append(custom_contig_cbg.labels[idx])
+                # Collect genomic features from combined_features_cbg (in Contigs section)
+                if combined_features_cbg is not None:
+                    for idx in combined_features_cbg.active:
+                        requested_features.append(combined_features_cbg.labels[idx])
 
                 # Collect features from Variables section
                 for cbg in active_variables_widgets:
                     for idx in cbg.active:
                         requested_features.append(cbg.labels[idx])
 
-                # Collect Genome features from shared genome_cbg_one (in Contigs section)
-                if genome_cbg_one is not None:
-                    for idx in genome_cbg_one.active:
-                        requested_features.append(genome_cbg_one.labels[idx])
-
                 print(f"[start_bokeh_server] Generating plot for sample={sample}, contig={contig}, features={requested_features}")
-                grid = generate_bokeh_plot_per_sample(conn, requested_features, contig, sample, xstart=xstart, xend=xend, genbank_path=genbank_path)
+                grid = generate_bokeh_plot_per_sample(conn, requested_features, contig, sample, xstart=xstart, xend=xend, genbank_path=genbank_path, feature_types=selected_feature_types, use_phage_colors=use_phage_colors, plot_isoforms=plot_isoforms)
 
             # Extract and cache plot data for instant downloads (no database round-trip)
             try:
@@ -1409,10 +1396,17 @@ def create_layout(db_path):
                 download_data_button,
                 margin=(0, 0, 5, 0)
             )
-            peruse_button.visible = True  # Show button when plot exists
-            download_contig_button.visible = True  # Show download button when plot exists
-            download_metrics_button.visible = True  # Show download metrics button when plot exists
-            download_data_button.visible = True  # Show download data button when plot exists
+            # Show buttons when plot exists (but some are hidden in 0-sample mode)
+            download_contig_button.visible = True  # Always show download contig button
+            if has_samples:
+                peruse_button.visible = True
+                download_metrics_button.visible = True
+                download_data_button.visible = True
+            else:
+                # No samples: hide sample-related buttons
+                peruse_button.visible = False
+                download_metrics_button.visible = False
+                download_data_button.visible = False
             
             # Stack toolbar row above grid
             main_placeholder.objects = [pn.Column(toolbar_row, grid, sizing_mode="stretch_both")]
@@ -1432,10 +1426,16 @@ def create_layout(db_path):
         from .perusing_data import generate_and_open_peruse_html
         
         contig = widgets['contig_select'].value
+        has_samples = widgets['has_samples']
 
         # Check if contig is selected
         if not contig:
             print("[start_bokeh_server] Peruse: No contig selected", flush=True)
+            return
+
+        # If no samples in database, cannot peruse
+        if not has_samples:
+            print("[start_bokeh_server] Peruse: No samples in database", flush=True)
             return
 
         is_all = (views.active == 1)
@@ -1788,7 +1788,7 @@ def create_layout(db_path):
         # Comparison operator select - "=" and "!=" for text, all operators for numeric
         comparison_select = Select(
             options=["=", "!="] if initial_is_text else ["=", ">", "<", "!="],
-            value="=",
+            value="=" if initial_is_text else ">",
             width=50,
             margin=(0, 2, 0, 0)
         )
@@ -1822,8 +1822,8 @@ def create_layout(db_path):
             initial_input.on_change('value', lambda attr, old, new: refresh_on_filter_change())
             initial_is_panel = False
 
-        # Remove button
-        minus_btn = Button(label="−", width=30, height=30, stylesheets=[stylesheet], margin=(0, 10, 0, 0))
+        # Remove button (Panel button for proper dynamic event handling)
+        minus_btn = pn.widgets.Button(name="−", width=30, height=30, margin=(0, 10, 0, 0), stylesheets=[stylesheet])
 
         # Store reference to current input widget (for later retrieval)
         current_input_ref = {'widget': initial_input, 'is_panel': initial_is_panel}
@@ -1895,7 +1895,7 @@ def create_layout(db_path):
             'and_div': None  # Will be set when AND is added above this row
         }
 
-        def remove_row_callback():
+        def remove_row_callback(event):
             # Don't allow removal if this is the only query row across all sections
             if count_total_query_rows() <= 1:
                 return
@@ -1962,9 +1962,11 @@ def create_layout(db_path):
             styles={'border-left': '3px solid #00b17c', 'padding-left': '10px', 'margin-left': '5px'}
         )
 
-        add_and_btn = Button(
-            label="+ Add AND/OR",
+        # Use Panel button instead of Bokeh button for proper dynamic event handling
+        add_and_btn = pn.widgets.Button(
+            name="+ Add AND/OR",
             margin=(5, 0, 5, 0),
+            button_type="success",
             stylesheets=[stylesheet]
         )
 
@@ -1974,7 +1976,7 @@ def create_layout(db_path):
             'add_and_btn': add_and_btn
         }
 
-        def add_and_or_callback():
+        def add_and_or_callback(event):
             # Create a new query row
             new_row = create_query_row(section_data)
             section_data['rows'].append(new_row)
@@ -1990,10 +1992,11 @@ def create_layout(db_path):
 
         return section_data
 
-    # Create the global "+ Add AND/OR" button
-    global_add_btn = Button(
-        label="+ Add AND/OR",
+    # Create the global "+ Add AND/OR" button (Panel button for proper dynamic handling)
+    global_add_btn = pn.widgets.Button(
+        name="+ Add AND/OR",
         margin=(10, 0, 5, 0),
+        button_type="primary",
         stylesheets=[pink_buttons_stylesheet]
     )
 
@@ -2032,7 +2035,7 @@ def create_layout(db_path):
 
         filtering_content.objects = content_children
 
-    def global_add_and_or_callback():
+    def global_add_and_or_callback(event):
         # Create a new section
         new_section = create_or_section()
         or_sections.append(new_section)
@@ -2229,18 +2232,73 @@ def create_layout(db_path):
 
     ## Build Genome module controls (placed in Contigs section, shared between views)
     genome_section = None
-    custom_contig_cbg = None
+    combined_features_cbg = None
 
-    # Build custom contig-level feature checkbox if any exist
+    # Feature type filter (MultiChoice) - only show if annotation types exist
+    # Gene map is plotted if at least one feature type is selected
+    feature_type_multichoice = None
+    if widgets['annotation_types']:
+        # Initially select only CDS if available, otherwise nothing
+        initial_value = ["CDS"] if "CDS" in widgets['annotation_types'] else []
+        multichoice_stylesheet = InlineStyleSheet(css=":host { background-color: white; }")
+        feature_type_multichoice = MultiChoice(
+            options=widgets['annotation_types'],
+            value=initial_value,
+            placeholder="Choose feature types to plot",
+            sizing_mode="stretch_width",
+            stylesheets=[multichoice_stylesheet]
+        )
+
+    # Phage color scheme checkbox - only show if database has CDS features with PHAROKKA functions
+    phage_colors_cbg = None
+    try:
+        cur = conn.cursor()
+        result = cur.execute(
+            "SELECT Status FROM Constants WHERE Constant = 'pharokka'"
+        ).fetchone()
+        has_pharokka_functions = result[0] if result else False
+        
+        if has_pharokka_functions:
+            phage_colors_cbg = CheckboxGroup(
+                labels=["Use phage color scheme for CDS"],
+                active=[]
+            )
+    except Exception:
+        pass  # Constants table might not exist in older databases
+
+    # Plot isoforms checkbox - only show if at least one locus_tag appears more than once
+    plot_isoforms_cbg = None
+    try:
+        cur = conn.cursor()
+        result = cur.execute(
+            "SELECT Status FROM Constants WHERE Constant = 'isoforms'"
+        ).fetchone()
+        has_isoforms = result[0] if result else False
+        
+        if has_isoforms:
+            plot_isoforms_cbg = CheckboxGroup(
+                labels=["Plot isoforms"],
+                active=[]  # Unchecked by default
+            )
+    except Exception:
+        pass  # Constants table or isoforms constant might not exist in older databases
+
+    # Build combined labels: Genome features (without Gene map) + Custom contig features
+    combined_labels = []
+    if genome_cbg_one is not None:
+        combined_labels.extend(genome_cbg_one.labels)  # Already without Gene map
     if widgets['custom_contig_subplots']:
-        custom_contig_cbg = CheckboxButtonGroup(
-            labels=widgets['custom_contig_subplots'], active=[],
+        combined_labels.extend(widgets['custom_contig_subplots'])
+
+    if combined_labels:
+        combined_features_cbg = CheckboxButtonGroup(
+            labels=combined_labels, active=[],
             sizing_mode="stretch_width", orientation="vertical"
         )
 
-    if genome_index_one is not None or custom_contig_cbg is not None:
+    if feature_type_multichoice is not None or combined_features_cbg is not None:
         # Build simple Genome section header (no collapse needed - Contigs section handles that)
-        genome_title = Div(text="<b>Plot genomic features:</b>", align="center")
+        genome_title = Div(text="<b>Other genomic features to plot:</b>", align="center")
 
         genome_help_tooltip = widgets['helps_widgets'][genome_index_one] if genome_index_one is not None else None
         if genome_help_tooltip is not None:
@@ -2249,12 +2307,19 @@ def create_layout(db_path):
         else:
             genome_hdr = genome_title
 
-        genome_children = [genome_hdr]
-        if genome_cbg_one is not None:
-            genome_cbg_one.visible = True
-            genome_children.append(genome_cbg_one)
-        if custom_contig_cbg is not None:
-            genome_children.append(custom_contig_cbg)
+        # Build genome section
+        # Layout: feature_type_multichoice, phage_colors_cbg (if available), plot_isoforms_cbg (if available), genome_hdr, combined_features_cbg
+        genome_children = []
+        if feature_type_multichoice is not None:
+            genome_children.append(feature_type_multichoice)
+        if phage_colors_cbg is not None:
+            genome_children.append(phage_colors_cbg)
+        if plot_isoforms_cbg is not None:
+            genome_children.append(plot_isoforms_cbg)
+        genome_children.append(genome_hdr)
+        if combined_features_cbg is not None:
+            combined_features_cbg.visible = True
+            genome_children.append(combined_features_cbg)
         genome_section = column(*genome_children, visible=True, sizing_mode="stretch_width", margin=(0, 5, 0, 5))
 
     # Add Genome section to contig_content
@@ -2385,26 +2450,35 @@ def create_layout(db_path):
 
     ## Put together all DOM elements
     # Create visual separators (horizontal lines) using background color
-    separator_filtering = Div(text="", height=1, sizing_mode="stretch_width", styles={'background-color': '#333', 'margin': '10px 0'})
-    separator_samples = Div(text="", height=1, sizing_mode="stretch_width", styles={'background-color': '#333', 'margin': '10px 0'})
-    separator_contigs = Div(text="", height=1, sizing_mode="stretch_width", styles={'background-color': '#333', 'margin': '10px 0'})
-    separator_variables = Div(text="", height=1, sizing_mode="stretch_width", styles={'background-color': '#333', 'margin': '10px 0'})
-
+    separator_filtering = Div(text="", height=1, sizing_mode="stretch_width", styles={'background-color': '#333', 'margin': '10px 0', 'min-height': '1px'})
+    separator_samples = Div(text="", height=1, sizing_mode="stretch_width", styles={'background-color': '#333', 'margin': '10px 0', 'min-height': '1px'})
+    separator_contigs = Div(text="", height=1, sizing_mode="stretch_width", styles={'background-color': '#333', 'margin': '10px 0', 'min-height': '1px'})
+    separator_variables = Div(text="", height=1, sizing_mode="stretch_width", styles={'background-color': '#333', 'margin': '10px 0', 'min-height': '1px'})
+    
     # Gene map is now part of the Genome module's CheckboxButtonGroup
-    # Include both variables sections - visibility is toggled by on_view_change
-    controls_children = [logo, views, separator_filtering, filtering_header, filtering_content,
-                         separator_contigs, contig_header, above_contig_content, widgets['contig_select'], below_contig_content,
-                         separator_samples, sample_header, above_sample_content, widgets['sample_select'],
-                         separator_variables,
-                         variables_section_one,  # One Sample view (with module checkboxes)
-                         variables_section_all,  # All Samples view (title headers only)
-                         buttons_row]
+    # Build controls list conditionally based on whether samples exist
+    # When no samples: hide views toggle, samples section, and variables section
+    if widgets['has_samples']:
+        controls_children = [logo, views, separator_filtering, filtering_header, filtering_content,
+                             separator_contigs, contig_header, above_contig_content, widgets['contig_select'], below_contig_content,
+                             separator_samples, sample_header, above_sample_content, widgets['sample_select'],
+                             separator_variables,
+                             variables_section_one,  # One Sample view (with module checkboxes)
+                             variables_section_all,  # All Samples view (title headers only)
+                             buttons_row]
+        placeholder_text = "<i>No plot yet. Select one sample, one contig and at least one variable in \"One sample\" mode or one contig and one variable in \"All samples\" mode and click Apply.</i>"
+    else:
+        # No samples: simplified UI with only Filtering, Contigs, and Apply button
+        controls_children = [logo, filtering_header, filtering_content,
+                             separator_contigs, contig_header, above_contig_content, widgets['contig_select'], below_contig_content,
+                             buttons_row]
+        placeholder_text = "<i>No plot yet. Select one contig and click Apply to view the genome annotation.</i>"
 
     controls_column = pn.Column(*controls_children, sizing_mode="stretch_height", css_classes=["left-col"])
 
     peruse_button.visible = False  # Initially hidden
     main_placeholder = pn.Column(
-        pn.pane.HTML("<i>No plot yet. Select one sample, one contig and at least one variable in \"One sample\" mode or one contig and one variable in \"All samples\" mode and click Apply.</i>"),
+        pn.pane.HTML(placeholder_text),
         sizing_mode="stretch_both"
     )
 

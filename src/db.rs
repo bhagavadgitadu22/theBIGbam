@@ -20,7 +20,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Mutex;
 
-use crate::gc_content::{GCContentRun, GCStats};
+use crate::gc_content::{GCContentRun, GCSkewRun, GCSkewStats, GCStats};
 use crate::types::{feature_table_name, ContigInfo, FeatureAnnotation, FeaturePoint, PackagingData, PresenceData, VARIABLES};
 
 /// Thread-safe database connection wrapper for sequential writes.
@@ -56,6 +56,9 @@ impl DbWriter {
 
         // Insert annotations
         insert_annotations(&conn, annotations)?;
+
+        // Populate Annotated_types table with distinct Type values from Contig_annotation
+        populate_annotated_types(&conn)?;
 
         // Build contig name -> id mapping
         let contig_name_to_id: HashMap<String, i64> = contigs
@@ -320,16 +323,23 @@ impl DbWriter {
         }
 
         let conn = self.conn.lock().unwrap();
-        let mut direct_appender = conn.appender("Contig_DirectRepeats")
-            .context("Failed to create Contig_DirectRepeats appender")?;
-        let mut inverted_appender = conn.appender("Contig_InvertedRepeats")
-            .context("Failed to create Contig_InvertedRepeats appender")?;
+        let mut direct_appender = conn.appender("Contig_directRepeats")
+            .context("Failed to create Contig_directRepeats appender")?;
+        let mut inverted_appender = conn.appender("Contig_invertedRepeats")
+            .context("Failed to create Contig_invertedRepeats appender")?;
 
         let mut direct_count = 0;
         let mut inverted_count = 0;
 
         for dup in repeats {
-            if let Some(&contig_id) = self.contig_name_to_id.get(&dup.contig_name) {
+            let contig_id_opt = self.contig_name_to_id.get(&dup.contig_name)
+                .or_else(|| {
+                    // Try without version suffix (e.g., "NC_003071.7" -> "NC_003071")
+                    dup.contig_name.rfind('.')
+                        .filter(|&dot_pos| dup.contig_name[dot_pos+1..].chars().all(|c| c.is_ascii_digit()))
+                        .and_then(|dot_pos| self.contig_name_to_id.get(&dup.contig_name[..dot_pos]))
+                });
+            if let Some(&contig_id) = contig_id_opt {
                 // Store pident as INTEGER (×100)
                 let pident_int = (dup.pident * 100.0).round() as i32;
 
@@ -357,9 +367,27 @@ impl DbWriter {
             }
         }
 
-        direct_appender.flush().context("Failed to flush Contig_DirectRepeats appender")?;
-        inverted_appender.flush().context("Failed to flush Contig_InvertedRepeats appender")?;
+        direct_appender.flush().context("Failed to flush Contig_directRepeats appender")?;
+        inverted_appender.flush().context("Failed to flush Contig_invertedRepeats appender")?;
         eprintln!("Wrote {} direct repeats and {} inverted repeats to database", direct_count, inverted_count);
+
+        // Warn about contig names from autoblast that couldn't be matched
+        let unmatched: std::collections::HashSet<&str> = repeats.iter()
+            .filter(|dup| {
+                self.contig_name_to_id.get(&dup.contig_name).is_none()
+                    && dup.contig_name.rfind('.')
+                        .filter(|&p| dup.contig_name[p+1..].chars().all(|c| c.is_ascii_digit()))
+                        .and_then(|p| self.contig_name_to_id.get(&dup.contig_name[..p]))
+                        .is_none()
+            })
+            .map(|dup| dup.contig_name.as_str())
+            .collect();
+        if !unmatched.is_empty() {
+            eprintln!("WARNING: {} contig(s) from autoblast not found in database (check naming):", unmatched.len());
+            for name in unmatched.iter().take(5) {
+                eprintln!("  - '{}'", name);
+            }
+        }
 
         // Calculate and update duplication percentages for all contigs
         drop(direct_appender);
@@ -463,19 +491,53 @@ impl DbWriter {
         Ok(())
     }
 
-    /// Update Contig table with GC statistics (average, sd, median).
-    /// Called after computing GC content for all contigs.
+    /// Write GC skew data to the database.
+    /// This is called once during database creation (not per-sample).
+    pub fn write_gc_skew(&self, gc_data: &[GCContentData]) -> Result<()> {
+        if gc_data.is_empty() {
+            return Ok(());
+        }
+
+        let conn = self.conn.lock().unwrap();
+        let mut appender = conn.appender("Contig_GCSkew")
+            .context("Failed to create Contig_GCSkew appender")?;
+
+        let mut total_runs = 0;
+
+        for data in gc_data {
+            if let Some(&contig_id) = self.contig_name_to_id.get(&data.contig_name) {
+                for run in &data.skew_runs {
+                    appender.append_row(params![
+                        contig_id,
+                        run.start_pos,
+                        run.end_pos,
+                        run.gc_skew as i32
+                    ])?;
+                    total_runs += 1;
+                }
+            }
+        }
+
+        appender.flush().context("Failed to flush Contig_GCSkew appender")?;
+        eprintln!("Wrote {} GC skew runs to database", total_runs);
+
+        Ok(())
+    }
+
+    /// Update Contig table with GC statistics (average, sd) and GC skew stats.
+    /// Called after computing GC content and GC skew for all contigs.
     pub fn update_contig_gc_stats(&self, gc_data: &[GCContentData]) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "UPDATE Contig SET GC_mean = ?, GC_sd = ?, GC_median = ? WHERE Contig_name = ?"
+            "UPDATE Contig SET GC_mean = ?, GC_sd = ?, GC_skew_amplitude = ?, Positive_GC_skew_windows_percentage = ? WHERE Contig_name = ?"
         )?;
 
         for data in gc_data {
             stmt.execute(params![
-                data.stats.average as f64,
-                data.stats.sd as f64,
-                data.stats.median as f64,
+                data.stats.average.round() as i32,                    // GC_mean as int (0-100)
+                (data.stats.sd * 100.0).round() as i32,               // GC_sd * 100
+                (data.skew_stats.amplitude * 100.0).round() as i32,   // GC_skew_amplitude * 100
+                data.skew_stats.percent_positive.round() as i32,      // Positive_GC_skew_windows_percentage as int (0-100)
                 &data.contig_name
             ])?;
         }
@@ -514,11 +576,11 @@ fn create_core_tables(conn: &Connection) -> Result<()> {
             Contig_id INTEGER PRIMARY KEY,
             Contig_name TEXT UNIQUE,
             Contig_length INTEGER,
-            Annotation_tool TEXT,
             Duplication_percentage INTEGER,
-            GC_mean REAL,
-            GC_sd REAL,
-            GC_median REAL
+            GC_mean INTEGER,
+            GC_sd INTEGER,
+            GC_skew_amplitude INTEGER,
+            Positive_GC_skew_windows_percentage INTEGER
         )",
         [],
     )
@@ -567,10 +629,10 @@ fn create_core_tables(conn: &Connection) -> Result<()> {
     )
     .context("Failed to create PhageMechanisms table")?;
 
-    // Contig_DirectRepeats table - stores direct repeats (same orientation)
+    // Contig_directRepeats table - stores direct repeats (same orientation)
     // Pident stored as INTEGER (×100)
     conn.execute(
-        "CREATE TABLE Contig_DirectRepeats (
+        "CREATE TABLE Contig_directRepeats (
             Contig_id INTEGER,
             Position1 INTEGER,
             Position2 INTEGER,
@@ -580,12 +642,12 @@ fn create_core_tables(conn: &Connection) -> Result<()> {
         )",
         [],
     )
-    .context("Failed to create Contig_DirectRepeats table")?;
+    .context("Failed to create Contig_directRepeats table")?;
 
-    // Contig_InvertedRepeats table - stores inverted repeats (opposite orientation)
+    // Contig_invertedRepeats table - stores inverted repeats (opposite orientation)
     // Pident stored as INTEGER (×100)
     conn.execute(
-        "CREATE TABLE Contig_InvertedRepeats (
+        "CREATE TABLE Contig_invertedRepeats (
             Contig_id INTEGER,
             Position1 INTEGER,
             Position2 INTEGER,
@@ -595,20 +657,33 @@ fn create_core_tables(conn: &Connection) -> Result<()> {
         )",
         [],
     )
-    .context("Failed to create Contig_InvertedRepeats table")?;
+    .context("Failed to create Contig_invertedRepeats table")?;
 
     // Contig_GCContent table - stores GC content (contig-level, sample-independent)
-    // GC_percentage stored as INTEGER (0-100)
+    // Value stored as INTEGER (0-100 percentage)
     conn.execute(
         "CREATE TABLE Contig_GCContent (
             Contig_id INTEGER,
             First_position INTEGER,
             Last_position INTEGER,
-            GC_percentage INTEGER
+            Value INTEGER
         )",
         [],
     )
     .context("Failed to create Contig_GCContent table")?;
+
+    // Contig_GCSkew table - stores GC skew (contig-level, sample-independent)
+    // Value stored as INTEGER × 100 (range: -100 to +100)
+    conn.execute(
+        "CREATE TABLE Contig_GCSkew (
+            Contig_id INTEGER,
+            First_position INTEGER,
+            Last_position INTEGER,
+            Value INTEGER
+        )",
+        [],
+    )
+    .context("Failed to create Contig_GCSkew table")?;
 
     // Completeness table - clipping prevalences stored as INTEGER (×100), totals as INTEGER
     // Note: Left/Right_clippings_percentage stores clipping_count/coverage (raw clipping prevalence)
@@ -645,7 +720,9 @@ fn create_core_tables(conn: &Connection) -> Result<()> {
             \"Type\" TEXT,
             Product TEXT,
             \"Function\" TEXT,
-            Phrog INTEGER
+            Phrog INTEGER,
+            Locus_tag TEXT,
+            Longest_isoform BOOLEAN
         )",
         [],
     )
@@ -671,6 +748,17 @@ fn create_core_tables(conn: &Connection) -> Result<()> {
     )
     .context("Failed to create Variable table")?;
 
+    // Annotated_types table - stores distinct Type values from Contig_annotation ordered by frequency
+    conn.execute(
+        "CREATE TABLE Annotated_types (
+            Type_id INTEGER PRIMARY KEY,
+            Type_name TEXT UNIQUE,
+            Frequency INTEGER
+        )",
+        [],
+    )
+    .context("Failed to create Annotated_types table")?;
+
     // (Contig_id, Sample_id, Variable_id) is the natural key
     conn.execute(
         "CREATE TABLE Summary (
@@ -684,6 +772,17 @@ fn create_core_tables(conn: &Connection) -> Result<()> {
     )
     .context("Failed to create Summary table")?;
 
+    // Constants table - stores metadata flags about database content
+    // Pre-computed at database creation time (not per-request)
+    conn.execute(
+        "CREATE TABLE Constants (
+            Constant TEXT PRIMARY KEY,
+            Status BOOLEAN
+        )",
+        [],
+    )
+    .context("Failed to create Constants table")?;
+
     Ok(())
 }
 
@@ -694,16 +793,15 @@ fn insert_contigs(conn: &Connection, contigs: &[ContigInfo]) -> Result<()> {
 
     for (i, contig) in contigs.iter().enumerate() {
         let null_int: Option<i32> = None;
-        let null_real: Option<f64> = None;
         appender.append_row(params![
             (i + 1) as i64,
             &contig.name,
             contig.length as i64,
-            &contig.annotation_tool,
-            null_int,   // Duplication_percentage - set later from autoblast
-            null_real,  // GC_mean - set later from GC content computation
-            null_real,  // GC_sd - set later from GC content computation
-            null_real,  // GC_median - set later from GC content computation
+            null_int,  // Duplication_percentage - set later from autoblast
+            null_int,  // GC_mean - set later from GC content computation (stored as int 0-100)
+            null_int,  // GC_sd - set later from GC content computation (stored as int, ×100)
+            null_int,  // GC_skew_amplitude - set later from GC skew computation (stored as int, ×100)
+            null_int,  // Positive_GC_skew_windows_percentage - set later from GC skew computation (stored as int 0-100)
         ])
         .with_context(|| format!("Failed to append contig: {}", contig.name))?;
     }
@@ -714,10 +812,88 @@ fn insert_contigs(conn: &Connection, contigs: &[ContigInfo]) -> Result<()> {
 
 /// Insert annotations into the database using Appender for bulk loading.
 fn insert_annotations(conn: &Connection, annotations: &[FeatureAnnotation]) -> Result<()> {
+    // PHAROKKA function categories (must match plotting_data_per_sample.py)
+    let pharokka_keys = vec![
+        "vfdb_card",
+        "unknown function",
+        "other",
+        "tail",
+        "transcription regulation",
+        "dna, rna and nucleotide metabolism",
+        "lysis",
+        "moron, auxiliary metabolic gene and host takeover",
+        "integration and excision",
+        "head and packaging",
+        "connector",
+    ];
+
+    // First pass: group annotations by (locus_tag, feature_type) to find longest per group
+    // Only group features that HAVE a locus_tag (features without locus_tag are always shown)
+    let mut group_max_length: std::collections::HashMap<(String, String), usize> = std::collections::HashMap::new();
+    
+    // Also check if any CDS feature Function contains PHAROKKA keys
+    let mut has_pharokka_function = false;
+    
+    for ann in annotations {
+        let length = (ann.end - ann.start + 1) as usize;
+        
+        // Only group annotations that have a locus_tag
+        if let Some(ref locus_tag) = ann.locus_tag {
+            let key = (locus_tag.clone(), ann.feature_type.clone());
+            group_max_length.entry(key)
+                .and_modify(|max| { if length > *max { *max = length; } })
+                .or_insert(length);
+        }
+        
+        // Check if this is a CDS with a PHAROKKA function
+        if ann.feature_type == "CDS" {
+            if let Some(function) = &ann.function {
+                let func_lower = function.to_lowercase();
+                for pharokka_key in &pharokka_keys {
+                    if func_lower.contains(pharokka_key) {
+                        has_pharokka_function = true;
+                        break;
+                    }
+                }
+                if has_pharokka_function {
+                    break;  // Early exit once we find one
+                }
+            }
+        }
+    }
+
     let mut appender = conn.appender("Contig_annotation")
         .context("Failed to create Contig_annotation appender")?;
 
+    // Track which (locus_tag, Type) groups have already had their longest assigned
+    // This ensures only the FIRST occurrence gets TRUE when multiple isoforms have equal max length
+    let mut longest_assigned: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
+
     for ann in annotations {
+        let length = (ann.end - ann.start + 1) as usize;
+        
+        // Determine Longest_isoform value:
+        // - NULL if no locus_tag (always displayed)
+        // - TRUE if this is the longest in its (locus_tag, Type) group AND is the first to be marked
+        // - FALSE if it's not the longest in its (locus_tag, Type) group OR already marked
+        let longest_isoform: Option<bool> = if let Some(ref locus_tag) = ann.locus_tag {
+            let key = (locus_tag.clone(), ann.feature_type.clone());
+            let max_length = *group_max_length.get(&key).unwrap_or(&0);
+            
+            // Only mark as longest if:
+            // 1. Length matches the max for this group
+            // 2. This group hasn't been assigned a longest yet (tie-breaking: first wins)
+            let is_longest = if length == max_length && !longest_assigned.contains(&key) {
+                longest_assigned.insert(key);
+                true
+            } else {
+                false
+            };
+            Some(is_longest)
+        } else {
+            None  // NULL for features without locus_tag
+        };
+        
         appender.append_row(params![
             ann.contig_id,
             ann.start,
@@ -727,6 +903,8 @@ fn insert_annotations(conn: &Connection, annotations: &[FeatureAnnotation]) -> R
             &ann.product,
             &ann.function,
             &ann.phrog,
+            &ann.locus_tag,
+            longest_isoform,
         ])
         .with_context(|| format!(
             "Failed to append annotation: contig_id={}, start={}, end={}, type={}",
@@ -735,6 +913,40 @@ fn insert_annotations(conn: &Connection, annotations: &[FeatureAnnotation]) -> R
     }
 
     appender.flush().context("Failed to flush Contig_annotation appender")?;
+    
+    // Check if any locus_tag appears more than once (isoforms present)
+    let mut locus_tag_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for ann in annotations {
+        if let Some(ref locus_tag) = ann.locus_tag {
+            *locus_tag_counts.entry(locus_tag.clone()).or_insert(0) += 1;
+        }
+    }
+    let has_isoforms = locus_tag_counts.values().any(|&count| count > 1);
+    
+    // Insert constants into Constants table
+    conn.execute(
+        "INSERT INTO Constants (Constant, Status) VALUES ('pharokka', ?), ('isoforms', ?)",
+        params![has_pharokka_function, has_isoforms],
+    )
+    .context("Failed to insert constants")?;
+    
+    Ok(())
+}
+
+/// Populate Annotated_types table with distinct Type values from Contig_annotation ordered by frequency.
+fn populate_annotated_types(conn: &Connection) -> Result<()> {
+    conn.execute(
+        "INSERT INTO Annotated_types (Type_id, Type_name, Frequency)
+         SELECT
+             ROW_NUMBER() OVER (ORDER BY COUNT(*) DESC) AS Type_id,
+             \"Type\" AS Type_name,
+             COUNT(*) AS Frequency
+         FROM Contig_annotation
+         GROUP BY \"Type\"
+         ORDER BY COUNT(*) DESC",
+        [],
+    )
+    .context("Failed to populate Annotated_types table")?;
     Ok(())
 }
 
@@ -743,9 +955,10 @@ fn create_variable_tables(conn: &Connection) -> Result<()> {
     for (i, v) in VARIABLES.iter().enumerate() {
         // Special case: contig-level data is stored in separate Contig_* tables
         let table_name = match v.name {
-            "direct_repeats" => "Contig_DirectRepeats".to_string(),
-            "inverted_repeats" => "Contig_InvertedRepeats".to_string(),
+            "direct_repeats" => "Contig_directRepeats".to_string(),
+            "inverted_repeats" => "Contig_invertedRepeats".to_string(),
             "gc_content" => "Contig_GCContent".to_string(),
+            "gc_skew" => "Contig_GCSkew".to_string(),
             _ => feature_table_name(v.name),
         };
 
@@ -994,9 +1207,9 @@ fn cleanup_unused_variables(conn: &Connection, created_tables: &HashSet<String>)
     let mut deleted_count = 0;
     for (var_name, table_name) in rows {
         // Skip special cases:
-        // - direct_repeats/inverted_repeats/gc_content: data stored in Contig_* tables (always exist)
+        // - direct_repeats/inverted_repeats/gc_content/gc_skew: data stored in Contig_* tables (always exist)
         // - primary_reads: is a VIEW, not a table (depends on plus/minus tables)
-        if var_name == "direct_repeats" || var_name == "inverted_repeats" || var_name == "gc_content" {
+        if var_name == "direct_repeats" || var_name == "inverted_repeats" || var_name == "gc_content" || var_name == "gc_skew" {
             continue;
         }
 
@@ -1079,7 +1292,9 @@ pub struct RepeatsData {
 pub struct GCContentData {
     pub contig_name: String,
     pub runs: Vec<GCContentRun>,
+    pub skew_runs: Vec<GCSkewRun>,
     pub stats: GCStats,
+    pub skew_stats: GCSkewStats,
 }
 
 /// Completeness data for a contig.

@@ -14,7 +14,6 @@
 //!     output_dir="/path/to/output",
 //!     modules=["Coverage", "Misalignment", "Long-reads", "Paired-reads", "Phage termini"],
 //!     threads=8,
-//!     annotation_tool="pharokka",
 //! )
 //! # result = {"samples_processed": 10, "samples_failed": 0, "total_time": 123.4}
 //! ```
@@ -67,7 +66,6 @@ mod python {
     ///     output_db: Output database file path (.db)
     ///     modules: List of modules to compute: "Coverage", "Misalignment", "Long-reads", "Paired-reads", "Phage termini"
     ///     threads: Number of threads to use
-    ///     annotation_tool: Annotation tool name (e.g., "pharokka")
     ///     min_coverage: Minimum coverage percentage for contig inclusion (default 50.0)
     ///     compress_ratio: Compression ratio threshold (default 10.0)
     ///     circular: Whether the genome is circular (default False)
@@ -79,7 +77,7 @@ mod python {
     ///         - "samples_failed": int
     ///         - "total_time": float (seconds)
     #[pyfunction]
-    #[pyo3(signature = (genbank_path, bam_files, output_db, modules, threads, sequencing_type=None, annotation_tool="", min_coverage=50.0, curve_ratio=10.0, bar_ratio=10.0, contig_variation_percentage=10.0, circular=false, create_indexes=true, autoblast_file=""))]
+    #[pyo3(signature = (genbank_path, bam_files, output_db, modules, threads, sequencing_type=None, min_coverage=50.0, curve_ratio=10.0, bar_ratio=10.0, contig_variation_percentage=10.0, circular=false, create_indexes=true, autoblast_file=""))]
     fn process_all_samples<'py>(
         py: Python<'py>,
         genbank_path: &str,
@@ -88,7 +86,6 @@ mod python {
         modules: Vec<String>,
         threads: usize,
         sequencing_type: Option<&str>,
-        annotation_tool: &str,
         min_coverage: f64,
         curve_ratio: f64,
         bar_ratio: f64,
@@ -97,6 +94,7 @@ mod python {
         create_indexes: bool,
         autoblast_file: &str,
     ) -> PyResult<Bound<'py, PyDict>> {
+        use crate::gc_content::GCParams;
         use crate::processing::{run_all_samples, ProcessConfig};
         use crate::processing_phage_packaging::PhageTerminiConfig;
         use std::path::PathBuf;
@@ -113,6 +111,7 @@ mod python {
             circular,
             sequencing_type: seq_type,
             phagetermini_config: PhageTerminiConfig::default(),
+            gc_params: GCParams::default(),
         };
 
         // Convert string paths to PathBuf
@@ -125,7 +124,6 @@ mod python {
                 &bam_paths,
                 Path::new(output_db),
                 &modules,
-                annotation_tool,
                 &config,
                 create_indexes,
                 Path::new(autoblast_file),

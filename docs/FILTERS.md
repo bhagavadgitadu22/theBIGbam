@@ -34,12 +34,14 @@ Once your filters are set, the available contigs and samples update accordingly,
 
 Those metrics are available only if a Genbank file was provided (or at least an assembly file for some of them).
 
-| Metric                  | Definition                                                                                                                           |
-| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
-| Contig length           | Length of the contig sequence, in base pairs (bp)                                                                                    |
-| GC (mean, median or sd) | Mean, median, or standard deviation of GC content (%) calculated across the contig using 100 bp sliding windows                      |
-| Duplication (%)         | Proportion of the contig that is repeated at least once, calculated from an autoblast of the contig                                  |
-| Annotation metrics      | Represents the info extracted from the Genbank file: for pharokka for instance, 3 columns Product, Function and Phrog can be queried |
+| Metric                     | Definition                                                                                                                                 |
+| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| Contig length              | Length of the contig sequence, in base pairs (bp)                                                                                          |
+| GC content (mean and sd)   | Mean, median, or standard deviation of GC content (%) calculated across the contig using non-overlapping 500 bp sliding windows            |
+| GC skew amplitude          | Amplitude of GC skew (*max(GC skew)−min(GC skew)*) calculated across the contig using non-overlapping 1kbp sliding windows                 |
+| % positive GC skew windows | % of the 1kbp windows with positive skew                                                                                                   |
+| Duplication (%)            | Proportion of the contig that is repeated at least once, calculated from an autoblast of the contig                                        |
+| Annotation metrics         | Represents the info extracted from the Genbank file: for pharokka for instance, 4 columns Type, Product, Function and Phrog can be queried |
 
 Additional columns might be available depending on the information you added per contig using **the bigbam add-contig-metadata** command.
 
