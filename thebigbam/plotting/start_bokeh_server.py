@@ -9,7 +9,6 @@ import panel as pn
 from bokeh.layouts import column, row
 from bokeh.models import Div, InlineStyleSheet, Tooltip
 from bokeh.models.widgets import CheckboxGroup, HelpButton, Button, RadioButtonGroup, CheckboxButtonGroup, Select, TextInput, Spinner, MultiChoice
-from bokeh.models.plots import GridPlot
 
 # Import the plotting function from the repo
 from .plotting_data_per_sample import generate_bokeh_plot_per_sample
@@ -18,7 +17,6 @@ from ..database.database_getters import get_filtering_metadata, ANNOTATION_EXCLU
 from .searchable_select import SearchableSelect
 
 def build_controls(conn):
-
     """Query DB and return widgets and helper mappings."""
     cur = conn.cursor()
 
@@ -141,7 +139,8 @@ def build_controls(conn):
         value=contigs[0] if len(contigs) == 1 else "",
         options=contigs,
         placeholder="Type to search contigs...",
-        sizing_mode="stretch_width"
+        sizing_mode="stretch_width",
+        margin=(0, 5, 0, 5)
     )
 
     # Widget Selector for Samples (autocomplete with max 20 suggestions)
@@ -154,7 +153,8 @@ def build_controls(conn):
         value=samples[0] if len(samples) == 1 else "",
         options=samples,
         placeholder="Type to search samples...",
-        sizing_mode="stretch_width"
+        sizing_mode="stretch_width",
+        margin=(0, 5, 0, 5)
     )
 
     # Build presence mappings: sample -> contigs and contig -> samples
@@ -1112,9 +1112,9 @@ def create_layout(db_path):
         contigs_count = len(filtered_contigs)
         samples_count = len(filtered_samples)
 
-        filtering_title.text = f"<b>Filtering</b> ({presences_count} contig/sample pairs)"
-        contig_title.text = f"<b>Contigs</b> ({contigs_count} available)"
-        sample_title.text = f"<b>Samples</b> ({samples_count} available)"
+        filtering_title.text = f"<span style='font-size: 1.2em;'><b>Filtering</b></span> ({presences_count} contig/sample pairs)"
+        contig_title.text = f"<span style='font-size: 1.2em;'><b>Contigs</b></span> ({contigs_count} available)"
+        sample_title.text = f"<span style='font-size: 1.2em;'><b>Samples</b></span> ({samples_count} available)"
 
     ## Views function
     # Enforce single-variable selection when in "All samples" view
@@ -1167,7 +1167,7 @@ def create_layout(db_path):
 
         # Toggle Sample section - hide entirely in All Samples view
         separator_samples.visible = not is_all
-        sample_header.visible = not is_all
+        sample_title.visible = not is_all
         above_sample_content.visible = not is_all
         widgets['sample_select'].visible = not is_all
 
@@ -2079,9 +2079,9 @@ def create_layout(db_path):
 
 
     ## Build Sample section
-    sample_toggle_btn = Button(label="▼", width=20, height=20, button_type="primary", align="center", margin=0, stylesheets=[toggle_stylesheet])
-    sample_title = Div(text="<b>Samples</b>", align="center")
-    sample_header = row(sample_toggle_btn, sample_title, sizing_mode="stretch_width", align="center", margin=(0, 0, 5, 0))
+    #sample_toggle_btn = Button(label="▼", width=20, height=20, button_type="primary", align="center", margin=0, stylesheets=[toggle_stylesheet])
+    sample_title = Div(text="<b>Samples</b>")
+    #sample_header = row(sample_toggle_btn, sample_title, sizing_mode="stretch_width", align="center", margin=(0, 0, 5, 0))
 
     above_sample_children = []
     above_sample_content = column(
@@ -2089,7 +2089,7 @@ def create_layout(db_path):
         visible=True, sizing_mode="stretch_width"
     )
 
-    sample_toggle_btn.on_click(make_toggle_callback(sample_toggle_btn, above_sample_content))
+    #sample_toggle_btn.on_click(make_toggle_callback(sample_toggle_btn, above_sample_content))
     def _on_sample_change(event):
         global_toggle_lock['locked'] = True
         refresh_contig_options_unlocked()
@@ -2107,12 +2107,12 @@ def create_layout(db_path):
     contig_toggle_btn = Button(label="▼", width=20, height=20, button_type="primary", align="center", margin=0, stylesheets=[toggle_stylesheet])
     contig_toggle_btn.styles = {'padding': '0px', 'line-height': '20px'}
     contig_title = Div(text="<b>Contigs</b>", align="center")
-    contig_header = row(contig_toggle_btn, contig_title, sizing_mode="stretch_width", align="center", margin=(0, 0, 5, 0))
+    contig_header = row(contig_toggle_btn, contig_title, sizing_mode="stretch_width", align="center", margin=(0, 0, 0, 0))
     above_contig_children = []
     
     above_contig_content = column(
         *above_contig_children,
-        visible=True, sizing_mode="stretch_width"
+        visible=True, sizing_mode="stretch_width", margin=(0, 0, 0, 0)
     )
     contig_toggle_btn.on_click(make_toggle_callback(contig_toggle_btn, above_contig_content))
 
@@ -2134,8 +2134,8 @@ def create_layout(db_path):
 
 
     ## Build Variables section - TWO SEPARATE SECTIONS for each view
-    variables_title_one = Div(text="<b>Variables</b>")
-    variables_title_all = Div(text="<b>Variables</b>")
+    variables_title_one = Div(text="<span style='font-size: 1.2em;'><b>Variables</b></span>")
+    variables_title_all = Div(text="<span style='font-size: 1.2em;'><b>Variables</b></span>")
     genome_cbg_one = None  # Will store reference to Genome module's CheckboxButtonGroup (shared between views)
 
     # Build "One Sample" view variables section
@@ -2320,23 +2320,23 @@ def create_layout(db_path):
         if combined_features_cbg is not None:
             combined_features_cbg.visible = True
             genome_children.append(combined_features_cbg)
-        genome_section = column(*genome_children, visible=True, sizing_mode="stretch_width", margin=(0, 5, 0, 5))
+        genome_section = column(*genome_children, visible=True, sizing_mode="stretch_width", margin=(0, 0, 0, 0))
 
     # Add Genome section to contig_content
     below_contig_children = []
     
     # Create position range inputs
     from_position_input = TextInput(value="0", placeholder="Start position", sizing_mode="stretch_width", margin=(0, 0, 0, 0))
-    to_position_input = TextInput(value="", placeholder="End position", sizing_mode="stretch_width", margin=(0, 10, 0, 0))
+    to_position_input = TextInput(value="", placeholder="End position", sizing_mode="stretch_width", margin=(0, 5, 0, 0))
     
-    position_label_from = Div(text="From", width=40, margin=(5, 5, 5, 10))
-    position_label_to = Div(text="to", width=25, margin=(5, 5, 5, 5))
+    position_label_from = Div(text="From", width=40, margin=(5, 0, 5, 5))
+    position_label_to = Div(text="to", width=25, margin=(5, 0, 5, 5))
     
     position_row = row(
         position_label_from, from_position_input, 
         position_label_to, to_position_input,
         sizing_mode="stretch_width",
-        margin=(10, 0, 0, 0)
+        margin=(10, 0, 5, 0)
     )
     
     below_contig_children.append(position_row)
@@ -2346,7 +2346,7 @@ def create_layout(db_path):
 
     below_contig_content = column(
         *below_contig_children,
-        visible=True, sizing_mode="stretch_width"
+        visible=True, sizing_mode="stretch_width", margin=(0, 0, 0, 0)
     )
     contig_toggle_btn.on_click(make_toggle_callback(contig_toggle_btn, below_contig_content))
 
@@ -2449,11 +2449,11 @@ def create_layout(db_path):
     update_section_titles()
 
     ## Put together all DOM elements
-    # Create visual separators (horizontal lines) using background color
-    separator_filtering = Div(text="", height=1, sizing_mode="stretch_width", styles={'background-color': '#333', 'margin': '10px 0', 'min-height': '1px'})
-    separator_samples = Div(text="", height=1, sizing_mode="stretch_width", styles={'background-color': '#333', 'margin': '10px 0', 'min-height': '1px'})
-    separator_contigs = Div(text="", height=1, sizing_mode="stretch_width", styles={'background-color': '#333', 'margin': '10px 0', 'min-height': '1px'})
-    separator_variables = Div(text="", height=1, sizing_mode="stretch_width", styles={'background-color': '#333', 'margin': '10px 0', 'min-height': '1px'})
+    # Create visual separators (horizontal lines) - using 2px height for consistent rendering at all zoom levels
+    separator_filtering = Div(text="", height=2, sizing_mode="stretch_width", styles={'background-color': '#333', 'margin-top': '10px', 'margin-bottom': '10px'})
+    separator_samples = Div(text="", height=2, sizing_mode="stretch_width", styles={'background-color': '#333', 'margin-top': '10px', 'margin-bottom': '10px'})
+    separator_contigs = Div(text="", height=2, sizing_mode="stretch_width", styles={'background-color': '#333', 'margin-top': '10px', 'margin-bottom': '10px'})
+    separator_variables = Div(text="", height=2, sizing_mode="stretch_width", styles={'background-color': '#333', 'margin-top': '10px', 'margin-bottom': '10px'})
     
     # Gene map is now part of the Genome module's CheckboxButtonGroup
     # Build controls list conditionally based on whether samples exist
@@ -2461,7 +2461,7 @@ def create_layout(db_path):
     if widgets['has_samples']:
         controls_children = [logo, views, separator_filtering, filtering_header, filtering_content,
                              separator_contigs, contig_header, above_contig_content, widgets['contig_select'], below_contig_content,
-                             separator_samples, sample_header, above_sample_content, widgets['sample_select'],
+                             separator_samples, sample_title, above_sample_content, widgets['sample_select'],
                              separator_variables,
                              variables_section_one,  # One Sample view (with module checkboxes)
                              variables_section_all,  # All Samples view (title headers only)
