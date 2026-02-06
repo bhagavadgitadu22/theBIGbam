@@ -31,7 +31,8 @@ def build_controls(conn):
     # Check if Completeness table exists and has data
     has_completeness = False
     try:
-        cur.execute("SELECT 1 FROM Completeness LIMIT 1")
+        cur = conn.cursor()
+        cur.execute("SELECT 1 FROM information_schema.tables WHERE table_name = 'Completeness'")
         has_completeness = cur.fetchone() is not None
     except Exception:
         pass
@@ -169,22 +170,10 @@ def build_controls(conn):
         sample_to_contigs.setdefault(sample_name, set()).add(contig_name)
         contig_to_samples.setdefault(contig_name, set()).add(sample_name)
 
-    # Modules and variables - only show those with data in database
-    # First, identify which feature tables exist (tables only exist if they have data)
-    cur.execute("SELECT DISTINCT Feature_table_name FROM Variable")
-    feature_tables = [r[0] for r in cur.fetchall()]
-
-    tables_with_data = set()
-    for table_name in feature_tables:
-        try:
-            cur.execute(f"SELECT 1 FROM \"{table_name}\" LIMIT 1")
-            tables_with_data.add(table_name)
-        except Exception:
-            pass  # Table doesn't exist
-
     # Get variables that have data (their feature table exists)
     cur.execute("SELECT DISTINCT Variable_name, Feature_table_name FROM Variable")
-    variables = [r[0] for r in cur.fetchall() if r[1] in tables_with_data]
+    variables = [r[0] for r in cur.fetchall()]
+    tables_with_data = [v[1] for v in variables]
 
     # Get modules that have at least one variable with data
     # Define the display order for modules
@@ -192,7 +181,7 @@ def build_controls(conn):
 
     cur.execute("SELECT DISTINCT Module FROM Variable WHERE Feature_table_name IN ({})".format(
         ','.join('?' * len(tables_with_data))
-    ), tuple(tables_with_data))
+    ), tuple(tables_with_data))  # Pass only variable names to match with Feature_table_name
     modules_from_db = [r[0] for r in cur.fetchall()]
 
     # Sort modules according to MODULE_ORDER, keeping any unknown modules at the end
@@ -1836,7 +1825,8 @@ def create_layout(db_path):
     has_sequence_data = False
     try:
         cur = conn.cursor()
-        cur.execute("SELECT 1 FROM Contig_sequence LIMIT 1")
+        cur.execute("SELECT 1 FROM information_schema.tables WHERE table_name = 'Contig_sequence'")
+        has_sequence_data = cur.fetchone() is not None
         has_sequence_data = cur.fetchone() is not None
     except Exception:
         pass
