@@ -33,6 +33,32 @@ pub struct PeakArea {
     pub expected_clippings: f64,
 }
 
+/// Clipping peak area for phage termini detection.
+/// Represents a merged region of nearby clipping positions with significant signal.
+#[derive(Clone, Debug)]
+pub struct ClippingPeakArea {
+    /// First position of the merged area
+    pub start_pos: i32,
+    /// Last position of the merged area  
+    pub end_pos: i32,
+    /// Canonical start position (translated to first DTR region)
+    pub canonical_start: i32,
+    /// Canonical end position (translated to first DTR region)
+    pub canonical_end: i32,
+    /// Position with highest clipping count
+    pub center_pos: i32,
+    /// Total clippings in this area
+    pub total_clippings: u64,
+    /// Maximum clipping count at any position
+    pub max_clippings: u64,
+    /// Average primary_reads coverage in this area (for filtering)
+    pub avg_coverage: f64,
+    /// Number of positions merged into this area
+    pub num_positions: u32,
+    /// Whether this area passed strict filters
+    pub kept: bool,
+}
+
 /// Configuration for phage termini detection.
 #[derive(Clone, Copy)]
 pub struct PhageTerminiConfig {
@@ -44,6 +70,13 @@ pub struct PhageTerminiConfig {
     /// Duplications must have one region starting within this distance from position 1
     /// and the other region ending within this distance from the contig end.
     pub max_distance_duplication: i32,
+    /// Minimum SPC to consider a position for merging (loose pre-filter).
+    pub min_spc_for_merge: i32,
+    /// Minimum frequency (%) of coverage_reduced for merging (loose pre-filter).
+    pub min_frequency_for_merge: i32,
+    /// Decay factor for density-based peak merging (0.0-1.0).
+    /// Controls how much density can drop when merging areas.
+    pub decay_factor_for_merge: f64,
     /// Minimum event count to consider a signal significant (applies to both peaks and clippings)
     pub min_events: i32,
     /// Minimum frequence of events to consider a signal significant (applies to both peaks and clippings)
@@ -52,14 +85,11 @@ pub struct PhageTerminiConfig {
     pub max_distance_peaks: i32,
     /// Significance threshold for clipping test (p-value threshold)
     /// Lower values are more stringent (require higher confidence that peak is real terminus)
+    /// NOTE: Currently unused - kept for potential future use
+    #[allow(dead_code)]
     pub clipping_significance: f64,
-    /// Decay factor for density-based peak merging (0.0-1.0).
-    /// Controls how much density can drop when merging areas.
-    pub decay_factor_for_merge: f64,
-    /// Minimum SPC to consider a position for merging (loose pre-filter).
-    pub min_spc_for_merge: i32,
-    /// Minimum frequency (%) of coverage_reduced for merging (loose pre-filter).
-    pub min_frequency_for_merge: i32,
+
+
 }
 
 impl Default for PhageTerminiConfig {
@@ -68,13 +98,13 @@ impl Default for PhageTerminiConfig {
             min_aligned_fraction: 90,
             min_identity_dtr: 90,
             max_distance_duplication: 100,
+            min_spc_for_merge: 3,
+            min_frequency_for_merge: 3,
+            decay_factor_for_merge: 0.8,
             min_events: 10,
             min_frequency: 10,
             max_distance_peaks: 20,
             clipping_significance: 0.05, // 95% confidence interval
-            decay_factor_for_merge: 0.8,
-            min_spc_for_merge: 3,
-            min_frequency_for_merge: 1,
         }
     }
 }
@@ -118,13 +148,13 @@ struct MicroArea {
 }
 
 impl MicroArea {
-    /// Calculate density using canonical span
+    /// Calculate tau-based density (total_spc / sum_coverage)
+    /// This normalizes for coverage variation across the genome.
     fn density(&self) -> f64 {
-        let span = (self.canonical_end - self.canonical_start + 1) as f64;
-        if span <= 0.0 {
-            return self.total_spc as f64;
+        if self.sum_coverage == 0 {
+            return 0.0;
         }
-        self.total_spc as f64 / span
+        self.total_spc as f64 / self.sum_coverage as f64
     }
 }
 
@@ -228,6 +258,8 @@ pub struct DtrRegion {
 
 /// Statistical test for excess clippings with detailed reason for rejection.
 /// Returns (passes_test, expected_clippings, rejection_reason).
+/// NOTE: Currently unused - kept for potential future use.
+#[allow(dead_code)]
 fn is_area_clipping_acceptable_with_reason(
     total_spc: u64,
     sum_clippings: u64,
@@ -273,6 +305,8 @@ fn is_area_clipping_acceptable_with_reason(
 
 /// Sum pre-filtered clippings within an area and max_distance_peaks of its edges.
 /// Uses simple circular/linear distance - DTR deduplication happens at classification.
+/// NOTE: Currently unused - kept for potential future use.
+#[allow(dead_code)]
 fn sum_prefiltered_clippings_for_area(
     area: &PeakArea,
     clippings: &[u64],           // already pre-filtered (zeros = insignificant)
@@ -357,6 +391,7 @@ fn density_based_merge(
             canonical_start: canonical,
             canonical_end: canonical,
             total_spc: spc,
+            sum_coverage: cov,
             max_spc_pos: pos,
             max_spc: spc,
             num_positions: 1,
@@ -500,6 +535,419 @@ fn density_based_merge(
     areas
 }
 
+/// Density-based merging for clipping positions.
+/// Similar to density_based_merge but uses primary_reads as coverage reference.
+fn density_based_merge_clippings(
+    clippings: &[u64],
+    primary_reads: &[u64],
+    config: &PhageTerminiConfig,
+    genome_length: usize,
+    circular: bool,
+    dtr_regions: &[DtrRegion],
+) -> Vec<MicroArea> {
+    let min_spc = config.min_spc_for_merge as u64;
+    let min_freq = config.min_frequency_for_merge as f64 / 100.0;
+    let max_distance = config.max_distance_peaks;
+    let decay_factor = config.decay_factor_for_merge;
+
+    // Step 1: Initialize micro-areas from qualifying positions
+    let mut areas: Vec<MicroArea> = Vec::new();
+    for (idx, &clips) in clippings.iter().enumerate() {
+        if clips < min_spc {
+            continue;
+        }
+        let pos = (idx + 1) as i32;
+        let cov = primary_reads.get(idx).copied().unwrap_or(0);
+        let threshold = (cov as f64 * min_freq) as u64;
+        if clips < threshold {
+            continue;
+        }
+
+        // Compute canonical position for span/density calculation
+        let canonical = translate_to_first_dtr_region(pos, dtr_regions);
+
+        areas.push(MicroArea {
+            start_pos: pos,
+            end_pos: pos,
+            canonical_start: canonical,
+            canonical_end: canonical,
+            total_spc: clips,
+            max_spc_pos: pos,
+            max_spc: clips,
+            num_positions: 1,
+        });
+    }
+
+    if areas.is_empty() {
+        return areas;
+    }
+
+    // Sort by canonical position for efficient scanning
+    areas.sort_by_key(|a| a.canonical_start);
+
+    // Step 2: Greedy density-based merge (same as for reads)
+    let mut merged = true;
+    while merged {
+        merged = false;
+
+        let mut best_i: Option<usize> = None;
+        let mut best_j: Option<usize> = None;
+        let mut best_dist = i32::MAX;
+
+        for i in 0..areas.len() {
+            for j in (i + 1)..areas.len() {
+                let close = dtr_aware_close_enough(
+                    areas[i].end_pos,
+                    areas[j].start_pos,
+                    max_distance,
+                    genome_length,
+                    circular,
+                    dtr_regions,
+                );
+                if !close {
+                    continue;
+                }
+
+                let dist = (areas[j].canonical_start - areas[i].canonical_end).abs();
+                if dist < best_dist {
+                    best_dist = dist;
+                    best_i = Some(i);
+                    best_j = Some(j);
+                }
+            }
+        }
+
+        if let (Some(i), Some(j)) = (best_i, best_j) {
+            let density_i = areas[i].density();
+            let density_j = areas[j].density();
+            let min_density = density_i.min(density_j);
+
+            let combined_spc = areas[i].total_spc + areas[j].total_spc;
+            let combined_canonical_start = areas[i].canonical_start.min(areas[j].canonical_start);
+            let combined_canonical_end = areas[i].canonical_end.max(areas[j].canonical_end);
+            let combined_span = (combined_canonical_end - combined_canonical_start + 1) as f64;
+            let combined_density = combined_spc as f64 / combined_span;
+
+            if combined_density >= min_density * decay_factor {
+                let area_j = areas.remove(j);
+
+                areas[i].start_pos = areas[i].start_pos.min(area_j.start_pos);
+                areas[i].end_pos = areas[i].end_pos.max(area_j.end_pos);
+                areas[i].canonical_start = combined_canonical_start;
+                areas[i].canonical_end = combined_canonical_end;
+                areas[i].total_spc = combined_spc;
+                areas[i].num_positions += area_j.num_positions;
+
+                if area_j.max_spc > areas[i].max_spc {
+                    areas[i].max_spc = area_j.max_spc;
+                    areas[i].max_spc_pos = area_j.max_spc_pos;
+                }
+
+                merged = true;
+            }
+        }
+    }
+
+    // Step 3: Handle circular wrap-around merge
+    if circular && areas.len() > 1 {
+        let first_idx = 0;
+        let last_idx = areas.len() - 1;
+
+        let close = dtr_aware_close_enough(
+            areas[last_idx].end_pos,
+            areas[first_idx].start_pos,
+            max_distance,
+            genome_length,
+            circular,
+            dtr_regions,
+        );
+
+        if close {
+            let density_first = areas[first_idx].density();
+            let density_last = areas[last_idx].density();
+            let min_density = density_first.min(density_last);
+
+            let combined_spc = areas[first_idx].total_spc + areas[last_idx].total_spc;
+            let span_first = (areas[first_idx].canonical_end - areas[first_idx].canonical_start + 1) as f64;
+            let span_last = (areas[last_idx].canonical_end - areas[last_idx].canonical_start + 1) as f64;
+            let combined_span = span_first + span_last;
+            let combined_density = combined_spc as f64 / combined_span;
+
+            if combined_density >= min_density * decay_factor {
+                let first_area = areas.remove(first_idx);
+                let last_idx = areas.len() - 1;
+
+                areas[last_idx].end_pos = first_area.end_pos;
+                areas[last_idx].canonical_start = areas[last_idx].canonical_start.min(first_area.canonical_start);
+                areas[last_idx].canonical_end = areas[last_idx].canonical_end.max(first_area.canonical_end);
+                areas[last_idx].total_spc = combined_spc;
+                areas[last_idx].num_positions += first_area.num_positions;
+
+                if first_area.max_spc > areas[last_idx].max_spc {
+                    areas[last_idx].max_spc = first_area.max_spc;
+                    areas[last_idx].max_spc_pos = first_area.max_spc_pos;
+                }
+            }
+        }
+    }
+
+    areas
+}
+
+/// Convert MicroAreas to ClippingPeakAreas, computing average coverage.
+fn convert_micro_to_clipping_peak_areas(
+    micro_areas: Vec<MicroArea>,
+    primary_reads: &[u64],
+) -> Vec<ClippingPeakArea> {
+    micro_areas
+        .into_iter()
+        .map(|ma| {
+            // Calculate average primary_reads coverage within the area
+            let mut sum_cov = 0u64;
+            let mut count = 0u64;
+            for pos in ma.start_pos..=ma.end_pos {
+                let idx = (pos - 1) as usize;
+                if let Some(&cov) = primary_reads.get(idx) {
+                    sum_cov += cov;
+                    count += 1;
+                }
+            }
+            let avg_coverage = if count > 0 {
+                sum_cov as f64 / count as f64
+            } else {
+                0.0
+            };
+
+            ClippingPeakArea {
+                start_pos: ma.start_pos,
+                end_pos: ma.end_pos,
+                canonical_start: ma.canonical_start,
+                canonical_end: ma.canonical_end,
+                center_pos: ma.max_spc_pos,
+                total_clippings: ma.total_spc,
+                max_clippings: ma.max_spc,
+                avg_coverage,
+                num_positions: ma.num_positions,
+                kept: true,
+            }
+        })
+        .collect()
+}
+
+/// Apply strict filters to clipping areas (min_events=10, min_frequency=10% of primary_reads).
+fn apply_strict_filters_to_clipping_areas(
+    areas: &mut [ClippingPeakArea],
+    min_events: u64,
+    min_frequency: f64,
+) {
+    for area in areas.iter_mut() {
+        let threshold = (area.avg_coverage * min_frequency) as u64;
+        if area.total_clippings < min_events || area.total_clippings < threshold {
+            area.kept = false;
+        }
+    }
+}
+
+/// Filter clipping areas based on DTR requirements.
+/// For DTR genomes, only keep ClippingPeakAreas that exist in BOTH DTR regions.
+/// Areas not in any DTR region are kept as-is.
+fn filter_dtr_clipping_areas(
+    areas: &mut Vec<ClippingPeakArea>,
+    dtr_regions: &[DtrRegion],
+    max_distance: i32,
+) {
+    if dtr_regions.is_empty() {
+        return;
+    }
+
+    // Mark areas to remove
+    let mut to_remove: Vec<usize> = Vec::new();
+
+    for (idx, area) in areas.iter().enumerate() {
+        if !area.kept {
+            continue; // Already filtered out
+        }
+
+        let pos = area.center_pos;
+
+        // Check if this area is in any DTR region
+        for dtr in dtr_regions {
+            if !dtr.is_direct {
+                continue; // Only DTR, not ITR
+            }
+
+            let in_first = pos >= dtr.first_start && pos <= dtr.first_end;
+            let in_second = pos >= dtr.second_start && pos <= dtr.second_end;
+
+            if in_first {
+                // Must have a matching area in second region
+                let equiv_pos = dtr.second_start + (pos - dtr.first_start);
+                let has_match = areas.iter().enumerate().any(|(j, other)| {
+                    j != idx && other.kept && {
+                        let other_pos = other.center_pos;
+                        (other_pos - equiv_pos).abs() <= max_distance
+                    }
+                });
+                if !has_match {
+                    to_remove.push(idx);
+                }
+            } else if in_second {
+                // Must have a matching area in first region
+                let equiv_pos = dtr.first_start + (pos - dtr.second_start);
+                let has_match = areas.iter().enumerate().any(|(j, other)| {
+                    j != idx && other.kept && {
+                        let other_pos = other.center_pos;
+                        (other_pos - equiv_pos).abs() <= max_distance
+                    }
+                });
+                if !has_match {
+                    to_remove.push(idx);
+                }
+            }
+        }
+    }
+
+    // Mark as not kept (don't remove to preserve indices for debug)
+    for idx in to_remove {
+        areas[idx].kept = false;
+    }
+}
+
+/// Merge and filter clipping arrays into ClippingPeakAreas.
+/// Pipeline: loose prefilter → density merge → strict filters → DTR filter
+fn filter_and_merge_clippings(
+    left_clippings: &[u64],
+    right_clippings: &[u64],
+    primary_reads: &[u64],
+    config: &PhageTerminiConfig,
+    genome_length: usize,
+    circular: bool,
+    dtr_regions: &[DtrRegion],
+) -> (Vec<ClippingPeakArea>, Vec<ClippingPeakArea>) {
+    let min_events = config.min_events as u64;
+    let min_frequency = config.min_frequency as f64 / 100.0;
+    let max_distance = config.max_distance_peaks;
+
+    // Left clippings: loose prefilter + density merge
+    let left_micro = density_based_merge_clippings(
+        left_clippings,
+        primary_reads,
+        config,
+        genome_length,
+        circular,
+        dtr_regions,
+    );
+    let mut left_areas = convert_micro_to_clipping_peak_areas(left_micro, primary_reads);
+
+    // Right clippings: loose prefilter + density merge
+    let right_micro = density_based_merge_clippings(
+        right_clippings,
+        primary_reads,
+        config,
+        genome_length,
+        circular,
+        dtr_regions,
+    );
+    let mut right_areas = convert_micro_to_clipping_peak_areas(right_micro, primary_reads);
+
+    // Apply strict filters (min_events=10, min_frequency=10%)
+    apply_strict_filters_to_clipping_areas(&mut left_areas, min_events, min_frequency);
+    apply_strict_filters_to_clipping_areas(&mut right_areas, min_events, min_frequency);
+
+    // DTR filter: keep only clipping areas present in both DTR regions
+    filter_dtr_clipping_areas(&mut left_areas, dtr_regions, max_distance);
+    filter_dtr_clipping_areas(&mut right_areas, dtr_regions, max_distance);
+
+    (left_areas, right_areas)
+}
+
+/// Check if a PeakArea is within max_distance of any kept ClippingPeakArea.
+/// If so, the PeakArea should be invalidated (excess clippings indicate it's not a real terminus).
+fn is_peak_area_near_clipping_area(
+    peak_area: &PeakArea,
+    clipping_areas: &[ClippingPeakArea],
+    max_distance: i32,
+    genome_length: usize,
+    circular: bool,
+) -> bool {
+    let peak_center = peak_area.center_pos;
+
+    for clip_area in clipping_areas {
+        if !clip_area.kept {
+            continue;
+        }
+
+        // Check distance from peak center to clipping area bounds
+        let dist_to_start = if circular {
+            circular_distance(peak_center, clip_area.start_pos, genome_length)
+        } else {
+            (peak_center - clip_area.start_pos).abs()
+        };
+
+        let dist_to_end = if circular {
+            circular_distance(peak_center, clip_area.end_pos, genome_length)
+        } else {
+            (peak_center - clip_area.end_pos).abs()
+        };
+
+        let dist_to_center = if circular {
+            circular_distance(peak_center, clip_area.center_pos, genome_length)
+        } else {
+            (peak_center - clip_area.center_pos).abs()
+        };
+
+        // Peak is "near" clipping area if within max_distance of any part
+        let min_dist = dist_to_start.min(dist_to_end).min(dist_to_center);
+
+        // Also check if peak is inside the clipping area
+        let inside = if clip_area.start_pos <= clip_area.end_pos {
+            peak_center >= clip_area.start_pos && peak_center <= clip_area.end_pos
+        } else {
+            // Wrap-around area
+            peak_center >= clip_area.start_pos || peak_center <= clip_area.end_pos
+        };
+
+        if inside || min_dist <= max_distance {
+            return true;
+        }
+    }
+
+    false
+}
+
+/// Invalidate PeakAreas that are near ClippingPeakAreas.
+/// Start areas are checked against left clipping areas.
+/// End areas are checked against right clipping areas.
+fn invalidate_peak_areas_by_clippings(
+    start_areas: &mut [PeakArea],
+    end_areas: &mut [PeakArea],
+    left_clipping_areas: &[ClippingPeakArea],
+    right_clipping_areas: &[ClippingPeakArea],
+    max_distance: i32,
+    genome_length: usize,
+    circular: bool,
+) {
+    // Invalidate start areas near left clipping areas
+    for area in start_areas.iter_mut() {
+        if !area.kept {
+            continue; // Already filtered out
+        }
+        if is_peak_area_near_clipping_area(area, left_clipping_areas, max_distance, genome_length, circular) {
+            area.kept = false;
+        }
+    }
+
+    // Invalidate end areas near right clipping areas
+    for area in end_areas.iter_mut() {
+        if !area.kept {
+            continue; // Already filtered out
+        }
+        if is_peak_area_near_clipping_area(area, right_clipping_areas, max_distance, genome_length, circular) {
+            area.kept = false;
+        }
+    }
+}
+
 /// Convert MicroAreas to PeakAreas, computing coverage and tau at the center.
 fn convert_micro_to_peak_areas(
     micro_areas: Vec<MicroArea>,
@@ -561,15 +1009,12 @@ fn apply_area_filters(
 /// Filter positions and merge nearby ones into peak areas, returning ALL areas with metadata.
 ///
 /// This implements:
-/// 1. Position Filtering: SPC >= 0.1*coverage_reduced AND SPC >= min_events
-/// 2. Peak Merging: merge nearby positions into areas (DTR-aware)
-/// 3. Clipping Pre-filter: identify significant clipping positions
-/// 4. Area Clipping Aggregation: sum pre-filtered clippings for each area
-/// 5. Statistical Test: filter areas with excess clippings
+/// 1. Density-based merge for read starts/ends (loose thresholds + strict area filters)
+/// 2. Density-based merge for clippings (loose thresholds + strict area filters + DTR filter)
+/// 3. Invalidate PeakAreas that are near ClippingPeakAreas
 ///
 /// Returns ALL areas (both kept and discarded)
 /// Each area has its `kept` field set to indicate whether it passed filtering
-/// Sets filtering metadata on each area (kept, sum_clippings, expected_clippings, clipped_ratio)
 pub fn filter_and_merge_to_areas_with_diagnostics(
     reads_starts: &[u64],
     reads_ends: &[u64],
@@ -577,7 +1022,7 @@ pub fn filter_and_merge_to_areas_with_diagnostics(
     right_clippings: &[u64],
     coverage_reduced: &[u64],
     primary_reads: &[u64],
-    clipped_ratio: f64,
+    _clipped_ratio: f64, // Kept for API compatibility, no longer used
     config: &PhageTerminiConfig,
     genome_length: usize,
     circular: bool,
@@ -586,10 +1031,8 @@ pub fn filter_and_merge_to_areas_with_diagnostics(
     let min_frequency = (config.min_frequency as f64) / 100.0;
     let min_events = config.min_events as u64;
     let max_distance_peaks = config.max_distance_peaks;
-    let clipping_significance = config.clipping_significance;
 
-    // Step 1-2: Density-based merge (uses loose thresholds internally, then strict area-level filters)
-    // This approach merges first, then filters - capturing scattered signals better than pre-filter→merge
+    // Step 1: Density-based merge for read starts/ends
     let start_micro = density_based_merge(
         reads_starts,
         coverage_reduced,
@@ -608,118 +1051,36 @@ pub fn filter_and_merge_to_areas_with_diagnostics(
     );
 
     // Convert MicroAreas to PeakAreas
-    let mut start_areas = convert_micro_to_peak_areas(&start_micro, reads_starts, reads_ends, coverage_reduced);
-    let mut end_areas = convert_micro_to_peak_areas(&end_micro, reads_starts, reads_ends, coverage_reduced);
+    let mut start_areas = convert_micro_to_peak_areas(start_micro, reads_starts, reads_ends, coverage_reduced);
+    let mut end_areas = convert_micro_to_peak_areas(end_micro, reads_starts, reads_ends, coverage_reduced);
 
     // Apply strict area-level filters (min_events, min_frequency on total_spc)
     apply_area_filters(&mut start_areas, coverage_reduced, min_events, min_frequency);
     apply_area_filters(&mut end_areas, coverage_reduced, min_events, min_frequency);
 
-    // Step 3: Pre-filter clippings (zero out non-significant positions)
-    let mut left_clippings_filtered: Vec<u64> = left_clippings.to_vec();
-    for (idx, clips) in left_clippings_filtered.iter_mut().enumerate() {
-        if *clips < min_events {
-            *clips = 0;
-            continue;
-        }
-        let prim = primary_reads.get(idx).copied().unwrap_or(0);
-        let threshold = (prim as f64 * min_frequency) as u64;
-        if *clips < threshold {
-            *clips = 0;
-        }
-    }
+    // Step 2: Density-based merge for clippings (with strict filters + DTR filter)
+    let (left_clipping_areas, right_clipping_areas) = filter_and_merge_clippings(
+        left_clippings,
+        right_clippings,
+        primary_reads,
+        config,
+        genome_length,
+        circular,
+        dtr_regions,
+    );
 
-    let mut right_clippings_filtered: Vec<u64> = right_clippings.to_vec();
-    for (idx, clips) in right_clippings_filtered.iter_mut().enumerate() {
-        if *clips < min_events {
-            *clips = 0;
-            continue;
-        }
-        let prim = primary_reads.get(idx).copied().unwrap_or(0);
-        let threshold = (prim as f64 * min_frequency) as u64;
-        if *clips < threshold {
-            *clips = 0;
-        }
-    }
-
-    // Step 3b: DTR both-copies confirmation
-    // In a doubled assembly with DTRs, boundary clippings are artifacts (reads
-    // can't extend past the contig edge). Real biological clippings appear at
-    // both DTR copies; artifacts appear at only one. Zero any clipping that
-    // lacks a counterpart at the equivalent position in the other copy.
-    for dtr in dtr_regions {
-        if !dtr.is_direct {
-            continue; // Only DTR, not ITR
-        }
-
-        let gl = genome_length as i32;
-
-        // Snapshot to avoid cascade: zeroing copy A shouldn't cause copy B
-        // to fail the check too.
-        let left_snapshot = left_clippings_filtered.clone();
-        let right_snapshot = right_clippings_filtered.clone();
-
-        // Check first region against second
-        for p in dtr.first_start..=dtr.first_end {
-            let q = dtr.second_start + (p - dtr.first_start);
-            if q < 1 || q > gl { continue; }
-            let pi = (p - 1) as usize;
-            let qi = (q - 1) as usize;
-            if left_snapshot[pi] > 0 && left_snapshot[qi] == 0 {
-                left_clippings_filtered[pi] = 0;
-            }
-            if right_snapshot[pi] > 0 && right_snapshot[qi] == 0 {
-                right_clippings_filtered[pi] = 0;
-            }
-        }
-
-        // Check second region against first
-        for p in dtr.second_start..=dtr.second_end {
-            let q = dtr.first_start + (p - dtr.second_start);
-            if q < 1 || q > gl { continue; }
-            let pi = (p - 1) as usize;
-            let qi = (q - 1) as usize;
-            if left_snapshot[pi] > 0 && left_snapshot[qi] == 0 {
-                left_clippings_filtered[pi] = 0;
-            }
-            if right_snapshot[pi] > 0 && right_snapshot[qi] == 0 {
-                right_clippings_filtered[pi] = 0;
-            }
-        }
-    }
-
-    // Step 4-5: Area Left Clipping Aggregation + Statistical Test for starts
-    // Update each area with filtering metadata and kept status
-    for area in &mut start_areas {
-        let sum_clips = sum_prefiltered_clippings_for_area(
-            area, &left_clippings_filtered,
-            max_distance_peaks, genome_length, circular
-        );
-        let (passes, expected_clippings, _reason) = is_area_clipping_acceptable_with_reason(
-            area.total_spc as u64, sum_clips, clipped_ratio, clipping_significance
-        );
-
-        area.sum_clippings = sum_clips;
-        area.clipped_ratio = clipped_ratio;
-        area.expected_clippings = expected_clippings;
-        area.kept = passes;
-    }
-
-    // Step 4-5: Area Right Clipping Aggregation + Statistical Test for ends
-    for area in &mut end_areas {
-        let sum_clips = sum_prefiltered_clippings_for_area(
-            area, &right_clippings_filtered,
-            max_distance_peaks, genome_length, circular
-        );
-        let (passes, expected_clippings, _reason) = is_area_clipping_acceptable_with_reason(
-            area.total_spc as u64, sum_clips, clipped_ratio, clipping_significance
-        );
-
-        area.sum_clippings = sum_clips;
-        area.clipped_ratio = clipped_ratio;
-        area.expected_clippings = expected_clippings;
-        area.kept = passes;
-    }
+    // Step 3: Invalidate PeakAreas near ClippingPeakAreas
+    // Start areas are invalidated by left clipping areas
+    // End areas are invalidated by right clipping areas
+    invalidate_peak_areas_by_clippings(
+        &mut start_areas,
+        &mut end_areas,
+        &left_clipping_areas,
+        &right_clipping_areas,
+        max_distance_peaks,
+        genome_length,
+        circular,
+    );
 
     (start_areas, end_areas)
 }
