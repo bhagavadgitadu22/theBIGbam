@@ -290,25 +290,25 @@ def make_bokeh_subplot(feature_dict, height, x_range, sample_title=None):
             ("Linked start", "@linked_start{0,0}"),
             ("Linked end", "@linked_end{0,0}"),
             ("Length", "@length{0,0}"),
-            ("Identity", "@y{0.1}%")
+            ("Identity", "@y{0.01}%")
         ]
     elif has_variable_width:
         # For bars with spans, show first and last position
         tooltips = [
             ("First position", "@first_pos{0,0}"),
             ("Last position", "@last_pos{0,0}"),
-            ("Value", "@y{0.0}")
+            ("Value", "@y{0.00}")
         ]
     elif has_any_stats:
         tooltips = [
             ("Position", "@x{0,0}"),
-            ("Value", "@y{0.0}"),
-            ("Mean", "@mean{0.0}"),
-            ("Median", "@median{0.0}"),
-            ("Std", "@std{0.0}")
+            ("Value", "@y{0.00}"),
+            ("Mean", "@mean{0.00}"),
+            ("Median", "@median{0.00}"),
+            ("Std", "@std{0.00}")
         ]
     else:
-        tooltips = [("Position", "@x{0,0}"), ("Value", "@y{0.0}")]
+        tooltips = [("Position", "@x{0,0}"), ("Value", "@y{0.00}")]
     
     hover = HoverTool(tooltips=tooltips, mode='vline')
     p.add_tools(hover)

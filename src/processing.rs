@@ -1039,6 +1039,7 @@ fn process_samples_parallel(
     let write_pb_clone = write_pb.clone();
     let is_tty_writer = is_tty;
     let total_writer = total;
+    let circular = config.circular;
 
     // Spawn dedicated writer thread
     let writer_handle = thread::spawn(move || -> Result<(usize, std::time::Duration)> {
@@ -1068,6 +1069,7 @@ fn process_samples_parallel(
                 &result.packaging,
                 &result.completeness,
                 &result.features,
+                circular,
             ) {
                 eprintln!("\nError writing data for {}: {}", result.sample_name, e);
                 let msg = format!("ERR: {}", result.sample_name);
@@ -1219,6 +1221,7 @@ fn process_samples_sequential(
                     &packaging,
                     &completeness,
                     &features,
+                    config.circular,
                 ) {
                     eprintln!("\nError writing data for {}: {}", sample_name, e);
                     failed += 1;

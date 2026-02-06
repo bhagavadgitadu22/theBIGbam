@@ -115,6 +115,7 @@ impl DbWriter {
         packaging: &[PackagingData],
         completeness: &[CompletenessData],
         features: &[FeaturePoint],
+        circular: bool,
     ) -> Result<()> {
         let sample_id = {
             let sample_map = self.sample_name_to_id.lock().unwrap();
@@ -128,7 +129,7 @@ impl DbWriter {
         self.write_presences(&conn, sample_id, presences)?;
 
         // Insert packaging mechanisms
-        self.write_packaging(&conn, sample_id, packaging)?;
+        self.write_packaging(&conn, sample_id, packaging, circular)?;
 
         // Insert completeness data
         self.write_completeness(&conn, sample_id, completeness)?;
@@ -160,7 +161,7 @@ impl DbWriter {
         Ok(())
     }
 
-    fn write_packaging(&self, conn: &Connection, sample_id: i64, packaging: &[PackagingData]) -> Result<()> {
+    fn write_packaging(&self, conn: &Connection, sample_id: i64, packaging: &[PackagingData], circular: bool) -> Result<()> {
         // Track next packaging_id and terminus_id
         // Query current max to ensure unique IDs
         let mut packaging_id: i64 = conn.query_row(
@@ -189,10 +190,17 @@ impl DbWriter {
                     .map(|t| t.center_pos)
                     .collect();
 
+                // Get genome length for circular distance calculation
+                let genome_length: i32 = conn.query_row(
+                    "SELECT Contig_length FROM Contig WHERE Contig_id = ?",
+                    params![contig_id],
+                    |row| row.get(0),
+                ).unwrap_or(0);
+
                 // Calculate terminase_distance: minimal distance from any kept terminus
                 // center to any terminase gene annotation
                 let terminase_distance = calculate_terminase_distance(
-                    conn, contig_id, &kept_terminus_positions,
+                    conn, contig_id, &kept_terminus_positions, genome_length, circular,
                 );
 
                 // Insert into PhageMechanisms
@@ -649,10 +657,13 @@ impl DbWriter {
 /// Calculate the minimal distance between any kept terminus center position
 /// and any terminase gene annotation for a given contig.
 /// Returns None if no terminase genes are found or no terminus positions are provided.
+/// When circular=true, uses circular distance (min of linear or wrap-around).
 fn calculate_terminase_distance(
     conn: &Connection,
     contig_id: i64,
     terminus_positions: &[i32],
+    genome_length: i32,
+    circular: bool,
 ) -> Option<i32> {
     if terminus_positions.is_empty() {
         return None;
@@ -679,13 +690,19 @@ fn calculate_terminase_distance(
     let mut min_dist = i32::MAX;
     for &term_pos in terminus_positions {
         for &(gene_start, gene_end) in &terminase_genes {
-            // Distance to nearest edge of the gene
-            let dist = if term_pos < gene_start {
+            // Distance to nearest edge of the gene (linear)
+            let linear_dist = if term_pos < gene_start {
                 gene_start - term_pos
             } else if term_pos > gene_end {
                 term_pos - gene_end
             } else {
                 0 // terminus is within the gene
+            };
+            // For circular genomes, consider wrap-around distance
+            let dist = if circular && linear_dist > 0 {
+                linear_dist.min(genome_length - linear_dist)
+            } else {
+                linear_dist
             };
             min_dist = min_dist.min(dist);
         }
