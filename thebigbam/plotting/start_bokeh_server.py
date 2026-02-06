@@ -172,8 +172,9 @@ def build_controls(conn):
 
     # Get variables that have data (their feature table exists)
     cur.execute("SELECT DISTINCT Variable_name, Feature_table_name FROM Variable")
-    variables = [r[0] for r in cur.fetchall()]
-    tables_with_data = [v[1] for v in variables]
+    rows = cur.fetchall()
+    variables = [r[0] for r in rows]
+    tables_with_data = [r[1] for r in rows]
 
     # Get modules that have at least one variable with data
     # Define the display order for modules
@@ -1776,32 +1777,6 @@ def create_layout(db_path):
             sizing_mode="stretch_width", orientation="vertical"
         )
 
-    if feature_type_multichoice is not None or combined_features_cbg is not None:
-        # Build simple Genome section header (no collapse needed - Contigs section handles that)
-        genome_title = Div(text="<b>Other genomic features to plot:</b>", align="center")
-
-        genome_help_tooltip = widgets['helps_widgets'][genome_index_one] if genome_index_one is not None else None
-        if genome_help_tooltip is not None:
-            help_btn = HelpButton(tooltip=genome_help_tooltip, width=20, height=20, align="center", button_type="light", stylesheets=[toggle_stylesheet])
-            genome_hdr = row(genome_title, help_btn, sizing_mode="stretch_width", align="center")
-        else:
-            genome_hdr = genome_title
-
-        # Build genome section
-        # Layout: feature_type_multichoice, phage_colors_cbg (if available), plot_isoforms_cbg (if available), genome_hdr, combined_features_cbg
-        genome_children = []
-        if feature_type_multichoice is not None:
-            genome_children.append(feature_type_multichoice)
-        if phage_colors_cbg is not None:
-            genome_children.append(phage_colors_cbg)
-        if plot_isoforms_cbg is not None:
-            genome_children.append(plot_isoforms_cbg)
-        genome_children.append(genome_hdr)
-        if combined_features_cbg is not None:
-            combined_features_cbg.visible = True
-            genome_children.append(combined_features_cbg)
-        genome_section = column(*genome_children, visible=True, sizing_mode="stretch_width", margin=(0, 0, 0, 0))
-
     # Add Genome section to contig_content
     below_contig_children = []
     
@@ -1827,11 +1802,11 @@ def create_layout(db_path):
         cur = conn.cursor()
         cur.execute("SELECT 1 FROM information_schema.tables WHERE table_name = 'Contig_sequence'")
         has_sequence_data = cur.fetchone() is not None
-        has_sequence_data = cur.fetchone() is not None
     except Exception:
         pass
 
     sequence_cbg = None
+    sequence_row = None
     if has_sequence_data:
         sequence_cbg = CheckboxGroup(labels=["Plot sequence"], active=[])
         sequence_help_tooltip = Tooltip(content="Not recommended for regions larger than 1000 bp as it may slow down rendering", position="right")
@@ -1840,10 +1815,41 @@ def create_layout(db_path):
             align="center", button_type="light", stylesheets=[toggle_stylesheet]
         )
         sequence_row = row(sequence_cbg, sequence_help_btn, sizing_mode="stretch_width")
-        below_contig_children.append(sequence_row)
+
+    if feature_type_multichoice is not None or combined_features_cbg is not None:
+        # Build simple Genome section header (no collapse needed - Contigs section handles that)
+        genome_title = Div(text="<b>Other genomic features to plot:</b>", align="center")
+
+        genome_help_tooltip = widgets['helps_widgets'][genome_index_one] if genome_index_one is not None else None
+        if genome_help_tooltip is not None:
+            help_btn = HelpButton(tooltip=genome_help_tooltip, width=20, height=20, align="center", button_type="light", stylesheets=[toggle_stylesheet])
+            genome_hdr = row(genome_title, help_btn, sizing_mode="stretch_width", align="center")
+        else:
+            genome_hdr = genome_title
+
+        # Build genome section
+        # Layout: feature_type_multichoice, sequence_row (if available), phage_colors_cbg (if available), plot_isoforms_cbg (if available), genome_hdr, combined_features_cbg
+        genome_children = []
+        if feature_type_multichoice is not None:
+            genome_children.append(feature_type_multichoice)
+        if sequence_row is not None:
+            genome_children.append(sequence_row)
+        if phage_colors_cbg is not None:
+            genome_children.append(phage_colors_cbg)
+        if plot_isoforms_cbg is not None:
+            genome_children.append(plot_isoforms_cbg)
+        genome_children.append(genome_hdr)
+        if combined_features_cbg is not None:
+            combined_features_cbg.visible = True
+            genome_children.append(combined_features_cbg)
+        genome_section = column(*genome_children, visible=True, sizing_mode="stretch_width", margin=(0, 0, 0, 0))
 
     if genome_section is not None:
         below_contig_children = list(below_contig_children) + [genome_section]
+
+    # Fallback: if no genome section exists, append sequence_row directly
+    if sequence_row is not None and genome_section is None:
+        below_contig_children.append(sequence_row)
 
     below_contig_content = column(
         *below_contig_children,
