@@ -770,6 +770,26 @@ def create_layout(db_path):
                 main_placeholder.objects = [pn.pane.HTML(f"<pre>Error: Invalid position range - positions must satisfy 0 ≤ start &lt; end ≤ {contig_length}.</pre>")]
                 return
 
+            # Check whether to plot sequence (checkbox checked + region <= 1000 bp)
+            plot_sequence = (
+                sequence_cbg is not None
+                and 0 in sequence_cbg.active
+                and (xend - xstart) <= 1000
+            )
+
+            # Check whether to preserve x-range from previous plot
+            preserve_xrange = (
+                current_plot_state['shared_xrange'] is not None
+                and current_plot_state['contig'] == contig
+                and current_plot_state['is_all'] == is_all
+                and (is_all or current_plot_state['sample'] == sample)
+                and current_plot_state['data_xstart'] == xstart
+                and current_plot_state['data_xend'] == xend
+            )
+            if preserve_xrange:
+                prev_xstart = current_plot_state['shared_xrange'].start
+                prev_xend = current_plot_state['shared_xrange'].end
+
             if is_all:
                 # All-samples view: require exactly one variable selected from non-Genome modules
                 # Genome module is shared (in Contigs section):
@@ -801,7 +821,7 @@ def create_layout(db_path):
                     filtered_samples = [s for s in filtered_samples if s in allowed_samples]
 
                 print(f"[start_bokeh_server] Generating plot for all samples with variable={selected_var}, contig={contig}, genome_features={genome_features}, filtered_samples={len(filtered_samples)}")
-                grid = generate_bokeh_plot_all_samples(conn, selected_var, contig, xstart=xstart, xend=xend, genbank_path=genbank_path, genome_features=genome_features if genome_features else None, allowed_samples=set(filtered_samples), feature_types=selected_feature_types, use_phage_colors=use_phage_colors)
+                grid = generate_bokeh_plot_all_samples(conn, selected_var, contig, xstart=xstart, xend=xend, genbank_path=genbank_path, genome_features=genome_features if genome_features else None, allowed_samples=set(filtered_samples), feature_types=selected_feature_types, use_phage_colors=use_phage_colors, plot_sequence=plot_sequence)
             else:
                 # One-sample view: collect possibly-many requested features and call per-sample plot
                 requested_features = []
@@ -817,7 +837,7 @@ def create_layout(db_path):
                         requested_features.append(cbg.labels[idx])
 
                 print(f"[start_bokeh_server] Generating plot for sample={sample}, contig={contig}, features={requested_features}")
-                grid = generate_bokeh_plot_per_sample(conn, requested_features, contig, sample, xstart=xstart, xend=xend, genbank_path=genbank_path, feature_types=selected_feature_types, use_phage_colors=use_phage_colors, plot_isoforms=plot_isoforms)
+                grid = generate_bokeh_plot_per_sample(conn, requested_features, contig, sample, xstart=xstart, xend=xend, genbank_path=genbank_path, feature_types=selected_feature_types, use_phage_colors=use_phage_colors, plot_isoforms=plot_isoforms, plot_sequence=plot_sequence)
 
             # Extract and cache plot data for instant downloads (no database round-trip)
             try:
@@ -835,6 +855,19 @@ def create_layout(db_path):
             except Exception as cache_err:
                 print(f"[start_bokeh_server] Warning: Could not cache plot data: {cache_err}", flush=True)
                 plot_data_cache['data'] = None
+
+            # Restore preserved x-range and update state
+            new_xrange = _get_shared_xrange(grid)
+            if preserve_xrange and new_xrange is not None:
+                new_xrange.start = prev_xstart
+                new_xrange.end = prev_xend
+
+            current_plot_state['contig'] = contig
+            current_plot_state['sample'] = sample
+            current_plot_state['is_all'] = is_all
+            current_plot_state['shared_xrange'] = new_xrange
+            current_plot_state['data_xstart'] = xstart
+            current_plot_state['data_xend'] = xend
 
             # Create toolbar-style row with buttons positioned top-right
             # Use Panel Row to mix Bokeh and Panel widgets
@@ -924,7 +957,26 @@ def create_layout(db_path):
     # Cache for plot data - extracted from ColumnDataSources after plotting
     # This avoids re-querying the database for downloads (instant downloads)
     plot_data_cache = {'data': None, 'is_all_samples': False, 'filename': 'data.csv'}
-    
+
+    # Track current plot state for x-range preservation across APPLY clicks
+    current_plot_state = {
+        'contig': None,
+        'sample': None,
+        'is_all': None,
+        'shared_xrange': None,
+        'data_xstart': None,
+        'data_xend': None,
+    }
+
+    def _get_shared_xrange(grid):
+        """Extract the shared Range1d from a gridplot's first figure."""
+        if hasattr(grid, 'children'):
+            for child_spec in grid.children:
+                child = child_spec[0] if isinstance(child_spec, tuple) else child_spec
+                if hasattr(child, 'x_range'):
+                    return child.x_range
+        return None
+
     def extract_plot_data_from_grid(grid):
         """Extract all data from ColumnDataSources in a GridPlot.
         
@@ -1777,7 +1829,27 @@ def create_layout(db_path):
     )
     
     below_contig_children.append(position_row)
-    
+
+    # Check if sequence data is available in the database
+    has_sequence_data = False
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT 1 FROM Contig_sequence LIMIT 1")
+        has_sequence_data = cur.fetchone() is not None
+    except Exception:
+        pass
+
+    sequence_cbg = None
+    if has_sequence_data:
+        sequence_cbg = CheckboxGroup(labels=["Plot sequence"], active=[])
+        sequence_help_tooltip = Tooltip(content="Only shown when plotting regions \u2264 1000 bp", position="right")
+        sequence_help_btn = HelpButton(
+            tooltip=sequence_help_tooltip, width=20, height=20,
+            align="center", button_type="light", stylesheets=[toggle_stylesheet]
+        )
+        sequence_row = row(sequence_cbg, sequence_help_btn, sizing_mode="stretch_width")
+        below_contig_children.append(sequence_row)
+
     if genome_section is not None:
         below_contig_children = list(below_contig_children) + [genome_section]
 

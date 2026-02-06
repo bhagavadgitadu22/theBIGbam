@@ -2,10 +2,10 @@ import duckdb
 from bokeh.models import Range1d
 from bokeh.layouts import gridplot
 
-from .plotting_data_per_sample import get_contig_info, get_feature_data, get_feature_data_batch, get_variable_metadata, get_repeats_data, make_bokeh_subplot, make_bokeh_genemap
+from .plotting_data_per_sample import get_contig_info, get_feature_data, get_feature_data_batch, get_variable_metadata, get_repeats_data, make_bokeh_subplot, make_bokeh_genemap, make_bokeh_sequence_subplot
 
 ### Function to generate the bokeh plot
-def generate_bokeh_plot_all_samples(conn, variable, contig_name, xstart=None, xend=None, subplot_size=130, genbank_path=None, genome_features=None, allowed_samples=None, feature_types=None, use_phage_colors=False):
+def generate_bokeh_plot_all_samples(conn, variable, contig_name, xstart=None, xend=None, subplot_size=130, genbank_path=None, genome_features=None, allowed_samples=None, feature_types=None, use_phage_colors=False, plot_sequence=False):
     """Generate a Bokeh plot showing all samples for a single variable.
 
     Args:
@@ -73,13 +73,13 @@ def generate_bokeh_plot_all_samples(conn, variable, contig_name, xstart=None, xe
                             genome_subplots.append(repeats_subplot)
                 # Handle GC content and GC skew - contig-level tables, use get_feature_data
                 elif feature_lower in ["gc_content", "gc content", "gccontent", "gc"]:
-                    list_feature_dict = get_feature_data(cur, "gc_content", contig_id, sample_id=None, xstart=xstart, xend=xend)
+                    list_feature_dict = get_feature_data(cur, "GC content", contig_id, sample_id=None, xstart=xstart, xend=xend)
                     if list_feature_dict:
                         gc_subplot = make_bokeh_subplot(list_feature_dict, subplot_size, shared_xrange)
                         if gc_subplot is not None:
                             genome_subplots.append(gc_subplot)
                 elif feature_lower in ["gc_skew", "gc skew", "gcskew", "skew"]:
-                    list_feature_dict = get_feature_data(cur, "gc_skew", contig_id, sample_id=None, xstart=xstart, xend=xend)
+                    list_feature_dict = get_feature_data(cur, "GC skew", contig_id, sample_id=None, xstart=xstart, xend=xend)
                     if list_feature_dict:
                         gc_skew_subplot = make_bokeh_subplot(list_feature_dict, subplot_size, shared_xrange)
                         if gc_skew_subplot is not None:
@@ -96,6 +96,12 @@ def generate_bokeh_plot_all_samples(conn, variable, contig_name, xstart=None, xe
             except Exception as e:
                 print(f"Error processing genome feature '{genome_feature}': {e}", flush=True)
                 continue
+
+    # --- Add sequence subplot right after annotation (top of genome tracks) ---
+    if plot_sequence:
+        seq_subplot = make_bokeh_sequence_subplot(conn, contig_name, xstart, xend, subplot_size // 2, shared_xrange)
+        if seq_subplot:
+            genome_subplots.insert(0, seq_subplot)
 
     # --- Add one subplot per sample for the main variable ---
     # Requested features are variables like 'coverage', 'reads_starts', etc.

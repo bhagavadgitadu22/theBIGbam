@@ -1,5 +1,6 @@
 import argparse, sys, os
 import tempfile
+import duckdb
 from pathlib import Path
 from multiprocessing import cpu_count
 
@@ -10,6 +11,79 @@ try:
 except ImportError:
     HAS_RUST = False
     _rust = None
+
+
+def _store_contig_sequences(db_path, assembly_path=None, genbank_path=None):
+    """Store contig sequences in the database for sequence visualization.
+
+    Reads sequences from the assembly FASTA or GenBank file and stores them
+    in a Contig_sequence table, matched by contig name.
+
+    Args:
+        db_path: Path to the output DuckDB database
+        assembly_path: Path to assembly FASTA file (preferred source)
+        genbank_path: Path to GenBank annotation file (fallback source; GFF3 has no sequences)
+    """
+    from Bio import SeqIO
+
+    # Pick the source: assembly FASTA if available, else GenBank
+    source_path = None
+    source_format = None
+    if assembly_path and os.path.exists(assembly_path):
+        source_path = assembly_path
+        source_format = "fasta"
+    elif genbank_path and os.path.exists(genbank_path):
+        # Skip GFF3 files — they don't contain sequences
+        if genbank_path.lower().endswith(('.gff', '.gff3')):
+            print("  Skipping sequence storage: GFF3 files don't contain sequences.", flush=True)
+            return
+        source_path = genbank_path
+        source_format = "genbank"
+    else:
+        return
+
+    # Read sequences into a dict
+    sequences = {}
+    try:
+        for record in SeqIO.parse(source_path, source_format):
+            sequences[record.id] = str(record.seq)
+    except Exception as e:
+        print(f"  WARNING: Could not read sequences from {source_path}: {e}", flush=True)
+        return
+
+    if not sequences:
+        print("  No sequences found in source file.", flush=True)
+        return
+
+    # Open the DB and store sequences matched to existing contigs
+    try:
+        db_conn = duckdb.connect(db_path)
+        cur = db_conn.cursor()
+
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS Contig_sequence (
+                Contig_id INTEGER PRIMARY KEY,
+                Sequence TEXT NOT NULL
+            )
+        """)
+
+        # Get existing contig names and IDs
+        cur.execute("SELECT Contig_id, Contig_name FROM Contig")
+        contig_rows = cur.fetchall()
+
+        inserted = 0
+        for contig_id, contig_name in contig_rows:
+            if contig_name in sequences:
+                cur.execute(
+                    "INSERT INTO Contig_sequence (Contig_id, Sequence) VALUES (?, ?)",
+                    (contig_id, sequences[contig_name])
+                )
+                inserted += 1
+
+        db_conn.close()
+        print(f"  Stored sequences for {inserted}/{len(contig_rows)} contigs.", flush=True)
+    except Exception as e:
+        print(f"  WARNING: Could not store sequences in database: {e}", flush=True)
 
 
 def calculating_all_features_parallel(list_modules, bam_files, output_db, min_coverage, curve_ratio, bar_ratio, contig_variation_percentage=0.1, circular=False, n_sample_cores=None, sequencing_type=None, genbank_path=None, autoblast_file=None):
@@ -180,6 +254,11 @@ def run_calculate_args(args):
         sequencing_type=args.sequencing_type, genbank_path=genbank_path,
         autoblast_file=autoblast_file
     )
+
+    # Store contig sequences for sequence visualization (if source files available)
+    if genbank_path or assembly_path:
+        print("Storing contig sequences for visualization...", flush=True)
+        _store_contig_sequences(output_db, assembly_path=assembly_path, genbank_path=genbank_path)
 
 def main():
     print("Parsing arguments...", flush=True)

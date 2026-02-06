@@ -338,6 +338,104 @@ def make_bokeh_subplot(feature_dict, height, x_range, sample_title=None):
 
     return p
 
+### Function to render DNA sequence as colored rectangles
+def make_bokeh_sequence_subplot(conn, contig_name, xstart, xend, height, x_range):
+    """Create a subplot showing colored nucleotide rectangles for a genomic region.
+
+    Only works for regions <= 1000 bp. Returns None if no sequence data is available
+    or the Contig_sequence table doesn't exist.
+
+    Args:
+        conn: DuckDB connection
+        contig_name: Name of the contig
+        xstart: Start position (0-based)
+        xend: End position
+        height: Height of the subplot in pixels
+        x_range: Shared x_range from other subplots
+    """
+    try:
+        cur = conn.cursor()
+
+        # Query only the needed substring (SUBSTR is 1-based)
+        cur.execute(
+            "SELECT SUBSTR(cs.Sequence, ? + 1, ? - ?) "
+            "FROM Contig_sequence cs "
+            "JOIN Contig c ON cs.Contig_id = c.Contig_id "
+            "WHERE c.Contig_name = ?",
+            (xstart, xend, xstart, contig_name)
+        )
+        row = cur.fetchone()
+        if row is None or row[0] is None:
+            return None
+
+        seq = row[0]
+        if not seq:
+            return None
+
+        # Map nucleotides to colors
+        color_map = {
+            'A': '#d62728', 'a': '#d62728',
+            'T': '#2ca02c', 't': '#2ca02c',
+            'G': '#ff7f0e', 'g': '#ff7f0e',
+            'C': '#1f77b4', 'c': '#1f77b4',
+        }
+
+        positions = []
+        colors = []
+        nucleotides = []
+        for i, nt in enumerate(seq):
+            positions.append(xstart + i)
+            colors.append(color_map.get(nt, '#999999'))
+            nucleotides.append(nt.upper())
+
+        source = ColumnDataSource(data=dict(
+            left=positions,
+            right=[p + 1 for p in positions],
+            bottom=[0] * len(positions),
+            top=[1] * len(positions),
+            color=colors,
+            nucleotide=nucleotides,
+            position=positions,
+        ))
+
+        p = figure(
+            height=height,
+            x_range=x_range,
+            y_range=Range1d(0, 1),
+            tools="xpan,reset,save"
+        )
+
+        p.quad(
+            left='left', right='right', bottom='bottom', top='top',
+            color='color', source=source, line_color=None
+        )
+
+        hover = HoverTool(tooltips=[
+            ("Position", "@position{0,0}"),
+            ("Nucleotide", "@nucleotide"),
+        ])
+        p.add_tools(hover)
+
+        # Match styling from make_bokeh_subplot
+        p.toolbar.logo = None
+        p.xaxis.formatter = NumeralTickFormatter(format="0,0")
+        p.yaxis.visible = False
+        p.xgrid.visible = False
+        p.ygrid.visible = False
+        p.outline_line_color = None
+        p.min_border_left = 40
+        p.min_border_right = 10
+
+        wheel = WheelZoomTool(dimensions='width')
+        p.add_tools(wheel)
+        p.toolbar.active_scroll = wheel
+
+        return p
+
+    except Exception:
+        return None
+
+
 ### Function to get repeats (contig-level, sample-independent)
 def get_repeats_data(cur, contig_id, variable_name="direct_repeats", xstart=None, xend=None):
     """Get repeats data for plotting, formatted for make_bokeh_subplot().
@@ -1010,7 +1108,7 @@ def get_feature_data_batch(cur, feature, contig_id, sample_ids, xstart=None, xen
 
 
 ### Function to generate the bokeh plot
-def generate_bokeh_plot_per_sample(conn, list_features, contig_name, sample_name, xstart=None, xend=None, subplot_size=100, genbank_path=None, feature_types=None, use_phage_colors=False, plot_isoforms=True):
+def generate_bokeh_plot_per_sample(conn, list_features, contig_name, sample_name, xstart=None, xend=None, subplot_size=100, genbank_path=None, feature_types=None, use_phage_colors=False, plot_isoforms=True, plot_sequence=False):
     """Generate a Bokeh plot for a single sample.
 
     Args:
@@ -1053,6 +1151,13 @@ def generate_bokeh_plot_per_sample(conn, list_features, contig_name, sample_name
     # --- Add one subplot per feature requested ---
     # Requested features are variables like 'coverage', 'reads_starts', etc.
     subplots = []
+
+    # --- Add sequence subplot right after annotation (top of data tracks) ---
+    if plot_sequence:
+        seq_subplot = make_bokeh_sequence_subplot(conn, contig_name, xstart, xend, subplot_size // 2, shared_xrange)
+        if seq_subplot:
+            subplots.append(seq_subplot)
+
     requested_features, include_repeats = parse_requested_features(list_features)
 
     # Add Repeats subplots if requested (contig-level, sample-independent)
@@ -1075,8 +1180,8 @@ def generate_bokeh_plot_per_sample(conn, list_features, contig_name, sample_name
             if repeats_subplot is not None:
                 subplots.append(repeats_subplot)
 
-    # Separate contig-level features (gc_content, gc_skew) from sample-dependent features
-    contig_level_features = ["gc_content", "gc_skew"]
+    # Separate contig-level features (GC content, GC skew) from sample-dependent features
+    contig_level_features = ["GC content", "GC skew"]
     contig_features = [f for f in requested_features if f in contig_level_features]
     sample_features = [f for f in requested_features if f not in contig_level_features]
 
@@ -1140,7 +1245,7 @@ def parse_requested_features(list_features):
     - "genome" or "Genome" -> Repeats + GC content + GC skew
 
     Returns tuple of (deduplicated list of individual feature names, include_repeats bool).
-    Note: gc_content and gc_skew are returned as regular features in the list.
+    Note: GC content and GC skew are returned as regular features in the list.
     """
     features = []
     include_repeats = False
@@ -1151,7 +1256,7 @@ def parse_requested_features(list_features):
         # Module: Genome
         if item_lower in ["genome"]:
             include_repeats = True
-            features.extend(["gc_content", "gc_skew"])
+            features.extend(["GC content", "GC skew"])
         # Module: Coverage
         elif item_lower in ["coverage"]:
             features.extend(["Primary alignments", "Other alignments", "Other alignments"])
@@ -1167,10 +1272,10 @@ def parse_requested_features(list_features):
             include_repeats = True
         # Handle "GC content" specifically - add as regular feature
         elif item_lower in ["gc_content", "gc content", "gccontent", "gc"]:
-            features.append("gc_content")
+            features.append("GC content")
         # Handle "GC skew" specifically - add as regular feature
         elif item_lower in ["gc_skew", "gc skew", "gcskew", "skew"]:
-            features.append("gc_skew")
+            features.append("GC skew")
         # Individual feature
         else:
             features.append(item)
