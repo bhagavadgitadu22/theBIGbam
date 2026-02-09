@@ -348,7 +348,7 @@ def make_bokeh_sequence_subplot(conn, contig_name, xstart, xend, height, x_range
     Args:
         conn: DuckDB connection
         contig_name: Name of the contig
-        xstart: Start position (0-based)
+        xstart: Start position (0 = full genome, or 1-based genome position)
         xend: End position
         height: Height of the subplot in pixels
         x_range: Shared x_range from other subplots
@@ -356,13 +356,16 @@ def make_bokeh_sequence_subplot(conn, contig_name, xstart, xend, height, x_range
     try:
         cur = conn.cursor()
 
+        # Clamp start to 1 (no nucleotide at position 0)
+        seq_start = max(xstart, 1)
+
         # Query only the needed substring (SUBSTR is 1-based)
         cur.execute(
-            "SELECT SUBSTR(cs.Sequence, ? + 1, ? - ?) "
+            "SELECT SUBSTR(cs.Sequence, ?, ? - ? + 1) "
             "FROM Contig_sequence cs "
             "JOIN Contig c ON cs.Contig_id = c.Contig_id "
             "WHERE c.Contig_name = ?",
-            (xstart, xend, xstart, contig_name)
+            (seq_start, xend, seq_start, contig_name)
         )
         row = cur.fetchone()
         if row is None or row[0] is None:
@@ -384,13 +387,13 @@ def make_bokeh_sequence_subplot(conn, contig_name, xstart, xend, height, x_range
         colors = []
         nucleotides = []
         for i, nt in enumerate(seq):
-            positions.append(xstart + i)
+            positions.append(seq_start + i)          # 1-based position
             colors.append(color_map.get(nt, '#999999'))
             nucleotides.append(nt.upper())
 
         source = ColumnDataSource(data=dict(
-            left=positions,
-            right=[p + 1 for p in positions],
+            left=[p - 0.5 for p in positions],       # Center quad on position
+            right=[p + 0.5 for p in positions],
             bottom=[0] * len(positions),
             top=[1] * len(positions),
             color=colors,
