@@ -33,7 +33,6 @@ use crate::parser::{parse_annotations};
 use crate::types::{
     ContigInfo, FeaturePoint, PackagingData, PlotType, PresenceData, SequencingType
 };
-use tempfile;
 
 use crate::processing_phage_packaging::{
     classify_packaging_areas, filter_and_merge_to_areas_with_diagnostics,
@@ -112,7 +111,7 @@ fn check_missing_md_tags(bam: &mut IndexedReader) -> bool {
             Err(_) => continue,
         };
 
-        if record.is_unmapped() {
+        if record.is_unmapped() || record.is_secondary() || record.is_supplementary() {
             continue;
         }
 
