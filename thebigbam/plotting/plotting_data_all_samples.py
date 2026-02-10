@@ -28,7 +28,7 @@ def generate_bokeh_plot_all_samples(conn, variable, contig_name, xstart=None, xe
     print(f"Locus {locus_name} validated ({locus_size} bp)", flush=True)
 
     # --- Main gene annotation plot (only if genbank provided) ---
-    shared_xrange = Range1d(-1000, locus_size+1000)
+    shared_xrange = Range1d(0, locus_size)
     if xstart is not None and xend is not None:
         shared_xrange.start = xstart
         shared_xrange.end = xend

@@ -1134,7 +1134,7 @@ def generate_bokeh_plot_per_sample(conn, list_features, contig_name, sample_name
     print(f"Locus {locus_name} validated ({locus_size} bp)", flush=True)
 
     # --- Main gene annotation plot (only if genbank provided) ---
-    shared_xrange = Range1d(-1000, locus_size+1000)
+    shared_xrange = Range1d(0, locus_size)
     if xstart is not None and xend is not None:
         shared_xrange.start = xstart
         shared_xrange.end = xend
@@ -1205,7 +1205,7 @@ def generate_bokeh_plot_per_sample(conn, list_features, contig_name, sample_name
 
     # Subplot names whose y-axis should be relative to Primary alignments max
     PRIMARY_RELATIVE_SUBPLOTS = {
-        "Primary alignments", "Other alignments", "Clippings", "Indels",
+        "Primary alignments", "Alignments by strand", "Other alignments", "Clippings", "Indels",
         "Mismatches", "Bad orientations", "Coverage reduced", "Reads termini",
         "Non-inward pairs", "Missing mates"
     }

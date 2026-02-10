@@ -197,11 +197,23 @@ def build_summary_data(conn, contig_name, sample_names):
     side_completeness_cols = {
         "Left_completeness_percentage": "Left completeness (%)", "Left_contamination_length": "Left expansion* (bp)", "Left_missing_length": "Left collapse** (bp)",
         "Right_completeness_percentage": "Right completeness (%)", "Right_contamination_length": "Right expansion* (bp)", "Right_missing_length": "Right collapse** (bp)",
-        "Circularising_reads": "Circularising reads", "Circularising_reads_percentage": "Circularising reads (%)",
     }
 
     phage_cols = {
         "Packaging_mechanism": "Mechanism", "Left_termini": "Left termini", "Right_termini": "Right termini"
+    }
+
+    topology_cols = {
+        "Circularising_reads": "Circularising reads",
+        "Circularising_reads_percentage": "Circularising reads (%)",
+        "Circularising_inserts": "Circularising inserts",
+        "Circularising_inserts_percentage": "Circularising inserts (%)",
+        "Mean_extra_insert_length": "Mean extra insert length",
+        "Median_extra_insert_length": "Median extra insert length",
+        "Contig_end_unmapped_mates": "Contig end unmapped mates",
+        "Contig_end_unmapped_mates_percentage": "Contig end unmapped mates (%)",
+        "Contig_end_mates_mapped_on_another_contig": "Contig end mates mapped on another contig",
+        "Contig_end_mates_mapped_on_another_contig_percentage": "Contig end mates mapped on another contig (%)",
     }
 
     cur = conn.cursor()
@@ -216,7 +228,7 @@ def build_summary_data(conn, contig_name, sample_names):
         return  # nothing to query
 
     # Initialize all columns with None
-    all_cols = coverage_cols | completeness_cols | side_completeness_cols | phage_cols
+    all_cols = coverage_cols | completeness_cols | side_completeness_cols | phage_cols | topology_cols
     for col in all_cols.keys():
         data[col] = [None] * n
 
@@ -281,6 +293,25 @@ def build_summary_data(conn, contig_name, sample_names):
     except Exception:
         pass  # View might not exist or have no data
 
+    # Query Explicit_topology view
+    try:
+        cols_str = ", ".join(topology_cols.keys())
+        query = f"""
+            SELECT Sample_name, {cols_str}
+            FROM Explicit_topology
+            WHERE Contig_name = ? AND Sample_name IN ({','.join(['?'] * len(sample_names))})
+        """
+        cur.execute(query, [contig_name] + list(sample_names))
+        for row in cur.fetchall():
+            sample_name, *values = row
+            idx = sample_idx.get(sample_name)
+            if idx is None:
+                continue
+            for value_col, cell in zip(topology_cols.keys(), values):
+                data[value_col][idx] = cell
+    except Exception:
+        pass  # View might not exist or have no data
+
     # Create content (as HTML strings)
     content = []
 
@@ -321,6 +352,12 @@ def build_summary_data(conn, contig_name, sample_names):
     if phage_table:
         content.append("<b>Phage mechanism:</b>")
         content.append(phage_table)
+
+    # Topology subsection
+    topology_table = generate_summary_table_html(data, topology_cols)
+    if topology_table:
+        content.append("<b>Topology:</b>")
+        content.append(topology_table)
 
     return content
 

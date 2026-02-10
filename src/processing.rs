@@ -863,6 +863,11 @@ fn add_features_from_arrays(
             contig_name,
             contig_length,
             arrays.circularising_reads_count,
+            arrays.circularising_inserts_count,
+            &arrays.circularising_insert_sizes,
+            &arrays.all_proper_insert_sizes,
+            arrays.contig_end_unmapped_mates,
+            arrays.contig_end_mates_mapped_on_another_contig,
         );
         if completeness.has_data() {
             Some(completeness)

@@ -41,6 +41,10 @@ def get_filtering_metadata(db_path: str) -> dict:
             'source': 'Explicit_completeness',
             'exclude': ['Contig_name', 'Sample_name', 'Score_completeness', 'Score_contamination']
         },
+        'Topology': {
+            'source': 'Explicit_topology',
+            'exclude': ['Contig_name', 'Sample_name']
+        },
         'Termini': {
             'source': 'Explicit_phage_mechanisms',
             'exclude': ['Contig_name', 'Sample_name']

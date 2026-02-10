@@ -137,7 +137,7 @@ pub fn process_contig_streaming(
         };
 
         // Compute template length and proper_pair with circular correction if needed
-        let (template_length, is_proper_pair, _is_non_inward) = if circular && seq_type.is_short_paired() {
+        let (template_length, is_proper_pair, is_non_inward) = if circular && seq_type.is_short_paired() {
             // In circular mode, insert_size and is_proper_pair from BAM are based on doubled assembly
             // We need to recompute based on the actual circular genome coordinates
             let pos1 = record.pos() as usize;
@@ -172,13 +172,89 @@ pub fn process_contig_streaming(
         };
 
         // Track circularising reads (primary alignments only, circular mode only)
-        if circular && !record.is_secondary() && !record.is_supplementary() {
+        let is_circularising_read = if circular && !record.is_secondary() && !record.is_supplementary() {
             let raw_start = record.pos() as usize;
             let raw_end = cigar_view.end_pos() as usize;
 
             // Detect reads crossing the boundary (mid-position of doubled contig)
             if raw_start < ref_length && raw_end > ref_length {
                 arrays.circularising_reads_count += 1;
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
+        // Track circularising inserts & contig-end anomalies (primary paired-end only)
+        // Skip reads already counted as circularising reads to avoid double-counting
+        if !is_circularising_read && seq_type.is_short_paired() && !record.is_secondary() && !record.is_supplementary() {
+            let pos = if circular { record.pos() as usize % ref_length } else { record.pos() as usize };
+            let near_left = pos < 1000;
+            let near_right = pos >= ref_length.saturating_sub(1000);
+
+            if near_left || near_right {
+                // Circularising inserts: read1 near one end, mate near opposite end
+                if record.is_first_in_template() {
+                    if circular {
+                        // In circular mode, junction-spanning pairs have raw positions on
+                        // different halves of the doubled contig:
+                        let raw_pos = record.pos() as usize;
+                        let raw_mpos = record.mpos() as usize;
+                        let pos_in_first_half = raw_pos < ref_length;
+                        let mate_in_first_half = raw_mpos < ref_length;
+
+                        if pos_in_first_half != mate_in_first_half {
+                            let mpos = raw_mpos % ref_length;
+                            let mate_near_left = mpos < 1000;
+                            let mate_near_right = mpos >= ref_length.saturating_sub(1000);
+                            if (near_left && mate_near_right) || (near_right && mate_near_left) {
+                                // Two valid orientations for junction-spanning inserts:
+                                // 1) Middle of doubled contig: reads straddle ref_length boundary
+                                //    → BAM aligner sees proper inward pair (small insert)
+                                // 2) Opposite ends of doubled contig: one near start, one near end
+                                //    → BAM aligner sees non-inward pair (huge insert)
+                                let bam_proper = record.is_proper_pair();
+                                let bam_non_inward = !record.is_proper_pair()
+                                    && record.tid() == record.mtid()
+                                    && !record.is_mate_unmapped();
+                                if bam_proper || bam_non_inward {
+                                    arrays.circularising_inserts_count += 1;
+                                    arrays.circularising_insert_sizes.push(template_length);
+                                }
+                            }
+                        }
+                    } else if is_non_inward {
+                        // Linear mode: non-inward pairs with mate on opposite end
+                        let mpos = record.mpos() as usize;
+                        let mate_near_left = mpos < 1000;
+                        let mate_near_right = mpos >= ref_length.saturating_sub(1000);
+                        if (near_left && mate_near_right) || (near_right && mate_near_left) {
+                            arrays.circularising_inserts_count += 1;
+                            arrays.circularising_insert_sizes.push(template_length);
+                        }
+                    }
+                }
+
+                // Unmapped mate with orientation suggesting mate beyond contig end
+                // Forward on right end → mate expected further right → beyond right end
+                // Reverse on left end  → mate expected further left  → beyond left end
+                if record.is_mate_unmapped() {
+                    if (near_right && !record.is_reverse()) || (near_left && record.is_reverse()) {
+                        arrays.contig_end_unmapped_mates += 1;
+                    }
+                }
+
+                // Mate on another contig near contig ends
+                if record.tid() != record.mtid() && !record.is_mate_unmapped() {
+                    arrays.contig_end_mates_mapped_on_another_contig += 1;
+                }
+            }
+
+            // Collect all proper-pair insert sizes for overall mean/median baseline
+            if record.is_first_in_template() && template_length > 0 && is_proper_pair {
+                arrays.all_proper_insert_sizes.push(template_length);
             }
         }
 

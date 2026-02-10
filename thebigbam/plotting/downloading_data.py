@@ -135,11 +135,16 @@ def download_metrics_summary_csv(db_path, contig_name, sample_names):
                         c.Read_based_clipping_frequency, c.Reference_based_clippings_frequency,
                         c.Left_completeness_percentage, c.Left_contamination_length, c.Left_missing_length,
                         c.Right_completeness_percentage, c.Right_contamination_length, c.Right_missing_length,
-                        c.Circularising_reads, c.Circularising_reads_percentage,
+                        t.Circularising_reads, t.Circularising_reads_percentage,
+                        t.Circularising_inserts, t.Circularising_inserts_percentage,
+                        t.Mean_extra_insert_length, t.Median_extra_insert_length,
+                        t.Contig_end_unmapped_mates, t.Contig_end_unmapped_mates_percentage,
+                        t.Contig_end_mates_mapped_on_another_contig, t.Contig_end_mates_mapped_on_another_contig_percentage,
                         ph.Packaging_mechanism, ph.Left_termini, ph.Right_termini
                     FROM samples s
                     LEFT JOIN Explicit_presences p ON s.Sample_name = p.Sample_name AND p.Contig_name = '{safe_contig}'
                     LEFT JOIN Explicit_completeness c ON s.Sample_name = c.Sample_name AND c.Contig_name = '{safe_contig}'
+                    LEFT JOIN Explicit_topology t ON s.Sample_name = t.Sample_name AND t.Contig_name = '{safe_contig}'
                     LEFT JOIN Explicit_phage_mechanisms ph ON s.Sample_name = ph.Sample_name AND ph.Contig_name = '{safe_contig}'
                     ORDER BY s.Sample_name
                 ) TO '{temp_path}' (HEADER, DELIMITER ',')

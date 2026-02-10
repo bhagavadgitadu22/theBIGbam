@@ -35,6 +35,11 @@ pub fn compute_completeness(
     contig_name: &str,
     contig_length: usize,
     circularising_reads_count: u64,
+    circularising_inserts_count: u64,
+    circularising_insert_sizes: &[i32],
+    all_proper_insert_sizes: &[i32],
+    contig_end_unmapped_mates: u64,
+    contig_end_mates_mapped_on_another_contig: u64,
 ) -> CompletenessData {
     // Helper function to compute median from a vector of lengths
     fn compute_median(lengths: &[u32]) -> i32 {
@@ -215,6 +220,97 @@ pub fn compute_completeness(
         None
     };
 
+    // Compute circularising inserts percentage based on mean coverage at junction
+    let circularising_inserts_percentage = if circularising_inserts_count > 0 && !primary_reads.is_empty() {
+        let first = primary_reads[0] as f64;
+        let last = primary_reads[primary_reads.len() - 1] as f64;
+        let mean_junction_coverage = (first + last) / 2.0;
+        if mean_junction_coverage > 0.0 {
+            Some(((circularising_inserts_count as f64 / mean_junction_coverage) * 100.0).round() as i32)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    // Compute contig end unmapped mates percentage based on mean coverage at junction
+    let contig_end_unmapped_mates_pct = if contig_end_unmapped_mates > 0 && !primary_reads.is_empty() {
+        let first = primary_reads[0] as f64;
+        let last = primary_reads[primary_reads.len() - 1] as f64;
+        let mean_junction_coverage = (first + last) / 2.0;
+        if mean_junction_coverage > 0.0 {
+            Some(((contig_end_unmapped_mates as f64 / mean_junction_coverage) * 100.0).round() as i32)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    // Compute contig end mates mapped on another contig percentage based on mean coverage at junction
+    let contig_end_mates_another_contig_pct = if contig_end_mates_mapped_on_another_contig > 0 && !primary_reads.is_empty() {
+        let first = primary_reads[0] as f64;
+        let last = primary_reads[primary_reads.len() - 1] as f64;
+        let mean_junction_coverage = (first + last) / 2.0;
+        if mean_junction_coverage > 0.0 {
+            Some(((contig_end_mates_mapped_on_another_contig as f64 / mean_junction_coverage) * 100.0).round() as i32)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    // Compute circularising inserts metrics
+    let circularising_inserts = if circularising_inserts_count > 0 {
+        Some(circularising_inserts_count)
+    } else {
+        None
+    };
+
+    let (mean_extra_insert, median_extra_insert) = if !circularising_insert_sizes.is_empty()
+        && !all_proper_insert_sizes.is_empty()
+    {
+        // Mean extra
+        let circ_mean = circularising_insert_sizes.iter().map(|&x| x as f64).sum::<f64>()
+            / circularising_insert_sizes.len() as f64;
+        let all_mean = all_proper_insert_sizes.iter().map(|&x| x as f64).sum::<f64>()
+            / all_proper_insert_sizes.len() as f64;
+
+        // Median extra (sort copies)
+        fn median_i32(slice: &[i32]) -> f64 {
+            let mut sorted = slice.to_vec();
+            sorted.sort_unstable();
+            let mid = sorted.len() / 2;
+            if sorted.len() % 2 == 0 {
+                (sorted[mid - 1] + sorted[mid]) as f64 / 2.0
+            } else {
+                sorted[mid] as f64
+            }
+        }
+        let circ_median = median_i32(circularising_insert_sizes);
+        let all_median = median_i32(all_proper_insert_sizes);
+
+        (
+            Some((circ_mean - all_mean).round() as i32),
+            Some((circ_median - all_median).round() as i32),
+        )
+    } else {
+        (None, None)
+    };
+
+    let unmapped_mates_ends = if contig_end_unmapped_mates > 0 {
+        Some(contig_end_unmapped_mates)
+    } else {
+        None
+    };
+    let mates_another_contig_ends = if contig_end_mates_mapped_on_another_contig > 0 {
+        Some(contig_end_mates_mapped_on_another_contig)
+    } else {
+        None
+    };
+
     CompletenessData {
         contig_name: contig_name.to_string(),
         prevalence_left: left_result.map(|(p, _, _)| p * 100.0), // Store as percentage
@@ -230,5 +326,13 @@ pub fn compute_completeness(
         total_reference_clipped: if total_reference_clipped > 0.0 { Some(total_reference_clipped) } else { None },
         circularising_reads,
         circularising_reads_percentage,
+        circularising_inserts,
+        mean_extra_insert_length: mean_extra_insert,
+        median_extra_insert_length: median_extra_insert,
+        contig_end_unmapped_mates: unmapped_mates_ends,
+        contig_end_mates_mapped_on_another_contig: mates_another_contig_ends,
+        circularising_inserts_percentage,
+        contig_end_unmapped_mates_percentage: contig_end_unmapped_mates_pct,
+        contig_end_mates_mapped_on_another_contig_percentage: contig_end_mates_another_contig_pct,
     }
 }

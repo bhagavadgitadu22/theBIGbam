@@ -122,6 +122,17 @@ pub struct FeatureArrays {
     /// In circular mode: reads crossing the mid-position of doubled contig.
     pub circularising_reads_count: u64,
 
+    /// Count of non-inward read pairs spanning both contig ends (paired-end only).
+    pub circularising_inserts_count: u64,
+    /// Template lengths of circularising insert pairs (for mean/median).
+    pub circularising_insert_sizes: Vec<i32>,
+    /// Template lengths of all proper pairs (read1 only, for overall mean/median baseline).
+    pub all_proper_insert_sizes: Vec<i32>,
+    /// Reads near contig ends with unmapped mate and outward-facing orientation.
+    pub contig_end_unmapped_mates: u64,
+    /// Reads near contig ends with mate on a different contig.
+    pub contig_end_mates_mapped_on_another_contig: u64,
+
     // -------------------------------------------------------------------------
     // Internal: Strand-specific tracking for phagetermini
     // -------------------------------------------------------------------------
@@ -174,6 +185,11 @@ impl FeatureArrays {
             mate_not_mapped: vec![0u64; ref_length],
             mate_on_another_contig: vec![0u64; ref_length],
             circularising_reads_count: 0,
+            circularising_inserts_count: 0,
+            circularising_insert_sizes: Vec::new(),
+            all_proper_insert_sizes: Vec::new(),
+            contig_end_unmapped_mates: 0,
+            contig_end_mates_mapped_on_another_contig: 0,
             start_plus: vec![0u64; ref_length],
             start_minus: vec![0u64; ref_length],
             end_plus: vec![0u64; ref_length],

@@ -372,26 +372,26 @@ def create_layout(db_path):
                     SELECT DISTINCT c.Contig_name, s.Sample_name
                     FROM Contig_annotation ca
                     JOIN Contig c ON ca.Contig_id = c.Contig_id
-                    CROSS JOIN Sample s
-                    JOIN Presences p ON c.Contig_id = p.Contig_id AND s.Sample_id = p.Sample_id
+                    LEFT JOIN Presences p ON c.Contig_id = p.Contig_id
+                    LEFT JOIN Sample s ON p.Sample_id = s.Sample_id
                     WHERE ca."{column_name}" {operator} ?
                 '''
             elif category == 'Contig':
-                # Contig table has no Sample_name, cross-join with all samples
+                # Contig table has no Sample_name, left-join to preserve contigs with 0 samples
                 query = f'''
                     SELECT DISTINCT c.Contig_name, s.Sample_name
                     FROM Contig c
-                    CROSS JOIN Sample s
-                    JOIN Presences p ON c.Contig_id = p.Contig_id AND s.Sample_id = p.Sample_id
+                    LEFT JOIN Presences p ON c.Contig_id = p.Contig_id
+                    LEFT JOIN Sample s ON p.Sample_id = s.Sample_id
                     WHERE c."{column_name}" {operator} ?
                 '''
             elif category == 'Sample':
-                # Sample table has no Contig_name, cross-join with all contigs
+                # Sample table has no Contig_name, left-join to preserve samples with 0 contigs
                 query = f'''
                     SELECT DISTINCT c.Contig_name, s.Sample_name
                     FROM Sample s
-                    CROSS JOIN Contig c
-                    JOIN Presences p ON c.Contig_id = p.Contig_id AND s.Sample_id = p.Sample_id
+                    LEFT JOIN Presences p ON s.Sample_id = p.Sample_id
+                    LEFT JOIN Contig c ON p.Contig_id = c.Contig_id
                     WHERE s."{column_name}" {operator} ?
                 '''
             else:
@@ -481,25 +481,6 @@ def create_layout(db_path):
             completions = [c for c in orig_contigs if c in allowed]
         else:
             completions = list(orig_contigs)
-
-        # Apply length filter
-        if length_slider is not None:
-            min_length, max_length = length_slider.value
-            completions = [c for c in completions if min_length <= widgets['contig_lengths'].get(c, 0) <= max_length]
-
-        # Apply duplication percentage filter
-        if duplication_slider is not None:
-            min_dup, max_dup = duplication_slider.value
-            dup_min_default = widgets['duplication_percentage_min']
-            dup_max_default = widgets['duplication_percentage_max']
-            # Only filter if slider is not at default (full range)
-            if min_dup > dup_min_default or max_dup < dup_max_default:
-                def passes_dup_filter(contig):
-                    dup = widgets['contig_duplications'].get(contig)
-                    if dup is None:
-                        return False  # Exclude contigs without duplication data when filter is active
-                    return min_dup <= dup <= max_dup
-                completions = [c for c in completions if passes_dup_filter(c)]
 
         # Apply Filtering2 query builder filters
         filtered_pairs = get_filtering_filtered_pairs()
@@ -626,92 +607,6 @@ def create_layout(db_path):
         global_toggle_lock['locked'] = False
         update_section_titles()
 
-    def create_variable_filter_row():
-        """Create a new row of variable filter widgets."""
-        type_select = Select(
-            options=["#Points", "Max"],
-            value="#Points",
-            width=70
-        )
-
-        var_input = Select(
-            options=widgets['variables'],
-            value="",
-            sizing_mode="stretch_width"
-        )
-        
-        comparison_select = Select(
-            options=[">", "<"],
-            value=">",
-            width=45
-        )
-        
-        threshold_input = TextInput(
-            value="0",
-            placeholder="Threshold",
-            width=50
-        )
-        
-        plus_btn = Button(label="+", width=30, height=30)
-        # len(variable_filter_rows)>0 to make - button invisible initially
-        minus_btn = Button(label="−", width=30, height=30, visible=len(variable_filter_rows)>0)
-        
-        filter_row = row(type_select, var_input, comparison_select, threshold_input, \
-                         plus_btn, minus_btn, sizing_mode="stretch_width")
-        
-        # Adjust margins for better spacing
-        # (top, right, bottom, left)
-        children = filter_row.children
-        for i, w in enumerate(children):
-            if i == 0:
-                # leftmost: keep left margin
-                w.margin = (0, 0, 0, 5)
-            else:
-                # middle widgets: no horizontal margin
-                w.margin = (0, 0, 0, 0)
-        
-        def add_row_callback():
-            new_row = create_variable_filter_row()
-            variable_filter_rows.append(new_row)
-            variable_filters_column.children = list(variable_filters_column.children) + [new_row]
-            # Make minus buttons visible when there's more than one row
-            for row_widget in variable_filter_rows:
-                row_widget.children[-1].visible = True  # Last child is minus button
-
-            # Refresh options after adding a new line
-            refresh_on_filter_change()
-        
-        def remove_row_callback():
-            if filter_row in variable_filter_rows:
-                variable_filter_rows.remove(filter_row)
-                variable_filters_column.children = [r for r in variable_filters_column.children if r != filter_row]
-                # Hide minus buttons if only one row remains
-                if len(variable_filter_rows) == 1:
-                    variable_filter_rows[0].children[-1].visible = False
-                    
-                # Refresh options after removing filter
-                refresh_on_filter_change()
-        
-        plus_btn.on_click(add_row_callback)
-        minus_btn.on_click(remove_row_callback)
-        
-        # Create a shared callback that refreshes both contig and sample options
-        def refresh_on_filter_change(attr=None, old=None, new=None):
-            _filtering_cache['valid'] = False
-            global_toggle_lock['locked'] = True
-            refresh_contig_options_unlocked()
-            refresh_sample_options_unlocked()
-            global_toggle_lock['locked'] = False
-            update_section_titles()
-        
-        # Attach to all inputs
-        type_select.on_change('value', refresh_on_filter_change)
-        var_input.on_change('value', refresh_on_filter_change)
-        comparison_select.on_change('value', refresh_on_filter_change)
-        threshold_input.on_change('value', refresh_on_filter_change)
-
-        return filter_row
-    
     ## Apply button function
     def apply_clicked():
         try:
@@ -860,6 +755,17 @@ def create_layout(db_path):
             current_plot_state['shared_xrange'] = new_xrange
             current_plot_state['data_xstart'] = xstart
             current_plot_state['data_xend'] = xend
+
+            # Sync From/To inputs when user zooms/pans
+            if new_xrange is not None:
+                def _sync_from(attr, old, new):
+                    from_position_input.value = str(int(new))
+
+                def _sync_to(attr, old, new):
+                    to_position_input.value = str(int(new))
+
+                new_xrange.on_change('start', _sync_from)
+                new_xrange.on_change('end', _sync_to)
 
             # Create toolbar-style row with buttons positioned top-right
             # Use Panel Row to mix Bokeh and Panel widgets
@@ -1245,6 +1151,15 @@ def create_layout(db_path):
             total += len(section_data['rows'])
         return total
 
+    def refresh_on_filter_change():
+        """Refresh contig and sample options when Filtering2 values change."""
+        _filtering_cache['valid'] = False
+        global_toggle_lock['locked'] = True
+        refresh_contig_options_unlocked()
+        refresh_sample_options_unlocked()
+        global_toggle_lock['locked'] = False
+        update_section_titles()
+
     def create_query_row(section_data):
         """Create a single query row with cascading selects, comparison, dynamic input and remove button."""
         # Get categories from metadata
@@ -1289,15 +1204,6 @@ def create_layout(db_path):
 
         # Container for the dynamic input widget
         input_container = pn.Column(width=90, margin=(0, 2, 0, 0))
-
-        def refresh_on_filter_change():
-            """Refresh contig and sample options when Filtering2 values change."""
-            _filtering_cache['valid'] = False
-            global_toggle_lock['locked'] = True
-            refresh_contig_options_unlocked()
-            refresh_sample_options_unlocked()
-            global_toggle_lock['locked'] = False
-            update_section_titles()
 
         # Create initial input widget based on column type
         if initial_is_text:
@@ -1356,6 +1262,9 @@ def create_layout(db_path):
                 current_input_ref['is_panel'] = False
                 # Add callback for Bokeh Spinner
                 new_input.on_change('value', lambda attr, old, new: refresh_on_filter_change())
+
+            # Immediately apply the new default value to contig/sample filtering
+            refresh_on_filter_change()
 
         def update_subcategories(attr, old, new):
             """Update column options when category changes."""
@@ -1475,6 +1384,7 @@ def create_layout(db_path):
             new_row = create_query_row(section_data)
             section_data['rows'].append(new_row)
             rebuild_section(section_data)
+            refresh_on_filter_change()
 
         add_and_btn.on_click(add_and_or_callback)
 
@@ -1534,6 +1444,7 @@ def create_layout(db_path):
         new_section = create_or_section()
         or_sections.append(new_section)
         rebuild_filtering_content()
+        refresh_on_filter_change()
 
     global_add_btn.on_click(global_add_and_or_callback)
 
@@ -1552,11 +1463,6 @@ def create_layout(db_path):
     # Add toggle callback for collapsible Filtering section
     filtering_toggle_btn.on_click(make_toggle_callback(filtering_toggle_btn, filtering_content))
 
-
-    # Initialize slider/filter variables used by refresh_contig_options_unlocked
-    length_slider = None
-    duplication_slider = None
-    variable_filter_rows = []
 
 
     ## Build Sample section
@@ -1904,7 +1810,7 @@ def create_layout(db_path):
     ## Plotting parameters section
     separator_plotting_params = Div(text="", height=2, sizing_mode="stretch_width",
         styles={'background-color': '#333', 'margin-top': '10px', 'margin-bottom': '10px'})
-    plotting_params_title = Div(text="<span style='font-size: 1.2em;'><b>Plotting parameters:</b></span>")
+    plotting_params_title = Div(text="<span style='font-size: 1.2em;'><b>Plotting parameters</b></span>")
 
     same_y_scale_cbg = CheckboxGroup(labels=["Use same scale for all y axis"], active=[])
     same_y_scale_tooltip = Tooltip(content=(

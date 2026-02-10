@@ -134,6 +134,9 @@ impl DbWriter {
         // Insert completeness data
         self.write_completeness(&conn, sample_id, completeness)?;
 
+        // Insert topology data
+        self.write_topology(&conn, sample_id, completeness)?;
+
         // Insert features
         self.write_features(&conn, sample_id, features)?;
 
@@ -286,22 +289,48 @@ impl DbWriter {
                     let total_ins = data.total_insertions.map(|v| v.round() as i32);
                     let total_rc = data.total_reads_clipped.map(|v| v.round() as i32);
                     let total_ref = data.total_reference_clipped.map(|v| v.round() as i32);
-                    // Circularising reads
-                    let circ_reads = data.circularising_reads.map(|v| v as i64);
-                    let circ_pct = data.circularising_reads_percentage;
 
                     appender.append_row(params![
                         contig_id, sample_id,
                         prev_left, data.left_contamination_length, data.left_missing_length,
                         prev_right, data.right_contamination_length, data.right_missing_length,
-                        total_mm, total_del, total_ins, total_rc, total_ref,
-                        circ_reads, circ_pct
+                        total_mm, total_del, total_ins, total_rc, total_ref
                     ])?;
                 }
             }
         }
 
         appender.flush().context("Failed to flush Completeness appender")?;
+        Ok(())
+    }
+
+    fn write_topology(&self, conn: &Connection, sample_id: i64, completeness: &[CompletenessData]) -> Result<()> {
+        let mut appender = conn.appender("Topology")
+            .context("Failed to create Topology appender")?;
+
+        for data in completeness {
+            if data.has_topology_data() {
+                if let Some(&contig_id) = self.contig_name_to_id.get(&data.contig_name) {
+                    let circ_reads = data.circularising_reads.map(|v| v as i64);
+                    let circ_pct = data.circularising_reads_percentage;
+                    let circ_inserts = data.circularising_inserts.map(|v| v as i64);
+                    let circ_inserts_pct = data.circularising_inserts_percentage;
+                    let mean_extra = data.mean_extra_insert_length;
+                    let median_extra = data.median_extra_insert_length;
+                    let unmapped_ends = data.contig_end_unmapped_mates.map(|v| v as i64);
+                    let unmapped_ends_pct = data.contig_end_unmapped_mates_percentage;
+                    let mates_other = data.contig_end_mates_mapped_on_another_contig.map(|v| v as i64);
+                    let mates_other_pct = data.contig_end_mates_mapped_on_another_contig_percentage;
+                    appender.append_row(params![
+                        contig_id, sample_id,
+                        circ_reads, circ_pct,
+                        circ_inserts, circ_inserts_pct, mean_extra, median_extra, unmapped_ends, unmapped_ends_pct, mates_other, mates_other_pct
+                    ])?;
+                }
+            }
+        }
+
+        appender.flush().context("Failed to flush Topology appender")?;
         Ok(())
     }
 
@@ -869,13 +898,30 @@ fn create_core_tables(conn: &Connection) -> Result<()> {
             Deletion_frequency INTEGER,
             Insertion_frequency INTEGER,
             Read_based_clipping_frequency INTEGER,
-            Reference_based_clippings_frequency INTEGER,
-            Circularising_reads INTEGER,
-            Circularising_reads_percentage INTEGER
+            Reference_based_clippings_frequency INTEGER
         )",
         [],
     )
     .context("Failed to create Completeness table")?;
+
+    conn.execute(
+        "CREATE TABLE Topology (
+            Contig_id INTEGER,
+            Sample_id INTEGER,
+            Circularising_reads INTEGER,
+            Circularising_reads_percentage INTEGER,
+            Circularising_inserts INTEGER,
+            Circularising_inserts_percentage INTEGER,
+            Mean_extra_insert_length INTEGER,
+            Median_extra_insert_length INTEGER,
+            Contig_end_unmapped_mates INTEGER,
+            Contig_end_unmapped_mates_percentage INTEGER,
+            Contig_end_mates_mapped_on_another_contig INTEGER,
+            Contig_end_mates_mapped_on_another_contig_percentage INTEGER
+        )",
+        [],
+    )
+    .context("Failed to create Topology table")?;
 
     // No auto-increment ID needed
     conn.execute(
@@ -1329,15 +1375,36 @@ fn create_views(conn: &Connection, created_tables: &HashSet<String>) -> Result<(
              COALESCE(comp.Mismatch_frequency, 0) + COALESCE(comp.Deletion_frequency, 0) + COALESCE(comp.Reference_based_clippings_frequency, 0) AS Score_contamination,
              CASE WHEN c.Contig_length > 0 THEN LEAST(100, ROUND(
                 (COALESCE(comp.Mismatch_frequency, 0) + COALESCE(comp.Deletion_frequency, 0) + COALESCE(comp.Reference_based_clippings_frequency, 0)) * 100.0 / c.Contig_length
-             ))::INTEGER ELSE 0 END AS Contamination_percentage,
-             COALESCE(comp.Circularising_reads, 0) AS Circularising_reads,
-             COALESCE(comp.Circularising_reads_percentage, 0) AS Circularising_reads_percentage
+             ))::INTEGER ELSE 0 END AS Contamination_percentage
          FROM Completeness comp
          JOIN Contig c ON comp.Contig_id = c.Contig_id
          JOIN Sample s ON comp.Sample_id = s.Sample_id",
         [],
     )
     .context("Failed to create Explicit_completeness VIEW")?;
+
+    // Explicit_topology VIEW
+    conn.execute(
+        "CREATE VIEW Explicit_topology AS
+         SELECT
+             c.Contig_name,
+             s.Sample_name,
+             COALESCE(t.Circularising_reads, 0) AS Circularising_reads,
+             COALESCE(t.Circularising_reads_percentage, 0) AS Circularising_reads_percentage,
+             COALESCE(t.Circularising_inserts, 0) AS Circularising_inserts,
+             COALESCE(t.Circularising_inserts_percentage, 0) AS Circularising_inserts_percentage,
+             COALESCE(t.Mean_extra_insert_length, 0) AS Mean_extra_insert_length,
+             COALESCE(t.Median_extra_insert_length, 0) AS Median_extra_insert_length,
+             COALESCE(t.Contig_end_unmapped_mates, 0) AS Contig_end_unmapped_mates,
+             COALESCE(t.Contig_end_unmapped_mates_percentage, 0) AS Contig_end_unmapped_mates_percentage,
+             COALESCE(t.Contig_end_mates_mapped_on_another_contig, 0) AS Contig_end_mates_mapped_on_another_contig,
+             COALESCE(t.Contig_end_mates_mapped_on_another_contig_percentage, 0) AS Contig_end_mates_mapped_on_another_contig_percentage
+         FROM Topology t
+         JOIN Contig c ON t.Contig_id = c.Contig_id
+         JOIN Sample s ON t.Sample_id = s.Sample_id",
+        [],
+    )
+    .context("Failed to create Explicit_topology VIEW")?;
 
     // Explicit_phage_mechanisms VIEW - backwards compatible with comma-separated termini
     // Includes aggregated diagnostics columns from PhageTermini
@@ -1546,6 +1613,22 @@ pub struct CompletenessData {
     pub circularising_reads: Option<u64>,
     /// Percentage of primary reads that are circularising
     pub circularising_reads_percentage: Option<i32>,
+    /// Count of non-inward read pairs spanning both contig ends
+    pub circularising_inserts: Option<u64>,
+    /// Mean extra insert length of circularising inserts vs all proper pairs
+    pub mean_extra_insert_length: Option<i32>,
+    /// Median extra insert length of circularising inserts vs all proper pairs
+    pub median_extra_insert_length: Option<i32>,
+    /// Reads near contig ends with unmapped mate and outward-facing orientation
+    pub contig_end_unmapped_mates: Option<u64>,
+    /// Reads near contig ends with mate on a different contig
+    pub contig_end_mates_mapped_on_another_contig: Option<u64>,
+    /// Percentage of circularising inserts relative to mean junction coverage
+    pub circularising_inserts_percentage: Option<i32>,
+    /// Percentage of unmapped mates on contig ends relative to mean junction coverage
+    pub contig_end_unmapped_mates_percentage: Option<i32>,
+    /// Percentage of mates mapped on another contig relative to mean junction coverage
+    pub contig_end_mates_mapped_on_another_contig_percentage: Option<i32>,
 }
 
 impl CompletenessData {
@@ -1554,7 +1637,14 @@ impl CompletenessData {
         self.prevalence_left.is_some() || self.prevalence_right.is_some()
             || self.total_mismatches.is_some() || self.total_deletions.is_some()
             || self.total_insertions.is_some() || self.total_reads_clipped.is_some()
-            || self.total_reference_clipped.is_some() || self.circularising_reads.is_some()
+            || self.total_reference_clipped.is_some()
+    }
+
+    /// Returns true if there is any topology data.
+    pub fn has_topology_data(&self) -> bool {
+        self.circularising_reads.is_some() || self.circularising_inserts.is_some()
+            || self.contig_end_unmapped_mates.is_some()
+            || self.contig_end_mates_mapped_on_another_contig.is_some()
     }
 }
 
