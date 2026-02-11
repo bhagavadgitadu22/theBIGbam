@@ -417,16 +417,19 @@ pub struct FeaturePoint {
     pub std: Option<f32>,
 }
 
-/// Records whether a contig was detected in a sample.
+/// Coverage data for a contig in a sample.
 ///
-/// A contig is "present" in a sample if it has sufficient coverage.
-/// This is used for presence/absence matrices across samples.
+/// Stores coverage metrics used to assess read depth and abundance.
 #[derive(Clone, Debug)]
 pub struct PresenceData {
     /// The contig name
     pub contig_name: String,
     /// Percentage of bases with at least 1x coverage (0-100)
     pub coverage_pct: f32,
+    /// Whether aligned fraction is above expected: exact_af >= (1 - e^(-0.883 × coverage_mean)) × 100
+    pub above_expected_aligned_fraction: bool,
+    /// Number of primary reads mapped to this contig
+    pub read_count: u64,
     /// Coverage variation (Fano factor style): 1/(n-1) * Σ(cov(i+1) - cov(i))² / mean_cov
     /// Measures coverage smoothness normalized by mean (low = uniform, high = variable)
     pub coverage_variation: f32,
@@ -438,6 +441,8 @@ pub struct PresenceData {
     pub coverage_mean: f32,
     /// Median coverage depth across all positions
     pub coverage_median: f32,
+    /// Trimmed mean coverage (5% trim both sides)
+    pub coverage_trimmed_mean: f32,
 }
 
 /// A terminus area with full metadata for database storage.
@@ -470,7 +475,7 @@ pub struct TerminusArea {
 /// Phage packaging mechanism data for a contig in a sample.
 ///
 /// Stores the detected packaging mechanism and terminus areas.
-/// Similar to CompletenessData, this is stored separately from PresenceData.
+/// This is stored separately from PresenceData.
 #[derive(Clone, Debug)]
 pub struct PackagingData {
     /// The contig name

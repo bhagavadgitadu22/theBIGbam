@@ -182,21 +182,49 @@ def build_summary_data(conn, contig_name, sample_names):
     """
     # Define column groups for each subsection
     coverage_cols = {
-        "Aligned_fraction_percentage": "Aligned fraction (%)", "Coverage_mean": "Coverage mean", "Coverage_median": "Coverage median",
-        "Coverage_sd": "Coverage sd", "Coverage_variation": "Coverage variation", 
-        "Coverage_mean_corrected_by_number_of_reads": "Coverage mean (2)", "Coverage_median_corrected_by_number_of_reads": "Coverage median (2)", 
-        "Coverage_mean_corrected_by_number_of_mapped_reads": "Coverage mean (3)", "Coverage_median_corrected_by_number_of_mapped_reads": "Coverage median (3)"
+        "Aligned_fraction_percentage": "Aligned fraction (%)",
+        "Above_expected_aligned_fraction": "Above expected AF",
+        "Read_count": "Read count",
+        "Coverage_mean": "Coverage mean",
+        "Coverage_median": "Coverage median",
+        "Coverage_trimmed_mean": "Coverage trimmed mean",
+        "Coverage_sd": "Coverage sd",
+        "Coverage_variation": "Coverage variation",
+        "RPKM": "RPKM",
+        "TPM": "TPM",
     }
 
-    completeness_cols = {
-        "Completeness_percentage": "Completeness (%)", "Contamination_percentage": "Contamination (%)",
-        "Mismatch_frequency": "Mismatches (per pos)", "Insertion_frequency": "Insertions* (per pos)", "Deletion_frequency": "Deletions** (per pos)",
-        "Read_based_clipping_frequency": "Read clippings (per pos)", "Reference_based_clippings_frequency": "Reference clippings (per pos)"
+    misassembly_cols = {
+        "Mismatches_per_100kbp": "Mismatches (per 100kbp)",
+        "Deletions_per_100kbp": "Deletions (per 100kbp)",
+        "Insertions_per_100kbp": "Insertions (per 100kbp)",
+        "Clippings_per_100kbp": "Clippings (per 100kbp)",
+        "Collapse_bp": "Collapse (bp)",
+        "Collapse_per_100kbp": "Collapse (per 100kbp)",
+        "Expansion_bp": "Expansion (bp)",
+        "Expansion_per_100kbp": "Expansion (per 100kbp)",
     }
 
-    side_completeness_cols = {
-        "Left_completeness_percentage": "Left completeness (%)", "Left_contamination_length": "Left expansion* (bp)", "Left_missing_length": "Left collapse** (bp)",
-        "Right_completeness_percentage": "Right completeness (%)", "Right_contamination_length": "Right expansion* (bp)", "Right_missing_length": "Right collapse** (bp)",
+    microdiversity_cols = {
+        "Mismatches_per_100kbp": "Mismatches (per 100kbp)",
+        "Deletions_per_100kbp": "Deletions (per 100kbp)",
+        "Insertions_per_100kbp": "Insertions (per 100kbp)",
+        "Clippings_per_100kbp": "Clippings (per 100kbp)",
+        "Microdiverse_bp_on_reference": "Microdiverse bp (reference)",
+        "Microdiverse_bp_per_100kbp_on_reference": "Microdiverse bp/100kbp (reference)",
+        "Microdiverse_bp_on_reads": "Microdiverse bp (reads)",
+        "Microdiverse_bp_per_100kbp_on_reads": "Microdiverse bp/100kbp (reads)",
+    }
+
+    side_misassembly_cols = {
+        "Contig_start_collapse_percentage": "Start collapse (%)",
+        "Contig_start_collapse_bp": "Start collapse (bp)",
+        "Contig_start_expansion_bp": "Start expansion (bp)",
+        "Contig_end_collapse_percentage": "End collapse (%)",
+        "Contig_end_collapse_bp": "End collapse (bp)",
+        "Contig_end_expansion_bp": "End expansion (bp)",
+        "Contig_end_misjoint_mates": "End misjoint mates",
+        "Normalized_contig_end_misjoint_mates": "Normalized end misjoint mates",
     }
 
     phage_cols = {
@@ -204,16 +232,12 @@ def build_summary_data(conn, contig_name, sample_names):
     }
 
     topology_cols = {
+        "Category": "Category",
         "Circularising_reads": "Circularising reads",
         "Circularising_reads_percentage": "Circularising reads (%)",
         "Circularising_inserts": "Circularising inserts",
-        "Circularising_inserts_percentage": "Circularising inserts (%)",
-        "Mean_extra_insert_length": "Mean extra insert length",
-        "Median_extra_insert_length": "Median extra insert length",
-        "Contig_end_unmapped_mates": "Contig end unmapped mates",
-        "Contig_end_unmapped_mates_percentage": "Contig end unmapped mates (%)",
-        "Contig_end_mates_mapped_on_another_contig": "Contig end mates mapped on another contig",
-        "Contig_end_mates_mapped_on_another_contig_percentage": "Contig end mates mapped on another contig (%)",
+        "Circularising_insert_size_deviation": "Circularising insert size deviation",
+        "Normalized_circularising_inserts": "Normalized circularising inserts",
     }
 
     cur = conn.cursor()
@@ -228,89 +252,36 @@ def build_summary_data(conn, contig_name, sample_names):
         return  # nothing to query
 
     # Initialize all columns with None
-    all_cols = coverage_cols | completeness_cols | side_completeness_cols | phage_cols | topology_cols
+    all_cols = coverage_cols | misassembly_cols | microdiversity_cols | side_misassembly_cols | phage_cols | topology_cols
     for col in all_cols.keys():
         data[col] = [None] * n
 
-    # Query Explicit_presences view
-    try:
-        cols_str = ", ".join(coverage_cols.keys())
-        query = f"""
-            SELECT Sample_name, {cols_str}
-            FROM Explicit_presences
-            WHERE Contig_name = ? AND Sample_name IN ({','.join(['?'] * len(sample_names))})
-        """
-        cur.execute(query, [contig_name] + list(sample_names))
-        for row in cur.fetchall():
-            sample_name, *values = row
-            idx = sample_idx.get(sample_name)
-            if idx is None:
-                continue
+    # Helper to query a view and fill data
+    def query_view(view_name, col_dict):
+        try:
+            cols_str = ", ".join(col_dict.keys())
+            query = f"""
+                SELECT Sample_name, {cols_str}
+                FROM {view_name}
+                WHERE Contig_name = ? AND Sample_name IN ({','.join(['?'] * len(sample_names))})
+            """
+            cur.execute(query, [contig_name] + list(sample_names))
+            for row in cur.fetchall():
+                sample_name, *values = row
+                idx = sample_idx.get(sample_name)
+                if idx is None:
+                    continue
+                for value_col, cell in zip(col_dict.keys(), values):
+                    data[value_col][idx] = cell
+        except Exception:
+            pass  # View might not exist or have no data
 
-            for value_col, cell in zip(coverage_cols.keys(), values):
-                data[value_col][idx] = cell
-    except Exception:
-        pass  # View might not exist or have no data
-
-    # Query Explicit_completeness view
-    try:
-        comp_cols = completeness_cols | side_completeness_cols
-        cols_str = ", ".join(comp_cols)
-        query = f"""
-            SELECT Sample_name, {cols_str}
-            FROM Explicit_completeness
-            WHERE Contig_name = ? AND Sample_name IN ({','.join(['?'] * len(sample_names))})
-        """
-        cur.execute(query, [contig_name] + list(sample_names))
-        for row in cur.fetchall():
-            sample_name, *values = row
-            idx = sample_idx.get(sample_name)
-            if idx is None:
-                continue
-
-            for value_col, cell in zip(comp_cols.keys(), values):
-                data[value_col][idx] = cell
-    except Exception:
-        pass  # View might not exist or have no data
-
-    # Query Explicit_phage_mechanisms view
-    try:
-        cols_str = ", ".join(phage_cols)
-        query = f"""
-            SELECT Sample_name, {cols_str}
-            FROM Explicit_phage_mechanisms
-            WHERE Contig_name = ? AND Sample_name IN ({','.join(['?'] * len(sample_names))})
-        """
-        cur.execute(query, [contig_name] + list(sample_names))
-        for row in cur.fetchall():
-            sample_name, *values = row
-            idx = sample_idx.get(sample_name)
-            if idx is None:
-                continue
-
-            for value_col, cell in zip(phage_cols.keys(), values):
-                data[value_col][idx] = cell
-    except Exception:
-        pass  # View might not exist or have no data
-
-    # Query Explicit_topology view
-    try:
-        cols_str = ", ".join(topology_cols.keys())
-        query = f"""
-            SELECT Sample_name, {cols_str}
-            FROM Explicit_topology
-            WHERE Contig_name = ? AND Sample_name IN ({','.join(['?'] * len(sample_names))})
-        """
-        cur.execute(query, [contig_name] + list(sample_names))
-        for row in cur.fetchall():
-            sample_name, *values = row
-            idx = sample_idx.get(sample_name)
-            if idx is None:
-                continue
-            for value_col, cell in zip(topology_cols.keys(), values):
-                data[value_col][idx] = cell
-    except Exception:
-        pass  # View might not exist or have no data
+    query_view("Explicit_coverage", coverage_cols)
+    query_view("Explicit_misassembly", misassembly_cols)
+    query_view("Explicit_microdiversity", microdiversity_cols)
+    query_view("Explicit_side_misassembly", side_misassembly_cols)
+    query_view("Explicit_phage_mechanisms", phage_cols)
+    query_view("Explicit_topology", topology_cols)
 
     # Create content (as HTML strings)
     content = []
@@ -320,32 +291,37 @@ def build_summary_data(conn, contig_name, sample_names):
     if coverage_table:
         content.append("<b>Coverage:</b>")
         content.append(coverage_table)
-        # Add explanation for corrected coverage columns
+
+    # Misassembly subsection
+    misassembly_table = generate_summary_table_html(data, misassembly_cols)
+    if misassembly_table:
+        content.append("<b>Misassembly:</b>")
+        content.append(misassembly_table)
         content.append(
-            "<i>(2) Coverage mean/median corrected by number of reads or number of reads mapped<br>"
-            "(3) Coverage mean/median corrected by number of reads or number of reads mapped</i>"
+            "<i>Positions with ≥50% prevalence. "
+            "Collapse: extra bases in reads (insertions + clippings + mismatches). "
+            "Expansion: missing bases in reads (deletions + mismatches + paired clip distances).</i>"
         )
 
-    # Completeness subsection
-    completeness_table = generate_summary_table_html(data, completeness_cols)
-    side_completeness_table = generate_summary_table_html(data, side_completeness_cols)
-    if completeness_table or side_completeness_table:
-        content.append("<b>Completeness:</b>")
-        if completeness_table:
-            content.append(completeness_table)
-            # Add explanation for expansion and collapse
-            content.append(
-                "<i>* Insertion: Extra bases are present in the read but not in the contig<br>"
-                "** Deletion: A stretch of the contig has no corresponding bases in the read</i>"
-            )
+    # Microdiversity subsection
+    microdiversity_table = generate_summary_table_html(data, microdiversity_cols)
+    if microdiversity_table:
+        content.append("<b>Microdiversity:</b>")
+        content.append(microdiversity_table)
+        content.append(
+            "<i>Positions with ≥10% prevalence.</i>"
+        )
 
-        if side_completeness_table:
-            content.append(side_completeness_table)
-            # Add explanation for expansion and collapse
-            content.append(
-                "<i>* Expansion: alignment gaps in the aligned reads (ie extra sequences in the contigs)<br>"
-                "** Collapse: extra sequences in the aligned reads (ie alignment gaps in the contigs)</i>"
-            )
+    # Side misassembly subsection
+    side_misassembly_table = generate_summary_table_html(data, side_misassembly_cols)
+    if side_misassembly_table:
+        content.append("<b>Side misassembly:</b>")
+        content.append(side_misassembly_table)
+        content.append(
+            "<i>Clipping events at contig extremities with ≥50% prevalence. "
+            "Collapse: clipped bases extending beyond contig boundary. "
+            "Expansion: distance from clipping site to contig end.</i>"
+        )
 
     # Phage mechanism subsection
     phage_table = generate_summary_table_html(data, phage_cols)

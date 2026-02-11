@@ -122,7 +122,7 @@ def run_add_variable(args):
                 # --- Check sample/contig pair is present ---
                 sample_id = samples[sample]
                 if (contig_id, sample_id) not in presences_validated and (contig_id, sample_id) not in absences_validated:
-                    cur.execute("SELECT 1 FROM Presences WHERE Contig_id=? AND Sample_id=? LIMIT 1", (contig_id, sample_id))
+                    cur.execute("SELECT 1 FROM Coverage WHERE Contig_id=? AND Sample_id=? LIMIT 1", (contig_id, sample_id))
                     exists = cur.fetchone() is not None
 
                     if not exists:

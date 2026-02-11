@@ -26,7 +26,7 @@ use crate::compress::{
     add_compressed_feature, add_compressed_feature_with_reference,
     add_compressed_feature_with_stats, merge_identical_runs,
 };
-use crate::db::{DbWriter, CompletenessData, GCContentData, RepeatsData};
+use crate::db::{DbWriter, MisassemblyData, MicrodiversityData, SideMisassemblyData, TopologyData, GCContentData, RepeatsData};
 use crate::gc_content::{compute_gc_content, compute_gc_skew, GCParams};
 use crate::features::{FeatureArrays, ModuleFlags};
 use crate::parser::{parse_annotations};
@@ -38,7 +38,7 @@ use crate::processing_phage_packaging::{
     classify_packaging_areas, filter_and_merge_to_areas_with_diagnostics,
     is_valid_terminal_repeat, DtrRegion, PhageTerminiConfig,
 };
-use crate::processing_completeness::compute_completeness;
+use crate::processing_completeness::compute_all_metrics;
 
 /// Configuration for processing.
 #[derive(Clone)]
@@ -464,7 +464,7 @@ fn run_autoblast(contigs: &[ContigInfo], threads: usize) -> Result<Vec<RepeatsDa
 /// Add features from FeatureArrays to output (optimized path).
 /// Returns a tuple of:
 /// - Optional packaging data for phagetermini module (includes all termini with filtering metadata)
-/// - Optional completeness data for assemblycheck module
+/// - Optional metric structs (misassembly, microdiversity, side_misassembly, topology)
 fn add_features_from_arrays(
     arrays: &mut FeatureArrays,
     contig_name: &str,
@@ -474,7 +474,7 @@ fn add_features_from_arrays(
     flags: ModuleFlags,
     repeats: &[RepeatsData],
     output: &mut Vec<FeaturePoint>,
-) -> (Option<PackagingData>, Option<CompletenessData>) {
+) -> (Option<PackagingData>, Option<(MisassemblyData, MicrodiversityData, SideMisassemblyData, TopologyData)>) {
     let pt_config = config.phagetermini_config;
 
     // Build DTR regions from repeats for this contig (used for both merging and classification)
@@ -555,9 +555,8 @@ fn add_features_from_arrays(
     // Assemblycheck features
     let mut left_clip_runs: Vec<Run> = Vec::new();
     let mut right_clip_runs: Vec<Run> = Vec::new();
-    let mut insertion_runs: Vec<Run> = Vec::new();
-    let mut deletion_runs: Vec<Run> = Vec::new();
-    let mut mismatch_runs: Vec<Run> = Vec::new();
+    let mut _insertion_runs: Vec<Run> = Vec::new();
+    let mut _mismatch_runs: Vec<Run> = Vec::new();
     if flags.mapping_metrics || flags.phagetermini {
         // Clippings and insertions with statistics
         let left_clip_counts: Vec<f64> = arrays.left_clipping_lengths.iter().map(|v| v.len() as f64).collect();
@@ -610,14 +609,14 @@ fn add_features_from_arrays(
                 var.sqrt()
             }
         }).collect();
-        insertion_runs = add_compressed_feature_with_stats(&insertion_counts, &insertion_means, &insertion_medians, &insertion_stds,
+        _insertion_runs = add_compressed_feature_with_stats(&insertion_counts, &insertion_means, &insertion_medians, &insertion_stds,
             Some(&primary_reads_f64), "insertions", contig_name, config, output);
 
         // Other mapping metrics features (no statistics)
         // Apply two-stage compression: first with coverage reference, then merge identical runs
         let deletions_f64: Vec<f64> = arrays.deletions.iter().map(|&x| x as f64).collect();
-        deletion_runs = compress_signal_with_reference(&deletions_f64, Some(&primary_reads_f64), PlotType::Bars, config.curve_ratio, config.bar_ratio);
-        let deletions_runs_merged = merge_identical_runs(deletion_runs.clone());
+        let deletion_runs = compress_signal_with_reference(&deletions_f64, Some(&primary_reads_f64), PlotType::Bars, config.curve_ratio, config.bar_ratio);
+        let deletions_runs_merged = merge_identical_runs(deletion_runs);
         output.extend(deletions_runs_merged.into_iter().map(|run| FeaturePoint {
             contig_name: contig_name.to_string(),
             feature: "deletions".to_string(),
@@ -630,7 +629,7 @@ fn add_features_from_arrays(
         }));
 
         let mismatches_f64: Vec<f64> = arrays.mismatches.iter().map(|&x| x as f64).collect();
-        mismatch_runs = add_compressed_feature_with_reference(&mismatches_f64, Some(&primary_reads_f64), "mismatches", contig_name, config, output);
+        _mismatch_runs = add_compressed_feature_with_reference(&mismatches_f64, Some(&primary_reads_f64), "mismatches", contig_name, config, output);
     }
 
     // Paired-reads module
@@ -847,51 +846,44 @@ fn add_features_from_arrays(
         None
     };
 
-    // Compute completeness statistics when mapping_metrics is enabled
-    let completeness_result = if flags.mapping_metrics {
-        // Use actual primary read count (not sum of coverage array which gives coverage × positions)
-        let completeness = compute_completeness(
+    // Compute all metrics when mapping_metrics is enabled
+    let metrics_result = if flags.mapping_metrics {
+        let (misassembly, microdiversity, side_misassembly, topology) = compute_all_metrics(
             &arrays.left_clipping_lengths,
             &arrays.right_clipping_lengths,
             &arrays.insertion_lengths,
             &arrays.deletion_lengths,
             &arrays.primary_reads,
-            &left_clip_runs,
-            &right_clip_runs,
-            &insertion_runs,
-            &deletion_runs,
-            &mismatch_runs,
+            &arrays.mismatches,
+            &arrays.deletions,
             contig_name,
             contig_length,
             arrays.circularising_reads_count,
             arrays.circularising_inserts_count,
             &arrays.circularising_insert_sizes,
             &arrays.all_proper_insert_sizes,
-            arrays.contig_end_unmapped_mates,
             arrays.contig_end_mates_mapped_on_another_contig,
+            &left_clip_runs,
+            &right_clip_runs,
         );
-        if completeness.has_data() {
-            Some(completeness)
-        } else {
-            None
-        }
+        Some((misassembly, microdiversity, side_misassembly, topology))
     } else {
         None
     };
 
-    (packaging_result, completeness_result)
+    (packaging_result, metrics_result)
 }
 
 /// Process one BAM file using streaming (single-pass, optimized).
 /// Parallelizes at the contig level for samples with many contigs.
-/// Returns (features, presences, packaging, completeness, sample_name, seq_type, total_reads, mapped_reads)
+/// Returns (features, presences, packaging, misassembly, microdiversity, side_misassembly, topology, sample_name, seq_type, total_reads, mapped_reads)
 pub fn process_sample(
     bam_path: &Path,
     contigs: &[ContigInfo],
     modules: &[String],
     config: &ProcessConfig,
     repeats: &[RepeatsData],
-) -> Result<(Vec<FeaturePoint>, Vec<PresenceData>, Vec<PackagingData>, Vec<CompletenessData>, String, SequencingType, u64, u64)> {
+) -> Result<(Vec<FeaturePoint>, Vec<PresenceData>, Vec<PackagingData>, Vec<MisassemblyData>, Vec<MicrodiversityData>, Vec<SideMisassemblyData>, Vec<TopologyData>, String, SequencingType, u64, u64)> {
     let sample_name = bam_path
         .file_stem()
         .unwrap_or_default()
@@ -958,13 +950,14 @@ pub fn process_sample(
 
             // Calculate features for this contig
             let mut features = Vec::new();
-            let (packaging_info, completeness_info) = add_features_from_arrays(&mut arrays, &ref_name, ref_length, config, seq_type, flags, repeats, &mut features);
+            let (packaging_info, metrics_info) = add_features_from_arrays(&mut arrays, &ref_name, ref_length, config, seq_type, flags, repeats, &mut features);
             let coverage_median = arrays.coverage_median() as f32;
+            let coverage_trimmed_mean = arrays.coverage_trimmed_mean(0.05) as f32;
+
+            // Above expected aligned fraction: exact_af >= (1 - e^(-0.883 × coverage_mean)) × 100
+            let above_expected = coverage_pct >= (1.0 - (-0.883 * coverage_mean as f64).exp()) * 100.0;
 
             // Calculate coverage variation using Fano factor style normalization
-            // Formula: 1000000 × (1/(n-1)) × Σ(cov(i+1) - cov(i))² / mean_cov
-            // Divides by mean (not mean²) to remove spurious correlation with coverage depth
-            // Multiplied by 1000000 for 6 decimal digits precision when stored as integer
             let coverage_variation = if arrays.primary_reads.len() > 1 && coverage_mean > 0.0 {
                 let n = arrays.primary_reads.len();
                 let mean_cov = coverage_mean as f64;
@@ -982,8 +975,6 @@ pub fn process_sample(
             };
 
             // Coverage SD: Coefficient of Variation (CV) = std_dev / mean
-            // Normalized to remove correlation with coverage depth
-            // Scaled by 1,000,000 for integer storage (same as coverage_variation)
             let coverage_sd = if arrays.primary_reads.len() > 0 && coverage_mean > 0.0 {
                 let mean_cov = coverage_mean as f64;
                 let n = arrays.primary_reads.len() as f64;
@@ -994,7 +985,7 @@ pub fn process_sample(
                         diff * diff
                     })
                     .sum::<f64>() / n;
-                let cv = variance.sqrt() / mean_cov;  // Coefficient of variation
+                let cv = variance.sqrt() / mean_cov;
                 (cv * 1_000_000.0) as f32
             } else {
                 0.0
@@ -1003,13 +994,16 @@ pub fn process_sample(
             let presence = PresenceData {
                 contig_name: ref_name.clone(),
                 coverage_pct: coverage_pct as f32,
+                above_expected_aligned_fraction: above_expected,
+                read_count: primary_count,
                 coverage_variation,
                 coverage_sd,
                 coverage_mean,
                 coverage_median,
+                coverage_trimmed_mean,
             };
 
-            Some((features, presence, packaging_info, completeness_info, primary_count))
+            Some((features, presence, packaging_info, metrics_info, primary_count))
         })
         .collect();
 
@@ -1017,22 +1011,28 @@ pub fn process_sample(
     let mut all_features = Vec::new();
     let mut all_presences = Vec::new();
     let mut all_packaging = Vec::new();
-    let mut all_completeness = Vec::new();
+    let mut all_misassembly = Vec::new();
+    let mut all_microdiversity = Vec::new();
+    let mut all_side_misassembly = Vec::new();
+    let mut all_topology = Vec::new();
     let mut mapped_reads: u64 = 0;
 
-    for (features, presence, packaging, completeness, primary_count) in results {
+    for (features, presence, packaging, metrics, primary_count) in results {
         all_features.extend(features);
         all_presences.push(presence);
         mapped_reads += primary_count;
         if let Some(pkg) = packaging {
             all_packaging.push(pkg);
         }
-        if let Some(comp) = completeness {
-            all_completeness.push(comp);
+        if let Some((mis, micro, side, topo)) = metrics {
+            all_misassembly.push(mis);
+            all_microdiversity.push(micro);
+            all_side_misassembly.push(side);
+            all_topology.push(topo);
         }
     }
 
-    Ok((all_features, all_presences, all_packaging, all_completeness, sample_name, seq_type, total_reads, mapped_reads))
+    Ok((all_features, all_presences, all_packaging, all_misassembly, all_microdiversity, all_side_misassembly, all_topology, sample_name, seq_type, total_reads, mapped_reads))
 }
 
 /// Extract contig information from BAM file headers.
@@ -1218,7 +1218,10 @@ struct SampleResult {
     features: Vec<FeaturePoint>,
     presences: Vec<PresenceData>,
     packaging: Vec<PackagingData>,
-    completeness: Vec<CompletenessData>,
+    misassembly: Vec<MisassemblyData>,
+    microdiversity: Vec<MicrodiversityData>,
+    side_misassembly: Vec<SideMisassemblyData>,
+    topology: Vec<TopologyData>,
 }
 
 fn process_samples_parallel(
@@ -1324,7 +1327,10 @@ fn process_samples_parallel(
                 &result.sample_name,
                 &result.presences,
                 &result.packaging,
-                &result.completeness,
+                &result.misassembly,
+                &result.microdiversity,
+                &result.side_misassembly,
+                &result.topology,
                 &result.features,
                 circular,
             ) {
@@ -1356,7 +1362,7 @@ fn process_samples_parallel(
         let sample_start = std::time::Instant::now();
 
         match process_sample(bam_path, contigs, modules, config, repeats) {
-            Ok((features, presences, packaging, completeness, sample_name, sequencing_type, total_reads, mapped_reads)) => {
+            Ok((features, presences, packaging, misassembly, microdiversity, side_misassembly, topology, sample_name, sequencing_type, total_reads, mapped_reads)) => {
                 let sample_time = sample_start.elapsed().as_secs_f64();
                 completed_count.fetch_add(1, Ordering::SeqCst);
                 let msg = format!("{} ({:.2}s)", sample_name, sample_time);
@@ -1375,7 +1381,10 @@ fn process_samples_parallel(
                     features,
                     presences,
                     packaging,
-                    completeness,
+                    misassembly,
+                    microdiversity,
+                    side_misassembly,
+                    topology,
                 });
             }
             Err(e) => {
@@ -1457,7 +1466,7 @@ fn process_samples_sequential(
         let sample_start = std::time::Instant::now();
 
         match process_sample(bam_path, contigs, modules, config, repeats) {
-            Ok((features, presences, packaging, completeness, sample_name, sequencing_type, total_reads, mapped_reads)) => {
+            Ok((features, presences, packaging, misassembly, microdiversity, side_misassembly, topology, sample_name, sequencing_type, total_reads, mapped_reads)) => {
                 let process_elapsed = sample_start.elapsed();
                 processing_time_total += process_elapsed;
 
@@ -1476,7 +1485,10 @@ fn process_samples_sequential(
                     &sample_name,
                     &presences,
                     &packaging,
-                    &completeness,
+                    &misassembly,
+                    &microdiversity,
+                    &side_misassembly,
+                    &topology,
                     &features,
                     config.circular,
                 ) {

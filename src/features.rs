@@ -333,6 +333,24 @@ impl FeatureArrays {
         }
     }
 
+    /// Compute trimmed mean coverage (trim `trim_fraction` from both sides).
+    /// For example, trim_fraction=0.05 trims the bottom and top 5%.
+    pub fn coverage_trimmed_mean(&self, trim_fraction: f64) -> f64 {
+        if self.primary_reads.is_empty() {
+            return 0.0;
+        }
+        let mut sorted: Vec<u64> = self.primary_reads.clone();
+        sorted.sort_unstable();
+        let n = sorted.len();
+        let trim = (n as f64 * trim_fraction) as usize;
+        let trimmed = &sorted[trim..n.saturating_sub(trim)];
+        if trimmed.is_empty() {
+            0.0
+        } else {
+            trimmed.iter().sum::<u64>() as f64 / trimmed.len() as f64
+        }
+    }
+
     /// Convert to FeatureMap for assemblycheck features.
     ///
     /// Only includes features relevant to the sequencing type:

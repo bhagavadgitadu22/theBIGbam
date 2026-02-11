@@ -124,26 +124,35 @@ def download_metrics_summary_csv(db_path, contig_name, sample_names):
                     WITH samples AS (
                         SELECT Sample_name FROM Sample WHERE Sample_name IN ({samples_list})
                     )
-                    SELECT 
+                    SELECT
                         s.Sample_name as "Sample",
-                        p.Aligned_fraction_percentage as "Aligned_fraction_percentage",
-                        p.Coverage_mean, p.Coverage_median, p.Coverage_sd, p.Coverage_variation,
-                        p.Coverage_mean_corrected_by_number_of_reads, p.Coverage_median_corrected_by_number_of_reads,
-                        p.Coverage_mean_corrected_by_number_of_mapped_reads, p.Coverage_median_corrected_by_number_of_mapped_reads,
-                        c.Completeness_percentage, c.Contamination_percentage,
-                        c.Mismatch_frequency, c.Insertion_frequency, c.Deletion_frequency,
-                        c.Read_based_clipping_frequency, c.Reference_based_clippings_frequency,
-                        c.Left_completeness_percentage, c.Left_contamination_length, c.Left_missing_length,
-                        c.Right_completeness_percentage, c.Right_contamination_length, c.Right_missing_length,
-                        t.Circularising_reads, t.Circularising_reads_percentage,
-                        t.Circularising_inserts, t.Circularising_inserts_percentage,
-                        t.Mean_extra_insert_length, t.Median_extra_insert_length,
-                        t.Contig_end_unmapped_mates, t.Contig_end_unmapped_mates_percentage,
-                        t.Contig_end_mates_mapped_on_another_contig, t.Contig_end_mates_mapped_on_another_contig_percentage,
+                        cov.Aligned_fraction_percentage, cov.Above_expected_aligned_fraction,
+                        cov.Read_count, cov.Coverage_mean, cov.Coverage_median, cov.Coverage_trimmed_mean,
+                        cov.Coverage_sd, cov.Coverage_variation, cov.RPKM, cov.TPM,
+                        mis.Mismatches_per_100kbp as "Misassembly_mismatches_per_100kbp",
+                        mis.Deletions_per_100kbp as "Misassembly_deletions_per_100kbp",
+                        mis.Insertions_per_100kbp as "Misassembly_insertions_per_100kbp",
+                        mis.Clippings_per_100kbp as "Misassembly_clippings_per_100kbp",
+                        mis.Collapse_bp, mis.Collapse_per_100kbp,
+                        mis.Expansion_bp, mis.Expansion_per_100kbp,
+                        mic.Mismatches_per_100kbp as "Microdiversity_mismatches_per_100kbp",
+                        mic.Deletions_per_100kbp as "Microdiversity_deletions_per_100kbp",
+                        mic.Insertions_per_100kbp as "Microdiversity_insertions_per_100kbp",
+                        mic.Clippings_per_100kbp as "Microdiversity_clippings_per_100kbp",
+                        mic.Microdiverse_bp_on_reference, mic.Microdiverse_bp_per_100kbp_on_reference,
+                        mic.Microdiverse_bp_on_reads, mic.Microdiverse_bp_per_100kbp_on_reads,
+                        sm.Contig_start_collapse_percentage, sm.Contig_start_collapse_bp, sm.Contig_start_expansion_bp,
+                        sm.Contig_end_collapse_percentage, sm.Contig_end_collapse_bp, sm.Contig_end_expansion_bp,
+                        sm.Contig_end_misjoint_mates, sm.Normalized_contig_end_misjoint_mates,
+                        t.Category, t.Circularising_reads, t.Circularising_reads_percentage,
+                        t.Circularising_inserts, t.Circularising_insert_size_deviation,
+                        t.Normalized_circularising_inserts,
                         ph.Packaging_mechanism, ph.Left_termini, ph.Right_termini
                     FROM samples s
-                    LEFT JOIN Explicit_presences p ON s.Sample_name = p.Sample_name AND p.Contig_name = '{safe_contig}'
-                    LEFT JOIN Explicit_completeness c ON s.Sample_name = c.Sample_name AND c.Contig_name = '{safe_contig}'
+                    LEFT JOIN Explicit_coverage cov ON s.Sample_name = cov.Sample_name AND cov.Contig_name = '{safe_contig}'
+                    LEFT JOIN Explicit_misassembly mis ON s.Sample_name = mis.Sample_name AND mis.Contig_name = '{safe_contig}'
+                    LEFT JOIN Explicit_microdiversity mic ON s.Sample_name = mic.Sample_name AND mic.Contig_name = '{safe_contig}'
+                    LEFT JOIN Explicit_side_misassembly sm ON s.Sample_name = sm.Sample_name AND sm.Contig_name = '{safe_contig}'
                     LEFT JOIN Explicit_topology t ON s.Sample_name = t.Sample_name AND t.Contig_name = '{safe_contig}'
                     LEFT JOIN Explicit_phage_mechanisms ph ON s.Sample_name = ph.Sample_name AND ph.Contig_name = '{safe_contig}'
                     ORDER BY s.Sample_name

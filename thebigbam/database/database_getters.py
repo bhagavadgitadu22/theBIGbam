@@ -33,13 +33,21 @@ def get_filtering_metadata(db_path: str) -> dict:
             'source': 'Sample',
             'exclude': ['Sample_id', 'Sample_name']
         },
-        'Presences': {
-            'source': 'Explicit_presences',
-            'exclude': ['Contig_name', 'Sample_name', 'Read_number_correction_ratio', 'Read_mapped_correction_ratio']
+        'Coverage': {
+            'source': 'Explicit_coverage',
+            'exclude': ['Contig_name', 'Sample_name']
         },
-        'Completeness': {
-            'source': 'Explicit_completeness',
-            'exclude': ['Contig_name', 'Sample_name', 'Score_completeness', 'Score_contamination']
+        'Misassembly': {
+            'source': 'Explicit_misassembly',
+            'exclude': ['Contig_name', 'Sample_name']
+        },
+        'Microdiversity': {
+            'source': 'Explicit_microdiversity',
+            'exclude': ['Contig_name', 'Sample_name']
+        },
+        'Side misassembly': {
+            'source': 'Explicit_side_misassembly',
+            'exclude': ['Contig_name', 'Sample_name']
         },
         'Topology': {
             'source': 'Explicit_topology',

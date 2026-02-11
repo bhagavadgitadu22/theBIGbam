@@ -3,7 +3,7 @@
 //! Database schema:
 //! - `Contig`: Contig metadata (name, length, annotation tool)
 //! - `Sample`: Sample names from BAM files
-//! - `Presences`: Coverage percentage per contig per sample
+//! - `Coverage`: Coverage metrics per contig per sample
 //! - `Contig_annotation`: Gene annotations from GenBank
 //! - `Variable`: Feature metadata (name, type, table name)
 //! - Feature tables: One table per feature type (coverage, tau, etc.)
@@ -22,6 +22,7 @@ use std::sync::Mutex;
 
 use crate::gc_content::{GCContentRun, GCSkewRun, GCSkewStats, GCStats};
 use crate::types::{feature_table_name, ContigInfo, FeatureAnnotation, FeaturePoint, PackagingData, PresenceData, VARIABLES};
+// Re-export new metric data structs (defined below in this file)
 
 /// Thread-safe database connection wrapper for sequential writes.
 pub struct DbWriter {
@@ -107,13 +108,16 @@ impl DbWriter {
         Ok(sample_id)
     }
 
-    /// Write all data for a sample (presences, packaging, completeness, features).
+    /// Write all data for a sample (coverage, packaging, misassembly/microdiversity/side_misassembly/topology, features).
     pub fn write_sample_data(
         &self,
         sample_name: &str,
         presences: &[PresenceData],
         packaging: &[PackagingData],
-        completeness: &[CompletenessData],
+        misassembly: &[MisassemblyData],
+        microdiversity: &[MicrodiversityData],
+        side_misassembly: &[SideMisassemblyData],
+        topology: &[TopologyData],
         features: &[FeaturePoint],
         circular: bool,
     ) -> Result<()> {
@@ -125,17 +129,23 @@ impl DbWriter {
         let conn = self.conn.lock().unwrap();
 
         // Appenders handle their own transactions - no explicit BEGIN/COMMIT needed
-        // Insert presences
+        // Insert coverage data
         self.write_presences(&conn, sample_id, presences)?;
 
         // Insert packaging mechanisms
         self.write_packaging(&conn, sample_id, packaging, circular)?;
 
-        // Insert completeness data
-        self.write_completeness(&conn, sample_id, completeness)?;
+        // Insert misassembly data
+        self.write_misassembly(&conn, sample_id, misassembly)?;
+
+        // Insert microdiversity data
+        self.write_microdiversity(&conn, sample_id, microdiversity)?;
+
+        // Insert side misassembly data
+        self.write_side_misassembly(&conn, sample_id, side_misassembly)?;
 
         // Insert topology data
-        self.write_topology(&conn, sample_id, completeness)?;
+        self.write_topology(&conn, sample_id, topology)?;
 
         // Insert features
         self.write_features(&conn, sample_id, features)?;
@@ -144,23 +154,24 @@ impl DbWriter {
     }
 
     fn write_presences(&self, conn: &Connection, sample_id: i64, presences: &[PresenceData]) -> Result<()> {
-        let mut appender = conn.appender("Presences")
-            .context("Failed to create Presences appender")?;
+        let mut appender = conn.appender("Coverage")
+            .context("Failed to create Coverage appender")?;
 
         for p in presences {
             if let Some(&contig_id) = self.contig_name_to_id.get(&p.contig_name) {
-                // Store coverage_percentage, coverage_variation, and coverage_sd as integers (scaled)
-                // Store coverage_mean and coverage_median as integers (rounded)
                 let cov_pct = p.coverage_pct.round() as i32;
-                let cov_var = p.coverage_variation.round() as i32;
-                let cov_sd = p.coverage_sd.round() as i32;
+                let above_expected = p.above_expected_aligned_fraction;
+                let read_count = p.read_count as i64;
                 let cov_mean = p.coverage_mean.round() as i32;
                 let cov_median = p.coverage_median.round() as i32;
-                appender.append_row(params![contig_id, sample_id, cov_pct, cov_var, cov_sd, cov_mean, cov_median])?;
+                let cov_trimmed_mean = p.coverage_trimmed_mean.round() as i32;
+                let cov_sd = p.coverage_sd.round() as i32;
+                let cov_var = p.coverage_variation.round() as i32;
+                appender.append_row(params![contig_id, sample_id, cov_pct, above_expected, read_count, cov_mean, cov_median, cov_trimmed_mean, cov_sd, cov_var])?;
             }
         }
 
-        appender.flush().context("Failed to flush Presences appender")?;
+        appender.flush().context("Failed to flush Coverage appender")?;
         Ok(())
     }
 
@@ -273,60 +284,76 @@ impl DbWriter {
         Ok(())
     }
 
-    fn write_completeness(&self, conn: &Connection, sample_id: i64, completeness: &[CompletenessData]) -> Result<()> {
-        let mut appender = conn.appender("Completeness")
-            .context("Failed to create Completeness appender")?;
+    fn write_misassembly(&self, conn: &Connection, sample_id: i64, data: &[MisassemblyData]) -> Result<()> {
+        let mut appender = conn.appender("Misassembly")
+            .context("Failed to create Misassembly appender")?;
 
-        for data in completeness {
-            if data.has_data() {
-                if let Some(&contig_id) = self.contig_name_to_id.get(&data.contig_name) {
-                    // Store prevalences as integers (already percentages)
-                    let prev_left = data.prevalence_left.map(|v| v.round() as i32);
-                    let prev_right = data.prevalence_right.map(|v| v.round() as i32);
-                    // Store totals as integers (already counts or small values)
-                    let total_mm = data.total_mismatches.map(|v| v.round() as i32);
-                    let total_del = data.total_deletions.map(|v| v.round() as i32);
-                    let total_ins = data.total_insertions.map(|v| v.round() as i32);
-                    let total_rc = data.total_reads_clipped.map(|v| v.round() as i32);
-                    let total_ref = data.total_reference_clipped.map(|v| v.round() as i32);
-
-                    appender.append_row(params![
-                        contig_id, sample_id,
-                        prev_left, data.left_contamination_length, data.left_missing_length,
-                        prev_right, data.right_contamination_length, data.right_missing_length,
-                        total_mm, total_del, total_ins, total_rc, total_ref
-                    ])?;
-                }
+        for d in data {
+            if let Some(&contig_id) = self.contig_name_to_id.get(&d.contig_name) {
+                appender.append_row(params![
+                    contig_id, sample_id,
+                    d.mismatches_count, d.deletions_count, d.insertions_count, d.clippings_count,
+                    d.collapse_bp, d.expansion_bp
+                ])?;
             }
         }
 
-        appender.flush().context("Failed to flush Completeness appender")?;
+        appender.flush().context("Failed to flush Misassembly appender")?;
         Ok(())
     }
 
-    fn write_topology(&self, conn: &Connection, sample_id: i64, completeness: &[CompletenessData]) -> Result<()> {
+    fn write_microdiversity(&self, conn: &Connection, sample_id: i64, data: &[MicrodiversityData]) -> Result<()> {
+        let mut appender = conn.appender("Microdiversity")
+            .context("Failed to create Microdiversity appender")?;
+
+        for d in data {
+            if let Some(&contig_id) = self.contig_name_to_id.get(&d.contig_name) {
+                appender.append_row(params![
+                    contig_id, sample_id,
+                    d.mismatches_count, d.deletions_count, d.insertions_count, d.clippings_count,
+                    d.microdiverse_bp_on_reference, d.microdiverse_bp_on_reads
+                ])?;
+            }
+        }
+
+        appender.flush().context("Failed to flush Microdiversity appender")?;
+        Ok(())
+    }
+
+    fn write_side_misassembly(&self, conn: &Connection, sample_id: i64, data: &[SideMisassemblyData]) -> Result<()> {
+        let mut appender = conn.appender("Side_misassembly")
+            .context("Failed to create Side_misassembly appender")?;
+
+        for d in data {
+            if let Some(&contig_id) = self.contig_name_to_id.get(&d.contig_name) {
+                let misjoint = d.contig_end_misjoint_mates.map(|v| v as i64);
+                appender.append_row(params![
+                    contig_id, sample_id,
+                    d.contig_start_collapse_percentage, d.contig_start_collapse_bp, d.contig_start_expansion_bp,
+                    d.contig_end_collapse_percentage, d.contig_end_collapse_bp, d.contig_end_expansion_bp,
+                    misjoint
+                ])?;
+            }
+        }
+
+        appender.flush().context("Failed to flush Side_misassembly appender")?;
+        Ok(())
+    }
+
+    fn write_topology(&self, conn: &Connection, sample_id: i64, data: &[TopologyData]) -> Result<()> {
         let mut appender = conn.appender("Topology")
             .context("Failed to create Topology appender")?;
 
-        for data in completeness {
-            if data.has_topology_data() {
-                if let Some(&contig_id) = self.contig_name_to_id.get(&data.contig_name) {
-                    let circ_reads = data.circularising_reads.map(|v| v as i64);
-                    let circ_pct = data.circularising_reads_percentage;
-                    let circ_inserts = data.circularising_inserts.map(|v| v as i64);
-                    let circ_inserts_pct = data.circularising_inserts_percentage;
-                    let mean_extra = data.mean_extra_insert_length;
-                    let median_extra = data.median_extra_insert_length;
-                    let unmapped_ends = data.contig_end_unmapped_mates.map(|v| v as i64);
-                    let unmapped_ends_pct = data.contig_end_unmapped_mates_percentage;
-                    let mates_other = data.contig_end_mates_mapped_on_another_contig.map(|v| v as i64);
-                    let mates_other_pct = data.contig_end_mates_mapped_on_another_contig_percentage;
-                    appender.append_row(params![
-                        contig_id, sample_id,
-                        circ_reads, circ_pct,
-                        circ_inserts, circ_inserts_pct, mean_extra, median_extra, unmapped_ends, unmapped_ends_pct, mates_other, mates_other_pct
-                    ])?;
-                }
+        for d in data {
+            if let Some(&contig_id) = self.contig_name_to_id.get(&d.contig_name) {
+                let circ_reads = d.circularising_reads.map(|v| v as i64);
+                let circ_pct = d.circularising_reads_percentage;
+                let circ_inserts = d.circularising_inserts.map(|v| v as i64);
+                let circ_dev = d.circularising_insert_size_deviation;
+                appender.append_row(params![
+                    contig_id, sample_id,
+                    &d.category, circ_reads, circ_pct, circ_inserts, circ_dev
+                ])?;
             }
         }
 
@@ -769,23 +796,24 @@ fn create_core_tables(conn: &Connection) -> Result<()> {
     )
     .context("Failed to create Sample table")?;
 
-    // Aligned_fraction_percentage, Coverage_variation, and Coverage_sd stored as INTEGER (scaled)
-    // Coverage_mean and Coverage_median stored as INTEGER (rounded)
-    // No Presence_id needed - (Contig_id, Sample_id) is the natural key
+    // Coverage table
     conn.execute(
-        "CREATE TABLE Presences (
+        "CREATE TABLE Coverage (
             Contig_id INTEGER,
             Sample_id INTEGER,
             Aligned_fraction_percentage INTEGER,
-            Coverage_variation INTEGER,
-            Coverage_sd INTEGER,
+            Above_expected_aligned_fraction BOOLEAN,
+            Read_count INTEGER,
             Coverage_mean INTEGER,
             Coverage_median INTEGER,
+            Coverage_trimmed_mean INTEGER,
+            Coverage_sd INTEGER,
+            Coverage_variation INTEGER,
             PRIMARY KEY (Contig_id, Sample_id)
         )",
         [],
     )
-    .context("Failed to create Presences table")?;
+    .context("Failed to create Coverage table")?;
 
     conn.execute(
         "CREATE TABLE PhageMechanisms (
@@ -881,43 +909,65 @@ fn create_core_tables(conn: &Connection) -> Result<()> {
     )
     .context("Failed to create Contig_GCSkew table")?;
 
-    // Completeness table - clipping prevalences stored as INTEGER (×100), totals as INTEGER
-    // Note: Left/Right_clippings_percentage stores clipping_count/coverage (raw clipping prevalence)
-    // The Explicit_completeness VIEW derives completeness as: 1 - clipping_prevalence
+    // Misassembly table - counts at ≥50% prevalence threshold
     conn.execute(
-        "CREATE TABLE Completeness (
+        "CREATE TABLE Misassembly (
             Contig_id INTEGER,
             Sample_id INTEGER,
-            Left_clippings_percentage INTEGER,
-            Left_contamination_length INTEGER,
-            Left_missing_length INTEGER,
-            Right_clippings_percentage INTEGER,
-            Right_contamination_length INTEGER,
-            Right_missing_length INTEGER,
-            Mismatch_frequency INTEGER,
-            Deletion_frequency INTEGER,
-            Insertion_frequency INTEGER,
-            Read_based_clipping_frequency INTEGER,
-            Reference_based_clippings_frequency INTEGER
+            Mismatches_count INTEGER,
+            Deletions_count INTEGER,
+            Insertions_count INTEGER,
+            Clippings_count INTEGER,
+            Collapse_bp INTEGER,
+            Expansion_bp INTEGER
         )",
         [],
     )
-    .context("Failed to create Completeness table")?;
+    .context("Failed to create Misassembly table")?;
 
+    // Microdiversity table - counts at ≥10% prevalence threshold
+    conn.execute(
+        "CREATE TABLE Microdiversity (
+            Contig_id INTEGER,
+            Sample_id INTEGER,
+            Mismatches_count INTEGER,
+            Deletions_count INTEGER,
+            Insertions_count INTEGER,
+            Clippings_count INTEGER,
+            Microdiverse_bp_on_reference INTEGER,
+            Microdiverse_bp_on_reads INTEGER
+        )",
+        [],
+    )
+    .context("Failed to create Microdiversity table")?;
+
+    // Side_misassembly table - left/right clipping events with ≥50% prevalence
+    conn.execute(
+        "CREATE TABLE Side_misassembly (
+            Contig_id INTEGER,
+            Sample_id INTEGER,
+            Contig_start_collapse_percentage INTEGER,
+            Contig_start_collapse_bp INTEGER,
+            Contig_start_expansion_bp INTEGER,
+            Contig_end_collapse_percentage INTEGER,
+            Contig_end_collapse_bp INTEGER,
+            Contig_end_expansion_bp INTEGER,
+            Contig_end_misjoint_mates INTEGER
+        )",
+        [],
+    )
+    .context("Failed to create Side_misassembly table")?;
+
+    // Topology table - LINEAR/CIRCULAR/INCOMPLETE classification
     conn.execute(
         "CREATE TABLE Topology (
             Contig_id INTEGER,
             Sample_id INTEGER,
+            Category TEXT,
             Circularising_reads INTEGER,
             Circularising_reads_percentage INTEGER,
             Circularising_inserts INTEGER,
-            Circularising_inserts_percentage INTEGER,
-            Mean_extra_insert_length INTEGER,
-            Median_extra_insert_length INTEGER,
-            Contig_end_unmapped_mates INTEGER,
-            Contig_end_unmapped_mates_percentage INTEGER,
-            Contig_end_mates_mapped_on_another_contig INTEGER,
-            Contig_end_mates_mapped_on_another_contig_percentage INTEGER
+            Circularising_insert_size_deviation INTEGER
         )",
         [],
     )
@@ -1324,84 +1374,125 @@ fn create_views(conn: &Connection, created_tables: &HashSet<String>) -> Result<(
         .context("Failed to create primary_reads VIEW")?;
     }
 
-    // Explicit_presences VIEW with correction ratios for normalizing across samples
+    // Explicit_coverage VIEW with RPKM and TPM
     conn.execute(
-        "CREATE VIEW Explicit_presences AS
+        "CREATE VIEW Explicit_coverage AS
+         WITH rpkm_base AS (
+             SELECT
+                 p.Contig_id,
+                 p.Sample_id,
+                 CASE WHEN c.Contig_length > 0 AND s.Number_of_mapped_reads > 0
+                      THEN (CAST(p.Read_count AS DOUBLE) * 1e9) / (CAST(c.Contig_length AS DOUBLE) * CAST(s.Number_of_mapped_reads AS DOUBLE))
+                      ELSE 0 END AS RPKM
+             FROM Coverage p
+             JOIN Contig c ON p.Contig_id = c.Contig_id
+             JOIN Sample s ON p.Sample_id = s.Sample_id
+         ),
+         rpkm_sum AS (
+             SELECT Sample_id, SUM(RPKM) AS total_rpkm FROM rpkm_base GROUP BY Sample_id
+         )
          SELECT
              c.Contig_name,
              s.Sample_name,
              p.Aligned_fraction_percentage,
-             p.Coverage_variation / 1000000.0 AS Coverage_variation,
-             p.Coverage_sd / 1000000.0 AS Coverage_sd,
+             p.Above_expected_aligned_fraction,
+             p.Read_count,
              p.Coverage_mean,
              p.Coverage_median,
-             CAST(s.Number_of_reads AS REAL) / (SELECT MIN(Number_of_reads) FROM Sample WHERE Number_of_reads > 0) AS Read_number_correction_ratio,
-             CAST(s.Number_of_mapped_reads AS REAL) / (SELECT MIN(Number_of_mapped_reads) FROM Sample WHERE Number_of_mapped_reads > 0) AS Read_mapped_correction_ratio,
-             p.Coverage_mean / (CAST(s.Number_of_reads AS REAL) / (SELECT MIN(Number_of_reads) FROM Sample WHERE Number_of_reads > 0)) AS Coverage_mean_corrected_by_number_of_reads,
-             p.Coverage_mean / (CAST(s.Number_of_mapped_reads AS REAL) / (SELECT MIN(Number_of_mapped_reads) FROM Sample WHERE Number_of_mapped_reads > 0)) AS Coverage_mean_corrected_by_number_of_mapped_reads,
-             p.Coverage_median / (CAST(s.Number_of_reads AS REAL) / (SELECT MIN(Number_of_reads) FROM Sample WHERE Number_of_reads > 0)) AS Coverage_median_corrected_by_number_of_reads,
-             p.Coverage_median / (CAST(s.Number_of_mapped_reads AS REAL) / (SELECT MIN(Number_of_mapped_reads) FROM Sample WHERE Number_of_mapped_reads > 0)) AS Coverage_median_corrected_by_number_of_mapped_reads
-         FROM Presences p
+             p.Coverage_trimmed_mean,
+             p.Coverage_sd / 1000000.0 AS Coverage_sd,
+             p.Coverage_variation / 1000000.0 AS Coverage_variation,
+             rb.RPKM,
+             CASE WHEN rs.total_rpkm > 0 THEN (rb.RPKM / rs.total_rpkm) * 1e6 ELSE 0 END AS TPM
+         FROM Coverage p
          JOIN Contig c ON p.Contig_id = c.Contig_id
-         JOIN Sample s ON p.Sample_id = s.Sample_id",
+         JOIN Sample s ON p.Sample_id = s.Sample_id
+         JOIN rpkm_base rb ON p.Contig_id = rb.Contig_id AND p.Sample_id = rb.Sample_id
+         JOIN rpkm_sum rs ON p.Sample_id = rs.Sample_id",
         [],
     )
-    .context("Failed to create Explicit_presences VIEW")?;
+    .context("Failed to create Explicit_coverage VIEW")?;
 
-    // Explicit_completeness VIEW - derives completeness from clipping prevalence
-    // Completeness = 1 - clipping_prevalence (higher clipping = lower completeness)
+    // Explicit_misassembly VIEW - per 100kbp normalization
     conn.execute(
-        "CREATE VIEW Explicit_completeness AS
+        "CREATE VIEW Explicit_misassembly AS
          SELECT
              c.Contig_name,
              s.Sample_name,
-             COALESCE(100 - comp.Left_clippings_percentage, 100) AS Left_completeness_percentage,
-             COALESCE(comp.Left_contamination_length, 0) AS Left_contamination_length,
-             COALESCE(comp.Left_missing_length, 0) AS Left_missing_length,
-             COALESCE(100 - comp.Right_clippings_percentage, 100) AS Right_completeness_percentage,
-             COALESCE(comp.Right_contamination_length, 0) AS Right_contamination_length,
-             COALESCE(comp.Right_missing_length, 0) AS Right_missing_length,
-             CASE WHEN c.Contig_length > 0 THEN COALESCE(comp.Mismatch_frequency, 0.0) / c.Contig_length ELSE 0 END AS Mismatch_frequency,
-             CASE WHEN c.Contig_length > 0 THEN COALESCE(comp.Deletion_frequency, 0.0) / c.Contig_length ELSE 0 END AS Deletion_frequency,
-             CASE WHEN c.Contig_length > 0 THEN COALESCE(comp.Insertion_frequency, 0.0) / c.Contig_length ELSE 0 END AS Insertion_frequency,
-             CASE WHEN c.Contig_length > 0 THEN COALESCE(comp.Read_based_clipping_frequency, 0.0) / c.Contig_length ELSE 0 END AS Read_based_clipping_frequency,
-             CASE WHEN c.Contig_length > 0 THEN COALESCE(comp.Reference_based_clippings_frequency, 0.0) / c.Contig_length ELSE 0 END AS Reference_based_clippings_frequency,
-             COALESCE(comp.Mismatch_frequency, 0) + COALESCE(comp.Insertion_frequency, 0) + COALESCE(comp.Read_based_clipping_frequency, 0) AS Score_completeness,
-             CASE WHEN c.Contig_length > 0 THEN GREATEST(0, ROUND(
-                100 - (
-                    (COALESCE(comp.Mismatch_frequency, 0) + COALESCE(comp.Insertion_frequency, 0) + COALESCE(comp.Read_based_clipping_frequency, 0)) * 100.0 / c.Contig_length
-                )
-             ))::INTEGER ELSE 100 END AS Completeness_percentage,
-             COALESCE(comp.Mismatch_frequency, 0) + COALESCE(comp.Deletion_frequency, 0) + COALESCE(comp.Reference_based_clippings_frequency, 0) AS Score_contamination,
-             CASE WHEN c.Contig_length > 0 THEN LEAST(100, ROUND(
-                (COALESCE(comp.Mismatch_frequency, 0) + COALESCE(comp.Deletion_frequency, 0) + COALESCE(comp.Reference_based_clippings_frequency, 0)) * 100.0 / c.Contig_length
-             ))::INTEGER ELSE 0 END AS Contamination_percentage
-         FROM Completeness comp
-         JOIN Contig c ON comp.Contig_id = c.Contig_id
-         JOIN Sample s ON comp.Sample_id = s.Sample_id",
+             CASE WHEN c.Contig_length > 0 THEN m.Mismatches_count * 100000.0 / c.Contig_length ELSE 0 END AS Mismatches_per_100kbp,
+             CASE WHEN c.Contig_length > 0 THEN m.Deletions_count * 100000.0 / c.Contig_length ELSE 0 END AS Deletions_per_100kbp,
+             CASE WHEN c.Contig_length > 0 THEN m.Insertions_count * 100000.0 / c.Contig_length ELSE 0 END AS Insertions_per_100kbp,
+             CASE WHEN c.Contig_length > 0 THEN m.Clippings_count * 100000.0 / c.Contig_length ELSE 0 END AS Clippings_per_100kbp,
+             m.Collapse_bp,
+             CASE WHEN c.Contig_length > 0 THEN m.Collapse_bp * 100000.0 / c.Contig_length ELSE 0 END AS Collapse_per_100kbp,
+             m.Expansion_bp,
+             CASE WHEN c.Contig_length > 0 THEN m.Expansion_bp * 100000.0 / c.Contig_length ELSE 0 END AS Expansion_per_100kbp
+         FROM Misassembly m
+         JOIN Contig c ON m.Contig_id = c.Contig_id
+         JOIN Sample s ON m.Sample_id = s.Sample_id",
         [],
     )
-    .context("Failed to create Explicit_completeness VIEW")?;
+    .context("Failed to create Explicit_misassembly VIEW")?;
 
-    // Explicit_topology VIEW
+    // Explicit_microdiversity VIEW
+    conn.execute(
+        "CREATE VIEW Explicit_microdiversity AS
+         SELECT
+             c.Contig_name,
+             s.Sample_name,
+             CASE WHEN c.Contig_length > 0 THEN md.Mismatches_count * 100000.0 / c.Contig_length ELSE 0 END AS Mismatches_per_100kbp,
+             CASE WHEN c.Contig_length > 0 THEN md.Deletions_count * 100000.0 / c.Contig_length ELSE 0 END AS Deletions_per_100kbp,
+             CASE WHEN c.Contig_length > 0 THEN md.Insertions_count * 100000.0 / c.Contig_length ELSE 0 END AS Insertions_per_100kbp,
+             CASE WHEN c.Contig_length > 0 THEN md.Clippings_count * 100000.0 / c.Contig_length ELSE 0 END AS Clippings_per_100kbp,
+             md.Microdiverse_bp_on_reference,
+             CASE WHEN c.Contig_length > 0 THEN md.Microdiverse_bp_on_reference * 100000.0 / c.Contig_length ELSE 0 END AS Microdiverse_bp_per_100kbp_on_reference,
+             md.Microdiverse_bp_on_reads,
+             CASE WHEN c.Contig_length > 0 THEN md.Microdiverse_bp_on_reads * 100000.0 / c.Contig_length ELSE 0 END AS Microdiverse_bp_per_100kbp_on_reads
+         FROM Microdiversity md
+         JOIN Contig c ON md.Contig_id = c.Contig_id
+         JOIN Sample s ON md.Sample_id = s.Sample_id",
+        [],
+    )
+    .context("Failed to create Explicit_microdiversity VIEW")?;
+
+    // Explicit_side_misassembly VIEW (JOINs with Coverage for normalization)
+    conn.execute(
+        "CREATE VIEW Explicit_side_misassembly AS
+         SELECT
+             c.Contig_name,
+             s.Sample_name,
+             COALESCE(sm.Contig_start_collapse_percentage, 0) AS Contig_start_collapse_percentage,
+             COALESCE(sm.Contig_start_collapse_bp, 0) AS Contig_start_collapse_bp,
+             COALESCE(sm.Contig_start_expansion_bp, 0) AS Contig_start_expansion_bp,
+             COALESCE(sm.Contig_end_collapse_percentage, 0) AS Contig_end_collapse_percentage,
+             COALESCE(sm.Contig_end_collapse_bp, 0) AS Contig_end_collapse_bp,
+             COALESCE(sm.Contig_end_expansion_bp, 0) AS Contig_end_expansion_bp,
+             COALESCE(sm.Contig_end_misjoint_mates, 0) AS Contig_end_misjoint_mates,
+             CASE WHEN cov.Coverage_mean > 0 THEN sm.Contig_end_misjoint_mates * 100.0 / cov.Coverage_mean ELSE 0 END AS Normalized_contig_end_misjoint_mates
+         FROM Side_misassembly sm
+         JOIN Contig c ON sm.Contig_id = c.Contig_id
+         JOIN Sample s ON sm.Sample_id = s.Sample_id
+         LEFT JOIN Coverage cov ON sm.Contig_id = cov.Contig_id AND sm.Sample_id = cov.Sample_id",
+        [],
+    )
+    .context("Failed to create Explicit_side_misassembly VIEW")?;
+
+    // Explicit_topology VIEW (JOINs with Coverage for normalization)
     conn.execute(
         "CREATE VIEW Explicit_topology AS
          SELECT
              c.Contig_name,
              s.Sample_name,
+             COALESCE(t.Category, 'LINEAR') AS Category,
              COALESCE(t.Circularising_reads, 0) AS Circularising_reads,
              COALESCE(t.Circularising_reads_percentage, 0) AS Circularising_reads_percentage,
              COALESCE(t.Circularising_inserts, 0) AS Circularising_inserts,
-             COALESCE(t.Circularising_inserts_percentage, 0) AS Circularising_inserts_percentage,
-             COALESCE(t.Mean_extra_insert_length, 0) AS Mean_extra_insert_length,
-             COALESCE(t.Median_extra_insert_length, 0) AS Median_extra_insert_length,
-             COALESCE(t.Contig_end_unmapped_mates, 0) AS Contig_end_unmapped_mates,
-             COALESCE(t.Contig_end_unmapped_mates_percentage, 0) AS Contig_end_unmapped_mates_percentage,
-             COALESCE(t.Contig_end_mates_mapped_on_another_contig, 0) AS Contig_end_mates_mapped_on_another_contig,
-             COALESCE(t.Contig_end_mates_mapped_on_another_contig_percentage, 0) AS Contig_end_mates_mapped_on_another_contig_percentage
+             COALESCE(t.Circularising_insert_size_deviation, 0) AS Circularising_insert_size_deviation,
+             CASE WHEN cov.Coverage_mean > 0 THEN t.Circularising_inserts * 100.0 / cov.Coverage_mean ELSE 0 END AS Normalized_circularising_inserts
          FROM Topology t
          JOIN Contig c ON t.Contig_id = c.Contig_id
-         JOIN Sample s ON t.Sample_id = s.Sample_id",
+         JOIN Sample s ON t.Sample_id = s.Sample_id
+         LEFT JOIN Coverage cov ON t.Contig_id = cov.Contig_id AND t.Sample_id = cov.Sample_id",
         [],
     )
     .context("Failed to create Explicit_topology VIEW")?;
@@ -1440,7 +1531,7 @@ fn create_views(conn: &Connection, created_tables: &HashSet<String>) -> Result<(
              CASE WHEN m.Terminase_distance IS NOT NULL AND c.Contig_length > 0
                   THEN CAST(ROUND(CAST(m.Terminase_distance AS REAL) / c.Contig_length * 100) AS INTEGER)
                   ELSE NULL END AS Terminase_percentage
-         FROM Presences p
+         FROM Coverage p
          JOIN Contig c ON p.Contig_id = c.Contig_id
          JOIN Sample s ON p.Sample_id = s.Sample_id
          LEFT JOIN PhageMechanisms m ON p.Contig_id = m.Contig_id AND p.Sample_id = m.Sample_id",
@@ -1587,65 +1678,53 @@ pub struct GCContentData {
     pub skew_stats: GCSkewStats,
 }
 
-/// Completeness data for a contig.
-/// Contains assembly completeness statistics computed from clipping events at reference ends.
-/// Individual score components are stored; score_completeness and score_contamination are computed in VIEW.
+/// Misassembly data for a contig (≥50% prevalence threshold).
 #[derive(Clone, Debug)]
-pub struct CompletenessData {
+pub struct MisassemblyData {
     pub contig_name: String,
-    pub prevalence_left: Option<f64>,
-    pub left_contamination_length: Option<i32>,
-    pub left_missing_length: Option<i32>,
-    pub prevalence_right: Option<f64>,
-    pub right_contamination_length: Option<i32>,
-    pub right_missing_length: Option<i32>,
-    /// Weighted mismatches: Σ(count/coverage) - contributes to both completeness and contamination
-    pub total_mismatches: Option<f64>,
-    /// Weighted deletions: Σ(count/coverage * median_length) - contributes to contamination
-    pub total_deletions: Option<f64>,
-    /// Weighted insertions: Σ(count/coverage * median_length) - contributes to completeness
-    pub total_insertions: Option<f64>,
-    /// Weighted clippings: Σ(count/coverage * median_length) for left+right - contributes to completeness
-    pub total_reads_clipped: Option<f64>,
-    /// Weighted reference gaps: Σ(avg_prevalence * distance) for paired clips - contributes to contamination
-    pub total_reference_clipped: Option<f64>,
-    /// Count of reads supporting genome circularity
-    pub circularising_reads: Option<u64>,
-    /// Percentage of primary reads that are circularising
-    pub circularising_reads_percentage: Option<i32>,
-    /// Count of non-inward read pairs spanning both contig ends
-    pub circularising_inserts: Option<u64>,
-    /// Mean extra insert length of circularising inserts vs all proper pairs
-    pub mean_extra_insert_length: Option<i32>,
-    /// Median extra insert length of circularising inserts vs all proper pairs
-    pub median_extra_insert_length: Option<i32>,
-    /// Reads near contig ends with unmapped mate and outward-facing orientation
-    pub contig_end_unmapped_mates: Option<u64>,
-    /// Reads near contig ends with mate on a different contig
-    pub contig_end_mates_mapped_on_another_contig: Option<u64>,
-    /// Percentage of circularising inserts relative to mean junction coverage
-    pub circularising_inserts_percentage: Option<i32>,
-    /// Percentage of unmapped mates on contig ends relative to mean junction coverage
-    pub contig_end_unmapped_mates_percentage: Option<i32>,
-    /// Percentage of mates mapped on another contig relative to mean junction coverage
-    pub contig_end_mates_mapped_on_another_contig_percentage: Option<i32>,
+    pub mismatches_count: i64,
+    pub deletions_count: i64,
+    pub insertions_count: i64,
+    pub clippings_count: i64,
+    pub collapse_bp: i64,
+    pub expansion_bp: i64,
 }
 
-impl CompletenessData {
-    /// Returns true if there is any completeness data.
-    pub fn has_data(&self) -> bool {
-        self.prevalence_left.is_some() || self.prevalence_right.is_some()
-            || self.total_mismatches.is_some() || self.total_deletions.is_some()
-            || self.total_insertions.is_some() || self.total_reads_clipped.is_some()
-            || self.total_reference_clipped.is_some()
-    }
+/// Microdiversity data for a contig (≥10% prevalence threshold).
+#[derive(Clone, Debug)]
+pub struct MicrodiversityData {
+    pub contig_name: String,
+    pub mismatches_count: i64,
+    pub deletions_count: i64,
+    pub insertions_count: i64,
+    pub clippings_count: i64,
+    pub microdiverse_bp_on_reference: i64,
+    pub microdiverse_bp_on_reads: i64,
+}
 
-    /// Returns true if there is any topology data.
-    pub fn has_topology_data(&self) -> bool {
-        self.circularising_reads.is_some() || self.circularising_inserts.is_some()
-            || self.contig_end_unmapped_mates.is_some()
-            || self.contig_end_mates_mapped_on_another_contig.is_some()
-    }
+/// Side misassembly data for a contig (left/right clipping events with ≥50% prevalence).
+#[derive(Clone, Debug)]
+pub struct SideMisassemblyData {
+    pub contig_name: String,
+    pub contig_start_collapse_percentage: Option<i32>,
+    pub contig_start_collapse_bp: Option<i32>,
+    pub contig_start_expansion_bp: Option<i32>,
+    pub contig_end_collapse_percentage: Option<i32>,
+    pub contig_end_collapse_bp: Option<i32>,
+    pub contig_end_expansion_bp: Option<i32>,
+    pub contig_end_misjoint_mates: Option<u64>,
+}
+
+/// Topology data for a contig (LINEAR/CIRCULAR/INCOMPLETE classification).
+#[derive(Clone, Debug)]
+pub struct TopologyData {
+    pub contig_name: String,
+    /// LINEAR, CIRCULAR, or INCOMPLETE
+    pub category: String,
+    pub circularising_reads: Option<u64>,
+    pub circularising_reads_percentage: Option<i32>,
+    pub circularising_inserts: Option<u64>,
+    pub circularising_insert_size_deviation: Option<i32>,
 }
 
 /// Parse BLAST outfmt 6 file and return repeats data.

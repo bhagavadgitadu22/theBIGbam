@@ -28,19 +28,19 @@ def build_controls(conn):
     except Exception:
         pass  # Table doesn't exist or has no data
 
-    # Check if Completeness table exists and has data
-    has_completeness = False
+    # Check if Misassembly table exists and has data
+    has_misassembly = False
     try:
         cur = conn.cursor()
-        cur.execute("SELECT 1 FROM information_schema.tables WHERE table_name = 'Completeness'")
-        has_completeness = cur.fetchone() is not None
+        cur.execute("SELECT 1 FROM information_schema.tables WHERE table_name = 'Misassembly'")
+        has_misassembly = cur.fetchone() is not None
     except Exception:
         pass
 
-    # Get Coverage_mean min/max from Presences table (stored as INTEGER)
+    # Get Coverage_mean min/max from Coverage table (stored as INTEGER)
     coverage_mean_max = 0
     try:
-        cur.execute("SELECT MIN(Coverage_mean), MAX(Coverage_mean) FROM Presences WHERE Coverage_mean IS NOT NULL")
+        cur.execute("SELECT MIN(Coverage_mean), MAX(Coverage_mean) FROM Coverage WHERE Coverage_mean IS NOT NULL")
         result = cur.fetchone()
         if result and result[0] is not None and result[1] is not None:
             coverage_mean_min = result[0]
@@ -48,10 +48,10 @@ def build_controls(conn):
     except Exception:
         pass
 
-    # Get Coverage_median min/max from Presences table (stored as INTEGER)
+    # Get Coverage_median min/max from Coverage table (stored as INTEGER)
     coverage_median_max = 0
     try:
-        cur.execute("SELECT MIN(Coverage_median), MAX(Coverage_median) FROM Presences WHERE Coverage_median IS NOT NULL")
+        cur.execute("SELECT MIN(Coverage_median), MAX(Coverage_median) FROM Coverage WHERE Coverage_median IS NOT NULL")
         result = cur.fetchone()
         if result and result[0] is not None and result[1] is not None:
             coverage_median_min = result[0]
@@ -59,10 +59,10 @@ def build_controls(conn):
     except Exception:
         pass
 
-    # Get Coverage_variation min/max from Explicit_presences view (already divided by 1000000)
+    # Get Coverage_variation min/max from Explicit_coverage view (already divided by 1000000)
     coverage_variation_max = 1.0
     try:
-        cur.execute("SELECT MIN(Coverage_variation), MAX(Coverage_variation) FROM Explicit_presences WHERE Coverage_variation IS NOT NULL")
+        cur.execute("SELECT MIN(Coverage_variation), MAX(Coverage_variation) FROM Explicit_coverage WHERE Coverage_variation IS NOT NULL")
         result = cur.fetchone()
         if result and result[0] is not None and result[1] is not None:
             coverage_variation_min = result[0]
@@ -70,10 +70,10 @@ def build_controls(conn):
     except Exception:
         pass
 
-    # Get Coverage_sd min/max from Explicit_presences view (already divided by 1000000)
+    # Get Coverage_sd min/max from Explicit_coverage view (already divided by 1000000)
     coverage_sd_max = 1.0
     try:
-        cur.execute("SELECT MIN(Coverage_sd), MAX(Coverage_sd) FROM Explicit_presences WHERE Coverage_sd IS NOT NULL")
+        cur.execute("SELECT MIN(Coverage_sd), MAX(Coverage_sd) FROM Explicit_coverage WHERE Coverage_sd IS NOT NULL")
         result = cur.fetchone()
         if result and result[0] is not None and result[1] is not None:
             coverage_sd_min = result[0]
@@ -81,12 +81,12 @@ def build_controls(conn):
     except Exception:
         pass
 
-    whole_contamination_max = 100.0
+    whole_expansion_max = 100.0
     try:
-        cur.execute("SELECT MAX(Contamination_percentage) FROM Explicit_completeness WHERE Contamination_percentage IS NOT NULL")
+        cur.execute("SELECT MAX(Expansion_per_100kbp) FROM Explicit_misassembly WHERE Expansion_per_100kbp IS NOT NULL")
         result = cur.fetchone()
         if result and result[0] is not None:
-            whole_contamination_max = result[0]
+            whole_expansion_max = result[0]
     except Exception:
         pass
 
@@ -160,9 +160,9 @@ def build_controls(conn):
 
     # Build presence mappings: sample -> contigs and contig -> samples
     cur.execute("""
-    SELECT Contig.Contig_name, Sample.Sample_name FROM Presences
-      JOIN Contig ON Presences.Contig_id = Contig.Contig_id
-      JOIN Sample ON Presences.Sample_id = Sample.Sample_id
+    SELECT Contig.Contig_name, Sample.Sample_name FROM Coverage
+      JOIN Contig ON Coverage.Contig_id = Contig.Contig_id
+      JOIN Sample ON Coverage.Sample_id = Sample.Sample_id
     """)
     sample_to_contigs = {}
     contig_to_samples = {}
@@ -274,12 +274,12 @@ def build_controls(conn):
         'variables': variables,
         'custom_contig_subplots': custom_contig_subplots,
         'phage_mechanisms': phage_mechanisms_list,
-        'has_completeness': has_completeness,
+        'has_misassembly': has_misassembly,
         'coverage_mean_max': coverage_mean_max,
         'coverage_median_max': coverage_median_max,
         'coverage_variation_max': coverage_variation_max,
         'coverage_sd_max': coverage_sd_max,
-        'whole_contamination_max': whole_contamination_max,
+        'whole_expansion_max': whole_expansion_max,
         'duplication_percentage_min': duplication_percentage_min,
         'duplication_percentage_max': duplication_percentage_max,
         'has_duplication_data': has_duplication_data,
@@ -351,8 +351,11 @@ def create_layout(db_path):
         source_table_map = {
             'Contig': 'Contig',
             'Sample': 'Sample',
-            'Presences': 'Explicit_presences',
-            'Completeness': 'Explicit_completeness',
+            'Coverage': 'Explicit_coverage',
+            'Misassembly': 'Explicit_misassembly',
+            'Microdiversity': 'Explicit_microdiversity',
+            'Side misassembly': 'Explicit_side_misassembly',
+            'Topology': 'Explicit_topology',
             'Termini': 'Explicit_phage_mechanisms'
         }
 
@@ -372,7 +375,7 @@ def create_layout(db_path):
                     SELECT DISTINCT c.Contig_name, s.Sample_name
                     FROM Contig_annotation ca
                     JOIN Contig c ON ca.Contig_id = c.Contig_id
-                    LEFT JOIN Presences p ON c.Contig_id = p.Contig_id
+                    LEFT JOIN Coverage p ON c.Contig_id = p.Contig_id
                     LEFT JOIN Sample s ON p.Sample_id = s.Sample_id
                     WHERE ca."{column_name}" {operator} ?
                 '''
@@ -381,7 +384,7 @@ def create_layout(db_path):
                 query = f'''
                     SELECT DISTINCT c.Contig_name, s.Sample_name
                     FROM Contig c
-                    LEFT JOIN Presences p ON c.Contig_id = p.Contig_id
+                    LEFT JOIN Coverage p ON c.Contig_id = p.Contig_id
                     LEFT JOIN Sample s ON p.Sample_id = s.Sample_id
                     WHERE c."{column_name}" {operator} ?
                 '''
@@ -390,7 +393,7 @@ def create_layout(db_path):
                 query = f'''
                     SELECT DISTINCT c.Contig_name, s.Sample_name
                     FROM Sample s
-                    LEFT JOIN Presences p ON s.Sample_id = p.Sample_id
+                    LEFT JOIN Coverage p ON s.Sample_id = p.Sample_id
                     LEFT JOIN Contig c ON p.Contig_id = c.Contig_id
                     WHERE s."{column_name}" {operator} ?
                 '''

@@ -36,7 +36,7 @@ def generate_bokeh_plot_all_samples(conn, variable, contig_name, xstart=None, xe
     annotation_fig = make_bokeh_genemap(conn, contig_id, locus_name, locus_size, subplot_size, shared_xrange, xstart, xend, feature_types=feature_types, use_phage_colors=use_phage_colors) if genbank_path else None
 
     # Get list of samples
-    cur.execute("SELECT Presences.Sample_id, Sample_name FROM Presences JOIN Sample ON Presences.Sample_id = Sample.Sample_id WHERE Contig_id=?", (contig_id,))
+    cur.execute("SELECT Coverage.Sample_id, Sample_name FROM Coverage JOIN Sample ON Coverage.Sample_id = Sample.Sample_id WHERE Contig_id=?", (contig_id,))
     rows = cur.fetchall()
     if rows is None:
         raise ValueError(f"No sample comprised this contig in the database: {contig_name}")
