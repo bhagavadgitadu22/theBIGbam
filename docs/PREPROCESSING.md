@@ -35,5 +35,4 @@ thebigbam mapping-per-sample --mapper minimap2-sr \
   -a "${DIR}/HK97_GCF_000848825.1.fasta" \
   -o "${DIR}/HK97_custom.bam" \
   --minimap2-params "--secondary=no -N5"
-
 ```

@@ -85,7 +85,7 @@ def _store_contig_sequences(db_path, assembly_path=None, genbank_path=None):
         print(f"  WARNING: Could not store sequences in database: {e}", flush=True)
 
 
-def calculating_all_features_parallel(list_modules, bam_files, output_db, min_coverage, curve_ratio, bar_ratio, contig_variation_percentage=0.1, circular=False, n_sample_cores=None, sequencing_type=None, genbank_path=None, assembly_path=None):
+def calculating_all_features_parallel(list_modules, bam_files, output_db, min_aligned_fraction, min_coverage_depth, curve_ratio, bar_ratio, contig_variation_percentage=0.1, circular=False, n_sample_cores=None, sequencing_type=None, genbank_path=None, assembly_path=None):
     """Process all BAM files in parallel using Rust bindings."""
     if not HAS_RUST:
         sys.exit("ERROR: Rust bindings (thebigbam_rs) are required but not available. Please install them first.")
@@ -103,7 +103,8 @@ def calculating_all_features_parallel(list_modules, bam_files, output_db, min_co
             modules=list_modules,
             threads=n_sample_cores,
             sequencing_type=sequencing_type,
-            min_coverage=float(min_coverage),
+            min_aligned_fraction=float(min_aligned_fraction),
+            min_coverage_depth=float(min_coverage_depth),
             curve_ratio=float(curve_ratio),
             bar_ratio=float(bar_ratio),
             contig_variation_percentage=float(contig_variation_percentage),
@@ -130,7 +131,8 @@ def add_calculate_args(parser):
     parser.add_argument("-m", "--modules", required=False, default=None, help="List of modules to compute (comma-separated). If not provided, all modules are computed. Options: Coverage, Misalignment, Long-reads, Paired-reads, Phage termini")
     parser.add_argument("-a", "--assembly", help="Path to assembly FASTA file (only needed for autoblast when genbank lacks sequence data)")
     parser.add_argument('-s', '--sequencing_type', choices=['long', 'paired-short', 'single-short'], help='Sequencing type (long or short allowed)')
-    parser.add_argument("--min_coverage", type=int, default=50, help="Minimum alignment-length coverage proportion for contig inclusion (default 50%% change threshold)")
+    parser.add_argument("--min_aligned_fraction", type=int, default=50, help="Minimum alignment-length coverage proportion for contig inclusion (default: 50%%)")
+    parser.add_argument("--min_coverage_depth", type=int, default=0, help="Minimum mean coverage depth for contig inclusion (disabled by default, e.g. 5 to filter low-depth contigs)")
     parser.add_argument('--variation_percentage', type=float, default=50, help='Run-length encoding ratio for independent features like coverage (default: 50%%)')
     parser.add_argument('--coverage_percentage', type=float, default=10, help='Compressing ratio for features depending on coverage: only values above this %% of the local coverage are kept (default: 10%%)')
     parser.add_argument('--contig_variation_percentage', type=float, default=10, help='Run-length encoding ratio for contig-level features like GC content (default: 10%%)')
@@ -174,7 +176,8 @@ def run_calculate_args(args):
         if not bam_files and requested_modules:
             print(f"WARNING: Modules {requested_modules} require BAM files - they will be skipped.", flush=True)
             requested_modules = []
-    min_coverage = args.min_coverage
+    min_aligned_fraction = args.min_aligned_fraction
+    min_coverage_depth = args.min_coverage_depth
     variation_percentage = args.variation_percentage
     coverage_percentage = args.coverage_percentage
     contig_variation_percentage = args.contig_variation_percentage
@@ -199,7 +202,7 @@ def run_calculate_args(args):
 
     print("\nCalculating values for all requested features from mapping files...", flush=True)
     calculating_all_features_parallel(
-        requested_modules, bam_files, output_db, min_coverage, variation_percentage, coverage_percentage,
+        requested_modules, bam_files, output_db, min_aligned_fraction, min_coverage_depth, variation_percentage, coverage_percentage,
         contig_variation_percentage=contig_variation_percentage, circular=circular, n_sample_cores=n_cores,
         sequencing_type=args.sequencing_type, genbank_path=genbank_path,
         assembly_path=assembly_path,

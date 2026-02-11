@@ -7,7 +7,7 @@ Interactive visualization of mapping-derived features for genomes. Designed to w
 theBIGbam processes BAM alignment files to extract and visualize genomic features including:
 
 - **Coverage tracks** (primary, secondary, supplementary reads)
-- **Assembly quality metrics** (clippings, indels, mismatches, orientations, insert sizes)
+- **Assembly quality features** (clippings, indels, mismatches, read lengths, paired-end properties)
 - **Termini detection** (positions of reads starts/ends, useful for identifying phage packaging sites)
 
 Built with **Rust** for fast BAM processing and **Python/Bokeh** for interactive visualization.
@@ -136,11 +136,11 @@ A more detailed explanation of the modules and the features it contains is avail
 
 ### Database compression
 
-**Parameters (optional):** --min_coverage, --variation_percentage, --contig_variation_percentage, --coverage_percentage, 
+**Parameters (optional):** --min_aligned_fraction, --min_coverage_depth, --variation_percentage, --contig_variation_percentage, --coverage_percentage,
 
 Discarding the reads to only keep the main features of the mappings (like the coverage per position) already allows the DuckDB database to be way lighter than the original BAM file. The database itself is also structured to be as light as possible. 
 
-First, the database is organised per contig per sample (qualified as a contig/sample pair thereafter). Only pairs relative to a contig present in a sample are stored in the database. The definition of a presence can be tweaked via the **--min_coverage** parameter: only contig/sample where at least x% of the contig received reads are kept in the database. The default is 50%, meaning a contig is considered present in a sample only if more than half of the contig received reads.
+First, the database is organised per contig per sample (qualified as a contig/sample pair thereafter). Only pairs relative to a contig present in a sample are stored in the database. The definition of a presence can be tweaked via two parameters: **--min_aligned_fraction** controls the minimum percentage of positions that received reads (default 50%, meaning a contig is considered present only if more than half of it received reads), and **--min_coverage_depth** sets the minimum mean coverage depth required for contig inclusion (default 5×), filtering out contigs with very low depth that produce noisy signals.
 
 To further reduce the size of the database, values per feature are compressed rather than saving all positions. The type of compression depends on the type of plots:
 

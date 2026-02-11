@@ -44,7 +44,8 @@ use crate::processing_completeness::compute_completeness;
 #[derive(Clone)]
 pub struct ProcessConfig {
     pub threads: usize,
-    pub min_coverage: f64,
+    pub min_aligned_fraction: f64,
+    pub min_coverage_depth: f64,
     /// Relative tolerance for RLE compression (e.g., 0.1 = 10% change threshold)
     pub curve_ratio: f64,
     pub bar_ratio: f64,
@@ -938,7 +939,7 @@ pub fn process_sample(
 
             // Process contig using streaming - single pass over reads
             // Early coverage check happens inside process_contig_streaming
-            let (mut arrays, coverage_pct, primary_count) = match process_contig_streaming(&mut bam, &ref_name, ref_length, seq_type, flags, config.circular, config.min_coverage) {
+            let (mut arrays, coverage_pct, primary_count) = match process_contig_streaming(&mut bam, &ref_name, ref_length, seq_type, flags, config.circular, config.min_aligned_fraction) {
                 Ok(Some(result)) => result,
                 Ok(None) => return None,
                 Err(e) => {
@@ -949,12 +950,15 @@ pub fn process_sample(
 
             // Coverage already checked and returned from process_contig_streaming
 
+            // Early-exit: skip contigs with low mean coverage depth (only when threshold > 0)
+            let coverage_mean = arrays.coverage_mean() as f32;
+            if config.min_coverage_depth > 0.0 && (coverage_mean as f64) < config.min_coverage_depth {
+                return None;
+            }
+
             // Calculate features for this contig
             let mut features = Vec::new();
             let (packaging_info, completeness_info) = add_features_from_arrays(&mut arrays, &ref_name, ref_length, config, seq_type, flags, repeats, &mut features);
-
-            // Calculate mean and median coverage depth
-            let coverage_mean = arrays.coverage_mean() as f32;
             let coverage_median = arrays.coverage_median() as f32;
 
             // Calculate coverage variation using Fano factor style normalization
