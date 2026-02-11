@@ -1,12 +1,18 @@
 from pathlib import Path
 import subprocess
 import shutil
+import shlex
 import tempfile
-import argparse
-import csv
+import warnings
 from typing import Optional
 
 from Bio import SeqIO
+
+MAPPER_CHOICES = [
+    'minimap2-sr', 'bwa-mem2',
+    'minimap2-ont', 'minimap2-pb', 'minimap2-hifi',
+    'minimap2-no-preset', 'minimap2-sr-secondary',
+]
 
 def _double_fasta(in_path: Path, out_path: Path) -> None:
     records = list(SeqIO.parse(str(in_path), "fasta"))
@@ -15,39 +21,72 @@ def _double_fasta(in_path: Path, out_path: Path) -> None:
             rec.seq = rec.seq + rec.seq
             SeqIO.write(rec, fh, "fasta")
 
+def _validate_read_inputs(args):
+    """Validate read-input constraints that argparse cannot express."""
+    if getattr(args, 'read2', None) and not getattr(args, 'read1', None):
+        raise ValueError("-r2/--read2 requires -r1/--read1")
+
+def _validate_extra_params(args):
+    """Warn if mapper-specific extra params don't match the chosen mapper."""
+    mapper = args.mapper
+    if getattr(args, 'bwa_params', None) and mapper.startswith('minimap2'):
+        warnings.warn(f"--bwa-params ignored: mapper is '{mapper}' (not bwa-mem2)")
+    if getattr(args, 'minimap2_params', None) and mapper == 'bwa-mem2':
+        warnings.warn(f"--minimap2-params ignored: mapper is '{mapper}' (not minimap2)")
+
 def add_mapping_per_sample_args(parser):
-    parser.add_argument('-r1', '--read1', required=True, help='Read1 (fastq/fastq.gz)')
-    parser.add_argument('-r2', '--read2', help='Read2 (fastq/fastq.gz; optional)')
+    parser.add_argument('-t', '--threads', type=int, default=4, help='Threads to pass to mapper and samtools (default: 4)')
+    reads_group = parser.add_mutually_exclusive_group(required=True)
+    reads_group.add_argument('-r1', '--read1', help='Read1 (fastq/fastq.gz)')
+    reads_group.add_argument('--interleaved', help='Interleaved paired-end reads (fastq/fastq.gz; alternative to -r1/-r2)')
+    parser.add_argument('-r2', '--read2', help='Read2 for paired-end reads (fastq/fastq.gz)')
     parser.add_argument('-a', '--assembly', required=True, help='Reference assembly to map against (fasta file)')
-    parser.add_argument('--sequencing-type', required=True, choices=['long', 'paired-short', 'single-short'], help='Sequencing type: use "paired-short", "single-short" or "long"')
-    parser.add_argument('--circular', action='store_true', help='Concatenate each contig to itself during the mapping to circularize it')
     parser.add_argument('-o', '--output', required=True, help='Output BAM path (will be written)')
-    parser.add_argument('-t', '--threads', type=int, default=4, help='Threads to pass to minimap2 and samtools (default: 4)')
+    parser.add_argument('--mapper', choices=MAPPER_CHOICES, default='minimap2-sr-secondary', help='Mapper and preset to use. Default: short-read preset minimap2-sr-secondary that uses the same options as -ax sr but keeping secondary reads')
+    parser.add_argument('--circular', action='store_true', help='Concatenate each contig to itself during the mapping to circularize it')
     parser.add_argument('--keep-unmapped', action='store_true', help='Keep unmapped reads in the output BAM (default: discard them)')
+    parser.add_argument('--minimap2-params', dest='minimap2_params', default=None, help='Extra parameters for minimap2 (e.g., --minimap2-params "--secondary=no -N5")')
+    parser.add_argument('--bwa-params', dest='bwa_params', default=None, help='Extra parameters for bwa-mem2 (e.g., --bwa-params "-M -B6")')
 
 def run_mapping_per_sample(args):
+    _validate_read_inputs(args)
+    _validate_extra_params(args)
+
+    read1 = Path(args.read1) if getattr(args, 'read1', None) else None
     read2 = Path(args.read2) if getattr(args, 'read2', None) else None
+    interleaved = Path(args.interleaved) if getattr(args, 'interleaved', None) else None
+    minimap2_params = getattr(args, 'minimap2_params', None)
+    bwa_params = getattr(args, 'bwa_params', None)
+
     return map_with_mapper(
         args.threads,
         Path(args.assembly),
-        args.sequencing_type,
-        Path(args.read1),
+        args.mapper,
+        read1,
         read2,
         Path(args.output),
         circular=bool(getattr(args, 'circular', False)),
         keep_unmapped=bool(getattr(args, 'keep_unmapped', False)),
+        interleaved=interleaved,
+        minimap2_params=minimap2_params,
+        bwa_params=bwa_params,
     ) or 0
 
-def map_with_mapper(threads: int, assembly_file: Path, sequencing_type: str, read1: Path,
+def map_with_mapper(threads: int, assembly_file: Path, mapper: str, read1: Optional[Path],
                       read2: Optional[Path], output_file: Path, circular: bool = False,
-                      keep_unmapped: bool = False) -> None:
-    """Run mapper + samtools pipeline and produce final indexed BAM at `output_file`.
+                      keep_unmapped: bool = False, interleaved: Optional[Path] = None,
+                      minimap2_params: Optional[str] = None, bwa_params: Optional[str] = None) -> None:
+    """Run mapper + samtools pipeline and produce final indexed BAM at `output_file`."""
 
-    This function expects `minimap2` and `samtools` to be on PATH.
-    """
-    for exe in ("minimap2", "samtools"):
-        if shutil.which(exe) is None:
-            raise FileNotFoundError(f"Required executable not found on PATH: {exe}")
+    # Executable check based on mapper
+    if mapper.startswith('minimap2'):
+        for exe in ("minimap2", "samtools"):
+            if shutil.which(exe) is None:
+                raise FileNotFoundError(f"Required executable not found on PATH: {exe}")
+    elif mapper == 'bwa-mem2':
+        for exe in ("bwa-mem2", "samtools"):
+            if shutil.which(exe) is None:
+                raise FileNotFoundError(f"Required executable not found on PATH: {exe}")
 
     assembly = Path(assembly_file)
     if not assembly.exists():
@@ -55,6 +94,7 @@ def map_with_mapper(threads: int, assembly_file: Path, sequencing_type: str, rea
 
     work_assembly = assembly
     temp_files = []
+    bwa_index_sidecars = []
     try:
         if circular:
             doubled = Path(tempfile.mkstemp(prefix=assembly.stem + "_doubled_", suffix=".fasta")[1])
@@ -62,33 +102,59 @@ def map_with_mapper(threads: int, assembly_file: Path, sequencing_type: str, rea
             work_assembly = doubled
             temp_files.append(doubled)
 
-        # Build minimap2 command
-        # from https://github.com/lh3/minimap2/blob/6d49eb690f3c32ae2b95a796951397bf598396f0/minimap2.1#L721
-        # minimap2 options for sr 
-        # -k21 -w11 --sr --frag=yes -A2 -B8 -O12,32 -E2,1 -r100 -p.5 -N20 -f1000,5000 -n2 -m25 -s40 -g100 -2K50m --heap-sort=yes --secondary=no
-        # minimap2 options for map-ont
-        # default mode -> no particular options needed
-        if sequencing_type == "long":
+        # bwa-mem2 indexing
+        if mapper == 'bwa-mem2':
+            bwa_index_cmd = ["bwa-mem2", "index", str(work_assembly)]
+            print("COMMAND_INDEX:", " ".join(bwa_index_cmd), flush=True)
+            subprocess.run(bwa_index_cmd, check=True)
+            # Track sidecar files for cleanup in circular mode
+            if circular:
+                for ext in ('.amb', '.ann', '.bwt', '.pac', '.sa', '.0123', '.bwt.2bit.64'):
+                    sidecar = Path(str(work_assembly) + ext)
+                    if sidecar.exists():
+                        bwa_index_sidecars.append(sidecar)
+
+        # Build mapper command
+        reads_args = []
+        if interleaved:
+            reads_args = [str(interleaved)]
+        elif read1 and read2:
+            reads_args = [str(read1), str(read2)]
+        elif read1:
+            reads_args = [str(read1)]
+
+        extra_params = []
+        if mapper.startswith('minimap2') and minimap2_params:
+            extra_params = shlex.split(minimap2_params)
+        elif mapper == 'bwa-mem2' and bwa_params:
+            extra_params = shlex.split(bwa_params)
+
+        if mapper == 'minimap2-sr':
+            mapper_cmd = ["minimap2", "-ax", "sr", "-t", str(threads)] + extra_params + [str(work_assembly)] + reads_args
+        elif mapper == 'minimap2-sr-secondary':
             mapper_cmd = [
-                "minimap2", "-ax", "map-ont", "-t", str(threads), str(work_assembly), str(read1)
-            ]
+                "minimap2", "-a", "-k21", "-w11", "--sr", "--frag=yes", "-A2", "-B8",
+                "-O12,32", "-E2,1", "-r100", "-p.5", "-N20", "-f1000,5000", "-n2",
+                "-m25", "-s40", "-g100", "-2K50m", "--heap-sort=yes", "--secondary=yes",
+                "-t", str(threads),
+            ] + extra_params + [str(work_assembly)] + reads_args
+        elif mapper == 'minimap2-ont':
+            mapper_cmd = ["minimap2", "-ax", "map-ont", "-t", str(threads)] + extra_params + [str(work_assembly)] + reads_args
+        elif mapper == 'minimap2-pb':
+            mapper_cmd = ["minimap2", "-ax", "map-pb", "-t", str(threads)] + extra_params + [str(work_assembly)] + reads_args
+        elif mapper == 'minimap2-hifi':
+            mapper_cmd = ["minimap2", "-ax", "map-hifi", "-t", str(threads)] + extra_params + [str(work_assembly)] + reads_args
+        elif mapper == 'minimap2-no-preset':
+            mapper_cmd = ["minimap2", "-a", "-t", str(threads)] + extra_params + [str(work_assembly)] + reads_args
+        elif mapper == 'bwa-mem2':
+            mapper_cmd = ["bwa-mem2", "mem", "-t", str(threads)]
+            if interleaved:
+                mapper_cmd.append("-p")
+            mapper_cmd += extra_params + [str(work_assembly)] + reads_args
         else:
-            # just removed secondary=no to keep secondary alignments for short reads
-            # -a flag is required to output SAM format (otherwise minimap2 outputs PAF)
-            mapper_cmd = [
-                "minimap2", "-a", "-k21", "-w11", "--sr", "--frag=yes", "-A2", "-B8", "-O12,32", "-E2,1", "-r100", "-p.5", "-N20", "-f1000,5000", "-n2", "-m25", "-s40", "-g100", "-2K50m", "--heap-sort=yes", "--secondary=yes", "-t", str(threads), str(work_assembly), str(read1)
-            ]
-            #mapper_cmd = [
-            #    "minimap2", "-ax", "sr", "-t", str(threads), str(work_assembly), str(read1)
-            #]
-            #bwa_index_cmd = ["bwa-mem2", "index", str(work_assembly)]
-            #subprocess.run(bwa_index_cmd, check=True)
-            #mapper_cmd = ["bwa-mem2", "mem", "-t", str(threads), str(work_assembly), str(read1)]
-            if read2:
-                mapper_cmd.append(str(read2))
+            raise ValueError(f"Unknown mapper: {mapper}")
 
         sorted_bam = Path(tempfile.mkstemp(prefix=output_file.stem + "_sorted_", suffix=".bam")[1])
-        #temp_files.append(sorted_bam)
 
         # Pipe: mapper | samtools view -bS -F 4 | samtools sort -o sorted_bam
         view_cmd = ["samtools", "view", "-@", str(threads), "-bS", "-"]
@@ -125,105 +191,16 @@ def map_with_mapper(threads: int, assembly_file: Path, sequencing_type: str, rea
                 Path(f).unlink()
             except Exception:
                 pass
-
-def add_mapping_all_args(parser):
-    parser.add_argument('--csv', required=True, help='CSV file with comma-separated columns: read1,read2,sequencing_type,assembly_file')
-    parser.add_argument('-a', '--assembly', help='Assembly file to use for all rows (overrides CSV field; optional)')
-    parser.add_argument('--sequencing-type', choices=['long', 'paired-short', 'single-short'], help='Sequencing type to use for all rows (overrides CSV field; optional)')
-    parser.add_argument('--circular', action='store_true', help='Concatenate each contig to itself during the mapping to circularize it')
-    parser.add_argument('-o', '--output-dir', required=True, help='Directory to create and place outputs (must NOT exist)')
-    parser.add_argument('-t', '--threads', type=int, default=4, help='Threads to pass to minimap2 and samtools (default: 4)')
-    parser.add_argument('--keep-unmapped', action='store_true', help='Keep unmapped reads in the output BAM (default: discard them)')
-
-def run_mapping_all(args):
-    csv_path = Path(args.csv)
-    if not csv_path.exists():
-        raise FileNotFoundError(f"CSV file not found: {csv_path}")
-
-    outdir = Path(args.output_dir)
-    if outdir.exists():
-        raise FileExistsError(f"Output directory already exists: {outdir}")
-    outdir.mkdir(parents=True, exist_ok=False)
-
-    global_seqtype = args.sequencing_type if getattr(args, 'sequencing_type', None) else None
-
-    global_assembly = Path(args.assembly) if getattr(args, 'assembly', None) else None
-    if global_assembly and not global_assembly.exists():
-        raise FileNotFoundError(f"Provided assembly file not found: {global_assembly}")
-
-    with csv_path.open(newline='') as fh:
-        reader = csv.reader(fh)
-        rows = list(reader)
-
-    # If first row looks like header, skip it
-    if rows:
-        first = [c.lower() for c in rows[0]]
-        if any("assembly" in c or "read" in c or "sequenc" in c for c in first):
-            rows = rows[1:]
-
-    if not rows:
-        print("No rows to process in CSV")
-        return 0
-
-    for i, raw in enumerate(rows, start=1):
-        # Expect assembly, read1, read2, sequencing_type
-        row = [c.strip() for c in raw]
-        while len(row) < 4:
-            row.append("")
-        read1, read2, seqtype, assembly = row[:4]
-        read2 = read2 or None
-        seqtype = seqtype.lower() if seqtype else None
-
-        if not read1:
-            raise ValueError(f"Row {i}: read1 is required")
-        read1p = Path(read1)
-        if not read1p.exists():
-            raise FileNotFoundError(f"Row {i}: read1 file not found: {read1p}")
-
-        read2p = Path(read2) if read2 else None
-        if read2p and not read2p.exists():
-            raise FileNotFoundError(f"Row {i}: read2 file not found: {read2p}")
-        
-        seqtype_to_use = global_seqtype if global_seqtype else seqtype
-        if not seqtype_to_use:
-            raise ValueError(f"Row {i}: sequencing_type is required")
-        
-        assembly_to_use = global_assembly if global_assembly else (Path(assembly) if assembly else None)
-        if assembly_to_use is None:
-            raise ValueError(f"Row {i}: no assembly provided (neither CSV nor --assembly)")
-        if not assembly_to_use.exists():
-            raise FileNotFoundError(f"Row {i}: assembly not found: {assembly_to_use}")
-
-        path_read1 = Path(read1p)
-        basename_read1 = path_read1.stem
-        # Strip double extensions like .fastq.gz, .fq.gz
-        if basename_read1.endswith(('.fastq', '.fq')):
-            basename_read1 = Path(basename_read1).stem
-        basename_assembly = Path(assembly_to_use).stem
-        desired_bam = outdir / f"{basename_read1}_mapped_on_{basename_assembly}.bam"
-
-        print(f"Processing row {i}: {read1p} -> assembly {assembly_to_use} (seqtype={seqtype_to_use}) -> {desired_bam}")
-
-        # Create args namespace for run_mapping_per_sample
-        sample_args = argparse.Namespace(
-            read1=str(read1p),
-            read2=str(read2p) if read2p else None,
-            assembly=str(assembly_to_use),
-            sequencing_type=seqtype_to_use,
-            circular=getattr(args, 'circular', False),
-            keep_unmapped=getattr(args, 'keep_unmapped', False),
-            output=str(desired_bam),
-            threads=args.threads,
-        )
-        run_mapping_per_sample(sample_args)
-
-    print("All rows processed")
-    return 0
+        for f in bwa_index_sidecars:
+            try:
+                f.unlink()
+            except Exception:
+                pass
 
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(description="Map reads with minimap2 and produce MD-tagged indexed BAM")
+    parser = argparse.ArgumentParser(description="Map reads and produce MD-tagged indexed BAM")
     add_mapping_per_sample_args(parser)
     args = parser.parse_args()
-    map_with_mapper(args.threads, Path(args.assembly), args.sequencing_type, Path(args.read1), Path(args.read2) if args.read2 else None, Path(args.output_file), args.circular)
+    run_mapping_per_sample(args)

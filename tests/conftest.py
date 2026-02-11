@@ -13,16 +13,16 @@ import pytest
 TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
 REFERENCE = os.path.join(TESTS_DIR, "test_10000bp.fasta")
 
-# FASTQ files and their sequencing types
-# Format: (r1_file, r2_file or None, sequencing_type)
+# FASTQ files and their mapper presets
+# Format: (r1_file, r2_file or None, mapper)
 FASTQ_FILES = [
     # Paired-end short reads
-    ("50_read_pairs_for_test_10kbp_R1.fastq", "50_read_pairs_for_test_10kbp_R2.fastq", "paired-short"),
-    ("50_read_pairs_for_test_10kbp_inverted_R1.fastq", "50_read_pairs_for_test_10kbp_inverted_R2.fastq", "paired-short"),
-    ("5000_read_pairs_for_test_10kbp_concatenated_100_times_R1.fastq", "5000_read_pairs_for_test_10kbp_concatenated_100_times_R2.fastq", "paired-short"),
+    ("50_read_pairs_for_test_10kbp_R1.fastq", "50_read_pairs_for_test_10kbp_R2.fastq", "minimap2-sr-secondary"),
+    ("50_read_pairs_for_test_10kbp_inverted_R1.fastq", "50_read_pairs_for_test_10kbp_inverted_R2.fastq", "minimap2-sr-secondary"),
+    ("5000_read_pairs_for_test_10kbp_concatenated_100_times_R1.fastq", "5000_read_pairs_for_test_10kbp_concatenated_100_times_R2.fastq", "minimap2-sr-secondary"),
     # Long reads (single file)
-    ("1000_long_reads_for_test_10kbp.fastq", None, "long"),
-    ("100_long_reads_for_test_10kbp_concatenated_100_times.fastq", None, "long"),
+    ("1000_long_reads_for_test_10kbp.fastq", None, "minimap2-ont"),
+    ("100_long_reads_for_test_10kbp_concatenated_100_times.fastq", None, "minimap2-ont"),
 ]
 
 def get_bam_name(fastq_name: str, circular: bool) -> str:
@@ -35,13 +35,13 @@ def get_bam_name(fastq_name: str, circular: bool) -> str:
     suffix = "_circular" if circular else ""
     return f"{base}{suffix}.bam"
 
-def generate_bam(r1_path: str, r2_path: str | None, seq_type: str, circular: bool, output_bam: str) -> None:
+def generate_bam(r1_path: str, r2_path: str | None, mapper: str, circular: bool, output_bam: str) -> None:
     """Generate a BAM file using thebigbam mapping-per-sample command."""
     cmd = [
         "thebigbam", "mapping-per-sample",
         "-r1", r1_path,
         "-a", REFERENCE,
-        "--sequencing-type", seq_type,
+        "--mapper", mapper,
         "-o", output_bam,
     ]
     if r2_path:
@@ -71,7 +71,7 @@ def test_bams():
 
     bam_files = {"circular": [], "linear": []}
 
-    for r1_name, r2_name, seq_type in FASTQ_FILES:
+    for r1_name, r2_name, mapper in FASTQ_FILES:
         r1_path = os.path.join(TESTS_DIR, r1_name)
         r2_path = os.path.join(TESTS_DIR, r2_name) if r2_name else None
 
@@ -89,7 +89,7 @@ def test_bams():
 
             # Generate if BAM or index doesn't exist
             if not os.path.exists(bam_path) or not os.path.exists(bai_path):
-                generate_bam(r1_path, r2_path, seq_type, circular, bam_path)
+                generate_bam(r1_path, r2_path, mapper, circular, bam_path)
 
             if os.path.exists(bam_path):
                 key = "circular" if circular else "linear"

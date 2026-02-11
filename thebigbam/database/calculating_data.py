@@ -122,7 +122,7 @@ def calculating_all_features_parallel(list_modules, bam_files, output_db, min_co
         print(f"Warning: {samples_failed} samples failed to process", flush=True)
 
 def add_calculate_args(parser):
-    parser.add_argument("-t", "--threads", required=True, help="Number of threads available")
+    parser.add_argument('-t', '--threads', type=int, default=4, help='Number of threads available (default: 4)')
     parser.add_argument("-g", "--genbank", help="Path to annotation file: GenBank (.gbk, .gbff) or GFF3 (.gff) format. Required if no BAM files provided.")
     parser.add_argument("-b", "--bam_files", help="Path to bam file or directory containing mapping files (BAM format). Optional if genbank is provided.")
     parser.add_argument("--circular", action="store_true", help="Set if assembly was doubled during mapping (enables modulo logic)")

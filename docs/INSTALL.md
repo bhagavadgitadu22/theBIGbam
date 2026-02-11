@@ -93,9 +93,8 @@ pip install .  # Re-install in conda environment
 This installs:
 
 - **minimap2** - Read aligner
+- bwa-mem2 - Alternative read aligner
 - **samtools** - BAM file manipulation
-- **seqkit** - Sequence file manipulation
-- **pharokka** or **bakta** - Genome annotation tools
 
 Alternatively, install these tools individually via your system package manager or from their official sources.
 
