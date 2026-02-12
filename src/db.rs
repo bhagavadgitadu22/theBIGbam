@@ -159,12 +159,12 @@ impl DbWriter {
 
         for p in presences {
             if let Some(&contig_id) = self.contig_name_to_id.get(&p.contig_name) {
-                let cov_pct = p.coverage_pct.round() as i32;
+                let cov_pct = (p.coverage_pct * 10.0).round() as i32;
                 let above_expected = p.above_expected_aligned_fraction;
                 let read_count = p.read_count as i64;
-                let cov_mean = p.coverage_mean.round() as i32;
-                let cov_median = p.coverage_median.round() as i32;
-                let cov_trimmed_mean = p.coverage_trimmed_mean.round() as i32;
+                let cov_mean = (p.coverage_mean * 10.0).round() as i32;
+                let cov_median = (p.coverage_median * 10.0).round() as i32;
+                let cov_trimmed_mean = (p.coverage_trimmed_mean * 10.0).round() as i32;
                 let cov_sd = p.coverage_sd.round() as i32;
                 let cov_var = p.coverage_variation.round() as i32;
                 appender.append_row(params![contig_id, sample_id, cov_pct, above_expected, read_count, cov_mean, cov_median, cov_trimmed_mean, cov_sd, cov_var])?;
@@ -329,7 +329,9 @@ impl DbWriter {
                 let misjoint = d.contig_end_misjoint_mates.map(|v| v as i64);
                 appender.append_row(params![
                     contig_id, sample_id,
+                    d.coverage_first_position as i64,
                     d.contig_start_collapse_percentage, d.contig_start_collapse_bp, d.contig_start_expansion_bp,
+                    d.coverage_last_position as i64,
                     d.contig_end_collapse_percentage, d.contig_end_collapse_bp, d.contig_end_expansion_bp,
                     misjoint
                 ])?;
@@ -352,7 +354,7 @@ impl DbWriter {
                 let circ_dev = d.circularising_insert_size_deviation;
                 appender.append_row(params![
                     contig_id, sample_id,
-                    &d.category, circ_reads, circ_pct, circ_inserts, circ_dev
+                    circ_reads, circ_pct, circ_inserts, circ_dev
                 ])?;
             }
         }
@@ -380,7 +382,7 @@ impl DbWriter {
         for v in VARIABLES {
             // Skip primary_reads - it's a VIEW
             // Skip contig-level variables stored in Contig_* tables (not per-sample)
-            if v.name == "primary_reads" || v.name == "direct_repeats" || v.name == "inverted_repeats" || v.name == "gc_content" {
+            if v.name == "primary_reads" || v.name == "direct_repeat_count" || v.name == "inverted_repeat_count" || v.name == "direct_repeat_identity" || v.name == "inverted_repeat_identity" || v.name == "gc_content" {
                 continue;
             }
 
@@ -587,7 +589,7 @@ impl DbWriter {
             let total_bp: i64 = merged.iter().map(|(start, end)| (*end - *start + 1) as i64).sum();
 
             // Calculate percentage (rounded to integer)
-            let percentage = ((total_bp as f64 / contig_length as f64) * 100.0).round() as i32;
+            let percentage = ((total_bp as f64 / contig_length as f64) * 1000.0).round() as i32;
 
             // Update the Contig table
             conn.execute(
@@ -678,7 +680,7 @@ impl DbWriter {
                 data.stats.average.round() as i32,                    // GC_mean as int (0-100)
                 (data.stats.sd * 100.0).round() as i32,               // GC_sd * 100
                 (data.skew_stats.amplitude * 100.0).round() as i32,   // GC_skew_amplitude * 100
-                data.skew_stats.percent_positive.round() as i32,      // Positive_GC_skew_windows_percentage as int (0-100)
+                (data.skew_stats.percent_positive * 10.0).round() as i32, // Positive_GC_skew_windows_percentage as int (0-1000, ×10)
                 &data.contig_name
             ])?;
         }
@@ -946,9 +948,11 @@ fn create_core_tables(conn: &Connection) -> Result<()> {
         "CREATE TABLE Side_misassembly (
             Contig_id INTEGER,
             Sample_id INTEGER,
+            Coverage_first_position INTEGER,
             Contig_start_collapse_percentage INTEGER,
             Contig_start_collapse_bp INTEGER,
             Contig_start_expansion_bp INTEGER,
+            Coverage_last_position INTEGER,
             Contig_end_collapse_percentage INTEGER,
             Contig_end_collapse_bp INTEGER,
             Contig_end_expansion_bp INTEGER,
@@ -958,12 +962,11 @@ fn create_core_tables(conn: &Connection) -> Result<()> {
     )
     .context("Failed to create Side_misassembly table")?;
 
-    // Topology table - LINEAR/CIRCULAR/INCOMPLETE classification
+    // Topology table - circularisation metrics
     conn.execute(
         "CREATE TABLE Topology (
             Contig_id INTEGER,
             Sample_id INTEGER,
-            Category TEXT,
             Circularising_reads INTEGER,
             Circularising_reads_percentage INTEGER,
             Circularising_inserts INTEGER,
@@ -1218,8 +1221,8 @@ fn create_variable_tables(conn: &Connection) -> Result<()> {
     for (i, v) in VARIABLES.iter().enumerate() {
         // Special case: contig-level data is stored in separate Contig_* tables
         let table_name = match v.name {
-            "direct_repeats" => "Contig_directRepeats".to_string(),
-            "inverted_repeats" => "Contig_invertedRepeats".to_string(),
+            "direct_repeat_count" | "direct_repeat_identity" => "Contig_directRepeats".to_string(),
+            "inverted_repeat_count" | "inverted_repeat_identity" => "Contig_invertedRepeats".to_string(),
             "gc_content" => "Contig_GCContent".to_string(),
             "gc_skew" => "Contig_GCSkew".to_string(),
             _ => feature_table_name(v.name),
@@ -1394,16 +1397,16 @@ fn create_views(conn: &Connection, created_tables: &HashSet<String>) -> Result<(
          SELECT
              c.Contig_name,
              s.Sample_name,
-             p.Aligned_fraction_percentage,
+             p.Aligned_fraction_percentage / 10.0 AS Aligned_fraction_percentage,
              p.Above_expected_aligned_fraction,
              p.Read_count,
-             p.Coverage_mean,
-             p.Coverage_median,
-             p.Coverage_trimmed_mean,
-             p.Coverage_sd / 1000000.0 AS Coverage_sd,
-             p.Coverage_variation / 1000000.0 AS Coverage_variation,
+             p.Coverage_mean / 10.0 AS Coverage_mean,
+             p.Coverage_median / 10.0 AS Coverage_median,
+             p.Coverage_trimmed_mean / 10.0 AS Coverage_trimmed_mean,
              rb.RPKM,
-             CASE WHEN rs.total_rpkm > 0 THEN (rb.RPKM / rs.total_rpkm) * 1e6 ELSE 0 END AS TPM
+             CASE WHEN rs.total_rpkm > 0 THEN (rb.RPKM / rs.total_rpkm) * 1e6 ELSE 0 END AS TPM,
+             ROUND(p.Coverage_sd / 1000000.0, 2) AS Coverage_sd,
+             ROUND(p.Coverage_variation / 1000000.0, 4) AS Coverage_variation
          FROM Coverage p
          JOIN Contig c ON p.Contig_id = c.Contig_id
          JOIN Sample s ON p.Sample_id = s.Sample_id
@@ -1444,10 +1447,10 @@ fn create_views(conn: &Connection, created_tables: &HashSet<String>) -> Result<(
              CASE WHEN c.Contig_length > 0 THEN md.Deletions_count * 100000.0 / c.Contig_length ELSE 0 END AS Deletions_per_100kbp,
              CASE WHEN c.Contig_length > 0 THEN md.Insertions_count * 100000.0 / c.Contig_length ELSE 0 END AS Insertions_per_100kbp,
              CASE WHEN c.Contig_length > 0 THEN md.Clippings_count * 100000.0 / c.Contig_length ELSE 0 END AS Clippings_per_100kbp,
-             md.Microdiverse_bp_on_reference,
-             CASE WHEN c.Contig_length > 0 THEN md.Microdiverse_bp_on_reference * 100000.0 / c.Contig_length ELSE 0 END AS Microdiverse_bp_per_100kbp_on_reference,
              md.Microdiverse_bp_on_reads,
-             CASE WHEN c.Contig_length > 0 THEN md.Microdiverse_bp_on_reads * 100000.0 / c.Contig_length ELSE 0 END AS Microdiverse_bp_per_100kbp_on_reads
+             CASE WHEN c.Contig_length > 0 THEN md.Microdiverse_bp_on_reads * 100000.0 / c.Contig_length ELSE 0 END AS Microdiverse_bp_per_100kbp_on_reads,
+             md.Microdiverse_bp_on_reference,
+             CASE WHEN c.Contig_length > 0 THEN md.Microdiverse_bp_on_reference * 100000.0 / c.Contig_length ELSE 0 END AS Microdiverse_bp_per_100kbp_on_reference
          FROM Microdiversity md
          JOIN Contig c ON md.Contig_id = c.Contig_id
          JOIN Sample s ON md.Sample_id = s.Sample_id",
@@ -1461,14 +1464,16 @@ fn create_views(conn: &Connection, created_tables: &HashSet<String>) -> Result<(
          SELECT
              c.Contig_name,
              s.Sample_name,
-             COALESCE(sm.Contig_start_collapse_percentage, 0) AS Contig_start_collapse_percentage,
+             COALESCE(sm.Coverage_first_position, 0) AS Coverage_first_position,
+             COALESCE(sm.Contig_start_collapse_percentage, 0) / 10.0 AS Contig_start_collapse_prevalence,
              COALESCE(sm.Contig_start_collapse_bp, 0) AS Contig_start_collapse_bp,
              COALESCE(sm.Contig_start_expansion_bp, 0) AS Contig_start_expansion_bp,
-             COALESCE(sm.Contig_end_collapse_percentage, 0) AS Contig_end_collapse_percentage,
+             COALESCE(sm.Coverage_last_position, 0) AS Coverage_last_position,
+             COALESCE(sm.Contig_end_collapse_percentage, 0) / 10.0 AS Contig_end_collapse_prevalence,
              COALESCE(sm.Contig_end_collapse_bp, 0) AS Contig_end_collapse_bp,
              COALESCE(sm.Contig_end_expansion_bp, 0) AS Contig_end_expansion_bp,
-             COALESCE(sm.Contig_end_misjoint_mates, 0) AS Contig_end_misjoint_mates,
-             CASE WHEN cov.Coverage_mean > 0 THEN sm.Contig_end_misjoint_mates * 100.0 / cov.Coverage_mean ELSE 0 END AS Normalized_contig_end_misjoint_mates
+             CASE WHEN s.Sequencing_type = 'paired-short' THEN COALESCE(sm.Contig_end_misjoint_mates, 0) ELSE NULL END AS Contig_end_misjoint_mates,
+             CASE WHEN s.Sequencing_type != 'paired-short' THEN NULL WHEN cov.Coverage_mean > 0 THEN COALESCE(sm.Contig_end_misjoint_mates, 0) * 1000.0 / cov.Coverage_mean ELSE 0 END AS Normalized_contig_end_misjoint_mates
          FROM Side_misassembly sm
          JOIN Contig c ON sm.Contig_id = c.Contig_id
          JOIN Sample s ON sm.Sample_id = s.Sample_id
@@ -1483,12 +1488,11 @@ fn create_views(conn: &Connection, created_tables: &HashSet<String>) -> Result<(
          SELECT
              c.Contig_name,
              s.Sample_name,
-             COALESCE(t.Category, 'LINEAR') AS Category,
              COALESCE(t.Circularising_reads, 0) AS Circularising_reads,
-             COALESCE(t.Circularising_reads_percentage, 0) AS Circularising_reads_percentage,
-             COALESCE(t.Circularising_inserts, 0) AS Circularising_inserts,
-             COALESCE(t.Circularising_insert_size_deviation, 0) AS Circularising_insert_size_deviation,
-             CASE WHEN cov.Coverage_mean > 0 THEN t.Circularising_inserts * 100.0 / cov.Coverage_mean ELSE 0 END AS Normalized_circularising_inserts
+             COALESCE(t.Circularising_reads_percentage, 0) AS Circularising_reads_prevalence,
+             CASE WHEN s.Sequencing_type = 'paired-short' THEN COALESCE(t.Circularising_inserts, 0) ELSE NULL END AS Circularising_inserts,
+             CASE WHEN s.Sequencing_type = 'paired-short' THEN COALESCE(t.Circularising_insert_size_deviation, 0) ELSE NULL END AS Circularising_insert_size_deviation,
+             CASE WHEN s.Sequencing_type != 'paired-short' THEN NULL WHEN cov.Coverage_mean > 0 THEN COALESCE(t.Circularising_inserts, 0) * 1000.0 / cov.Coverage_mean ELSE 0 END AS Normalized_circularising_inserts
          FROM Topology t
          JOIN Contig c ON t.Contig_id = c.Contig_id
          JOIN Sample s ON t.Sample_id = s.Sample_id
@@ -1590,7 +1594,7 @@ fn cleanup_unused_variables(conn: &Connection, created_tables: &HashSet<String>)
         // Skip special cases:
         // - direct_repeats/inverted_repeats/gc_content/gc_skew: data stored in Contig_* tables (always exist)
         // - primary_reads: is a VIEW, not a table (depends on plus/minus tables)
-        if var_name == "direct_repeats" || var_name == "inverted_repeats" || var_name == "gc_content" || var_name == "gc_skew" {
+        if var_name == "direct_repeat_count" || var_name == "inverted_repeat_count" || var_name == "direct_repeat_identity" || var_name == "inverted_repeat_identity" || var_name == "gc_content" || var_name == "gc_skew" {
             continue;
         }
 
@@ -1706,21 +1710,21 @@ pub struct MicrodiversityData {
 #[derive(Clone, Debug)]
 pub struct SideMisassemblyData {
     pub contig_name: String,
+    pub coverage_first_position: u64,
     pub contig_start_collapse_percentage: Option<i32>,
     pub contig_start_collapse_bp: Option<i32>,
     pub contig_start_expansion_bp: Option<i32>,
+    pub coverage_last_position: u64,
     pub contig_end_collapse_percentage: Option<i32>,
     pub contig_end_collapse_bp: Option<i32>,
     pub contig_end_expansion_bp: Option<i32>,
     pub contig_end_misjoint_mates: Option<u64>,
 }
 
-/// Topology data for a contig (LINEAR/CIRCULAR/INCOMPLETE classification).
+/// Topology data for a contig (circularisation metrics).
 #[derive(Clone, Debug)]
 pub struct TopologyData {
     pub contig_name: String,
-    /// LINEAR, CIRCULAR, or INCOMPLETE
-    pub category: String,
     pub circularising_reads: Option<u64>,
     pub circularising_reads_percentage: Option<i32>,
     pub circularising_inserts: Option<u64>,

@@ -60,11 +60,11 @@ def download_contig_summary_csv(db_path, contig_name):
                     SELECT
                         Contig_name as "Contig",
                         Contig_length as "Contig length",
-                        Duplication_percentage as "Duplication (%)",
+                        ROUND(Duplication_percentage / 10.0, 1) as "Duplication (%)",
                         GC_mean as "GC mean",
-                        GC_sd / 100.0 as "GC sd",
+                        ROUND(GC_sd / 100.0, 2) as "GC sd",
                         GC_skew_amplitude / 100.0 as "GC skew amplitude",
-                        Positive_GC_skew_windows_percentage / 100.0 as "Positive GC skew windows (%)"
+                        ROUND(Positive_GC_skew_windows_percentage / 10.0, 1) as "Positive GC skew windows (%)"
                     FROM Contig
                     WHERE Contig_name = '{safe_contig}'
                 ) TO '{temp_path}' (HEADER, DELIMITER ',')
@@ -128,7 +128,7 @@ def download_metrics_summary_csv(db_path, contig_name, sample_names):
                         s.Sample_name as "Sample",
                         cov.Aligned_fraction_percentage, cov.Above_expected_aligned_fraction,
                         cov.Read_count, cov.Coverage_mean, cov.Coverage_median, cov.Coverage_trimmed_mean,
-                        cov.Coverage_sd, cov.Coverage_variation, cov.RPKM, cov.TPM,
+                        cov.RPKM, cov.TPM, cov.Coverage_sd, cov.Coverage_variation,
                         mis.Mismatches_per_100kbp as "Misassembly_mismatches_per_100kbp",
                         mis.Deletions_per_100kbp as "Misassembly_deletions_per_100kbp",
                         mis.Insertions_per_100kbp as "Misassembly_insertions_per_100kbp",
@@ -139,12 +139,14 @@ def download_metrics_summary_csv(db_path, contig_name, sample_names):
                         mic.Deletions_per_100kbp as "Microdiversity_deletions_per_100kbp",
                         mic.Insertions_per_100kbp as "Microdiversity_insertions_per_100kbp",
                         mic.Clippings_per_100kbp as "Microdiversity_clippings_per_100kbp",
-                        mic.Microdiverse_bp_on_reference, mic.Microdiverse_bp_per_100kbp_on_reference,
                         mic.Microdiverse_bp_on_reads, mic.Microdiverse_bp_per_100kbp_on_reads,
-                        sm.Contig_start_collapse_percentage, sm.Contig_start_collapse_bp, sm.Contig_start_expansion_bp,
-                        sm.Contig_end_collapse_percentage, sm.Contig_end_collapse_bp, sm.Contig_end_expansion_bp,
+                        mic.Microdiverse_bp_on_reference, mic.Microdiverse_bp_per_100kbp_on_reference,
+                        sm.Coverage_first_position,
+                        sm.Contig_start_collapse_prevalence, sm.Contig_start_collapse_bp, sm.Contig_start_expansion_bp,
+                        sm.Coverage_last_position,
+                        sm.Contig_end_collapse_prevalence, sm.Contig_end_collapse_bp, sm.Contig_end_expansion_bp,
                         sm.Contig_end_misjoint_mates, sm.Normalized_contig_end_misjoint_mates,
-                        t.Category, t.Circularising_reads, t.Circularising_reads_percentage,
+                        t.Circularising_reads, t.Circularising_reads_prevalence,
                         t.Circularising_inserts, t.Circularising_insert_size_deviation,
                         t.Normalized_circularising_inserts,
                         ph.Packaging_mechanism, ph.Left_termini, ph.Right_termini

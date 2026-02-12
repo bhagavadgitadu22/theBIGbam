@@ -2,10 +2,10 @@ import duckdb
 from bokeh.models import Range1d
 from bokeh.layouts import gridplot
 
-from .plotting_data_per_sample import get_contig_info, get_feature_data, get_feature_data_batch, get_variable_metadata, get_repeats_data, make_bokeh_subplot, make_bokeh_genemap, make_bokeh_sequence_subplot
+from .plotting_data_per_sample import get_contig_info, get_feature_data, get_feature_data_batch, get_variable_metadata, get_repeats_aggregated_data, make_bokeh_subplot, make_bokeh_genemap, make_bokeh_sequence_subplot
 
 ### Function to generate the bokeh plot
-def generate_bokeh_plot_all_samples(conn, variable, contig_name, xstart=None, xend=None, subplot_size=130, genbank_path=None, genome_features=None, allowed_samples=None, feature_types=None, use_phage_colors=False, plot_sequence=False, same_y_scale=False):
+def generate_bokeh_plot_all_samples(conn, variable, contig_name, xstart=None, xend=None, subplot_size=130, genbank_path=None, genome_features=None, allowed_samples=None, feature_types=None, use_phage_colors=False, plot_sequence=False, same_y_scale=False, genemap_size=None):
     """Generate a Bokeh plot showing all samples for a single variable.
 
     Args:
@@ -33,7 +33,7 @@ def generate_bokeh_plot_all_samples(conn, variable, contig_name, xstart=None, xe
         shared_xrange.start = xstart
         shared_xrange.end = xend
 
-    annotation_fig = make_bokeh_genemap(conn, contig_id, locus_name, locus_size, subplot_size, shared_xrange, xstart, xend, feature_types=feature_types, use_phage_colors=use_phage_colors) if genbank_path else None
+    annotation_fig = make_bokeh_genemap(conn, contig_id, locus_name, locus_size, genemap_size if genemap_size is not None else subplot_size, shared_xrange, xstart, xend, feature_types=feature_types, use_phage_colors=use_phage_colors) if genbank_path else None
 
     # Get list of samples
     cur.execute("SELECT Coverage.Sample_id, Sample_name FROM Coverage JOIN Sample ON Coverage.Sample_id = Sample.Sample_id WHERE Contig_id=?", (contig_id,))
@@ -57,20 +57,30 @@ def generate_bokeh_plot_all_samples(conn, variable, contig_name, xstart=None, xe
                 feature_lower = genome_feature.lower().strip()
 
                 # Handle Repeats specially - they use contig-only tables with linked positions
-                if feature_lower in ["repeats", "repeat", "direct repeats", "inverted repeats"]:
-                    repeats_feature_dicts = []
-                    if feature_lower in ["repeats", "repeat", "direct repeats"]:
-                        direct_feature_dict = get_repeats_data(cur, contig_id, "direct_repeats", xstart, xend)
-                        if direct_feature_dict:
-                            repeats_feature_dicts.extend(direct_feature_dict)
-                    if feature_lower in ["repeats", "repeat", "inverted repeats"]:
-                        inverted_feature_dict = get_repeats_data(cur, contig_id, "inverted_repeats", xstart, xend)
-                        if inverted_feature_dict:
-                            repeats_feature_dicts.extend(inverted_feature_dict)
-                    if repeats_feature_dicts:
-                        repeats_subplot = make_bokeh_subplot(repeats_feature_dicts, subplot_size, shared_xrange)
-                        if repeats_subplot is not None:
-                            genome_subplots.append(repeats_subplot)
+                if feature_lower in ["repeat count"]:
+                    count_dicts, _ = get_repeats_aggregated_data(cur, contig_id, xstart, xend)
+                    if count_dicts:
+                        subplot = make_bokeh_subplot(count_dicts, subplot_size, shared_xrange)
+                        if subplot is not None:
+                            genome_subplots.append(subplot)
+                elif feature_lower in ["max repeat identity"]:
+                    _, identity_dicts = get_repeats_aggregated_data(cur, contig_id, xstart, xend)
+                    if identity_dicts:
+                        subplot = make_bokeh_subplot(identity_dicts, subplot_size, shared_xrange)
+                        if subplot is not None:
+                            genome_subplots.append(subplot)
+                elif feature_lower in ["repeats", "repeat", "direct repeats", "inverted repeats"]:
+                    count_dicts, identity_dicts = get_repeats_aggregated_data(cur, contig_id, xstart, xend)
+                    # Track 1: Repeat count
+                    if count_dicts:
+                        subplot = make_bokeh_subplot(count_dicts, subplot_size, shared_xrange)
+                        if subplot is not None:
+                            genome_subplots.append(subplot)
+                    # Track 2: Repeat max identity
+                    if identity_dicts:
+                        subplot = make_bokeh_subplot(identity_dicts, subplot_size, shared_xrange)
+                        if subplot is not None:
+                            genome_subplots.append(subplot)
                 # Handle GC content and GC skew - contig-level tables, use get_feature_data
                 elif feature_lower in ["gc_content", "gc content", "gccontent", "gc"]:
                     list_feature_dict = get_feature_data(cur, "GC content", contig_id, sample_id=None, xstart=xstart, xend=xend)

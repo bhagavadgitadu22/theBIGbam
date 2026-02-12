@@ -231,6 +231,10 @@ def make_bokeh_subplot(feature_dict, height, x_range, sample_title=None):
                 data_dict["linked_end"] = data_feature["linked_end"]
                 data_dict["length"] = data_feature["length"]
 
+            # Add repeat positions if available
+            if "repeat_positions" in data_feature:
+                data_dict["repeat_positions"] = data_feature["repeat_positions"]
+
             # Add statistics if available
             has_stats = data_feature.get("has_stats", False)
             if has_stats:
@@ -281,6 +285,7 @@ def make_bokeh_subplot(feature_dict, height, x_range, sample_title=None):
     has_any_stats = any(d.get("has_stats", False) for d in feature_dict)
     has_variable_width = any("width" in d and any(w != 1 for w in d["width"]) for d in feature_dict)
     is_duplication = any(d.get("is_duplication", False) for d in feature_dict)
+    has_repeat_positions = any("repeat_positions" in d for d in feature_dict)
 
     if is_duplication:
         # Duplication-specific tooltips
@@ -291,6 +296,12 @@ def make_bokeh_subplot(feature_dict, height, x_range, sample_title=None):
             ("Linked end", "@linked_end{0,0}"),
             ("Length", "@length{0,0}"),
             ("Identity", "@y{0.01}%")
+        ]
+    elif has_repeat_positions:
+        tooltips = [
+            ("Position", "@x{0,0}"),
+            ("Value", "@y{0.00}"),
+            ("Repeat positions", "@repeat_positions"),
         ]
     elif has_variable_width:
         # For bars with spans, show first and last position
@@ -439,116 +450,6 @@ def make_bokeh_sequence_subplot(conn, contig_name, xstart, xend, height, x_range
         return None
 
 
-### Function to get repeats (contig-level, sample-independent)
-def get_repeats_data(cur, contig_id, variable_name="direct_repeats", xstart=None, xend=None):
-    """Get repeats data for plotting, formatted for make_bokeh_subplot().
-
-    Args:
-        cur: DuckDB cursor
-        contig_id: Contig ID
-        variable_name: Either 'direct_repeats' or 'inverted_repeats'
-        xstart: Optional start position for filtering (only fetch data intersecting this range)
-        xend: Optional end position for filtering (only fetch data intersecting this range)
-
-    Returns:
-        List with one feature dict formatted for make_bokeh_subplot()
-    """
-    # Map variable name to table name
-    table_map = {
-        "direct_repeats": "Contig_directRepeats",
-        "inverted_repeats": "Contig_invertedRepeats",
-    }
-    table_name = table_map.get(variable_name)
-    if not table_name:
-        return []
-
-    # Get variable info from database
-    cur.execute(
-        "SELECT \"Type\", Color, Alpha, Fill_alpha, \"Size\", Title "
-        f"FROM Variable WHERE Variable_name='{variable_name}'"
-    )
-    var_row = cur.fetchone()
-    if not var_row:
-        return []  # Variable not found
-
-    type_picked, color, alpha, fill_alpha, size, title = var_row
-
-    # Check if table exists and has data
-    try:
-        # Build position filter clause
-        position_filter = ""
-        params = [contig_id]
-        if xstart is not None and xend is not None:
-            position_filter = " AND Position2 >= ? AND Position1 <= ?"
-            params.extend([xstart, xend])
-        
-        cur.execute(
-            f"SELECT Position1, Position2, Position1prime, Position2prime, Pident "
-            f"FROM {table_name} WHERE Contig_id=?{position_filter} ORDER BY Position1",
-            tuple(params)
-        )
-        rows = cur.fetchall()
-    except Exception:
-        return []  # Table doesn't exist or no data
-
-    if not rows:
-        return []
-
-    # Clip repeat positions to requested range
-    if xstart is not None and xend is not None:
-        clipped_rows = []
-        for row in rows:
-            pos1, pos2, pos1p, pos2p, pident_int = row
-            clipped_pos1 = max(pos1, xstart)
-            clipped_pos2 = min(pos2, xend)
-            clipped_rows.append((clipped_pos1, clipped_pos2, pos1p, pos2p, pident_int))
-        rows = clipped_rows
-
-    x_coords = []
-    y_coords = []
-    width_coords = []
-    first_pos_coords = []
-    last_pos_coords = []
-    linked_start_coords = []
-    linked_end_coords = []
-    length_coords = []
-
-    for row in rows:
-        pos1, pos2, pos1p, pos2p, pident_int = row
-        # Pident stored as INTEGER (×100), convert back to percentage
-        pident = pident_int / 100.0 if pident_int is not None else 0.0
-        length = abs(pos2 - pos1) + 1
-        midpoint = (pos1 + pos2) / 2.0
-
-        x_coords.append(midpoint)
-        y_coords.append(pident)
-        width_coords.append(length)
-        first_pos_coords.append(min(pos1, pos2))
-        last_pos_coords.append(max(pos1, pos2))
-        linked_start_coords.append(pos1p)
-        linked_end_coords.append(pos2p)
-        length_coords.append(length)
-
-    return [{
-        "type": type_picked,
-        "color": color,
-        "alpha": alpha,
-        "fill_alpha": fill_alpha,
-        "size": size,
-        "title": title,
-        "x": x_coords,
-        "y": y_coords,
-        "width": width_coords,
-        "first_pos": first_pos_coords,
-        "last_pos": last_pos_coords,
-        "linked_start": linked_start_coords,
-        "linked_end": linked_end_coords,
-        "length": length_coords,
-        "has_stats": False,
-        "is_duplication": True,  # Flag for special tooltip handling
-    }]
-
-
 def merge_rle_segments(plus_rows, minus_rows):
     """Merge two RLE-encoded arrays by summing overlapping values.
 
@@ -596,6 +497,289 @@ def merge_rle_segments(plus_rows, minus_rows):
         result.append((seg_start, seg_end, value))
 
     return result
+
+
+def aggregate_repeats_sweep(rows, original_positions=None):
+    """Aggregate repeat intervals using a boundary-based sweep-line.
+
+    Each repeat covers [min(pos1, pos2), max(pos1, pos2)] (first copy only).
+    For each segment between consecutive boundaries, compute:
+      - count: number of overlapping repeat intervals
+      - max_identity: max pident among overlapping intervals
+
+    Args:
+        rows: List of (pos1, pos2, pos1prime, pos2prime, pident_int) tuples
+        original_positions: Optional list of (orig_start, orig_end) per row,
+            used to track which repeat regions contribute to each segment
+
+    Returns:
+        (count_segments, identity_segments) - each a list of
+        (first, last, value, meta) tuples with adjacent same-value+meta
+        segments merged (RLE compression). meta is a tuple of positions for
+        count, or a single (start, end) for identity.
+    """
+    if not rows:
+        return [], []
+
+    # Build intervals: [start, end, pident, idx]
+    intervals = []
+    for idx, (pos1, pos2, _pos1p, _pos2p, pident_int) in enumerate(rows):
+        start = min(pos1, pos2)
+        end = max(pos1, pos2)
+        pident = pident_int / 100.0 if pident_int is not None else 0.0
+        intervals.append((start, end, pident, idx))
+
+    # Collect all boundaries
+    boundaries = set()
+    for start, end, _, _ in intervals:
+        boundaries.add(start)
+        boundaries.add(end + 1)
+
+    sorted_bounds = sorted(boundaries)
+    if len(sorted_bounds) < 2:
+        return [], []
+
+    # Sweep: for each segment between consecutive boundaries, find overlapping intervals
+    raw_count = []
+    raw_identity = []
+    for i in range(len(sorted_bounds) - 1):
+        seg_start = sorted_bounds[i]
+        seg_end = sorted_bounds[i + 1] - 1
+
+        count = 0
+        max_ident = 0.0
+        max_ident_idx = -1
+        overlapping_indices = []
+        for iv_start, iv_end, pident, iv_idx in intervals:
+            if iv_start > seg_end:
+                continue
+            if iv_end < seg_start:
+                continue
+            # Interval overlaps this segment
+            count += 1
+            overlapping_indices.append(iv_idx)
+            if pident > max_ident:
+                max_ident = pident
+                max_ident_idx = iv_idx
+
+        if count > 0:
+            if original_positions is not None:
+                count_meta = tuple(original_positions[j] for j in overlapping_indices)
+                identity_meta = original_positions[max_ident_idx]
+            else:
+                count_meta = None
+                identity_meta = None
+            raw_count.append((seg_start, seg_end, count, count_meta))
+            raw_identity.append((seg_start, seg_end, max_ident, identity_meta))
+
+    # RLE merge: collapse adjacent segments with same value AND meta
+    def _rle_merge(segments):
+        if not segments:
+            return []
+        merged = [segments[0]]
+        for first, last, value, meta in segments[1:]:
+            prev_first, prev_last, prev_value, prev_meta = merged[-1]
+            if value == prev_value and meta == prev_meta and first == prev_last + 1:
+                merged[-1] = (prev_first, last, value, meta)
+            else:
+                merged.append((first, last, value, meta))
+        return merged
+
+    return _rle_merge(raw_count), _rle_merge(raw_identity)
+
+
+def _format_count_positions(all_positions):
+    """Format all overlapping repeat positions for count tooltip."""
+    if not all_positions:
+        return ""
+    MAX_DISPLAY = 5
+    parts = [f"({s:,}, {e:,})" for s, e in all_positions[:MAX_DISPLAY]]
+    result = ", ".join(parts)
+    if len(all_positions) > MAX_DISPLAY:
+        result += f", ... (+{len(all_positions) - MAX_DISPLAY} more)"
+    return result
+
+def _format_identity_position(best_position):
+    """Format the best-identity repeat position for identity tooltip."""
+    if best_position is None:
+        return ""
+    return f"({best_position[0]:,}, {best_position[1]:,})"
+
+
+def _segments_to_curve_coords(segments, position_formatter=None):
+    """Convert (first, last, value[, meta]) segments to x/y arrays for varea plotting.
+
+    Inserts zero-padding between non-contiguous segments so varea doesn't
+    fill across gaps.
+
+    Args:
+        segments: List of (first, last, value) or (first, last, value, meta) tuples
+        position_formatter: Optional callable that formats meta into a string.
+            When provided, returns a third list of position strings.
+
+    Returns:
+        (x_list, y_list) when position_formatter is None
+        (x_list, y_list, pos_strings) when position_formatter is provided
+    """
+    if not segments:
+        if position_formatter is not None:
+            return [], [], []
+        return [], []
+
+    x_coords = []
+    y_coords = []
+    pos_strings = [] if position_formatter is not None else None
+
+    for i, seg in enumerate(segments):
+        first, last, value = seg[0], seg[1], seg[2]
+        meta = seg[3] if len(seg) > 3 else None
+
+        # Insert zero gap before this segment if it's not contiguous with previous
+        if i > 0:
+            prev_last = segments[i - 1][1]
+            if first > prev_last + 1:
+                # Drop to zero at end of previous segment
+                x_coords.append(prev_last + 1)
+                y_coords.append(0)
+                if pos_strings is not None:
+                    pos_strings.append("")
+                # Stay at zero until start of this segment
+                x_coords.append(first - 1)
+                y_coords.append(0)
+                if pos_strings is not None:
+                    pos_strings.append("")
+
+        # Segment start and end
+        formatted = position_formatter(meta) if position_formatter is not None else None
+        x_coords.append(first)
+        y_coords.append(value)
+        if pos_strings is not None:
+            pos_strings.append(formatted)
+        if first != last:
+            x_coords.append(last)
+            y_coords.append(value)
+            if pos_strings is not None:
+                pos_strings.append(formatted)
+
+    if pos_strings is not None:
+        return x_coords, y_coords, pos_strings
+    return x_coords, y_coords
+
+
+def get_repeats_aggregated_data(cur, contig_id, xstart=None, xend=None):
+    """Get aggregated repeat data as two sets of curve feature dicts.
+
+    For each repeat type (direct, inverted):
+      - Queries raw repeats from Contig_directRepeats / Contig_invertedRepeats
+      - Aggregates into count and max-identity curves via sweep-line
+      - Returns curve feature dicts ready for make_bokeh_subplot()
+
+    Args:
+        cur: DuckDB cursor
+        contig_id: Contig ID
+        xstart: Optional start position for filtering
+        xend: Optional end position for filtering
+
+    Returns:
+        (count_feature_dicts, identity_feature_dicts) - each is a list of 0-2
+        feature dicts (one per repeat type that has data)
+    """
+    # Each entry: (count_variable, identity_variable, table_name)
+    repeat_types = [
+        ("direct_repeat_count", "direct_repeat_identity", "Contig_directRepeats"),
+        ("inverted_repeat_count", "inverted_repeat_identity", "Contig_invertedRepeats"),
+    ]
+
+    count_feature_dicts = []
+    identity_feature_dicts = []
+
+    for count_var, identity_var, table_name in repeat_types:
+        # Get variable info for count and identity from Variable table
+        cur.execute(
+            "SELECT Color, Alpha, Fill_alpha, Title "
+            "FROM Variable WHERE Variable_name=?",
+            (count_var,)
+        )
+        count_meta = cur.fetchone()
+
+        cur.execute(
+            "SELECT Color, Alpha, Fill_alpha, Title "
+            "FROM Variable WHERE Variable_name=?",
+            (identity_var,)
+        )
+        identity_meta = cur.fetchone()
+
+        if not count_meta and not identity_meta:
+            continue
+
+        # Query raw repeats
+        try:
+            position_filter = ""
+            params = [contig_id]
+            if xstart is not None and xend is not None:
+                position_filter = " AND Position2 >= ? AND Position1 <= ?"
+                params.extend([xstart, xend])
+
+            cur.execute(
+                f"SELECT Position1, Position2, Position1prime, Position2prime, Pident "
+                f"FROM {table_name} WHERE Contig_id=?{position_filter} ORDER BY Position1",
+                tuple(params)
+            )
+            rows = cur.fetchall()
+        except Exception:
+            continue
+
+        if not rows:
+            continue
+
+        # Capture original (unclipped) repeat positions before clipping
+        original_positions = [(min(p1, p2), max(p1, p2)) for p1, p2, _, _, _ in rows]
+
+        # Clip to requested range
+        if xstart is not None and xend is not None:
+            clipped = []
+            for pos1, pos2, pos1p, pos2p, pident_int in rows:
+                clipped.append((max(pos1, xstart), min(pos2, xend), pos1p, pos2p, pident_int))
+            rows = clipped
+
+        # Aggregate
+        count_segments, identity_segments = aggregate_repeats_sweep(rows, original_positions=original_positions)
+
+        # Convert to curve coordinates (with position formatters for tooltips)
+        count_x, count_y, count_pos = _segments_to_curve_coords(count_segments, position_formatter=_format_count_positions)
+        ident_x, ident_y, ident_pos = _segments_to_curve_coords(identity_segments, position_formatter=_format_identity_position)
+
+        # Build feature dicts (type="curve" overrides whatever Variable table says)
+        if count_x and count_meta:
+            color, alpha, fill_alpha, title = count_meta
+            count_feature_dicts.append({
+                "type": "curve",
+                "color": color,
+                "alpha": alpha,
+                "fill_alpha": fill_alpha,
+                "size": 1,
+                "title": title,
+                "x": count_x,
+                "y": count_y,
+                "has_stats": False,
+                "repeat_positions": count_pos,
+            })
+        if ident_x and identity_meta:
+            color, alpha, fill_alpha, title = identity_meta
+            identity_feature_dicts.append({
+                "type": "curve",
+                "color": color,
+                "alpha": alpha,
+                "fill_alpha": fill_alpha,
+                "size": 1,
+                "title": title,
+                "x": ident_x,
+                "y": ident_y,
+                "has_stats": False,
+                "repeat_positions": ident_pos,
+            })
+
+    return count_feature_dicts, identity_feature_dicts
 
 
 ### Function to get variable metadata (rendering info from Variable table)
@@ -1111,7 +1295,7 @@ def get_feature_data_batch(cur, feature, contig_id, sample_ids, xstart=None, xen
 
 
 ### Function to generate the bokeh plot
-def generate_bokeh_plot_per_sample(conn, list_features, contig_name, sample_name, xstart=None, xend=None, subplot_size=100, genbank_path=None, feature_types=None, use_phage_colors=False, plot_isoforms=True, plot_sequence=False, same_y_scale=False):
+def generate_bokeh_plot_per_sample(conn, list_features, contig_name, sample_name, xstart=None, xend=None, subplot_size=100, genbank_path=None, feature_types=None, use_phage_colors=False, plot_isoforms=True, plot_sequence=False, same_y_scale=False, genemap_size=None):
     """Generate a Bokeh plot for a single sample.
 
     Args:
@@ -1139,7 +1323,7 @@ def generate_bokeh_plot_per_sample(conn, list_features, contig_name, sample_name
         shared_xrange.start = xstart
         shared_xrange.end = xend
 
-    annotation_fig = make_bokeh_genemap(conn, contig_id, locus_name, locus_size, subplot_size, shared_xrange, xstart, xend, feature_types=feature_types, use_phage_colors=use_phage_colors, plot_isoforms=plot_isoforms) if genbank_path else None
+    annotation_fig = make_bokeh_genemap(conn, contig_id, locus_name, locus_size, genemap_size if genemap_size is not None else subplot_size, shared_xrange, xstart, xend, feature_types=feature_types, use_phage_colors=use_phage_colors, plot_isoforms=plot_isoforms) if genbank_path else None
 
     # Get sample characteristics (optional – contig-level features work without a sample)
     sample_id = None
@@ -1161,27 +1345,24 @@ def generate_bokeh_plot_per_sample(conn, list_features, contig_name, sample_name
         if seq_subplot:
             subplots.append(seq_subplot)
 
-    requested_features, include_repeats = parse_requested_features(list_features)
+    requested_features, include_repeat_count, include_repeat_identity = parse_requested_features(list_features)
 
     # Add Repeats subplots if requested (contig-level, sample-independent)
-    if include_repeats:
-        repeats_feature_dicts = []
+    if include_repeat_count or include_repeat_identity:
         try:
-            direct_feature_dict = get_repeats_data(cur, contig_id, "direct_repeats", xstart, xend)
-            if direct_feature_dict:
-                repeats_feature_dicts.extend(direct_feature_dict)
+            count_dicts, identity_dicts = get_repeats_aggregated_data(cur, contig_id, xstart, xend)
+            # Track 1: Repeat count (direct + inverted as separate legend entries)
+            if include_repeat_count and count_dicts:
+                subplot = make_bokeh_subplot(count_dicts, subplot_size, shared_xrange)
+                if subplot is not None:
+                    subplots.append(subplot)
+            # Track 2: Repeat max identity (direct + inverted as separate legend entries)
+            if include_repeat_identity and identity_dicts:
+                subplot = make_bokeh_subplot(identity_dicts, subplot_size, shared_xrange)
+                if subplot is not None:
+                    subplots.append(subplot)
         except Exception as e:
-            print(f"Error processing Direct Repeats: {e}", flush=True)
-        try:
-            inverted_feature_dict = get_repeats_data(cur, contig_id, "inverted_repeats", xstart, xend)
-            if inverted_feature_dict:
-                repeats_feature_dicts.extend(inverted_feature_dict)
-        except Exception as e:
-            print(f"Error processing Inverted Repeats: {e}", flush=True)
-        if repeats_feature_dicts:
-            repeats_subplot = make_bokeh_subplot(repeats_feature_dicts, subplot_size, shared_xrange)
-            if repeats_subplot is not None:
-                subplots.append(repeats_subplot)
+            print(f"Error processing Repeats: {e}", flush=True)
 
     # Separate contig-level features (GC content, GC skew) from sample-dependent features
     contig_level_features = ["GC content", "GC skew"]
@@ -1280,20 +1461,22 @@ def parse_requested_features(list_features):
     - "coverage" or "Coverage" -> primary_reads, secondary_reads, supplementary_reads
     - "phagetermini" or "Phage termini" -> coverage_reduced, reads_starts, reads_ends, tau + Repeats
     - "assemblycheck" or "Assembly check" -> all assembly check features
-    - "genome" or "Genome" -> Repeats + GC content + GC skew
+    - "genome" or "Genome" -> Repeat count + Max repeat identity + GC content + GC skew
 
-    Returns tuple of (deduplicated list of individual feature names, include_repeats bool).
+    Returns tuple of (deduplicated list of individual feature names, include_repeat_count, include_repeat_identity).
     Note: GC content and GC skew are returned as regular features in the list.
     """
     features = []
-    include_repeats = False
+    include_repeat_count = False
+    include_repeat_identity = False
 
     for item in list_features:
         item_lower = item.lower().strip()
 
         # Module: Genome
         if item_lower in ["genome"]:
-            include_repeats = True
+            include_repeat_count = True
+            include_repeat_identity = True
             features.extend(["GC content", "GC skew"])
         # Module: Coverage
         elif item_lower in ["coverage"]:
@@ -1301,13 +1484,20 @@ def parse_requested_features(list_features):
         # Module: Phage termini / phagetermini
         elif item_lower in ["phage termini", "phagetermini", "phage_termini"]:
             features.extend(["Coverage reduced", "Reads termini", "Tau"])
-            include_repeats = True
+            include_repeat_count = True
+            include_repeat_identity = True
         # Module: Assembly check / assemblycheck
         elif item_lower in ["assembly check", "assemblycheck", "assembly_check"]:
             features.extend(["Clippings", "Indels", "Mismatches", "Read lengths", "Insert sizes", "Bad orientations"])
-        # Handle "Repeats" specifically (also accept legacy "duplications")
+        # Handle individual repeat subplot buttons
+        elif item_lower in ["repeat count"]:
+            include_repeat_count = True
+        elif item_lower in ["max repeat identity"]:
+            include_repeat_identity = True
+        # Handle legacy "Repeats" (also accept "duplications")
         elif item_lower in ["repeats", "repeat", "duplications", "duplication"]:
-            include_repeats = True
+            include_repeat_count = True
+            include_repeat_identity = True
         # Handle "GC content" specifically - add as regular feature
         elif item_lower in ["gc_content", "gc content", "gccontent", "gc"]:
             features.append("GC content")
@@ -1321,4 +1511,4 @@ def parse_requested_features(list_features):
     # Deduplicate while preserving order
     seen = set()
     deduped_features = [f for f in features if not (f in seen or seen.add(f))]
-    return deduped_features, include_repeats
+    return deduped_features, include_repeat_count, include_repeat_identity

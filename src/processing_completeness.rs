@@ -213,6 +213,21 @@ pub fn compute_all_metrics(
         }
     }
 
+    // === Microdiverse_bp_on_reference paired clips: Σ(distance) for pairs where both have prevalence ≥10% ===
+    for i in 0..all_clips.len().saturating_sub(1) {
+        let (pos_right, type_right, prev_right) = all_clips[i];
+        let (pos_left, type_left, prev_left) = all_clips[i + 1];
+
+        if type_right == ClipType::Right && type_left == ClipType::Left
+            && prev_right >= 0.1 && prev_left >= 0.1
+        {
+            let distance = pos_left - pos_right;
+            if distance > 0 {
+                micro_ref_bp += distance as i64;
+            }
+        }
+    }
+
     // === Side misassembly ===
     // Find left-side clipping events where median clipped length > distance to start AND prevalence ≥ 50%
     let left_result = left_clip_runs
@@ -273,10 +288,12 @@ pub fn compute_all_metrics(
 
     let side = SideMisassemblyData {
         contig_name: contig_name.to_string(),
-        contig_start_collapse_percentage: left_result.map(|(p, _, _)| (p * 100.0).round() as i32),
+        coverage_first_position: primary_reads.first().copied().unwrap_or(0),
+        contig_start_collapse_percentage: left_result.map(|(p, _, _)| (p * 1000.0).round() as i32),
         contig_start_collapse_bp: left_result.map(|(_, _, m)| m),
         contig_start_expansion_bp: left_result.map(|(_, d, _)| d),
-        contig_end_collapse_percentage: right_result.map(|(p, _, _)| (p * 100.0).round() as i32),
+        coverage_last_position: primary_reads.last().copied().unwrap_or(0),
+        contig_end_collapse_percentage: right_result.map(|(p, _, _)| (p * 1000.0).round() as i32),
         contig_end_collapse_bp: right_result.map(|(_, _, m)| m),
         contig_end_expansion_bp: right_result.map(|(_, d, _)| d),
         contig_end_misjoint_mates: contig_end_misjoint,
@@ -318,21 +335,8 @@ pub fn compute_all_metrics(
         None
     };
 
-    // Category logic:
-    // 1. INCOMPLETE if any side has ≥50% clipping
-    // 2. CIRCULAR if Circularising_reads_percentage > 50
-    // 3. LINEAR otherwise
-    let category = if side.contig_start_collapse_percentage.is_some() || side.contig_end_collapse_percentage.is_some() {
-        "INCOMPLETE"
-    } else if circularising_reads_percentage.unwrap_or(0) > 50 {
-        "CIRCULAR"
-    } else {
-        "LINEAR"
-    };
-
     let topology = TopologyData {
         contig_name: contig_name.to_string(),
-        category: category.to_string(),
         circularising_reads,
         circularising_reads_percentage,
         circularising_inserts,

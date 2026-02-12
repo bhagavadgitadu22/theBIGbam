@@ -92,7 +92,7 @@ def build_controls(conn):
 
     # Get Duplication_percentage min/max from Contig table
     duplication_percentage_min = 0
-    duplication_percentage_max = 100
+    duplication_percentage_max = 1000
     has_duplication_data = False
     try:
         cur.execute("SELECT MIN(Duplication_percentage), MAX(Duplication_percentage) FROM Contig WHERE Duplication_percentage IS NOT NULL")
@@ -652,10 +652,10 @@ def create_layout(db_path):
                 main_placeholder.objects = [pn.pane.HTML("<pre>Error: Invalid position range - positions must be integers.</pre>")]
                 return
             
-            # Validate position range (1-indexed, positions must be within contig bounds)
-            if xstart < 0 or xend > contig_length or xstart >= xend:
+            # Validate position range
+            if xstart >= xend:
                 peruse_button.visible = False
-                main_placeholder.objects = [pn.pane.HTML(f"<pre>Error: Invalid position range - positions must satisfy 0 ≤ start &lt; end ≤ {contig_length}.</pre>")]
+                main_placeholder.objects = [pn.pane.HTML(f"<pre>Error: Invalid position range - start must be less than end.</pre>")]
                 return
 
             # Check whether to plot sequence (checkbox checked)
@@ -666,6 +666,10 @@ def create_layout(db_path):
 
             # Check whether to use same y scale for all subplots
             same_y_scale = (0 in same_y_scale_cbg.active)
+
+            # Read subplot height from spinner
+            subplot_size = int(subplot_height_input.value)
+            genemap_size = int(genemap_height_input.value)
 
             # Check whether to preserve x-range from previous plot
             preserve_xrange = (
@@ -711,7 +715,7 @@ def create_layout(db_path):
                     filtered_samples = [s for s in filtered_samples if s in allowed_samples]
 
                 print(f"[start_bokeh_server] Generating plot for all samples with variable={selected_var}, contig={contig}, genome_features={genome_features}, filtered_samples={len(filtered_samples)}")
-                grid = generate_bokeh_plot_all_samples(conn, selected_var, contig, xstart=xstart, xend=xend, genbank_path=genbank_path, genome_features=genome_features if genome_features else None, allowed_samples=set(filtered_samples), feature_types=selected_feature_types, use_phage_colors=use_phage_colors, plot_sequence=plot_sequence, same_y_scale=same_y_scale)
+                grid = generate_bokeh_plot_all_samples(conn, selected_var, contig, xstart=xstart, xend=xend, genbank_path=genbank_path, genome_features=genome_features if genome_features else None, allowed_samples=set(filtered_samples), feature_types=selected_feature_types, use_phage_colors=use_phage_colors, plot_sequence=plot_sequence, same_y_scale=same_y_scale, subplot_size=subplot_size, genemap_size=genemap_size)
             else:
                 # One-sample view: collect possibly-many requested features and call per-sample plot
                 requested_features = []
@@ -727,7 +731,7 @@ def create_layout(db_path):
                         requested_features.append(cbg.labels[idx])
 
                 print(f"[start_bokeh_server] Generating plot for sample={sample}, contig={contig}, features={requested_features}")
-                grid = generate_bokeh_plot_per_sample(conn, requested_features, contig, sample, xstart=xstart, xend=xend, genbank_path=genbank_path, feature_types=selected_feature_types, use_phage_colors=use_phage_colors, plot_isoforms=plot_isoforms, plot_sequence=plot_sequence, same_y_scale=same_y_scale)
+                grid = generate_bokeh_plot_per_sample(conn, requested_features, contig, sample, xstart=xstart, xend=xend, genbank_path=genbank_path, feature_types=selected_feature_types, use_phage_colors=use_phage_colors, plot_isoforms=plot_isoforms, plot_sequence=plot_sequence, same_y_scale=same_y_scale, subplot_size=subplot_size, genemap_size=genemap_size)
 
             # Extract and cache plot data for instant downloads (no database round-trip)
             try:
@@ -1813,7 +1817,9 @@ def create_layout(db_path):
     ## Plotting parameters section
     separator_plotting_params = Div(text="", height=2, sizing_mode="stretch_width",
         styles={'background-color': '#333', 'margin-top': '10px', 'margin-bottom': '10px'})
-    plotting_params_title = Div(text="<span style='font-size: 1.2em;'><b>Plotting parameters</b></span>")
+    plotting_params_toggle_btn = Button(label="▼", width=20, height=20, button_type="primary", align="center", margin=0, stylesheets=[toggle_stylesheet])
+    plotting_params_title = Div(text="<b>Plotting parameters</b>", align="center")
+    plotting_params_header = row(plotting_params_toggle_btn, plotting_params_title, sizing_mode="stretch_width", align="center")
 
     same_y_scale_cbg = CheckboxGroup(labels=["Use same scale for all y axis"], active=[])
     same_y_scale_tooltip = Tooltip(content=(
@@ -1823,6 +1829,20 @@ def create_layout(db_path):
     same_y_scale_help = HelpButton(tooltip=same_y_scale_tooltip, width=20, height=20,
         align="center", button_type="light", stylesheets=[toggle_stylesheet])
     same_y_scale_row = row(same_y_scale_cbg, same_y_scale_help, sizing_mode="stretch_width")
+    
+    genemap_height_input = Spinner(value=100, low=10, high=1000, step=10, width=80, margin=(0, 2, 0, 0))
+    genemap_height_label = Div(text="Height of gene map (px)", width=160, margin=(5, 0, 5, 5))
+    genemap_height_row = row(genemap_height_input, genemap_height_label, sizing_mode="stretch_width", margin=(0, 0, 5, 0))
+
+    subplot_height_input = Spinner(value=100, low=10, high=1000, step=10, width=80, margin=(0, 2, 0, 0))
+    subplot_height_label = Div(text="Height per subplot (px)", width=160, margin=(5, 0, 5, 5))
+    subplot_height_row = row(subplot_height_input, subplot_height_label, sizing_mode="stretch_width")
+
+    plotting_params_content = pn.Column(
+        same_y_scale_row, genemap_height_row, subplot_height_row, 
+        sizing_mode="stretch_width"
+    )
+    plotting_params_toggle_btn.on_click(make_toggle_callback(plotting_params_toggle_btn, plotting_params_content))
 
     ## Create final Apply and Peruse data buttons
     apply_button = Button(label="APPLY", align="center", stylesheets=[stylesheet], css_classes=["apply-btn"])
@@ -1895,7 +1915,7 @@ def create_layout(db_path):
                              separator_variables,
                              variables_section_one,  # One Sample view (with module checkboxes)
                              variables_section_all,  # All Samples view (title headers only)
-                             separator_plotting_params, plotting_params_title, same_y_scale_row,
+                             separator_plotting_params, plotting_params_header, plotting_params_content,
                              buttons_row]
         placeholder_text = "<i>No plot yet. Select one sample, one contig and at least one variable in \"One sample\" mode or one contig and one variable in \"All samples\" mode and click Apply.</i>"
     else:

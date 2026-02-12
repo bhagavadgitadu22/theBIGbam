@@ -22,12 +22,12 @@ def generate_and_open_peruse_html(conn, contig_name, sample_names):
         cur.execute("SELECT Contig_length, Duplication_percentage, GC_mean, GC_sd, GC_skew_amplitude, Positive_GC_skew_windows_percentage FROM Contig WHERE Contig_name = ?", (contig_name,))
         result = cur.fetchone()
         contig_length = result[0] if result else "unknown"
-        contig_duplication = result[1] if result else "unknown"
+        contig_duplication = round(result[1] / 10.0, 1) if result and result[1] is not None else "unknown"
         gc_mean = result[2] if result and result[2] is not None else "N/A"
         # GC_sd and GC_skew_amplitude are stored as int × 100, decode them
-        gc_sd = result[3] / 100.0 if result and result[3] is not None else "N/A"
+        gc_sd = round(result[3] / 100.0, 2) if result and result[3] is not None else "N/A"
         gc_skew_amplitude = result[4] / 100.0 if result and result[4] is not None else "N/A"
-        gc_skew_percent_positive = result[5] if result and result[5] is not None else "N/A"
+        gc_skew_percent_positive = round(result[5] / 10.0, 1) if result and result[5] is not None else "N/A"
 
         # Build data
         content = build_summary_data(conn, contig_name, sample_names)
@@ -188,10 +188,10 @@ def build_summary_data(conn, contig_name, sample_names):
         "Coverage_mean": "Coverage mean",
         "Coverage_median": "Coverage median",
         "Coverage_trimmed_mean": "Coverage trimmed mean",
-        "Coverage_sd": "Coverage sd",
-        "Coverage_variation": "Coverage variation",
         "RPKM": "RPKM",
         "TPM": "TPM",
+        "Coverage_sd": "Coverage sd",
+        "Coverage_variation": "Coverage variation",
     }
 
     misassembly_cols = {
@@ -206,21 +206,23 @@ def build_summary_data(conn, contig_name, sample_names):
     }
 
     microdiversity_cols = {
-        "Mismatches_per_100kbp": "Mismatches (per 100kbp)",
-        "Deletions_per_100kbp": "Deletions (per 100kbp)",
-        "Insertions_per_100kbp": "Insertions (per 100kbp)",
-        "Clippings_per_100kbp": "Clippings (per 100kbp)",
-        "Microdiverse_bp_on_reference": "Microdiverse bp (reference)",
-        "Microdiverse_bp_per_100kbp_on_reference": "Microdiverse bp/100kbp (reference)",
+        "Micro_Mismatches_per_100kbp": "Mismatches (per 100kbp)",
+        "Micro_Deletions_per_100kbp": "Deletions (per 100kbp)",
+        "Micro_Insertions_per_100kbp": "Insertions (per 100kbp)",
+        "Micro_Clippings_per_100kbp": "Clippings (per 100kbp)",
         "Microdiverse_bp_on_reads": "Microdiverse bp (reads)",
         "Microdiverse_bp_per_100kbp_on_reads": "Microdiverse bp/100kbp (reads)",
+        "Microdiverse_bp_on_reference": "Microdiverse bp (reference)",
+        "Microdiverse_bp_per_100kbp_on_reference": "Microdiverse bp/100kbp (reference)",
     }
 
     side_misassembly_cols = {
-        "Contig_start_collapse_percentage": "Start collapse (%)",
+        "Coverage_first_position": "Coverage first position",
+        "Contig_start_collapse_prevalence": "Start collapse prevalence",
         "Contig_start_collapse_bp": "Start collapse (bp)",
         "Contig_start_expansion_bp": "Start expansion (bp)",
-        "Contig_end_collapse_percentage": "End collapse (%)",
+        "Coverage_last_position": "Coverage last position",
+        "Contig_end_collapse_prevalence": "End collapse prevalence",
         "Contig_end_collapse_bp": "End collapse (bp)",
         "Contig_end_expansion_bp": "End expansion (bp)",
         "Contig_end_misjoint_mates": "End misjoint mates",
@@ -232,9 +234,8 @@ def build_summary_data(conn, contig_name, sample_names):
     }
 
     topology_cols = {
-        "Category": "Category",
         "Circularising_reads": "Circularising reads",
-        "Circularising_reads_percentage": "Circularising reads (%)",
+        "Circularising_reads_prevalence": "Circularising reads prevalence",
         "Circularising_inserts": "Circularising inserts",
         "Circularising_insert_size_deviation": "Circularising insert size deviation",
         "Normalized_circularising_inserts": "Normalized circularising inserts",
@@ -251,15 +252,40 @@ def build_summary_data(conn, contig_name, sample_names):
     if not sample_names:
         return  # nothing to query
 
+    # Check if any sample is paired-read
+    placeholders = ','.join(['?'] * len(sample_names))
+    cur.execute(
+        f"SELECT COUNT(*) FROM Sample WHERE Sample_name IN ({placeholders}) AND Sequencing_type = 'paired-short'",
+        list(sample_names)
+    )
+    has_paired = cur.fetchone()[0] > 0
+
+    if not has_paired:
+        for key in ("Contig_end_misjoint_mates", "Normalized_contig_end_misjoint_mates"):
+            side_misassembly_cols.pop(key, None)
+        for key in ("Circularising_inserts", "Circularising_insert_size_deviation", "Normalized_circularising_inserts"):
+            topology_cols.pop(key, None)
+
     # Initialize all columns with None
     all_cols = coverage_cols | misassembly_cols | microdiversity_cols | side_misassembly_cols | phage_cols | topology_cols
     for col in all_cols.keys():
         data[col] = [None] * n
 
+    # SQL column name mapping for microdiversity (data-dict keys differ from SQL columns)
+    microdiversity_sql_map = {
+        "Micro_Mismatches_per_100kbp": "Mismatches_per_100kbp",
+        "Micro_Deletions_per_100kbp": "Deletions_per_100kbp",
+        "Micro_Insertions_per_100kbp": "Insertions_per_100kbp",
+        "Micro_Clippings_per_100kbp": "Clippings_per_100kbp",
+    }
+
     # Helper to query a view and fill data
-    def query_view(view_name, col_dict):
+    def query_view(view_name, col_dict, sql_col_map=None):
         try:
-            cols_str = ", ".join(col_dict.keys())
+            if sql_col_map:
+                cols_str = ", ".join(sql_col_map.get(k, k) for k in col_dict.keys())
+            else:
+                cols_str = ", ".join(col_dict.keys())
             query = f"""
                 SELECT Sample_name, {cols_str}
                 FROM {view_name}
@@ -278,7 +304,7 @@ def build_summary_data(conn, contig_name, sample_names):
 
     query_view("Explicit_coverage", coverage_cols)
     query_view("Explicit_misassembly", misassembly_cols)
-    query_view("Explicit_microdiversity", microdiversity_cols)
+    query_view("Explicit_microdiversity", microdiversity_cols, sql_col_map=microdiversity_sql_map)
     query_view("Explicit_side_misassembly", side_misassembly_cols)
     query_view("Explicit_phage_mechanisms", phage_cols)
     query_view("Explicit_topology", topology_cols)
@@ -323,17 +349,17 @@ def build_summary_data(conn, contig_name, sample_names):
             "Expansion: distance from clipping site to contig end.</i>"
         )
 
-    # Phage mechanism subsection
-    phage_table = generate_summary_table_html(data, phage_cols)
-    if phage_table:
-        content.append("<b>Phage mechanism:</b>")
-        content.append(phage_table)
-
     # Topology subsection
     topology_table = generate_summary_table_html(data, topology_cols)
     if topology_table:
         content.append("<b>Topology:</b>")
         content.append(topology_table)
+
+    # Phage mechanism subsection
+    phage_table = generate_summary_table_html(data, phage_cols)
+    if phage_table:
+        content.append("<b>Phage mechanism:</b>")
+        content.append(phage_table)
 
     return content
 
