@@ -1668,15 +1668,15 @@ def create_layout(db_path):
     
     # Plotting parameters useful in both views
     max_genemap_window_input = Spinner(value=100000, low=10, high=1000000, step=1000, width=100, margin=(0, 2, 0, 0))
-    max_genemap_window_label = Div(text="Max window size for gene map (bp)", width=175, margin=(5, 0, 5, 5))
+    max_genemap_window_label = Div(text="Max window size for gene map (bp)", margin=(5, 0, 5, 5))
     max_genemap_window_row = row(max_genemap_window_input, max_genemap_window_label, sizing_mode="stretch_width", margin=(5, 0, 5, 0))
 
     max_sequence_window_input = Spinner(value=1000, low=10, high=1000000, step=100, width=100, margin=(0, 2, 0, 0))
-    max_sequence_window_label = Div(text="Max window size for sequence (bp)", width=175, margin=(5, 0, 5, 5))
+    max_sequence_window_label = Div(text="Max window size for sequence (bp)", margin=(5, 0, 5, 5))
     max_sequence_window_row = row(max_sequence_window_input, max_sequence_window_label, sizing_mode="stretch_width", margin=(0, 0, 5, 0))
 
     max_binning_window_input = Spinner(value=100000, low=10, high=1000000, step=1000, width=100, margin=(0, 2, 0, 0))
-    max_binning_window_label = Div(text="Max window size without binning (bp)", width=175, margin=(5, 0, 5, 5))
+    max_binning_window_label = Div(text="Max window size without binning (bp)", margin=(5, 0, 5, 5))
     max_binning_window_row = row(max_binning_window_input, max_binning_window_label, sizing_mode="stretch_width", margin=(0, 0, 5, 0))
 
     genemap_height_input = Spinner(value=100, low=10, high=1000, step=10, width=80, margin=(0, 2, 0, 0))
