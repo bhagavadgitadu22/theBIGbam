@@ -20,106 +20,6 @@ def build_controls(conn):
     """Query DB and return widgets and helper mappings."""
     cur = conn.cursor()
 
-    # Check if PhageMechanisms table exists and has data
-    phage_mechanisms_list = []
-    try:
-        cur.execute("SELECT DISTINCT Packaging_mechanism FROM PhageMechanisms WHERE Packaging_mechanism IS NOT NULL")
-        phage_mechanisms_list = [r[0] for r in cur.fetchall()]
-    except Exception:
-        pass  # Table doesn't exist or has no data
-
-    # Check if Misassembly table exists and has data
-    has_misassembly = False
-    try:
-        cur = conn.cursor()
-        cur.execute("SELECT 1 FROM information_schema.tables WHERE table_name = 'Misassembly'")
-        has_misassembly = cur.fetchone() is not None
-    except Exception:
-        pass
-
-    # Get Coverage_mean min/max from Coverage table (stored as INTEGER)
-    coverage_mean_max = 0
-    try:
-        cur.execute("SELECT MIN(Coverage_mean), MAX(Coverage_mean) FROM Coverage WHERE Coverage_mean IS NOT NULL")
-        result = cur.fetchone()
-        if result and result[0] is not None and result[1] is not None:
-            coverage_mean_min = result[0]
-            coverage_mean_max = result[1]
-    except Exception:
-        pass
-
-    # Get Coverage_median min/max from Coverage table (stored as INTEGER)
-    coverage_median_max = 0
-    try:
-        cur.execute("SELECT MIN(Coverage_median), MAX(Coverage_median) FROM Coverage WHERE Coverage_median IS NOT NULL")
-        result = cur.fetchone()
-        if result and result[0] is not None and result[1] is not None:
-            coverage_median_min = result[0]
-            coverage_median_max = result[1]
-    except Exception:
-        pass
-
-    # Get Coverage_variation min/max from Explicit_coverage view (already divided by 1000000)
-    coverage_variation_max = 1.0
-    try:
-        cur.execute("SELECT MIN(Coverage_variation), MAX(Coverage_variation) FROM Explicit_coverage WHERE Coverage_variation IS NOT NULL")
-        result = cur.fetchone()
-        if result and result[0] is not None and result[1] is not None:
-            coverage_variation_min = result[0]
-            coverage_variation_max = result[1]
-    except Exception:
-        pass
-
-    # Get Coverage_sd min/max from Explicit_coverage view (already divided by 1000000)
-    coverage_sd_max = 1.0
-    try:
-        cur.execute("SELECT MIN(Coverage_sd), MAX(Coverage_sd) FROM Explicit_coverage WHERE Coverage_sd IS NOT NULL")
-        result = cur.fetchone()
-        if result and result[0] is not None and result[1] is not None:
-            coverage_sd_min = result[0]
-            coverage_sd_max = result[1]
-    except Exception:
-        pass
-
-    whole_expansion_max = 100.0
-    try:
-        cur.execute("SELECT MAX(Expansion_per_100kbp) FROM Explicit_misassembly WHERE Expansion_per_100kbp IS NOT NULL")
-        result = cur.fetchone()
-        if result and result[0] is not None:
-            whole_expansion_max = result[0]
-    except Exception:
-        pass
-
-    # Get Duplication_percentage min/max from Contig table
-    duplication_percentage_min = 0
-    duplication_percentage_max = 1000
-    has_duplication_data = False
-    try:
-        cur.execute("SELECT MIN(Duplication_percentage), MAX(Duplication_percentage) FROM Contig WHERE Duplication_percentage IS NOT NULL")
-        result = cur.fetchone()
-        if result and result[0] is not None and result[1] is not None:
-            duplication_percentage_min = result[0]
-            duplication_percentage_max = result[1]
-            has_duplication_data = True
-    except Exception:
-        pass
-
-    # Get annotation columns and their distinct values from Contig_annotation table
-    annotation_filters = {}
-    try:
-        # Get column names from Contig_annotation table
-        cur.execute("PRAGMA table_info(Contig_annotation)")
-        columns = [row[1] for row in cur.fetchall() if row[1] not in ANNOTATION_EXCLUDED_COLUMNS]
-        
-        # Get distinct non-null values for each column
-        for column in columns:
-            cur.execute(f'SELECT DISTINCT "{column}" FROM Contig_annotation WHERE "{column}" IS NOT NULL ORDER BY "{column}"')
-            values = [str(r[0]) for r in cur.fetchall()]
-            if values:  # Only add if there are values
-                annotation_filters[column] = values
-    except Exception:
-        pass  # Table doesn't exist or has no data
-
     # Get annotation feature types from Annotated_types table
     annotation_types = []
     try:
@@ -129,11 +29,10 @@ def build_controls(conn):
         pass
 
     # Widget Selector for Contigs (autocomplete with max 20 suggestions)
-    cur.execute("SELECT Contig_name, Contig_length, Duplication_percentage FROM Contig ORDER BY Contig_name")
+    cur.execute("SELECT Contig_name, Contig_length FROM Contig ORDER BY Contig_name")
     rows = cur.fetchall()
     contigs = [r[0] for r in rows]
     contig_lengths = {r[0]: r[1] for r in rows}  # Dictionary mapping contig_name -> length
-    contig_duplications = {r[0]: r[2] for r in rows}  # Dictionary mapping contig_name -> duplication percentage (can be None)
     
     # If only one contig in database, pre-fill the field
     contig_select = SearchableSelect(
@@ -171,10 +70,8 @@ def build_controls(conn):
         contig_to_samples.setdefault(contig_name, set()).add(sample_name)
 
     # Get variables that have data (their feature table exists)
-    cur.execute("SELECT DISTINCT Variable_name, Feature_table_name FROM Variable")
-    rows = cur.fetchall()
-    variables = [r[0] for r in rows]
-    tables_with_data = [r[1] for r in rows]
+    cur.execute("SELECT DISTINCT Feature_table_name FROM Variable")
+    tables_with_data = [r[0] for r in cur.fetchall()]
 
     # Get modules that have at least one variable with data
     # Define the display order for modules
@@ -199,7 +96,6 @@ def build_controls(conn):
     variables_widgets_one = []  # Variable button groups for One Sample view
     variables_widgets_all = []  # Variable button groups for All Samples view
     helps_widgets = []
-    variables_labels = []  # Store labels for each module
     for module in modules:
         # Get distinct subplots (deduplicate by subplot name only)
         cur.execute(
@@ -222,7 +118,6 @@ def build_controls(conn):
             continue
 
         module_names.append(module)
-        variables_labels.append(variables_checkbox)
 
         # Module checkbox (for One Sample view only)
         module_checkbox = CheckboxGroup(labels=[module], active=[])
@@ -266,27 +161,11 @@ def build_controls(conn):
         'helps_widgets': helps_widgets,
         'variables_widgets_one': variables_widgets_one,
         'variables_widgets_all': variables_widgets_all,
-        'variables_labels': variables_labels,
         'contigs': contigs,
         'contig_lengths': contig_lengths,
-        'contig_duplications': contig_duplications,
         'samples': samples,
-        'variables': variables,
         'custom_contig_subplots': custom_contig_subplots,
-        'phage_mechanisms': phage_mechanisms_list,
-        'has_misassembly': has_misassembly,
-        'coverage_mean_max': coverage_mean_max,
-        'coverage_median_max': coverage_median_max,
-        'coverage_variation_max': coverage_variation_max,
-        'coverage_sd_max': coverage_sd_max,
-        'whole_expansion_max': whole_expansion_max,
-        'duplication_percentage_min': duplication_percentage_min,
-        'duplication_percentage_max': duplication_percentage_max,
-        'has_duplication_data': has_duplication_data,
-        'annotation_filters': annotation_filters,
         'annotation_types': annotation_types,
-        'full_contigs': contigs,  # Store full list for substring matching
-        'full_samples': samples,  # Store full list for substring matching
         'has_samples': has_samples  # True if database has any samples
     }
     return widgets
@@ -632,10 +511,6 @@ def create_layout(db_path):
 
     ## Apply button function
     def apply_clicked():
-        import cProfile
-        import pstats
-        import io as _io
-        import os as _os
         try:
             contig = widgets['contig_select'].value
             has_samples = widgets['has_samples']
@@ -644,15 +519,15 @@ def create_layout(db_path):
             is_all = (views.active == 1) if has_samples else False
             sample = widgets['sample_select'].value if has_samples else None
 
-            # Select the correct widget set based on current view
-            active_variables_widgets = widgets['variables_widgets_all'] if is_all else widgets['variables_widgets_one']
-
             # Genome module is shared between views (in Contigs section)
             # Gene map is shown if at least one feature type is selected in the multichoice
             selected_feature_types = feature_type_multichoice.value if feature_type_multichoice is not None else None
             genbank_path = db_path if (selected_feature_types and len(selected_feature_types) > 0) else None
             use_phage_colors = (0 in phage_colors_cbg.active) if (phage_colors_cbg is not None and genbank_path) else False
             plot_isoforms = (0 in plot_isoforms_cbg.active) if (plot_isoforms_cbg is not None and genbank_path) else True
+
+            # Select the correct widget set based on current view
+            active_variables_widgets = widgets['variables_widgets_all'] if is_all else widgets['variables_widgets_one']
 
             # Parse and validate position inputs
             xstart = None
@@ -682,20 +557,21 @@ def create_layout(db_path):
                 main_placeholder.objects = [pn.pane.HTML(f"<pre>Error: Invalid position range - start must be less than end.</pre>")]
                 return
 
-
-            # Only plot sequence if window is <= 1000bp
+            # Only plot sequence if window is <= threshold from spinner
             plot_sequence = False
             if sequence_cbg is not None and 0 in sequence_cbg.active:
-                if (xend - xstart) <= 1000:
+                max_seq_window = int(max_sequence_window_input.value)
+                if (xend - xstart) <= max_seq_window:
                     plot_sequence = True
                 else:
-                    print("Warning: Sequence will not be plotted for regions larger than 1000 bp.", flush=True)
+                    print(f"Warning: Sequence will not be plotted for regions larger than {max_seq_window} bp.", flush=True)
 
-            # Only plot genome map if window is <= 100kb
+            # Only plot genome map if window is <= threshold from spinner
             plot_genemap = True
-            if (xend - xstart) > 100_000:
+            max_genemap_window = int(max_genemap_window_input.value)
+            if (xend - xstart) > max_genemap_window:
                 plot_genemap = False
-                print("Warning: Genome map will not be plotted for regions larger than 100,000 bp.", flush=True)
+                print(f"Warning: Genome map will not be plotted for regions larger than {max_genemap_window} bp.", flush=True)
 
             # Check whether to use same y scale for all subplots
             same_y_scale = (0 in same_y_scale_cbg.active)
@@ -703,6 +579,7 @@ def create_layout(db_path):
             # Read subplot height from spinner
             subplot_size = int(subplot_height_input.value)
             genemap_size = int(genemap_height_input.value)
+            max_binning = int(max_binning_window_input.value)
 
             # Check whether to preserve x-range from previous plot
             preserve_xrange = (
@@ -717,8 +594,6 @@ def create_layout(db_path):
                 prev_xstart = current_plot_state['shared_xrange'].start
                 prev_xend = current_plot_state['shared_xrange'].end
 
-            profile_enabled = bool(_os.environ.get("BIGBAMB_PROFILE", ""))
-            pr = cProfile.Profile() if profile_enabled else None
             grid = None
             if is_all:
                 # All-samples view: require exactly one variable selected from non-Genome modules
@@ -754,8 +629,6 @@ def create_layout(db_path):
                 order_by = "Sample_name" if sample_order_select.value == "Sample name" else sample_order_select.value
 
                 print(f"[start_bokeh_server] Generating plot for all samples with variable={selected_var}, contig={contig}, genome_features={genome_features}, filtered_samples={len(filtered_samples)}")
-                if pr:
-                    pr.enable()
                 # Pass plot_genemap to plotting function if supported, else filter genome_features
                 if not plot_genemap and genome_features:
                     # Remove "Gene map" from genome_features if present
@@ -765,10 +638,8 @@ def create_layout(db_path):
                     genome_features=genome_features if genome_features else None, allowed_samples=set(filtered_samples),
                     feature_types=selected_feature_types, use_phage_colors=use_phage_colors, plot_sequence=plot_sequence,
                     same_y_scale=same_y_scale, subplot_size=subplot_size, genemap_size=genemap_size,
-                    order_by_column=order_by
+                    order_by_column=order_by, downsample_threshold=max_binning
                 )
-                if pr:
-                    pr.disable()
             else:
                 # One-sample view: collect possibly-many requested features and call per-sample plot
                 requested_features = []
@@ -784,27 +655,17 @@ def create_layout(db_path):
                         requested_features.append(cbg.labels[idx])
 
                 print(f"[start_bokeh_server] Generating plot for sample={sample}, contig={contig}, features={requested_features}")
-                if pr:
-                    pr.enable()
                 # Remove "Gene map" from requested_features if window too large
                 if not plot_genemap and requested_features:
                     requested_features = [f for f in requested_features if f != "Gene map"]
                 grid = generate_bokeh_plot_per_sample(
                     conn, requested_features, contig, sample, xstart=xstart, xend=xend, genbank_path=genbank_path,
                     feature_types=selected_feature_types, use_phage_colors=use_phage_colors, plot_isoforms=plot_isoforms,
-                    plot_sequence=plot_sequence, same_y_scale=False, subplot_size=subplot_size, genemap_size=genemap_size
+                    plot_sequence=plot_sequence, same_y_scale=False, subplot_size=subplot_size, genemap_size=genemap_size,
+                    downsample_threshold=max_binning,
+                    max_genemap_window=int(max_genemap_window_input.value),
+                    max_sequence_window=int(max_sequence_window_input.value)
                 )
-                if pr:
-                    pr.disable()
-            # Save profiling stats if enabled
-            if pr:
-                stats_stream = _io.StringIO()
-                ps = pstats.Stats(pr, stream=stats_stream).sort_stats('cumulative')
-                ps.print_stats(40)  # Top 40 lines
-                stats_file = f"profile_stats_{_os.getpid()}.txt"
-                with open(stats_file, "w") as f:
-                    f.write(stats_stream.getvalue())
-                print(f"[start_bokeh_server] Profiling complete. Stats written to {stats_file}", flush=True)
 
             # Restore preserved x-range and update state
             new_xrange = _get_shared_xrange(grid)
@@ -1437,9 +1298,7 @@ def create_layout(db_path):
 
 
     ## Build Sample section
-    #sample_toggle_btn = Button(label="▼", width=20, height=20, button_type="primary", align="center", margin=0, stylesheets=[toggle_stylesheet])
     sample_title = Div(text="<b>Samples</b>")
-    #sample_header = row(sample_toggle_btn, sample_title, sizing_mode="stretch_width", align="center", margin=(0, 0, 5, 0))
 
     above_sample_children = []
     above_sample_content = column(
@@ -1447,8 +1306,9 @@ def create_layout(db_path):
         visible=True, sizing_mode="stretch_width"
     )
 
-    #sample_toggle_btn.on_click(make_toggle_callback(sample_toggle_btn, above_sample_content))
     def _on_sample_change(event):
+        if global_toggle_lock['locked']:
+            return
         global_toggle_lock['locked'] = True
         refresh_contig_options_unlocked()
         global_toggle_lock['locked'] = False
@@ -1475,6 +1335,8 @@ def create_layout(db_path):
     contig_toggle_btn.on_click(make_toggle_callback(contig_toggle_btn, above_contig_content))
 
     def on_contig_change(event):
+        if global_toggle_lock['locked']:
+            return
         new = event.new
         global_toggle_lock['locked'] = True
         refresh_sample_options_unlocked()
@@ -1794,10 +1656,29 @@ def create_layout(db_path):
     plotting_params_title = Div(text="<b>Plotting parameters</b>", align="center")
     plotting_params_header = row(plotting_params_toggle_btn, plotting_params_title, sizing_mode="stretch_width", align="center")
 
-    same_y_scale_cbg = CheckboxGroup(labels=["Use same y scale for all samples"], active=[])
+    # Sample paramaters (only useful in All Samples view)
+    sample_order_label = Div(text="Order samples by:", margin=(5, 5, 5, 0))
+    sample_order_select = Select(value="Sample name", options=sample_order_columns, sizing_mode="stretch_width", margin=(0, 5, 0, 5))
+    sample_order_row = row(sample_order_label, sample_order_select, sizing_mode="stretch_width", margin=(5, 0, 5, 0))
+    sample_order_row.visible = False  # Only shown in All Samples mode
+
+    same_y_scale_cbg = CheckboxGroup(labels=["Use same y scale for all samples"], active=[], margin=(5, 0, 5, 0))
     same_y_scale_row = row(same_y_scale_cbg, sizing_mode="stretch_width")
     same_y_scale_row.visible = False  # Only shown in All Samples mode
     
+    # Plotting parameters useful in both views
+    max_genemap_window_input = Spinner(value=100000, low=10, high=1000000, step=1000, width=100, margin=(0, 2, 0, 0))
+    max_genemap_window_label = Div(text="Max window size for gene map (bp)", width=175, margin=(5, 0, 5, 5))
+    max_genemap_window_row = row(max_genemap_window_input, max_genemap_window_label, sizing_mode="stretch_width", margin=(5, 0, 5, 0))
+
+    max_sequence_window_input = Spinner(value=1000, low=10, high=1000000, step=100, width=100, margin=(0, 2, 0, 0))
+    max_sequence_window_label = Div(text="Max window size for sequence (bp)", width=175, margin=(5, 0, 5, 5))
+    max_sequence_window_row = row(max_sequence_window_input, max_sequence_window_label, sizing_mode="stretch_width", margin=(0, 0, 5, 0))
+
+    max_binning_window_input = Spinner(value=100000, low=10, high=1000000, step=1000, width=100, margin=(0, 2, 0, 0))
+    max_binning_window_label = Div(text="Max window size without binning (bp)", width=175, margin=(5, 0, 5, 5))
+    max_binning_window_row = row(max_binning_window_input, max_binning_window_label, sizing_mode="stretch_width", margin=(0, 0, 5, 0))
+
     genemap_height_input = Spinner(value=100, low=10, high=1000, step=10, width=80, margin=(0, 2, 0, 0))
     genemap_height_label = Div(text="Height of gene map (px)", width=160, margin=(5, 0, 5, 5))
     genemap_height_row = row(genemap_height_input, genemap_height_label, sizing_mode="stretch_width", margin=(0, 0, 5, 0))
@@ -1806,21 +1687,16 @@ def create_layout(db_path):
     subplot_height_label = Div(text="Height per subplot (px)", width=160, margin=(5, 0, 5, 5))
     subplot_height_row = row(subplot_height_input, subplot_height_label, sizing_mode="stretch_width")
 
-    # Sample ordering (only useful in All Samples view)
-    sample_order_label = Div(text="Order samples by:", width=120, margin=(5, 0, 5, 5))
-    sample_order_select = Select(value="Sample name", options=sample_order_columns, sizing_mode="stretch_width", margin=(0, 5, 5, 0))
-    sample_order_row = row(sample_order_label, sample_order_select, sizing_mode="stretch_width", margin=(5, 0, 5, 0))
-    sample_order_row.visible = False  # Only shown in All Samples mode
-
     plotting_params_content = pn.Column(
         sample_order_row, same_y_scale_row,
-        genemap_height_row, subplot_height_row, 
+        max_genemap_window_row, max_sequence_window_row, max_binning_window_row,
+        genemap_height_row, subplot_height_row,
         sizing_mode="stretch_width"
     )
     plotting_params_toggle_btn.on_click(make_toggle_callback(plotting_params_toggle_btn, plotting_params_content))
 
     ## Create final Apply and Peruse data buttons
-    apply_button = Button(label="APPLY", align="center", stylesheets=[stylesheet], css_classes=["apply-btn"])
+    apply_button = Button(label="APPLY", align="center", stylesheets=[stylesheet], css_classes=["apply-btn"], margin=(5, 0, 0, 0))
     apply_button.on_click(lambda: apply_clicked())
 
     # Peruse button will be positioned in the plot area, styled to match toolbar

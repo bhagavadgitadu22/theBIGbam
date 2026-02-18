@@ -1,8 +1,8 @@
-import numpy as np
+import os
 from Bio.Seq import Seq
 from Bio.SeqRecord import SeqRecord
 from Bio.SeqFeature import SeqFeature, FeatureLocation
-from bokeh.models import Range1d, ColumnDataSource, HoverTool, WheelZoomTool, NumeralTickFormatter, Label, TapTool
+from bokeh.models import Range1d, ColumnDataSource, HoverTool, WheelZoomTool, NumeralTickFormatter, TapTool
 from bokeh.layouts import gridplot
 from bokeh.plotting import figure
 from dna_features_viewer import BiopythonTranslator
@@ -832,12 +832,25 @@ def get_variable_metadata_batch(cur, subplot_list):
 _DOWNSAMPLE_THRESHOLD = 100_000  # 100 kb
 _NUM_BINS = 1000
 
+# Features stored as relative values (value / coverage * 1000) — need ÷1000 scaling
+RELATIVE_SCALED_FEATURES = {
+    "Feature_left_clippings", "Feature_right_clippings", "Feature_insertions", "Feature_deletions",
+    "Feature_mismatches", "Feature_reads_starts", "Feature_reads_ends", "Feature_non_inward_pairs",
+    "Feature_mate_not_mapped", "Feature_mate_on_another_contig"
+}
+
+# Features stored as INTEGER × 100 — need ÷100 scaling
+_SCALED_FEATURES = ["Feature_mapq", "Contig_GCSkew"]
+
+# Features that have statistics columns (min/mean/max per position)
+_FEATURES_WITH_STATS = ["left_clippings", "right_clippings", "insertions", "reads_starts", "reads_ends"]
+
 
 def _rle_weighted_bin_sql(feature_table, is_contig_table, xstart, xend, sample_id, contig_id, cur, num_bins=_NUM_BINS, value_col="Value"):
-    """Run RLE-weighted SQL binning: maximum Value per bin to preserve spikes.
+    """SQL MAX binning: maximum Value per bin to preserve spikes.
 
-    For each RLE segment that overlaps a bin, the contribution is:
-        Value * (min(Last_position, bin_end) - max(First_position, bin_start) + 1) / bin_width
+    Each RLE row is assigned to the bin covering its midpoint. Within each bin,
+    the maximum Value is selected (not a weighted average).
 
     Args:
         value_col: Column name to bin (default: "Value")
@@ -845,7 +858,6 @@ def _rle_weighted_bin_sql(feature_table, is_contig_table, xstart, xend, sample_i
     Returns list of (position_of_max, max_y) tuples where position_of_max is the actual
     position (midpoint of RLE segment) where the maximum value occurred within the bin.
     """
-    import os
     window_size = xend - xstart + 1
     bin_width = max(1, window_size // num_bins)
 
@@ -977,11 +989,11 @@ def _rle_weighted_bin_primary_reads(xstart, xend, sample_id, contig_id, cur, num
 
 
 ### Function to get features of one variable
-def get_feature_data(cur, feature, contig_id, sample_id, xstart=None, xend=None, variable_metadata=None):
+def get_feature_data(cur, feature, contig_id, sample_id, xstart=None, xend=None, variable_metadata=None, downsample_threshold=None):
     """Get feature data for plotting.
 
-    Uses SQL-side binning (midpoint assignment, 1000 bins) for windows > 10kb
-    to limit the number of points sent to the browser. For small windows or
+    Uses SQL-side binning (midpoint assignment, 1000 bins) for windows larger than the
+    downsampling threshold (default: _DOWNSAMPLE_THRESHOLD = 100kb). For small windows or
     undefined ranges, full-resolution RLE expansion is used.
 
     Args:
@@ -992,14 +1004,8 @@ def get_feature_data(cur, feature, contig_id, sample_id, xstart=None, xend=None,
         xstart: Optional start position for filtering (only fetch data intersecting this range)
         xend: Optional end position for filtering (only fetch data intersecting this range)
         variable_metadata: Optional cached result from get_variable_metadata(); avoids re-querying Variable table
+        downsample_threshold: Override the module-level _DOWNSAMPLE_THRESHOLD for this call
     """
-    # Features stored as relative values (value / coverage * 1000) — need ÷1000 scaling
-    RELATIVE_SCALED_FEATURES = {
-        "Feature_left_clippings", "Feature_right_clippings", "Feature_insertions", "Feature_deletions", 
-        "Feature_mismatches", "Feature_reads_starts", "Feature_reads_ends", "Feature_non_inward_pairs", 
-        "Feature_mate_not_mapped", "Feature_mate_on_another_contig"
-    }
-
     # Get rendering info from Variable table (Type and Size are quoted - reserved words in DuckDB)
     if variable_metadata is not None:
         rows = variable_metadata
@@ -1026,8 +1032,7 @@ def get_feature_data(cur, feature, contig_id, sample_id, xstart=None, xend=None,
         }
 
         # Check if this feature stores scaled values (stored as INTEGER ×100)
-        scaled_features = ["Feature_mapq", "Contig_GCSkew"]
-        is_scaled = feature_table in scaled_features
+        is_scaled = feature_table in _SCALED_FEATURES
 
         # Check if this feature stores relative values (stored as INTEGER ×1000)
         is_relative_scaled = feature_table in RELATIVE_SCALED_FEATURES
@@ -1035,10 +1040,11 @@ def get_feature_data(cur, feature, contig_id, sample_id, xstart=None, xend=None,
         # Detect contig-level table (no Sample_id column)
         is_contig_table = feature_table.startswith("Contig_")
 
-        # --- DOWNSAMPLING PATH: large windows (> 100kb) ---
+        # --- DOWNSAMPLING PATH: large windows (> threshold) ---
+        _threshold = downsample_threshold if downsample_threshold is not None else _DOWNSAMPLE_THRESHOLD
         use_binning = (
             xstart is not None and xend is not None
-            and (xend - xstart) > _DOWNSAMPLE_THRESHOLD
+            and (xend - xstart) > _threshold
         )
 
         if use_binning:
@@ -1071,8 +1077,7 @@ def get_feature_data(cur, feature, contig_id, sample_id, xstart=None, xend=None,
         else:
             # --- FULL RESOLUTION PATH: small windows or undefined range ---
             # Check if this feature has statistics columns
-            features_with_stats = ["left_clippings", "right_clippings", "insertions", "reads_starts", "reads_ends"]
-            has_stats = feature_table in [f"Feature_{f}" for f in features_with_stats]
+            has_stats = feature_table in [f"Feature_{f}" for f in _FEATURES_WITH_STATS]
 
             # Special handling for primary_reads: combine strand tables in Python
             if feature_table == "Feature_primary_reads":
@@ -1370,11 +1375,11 @@ def _rle_weighted_bin_batch_sql(feature_table, xstart, xend, sample_ids, contig_
     return result
 
 
-def get_feature_data_batch(cur, feature, contig_id, sample_ids, xstart=None, xend=None, variable_metadata=None):
+def get_feature_data_batch(cur, feature, contig_id, sample_ids, xstart=None, xend=None, variable_metadata=None, downsample_threshold=None):
     """Get feature data for multiple samples in a single batch query.
 
-    Uses SQL-side binning for windows > 10kb (same as get_feature_data).
-    For small windows, uses full-resolution RLE expansion.
+    Uses SQL-side MAX binning for windows larger than the downsampling threshold
+    (default: _DOWNSAMPLE_THRESHOLD = 100kb). For small windows, uses full-resolution RLE expansion.
 
     Args:
         cur: DuckDB cursor
@@ -1384,17 +1389,11 @@ def get_feature_data_batch(cur, feature, contig_id, sample_ids, xstart=None, xen
         xstart: Optional start position for filtering
         xend: Optional end position for filtering
         variable_metadata: Optional cached result from get_variable_metadata()
+        downsample_threshold: Override the module-level _DOWNSAMPLE_THRESHOLD for this call
 
     Returns:
         Dict mapping sample_id to list_feature_dict (same format as get_feature_data returns)
     """
-    # Features stored as relative values (value / coverage * 1000) — need ÷1000 scaling
-    RELATIVE_SCALED_FEATURES = {
-        "Feature_left_clippings", "Feature_right_clippings", "Feature_insertions", "Feature_deletions", 
-        "Feature_mismatches", "Feature_reads_starts", "Feature_reads_ends", "Feature_non_inward_pairs", 
-        "Feature_mate_not_mapped", "Feature_mate_on_another_contig"
-    }
-
     if variable_metadata is not None:
         rows = variable_metadata
     else:
@@ -1410,9 +1409,10 @@ def get_feature_data_batch(cur, feature, contig_id, sample_ids, xstart=None, xen
     placeholders = ", ".join(["?"] * len(sample_ids))
 
     # Determine if we should use binning
+    _threshold = downsample_threshold if downsample_threshold is not None else _DOWNSAMPLE_THRESHOLD
     use_binning = (
         xstart is not None and xend is not None
-        and (xend - xstart) > _DOWNSAMPLE_THRESHOLD
+        and (xend - xstart) > _threshold
     )
 
     for row in rows:
@@ -1420,10 +1420,8 @@ def get_feature_data_batch(cur, feature, contig_id, sample_ids, xstart=None, xen
 
         is_relative_scaled = feature_table in RELATIVE_SCALED_FEATURES
 
-        features_with_stats = ["left_clippings", "right_clippings", "insertions", "reads_starts", "reads_ends"]
-        has_stats = feature_table in [f"Feature_{f}" for f in features_with_stats]
-        scaled_features = ["Feature_mapq", "Contig_GCSkew"]
-        is_scaled = feature_table in scaled_features
+        has_stats = feature_table in [f"Feature_{f}" for f in _FEATURES_WITH_STATS]
+        is_scaled = feature_table in _SCALED_FEATURES
 
         # Detect contig-level table (no Sample_id column)
         is_contig_table = feature_table.startswith("Contig_")
@@ -1682,7 +1680,7 @@ def parse_requested_features(list_features):
             features.extend(["GC content", "GC skew"])
         # Module: Coverage
         elif item_lower in ["coverage"]:
-            features.extend(["Primary alignments", "Other alignments", "Other alignments"])
+            features.extend(["Primary alignments", "Other alignments"])
         # Module: Phage termini / phagetermini
         elif item_lower in ["phage termini", "phagetermini", "phage_termini"]:
             features.extend(["Coverage reduced", "Reads termini", "Read termini transformation"])
@@ -1717,7 +1715,7 @@ def parse_requested_features(list_features):
 
 
 ### Function to generate the bokeh plot
-def generate_bokeh_plot_per_sample(conn, list_features, contig_name, sample_name, xstart=None, xend=None, subplot_size=100, genbank_path=None, feature_types=None, use_phage_colors=False, plot_isoforms=True, plot_sequence=False, same_y_scale=False, genemap_size=None):
+def generate_bokeh_plot_per_sample(conn, list_features, contig_name, sample_name, xstart=None, xend=None, subplot_size=100, genbank_path=None, feature_types=None, use_phage_colors=False, plot_isoforms=True, plot_sequence=False, same_y_scale=False, genemap_size=None, downsample_threshold=None, max_genemap_window=None, max_sequence_window=None):
     """Generate a Bokeh plot for a single sample."""
     cur = conn.cursor()
 
@@ -1731,16 +1729,17 @@ def generate_bokeh_plot_per_sample(conn, list_features, contig_name, sample_name
         shared_xrange.start = xstart
         shared_xrange.end = xend
 
+    _genemap_threshold = max_genemap_window if max_genemap_window is not None else 100_000
     annotation_fig = None
-    if genbank_path and xstart is not None and xend is not None and (xend - xstart) <= 100_000:
+    if genbank_path and xstart is not None and xend is not None and (xend - xstart) <= _genemap_threshold:
         annotation_fig = make_bokeh_genemap(
             conn, contig_id, locus_name, locus_size,
             genemap_size if genemap_size is not None else subplot_size,
             shared_xrange, xstart, xend,
             feature_types=feature_types, use_phage_colors=use_phage_colors, plot_isoforms=plot_isoforms
         )
-    elif genbank_path and xstart is not None and xend is not None and (xend - xstart) > 100_000:
-        print("Gene map not plotted: window > 100kbp", flush=True)
+    elif genbank_path and xstart is not None and xend is not None and (xend - xstart) > _genemap_threshold:
+        print(f"Gene map not plotted: window > {_genemap_threshold} bp", flush=True)
 
     # Get sample characteristics (optional – contig-level features work without a sample)
     sample_id = None
@@ -1757,17 +1756,15 @@ def generate_bokeh_plot_per_sample(conn, list_features, contig_name, sample_name
     subplots = []
 
     # --- Add sequence subplot right after annotation (top of data tracks) ---
-    if plot_sequence and xstart is not None and xend is not None and (xend - xstart) <= 1_000:
+    _seq_threshold = max_sequence_window if max_sequence_window is not None else 1_000
+    if plot_sequence and xstart is not None and xend is not None and (xend - xstart) <= _seq_threshold:
         seq_subplot = make_bokeh_sequence_subplot(conn, contig_name, xstart, xend, subplot_size // 2, shared_xrange)
         if seq_subplot:
             subplots.append(seq_subplot)
-    elif plot_sequence and xstart is not None and xend is not None and (xend - xstart) > 1_000:
-        print("Sequence not plotted: window > 1kbp", flush=True)
+    elif plot_sequence and xstart is not None and xend is not None and (xend - xstart) > _seq_threshold:
+        print(f"Sequence not plotted: window > {_seq_threshold} bp", flush=True)
 
     requested_features, include_repeat_count, include_repeat_identity = parse_requested_features(list_features)
-
-    # Enable tooltips for all window sizes (binned data now shows actual positions of max values)
-    show_tips = True
 
     # Add Repeats subplots if requested (contig-level, sample-independent)
     if include_repeat_count or include_repeat_identity:
@@ -1775,12 +1772,12 @@ def generate_bokeh_plot_per_sample(conn, list_features, contig_name, sample_name
             count_dicts, identity_dicts = get_repeats_aggregated_data(cur, contig_id, xstart, xend)
             # Track 1: Repeat count (direct + inverted as separate legend entries)
             if include_repeat_count and count_dicts:
-                subplot = make_bokeh_subplot(count_dicts, subplot_size, shared_xrange, show_tooltips=show_tips)
+                subplot = make_bokeh_subplot(count_dicts, subplot_size, shared_xrange, show_tooltips=True)
                 if subplot is not None:
                     subplots.append(subplot)
             # Track 2: Repeat max identity (direct + inverted as separate legend entries)
             if include_repeat_identity and identity_dicts:
-                subplot = make_bokeh_subplot(identity_dicts, subplot_size, shared_xrange, show_tooltips=show_tips)
+                subplot = make_bokeh_subplot(identity_dicts, subplot_size, shared_xrange, show_tooltips=True)
                 if subplot is not None:
                     subplots.append(subplot)
         except Exception as e:
@@ -1798,9 +1795,10 @@ def generate_bokeh_plot_per_sample(conn, list_features, contig_name, sample_name
             try:
                 list_feature_dict = get_feature_data(
                     cur, feature, contig_id, None, xstart, xend,
-                    variable_metadata=metadata_cache.get(feature)
+                    variable_metadata=metadata_cache.get(feature),
+                    downsample_threshold=downsample_threshold
                 )
-                subplot_feature = make_bokeh_subplot(list_feature_dict, subplot_size, shared_xrange, show_tooltips=show_tips)
+                subplot_feature = make_bokeh_subplot(list_feature_dict, subplot_size, shared_xrange, show_tooltips=True)
                 if subplot_feature is not None:
                     subplots.append(subplot_feature)
             except Exception as e:
@@ -1824,9 +1822,10 @@ def generate_bokeh_plot_per_sample(conn, list_features, contig_name, sample_name
             try:
                 list_feature_dict = get_feature_data(
                     cur, feature, contig_id, sample_id, xstart, xend,
-                    variable_metadata=metadata_cache.get(feature)
+                    variable_metadata=metadata_cache.get(feature),
+                    downsample_threshold=downsample_threshold
                 )
-                subplot_feature = make_bokeh_subplot(list_feature_dict, subplot_size, shared_xrange, show_tooltips=show_tips)
+                subplot_feature = make_bokeh_subplot(list_feature_dict, subplot_size, shared_xrange, show_tooltips=True)
                 if subplot_feature is not None:
                     if same_y_scale:
                         max_y = max((y for d in list_feature_dict for y in d["y"]), default=0)
