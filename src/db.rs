@@ -434,14 +434,39 @@ impl DbWriter {
             let mut appender = conn.appender(&table_name)
                 .with_context(|| format!("Failed to create appender for {}", table_name))?;
 
-            if has_stats {
+            let has_sequences = FEATURES_WITH_SEQUENCES.contains(&table_name.as_str());
+            let is_single_pos = SINGLE_POSITION_FEATURES.contains(&table_name.as_str());
+
+            if has_stats && has_sequences {
                 for f in feature_points {
                     if let Some(&contig_id) = self.contig_name_to_id.get(&f.contig_name) {
                         let value = if is_scaled { (f.value * 100.0).round() as i32 } else { f.value.round() as i32 };
                         let mean = f.mean.map(|v| if is_scaled { (v * 100.0).round() as i32 } else { v.round() as i32 });
                         let median = f.median.map(|v| if is_scaled { (v * 100.0).round() as i32 } else { v.round() as i32 });
                         let std = f.std.map(|v| if is_scaled { (v * 100.0).round() as i32 } else { v.round() as i32 });
-                        appender.append_row(params![contig_id, sample_id, f.start_pos, f.end_pos, value, mean, median, std])?;
+                        let last_pos: Option<i32> = if is_single_pos { None } else { Some(f.end_pos) };
+                        appender.append_row(params![contig_id, sample_id, f.start_pos, last_pos, value, mean, median, std, &f.sequence, f.sequence_prevalence])?;
+                        *contig_row_counts.entry(contig_id).or_insert(0) += 1;
+                    }
+                }
+            } else if has_stats {
+                for f in feature_points {
+                    if let Some(&contig_id) = self.contig_name_to_id.get(&f.contig_name) {
+                        let value = if is_scaled { (f.value * 100.0).round() as i32 } else { f.value.round() as i32 };
+                        let mean = f.mean.map(|v| if is_scaled { (v * 100.0).round() as i32 } else { v.round() as i32 });
+                        let median = f.median.map(|v| if is_scaled { (v * 100.0).round() as i32 } else { v.round() as i32 });
+                        let std = f.std.map(|v| if is_scaled { (v * 100.0).round() as i32 } else { v.round() as i32 });
+                        let last_pos: Option<i32> = if is_single_pos { None } else { Some(f.end_pos) };
+                        appender.append_row(params![contig_id, sample_id, f.start_pos, last_pos, value, mean, median, std])?;
+                        *contig_row_counts.entry(contig_id).or_insert(0) += 1;
+                    }
+                }
+            } else if has_sequences {
+                for f in feature_points {
+                    if let Some(&contig_id) = self.contig_name_to_id.get(&f.contig_name) {
+                        let value = if is_scaled { (f.value * 100.0).round() as i32 } else { f.value.round() as i32 };
+                        let last_pos: Option<i32> = if is_single_pos { None } else { Some(f.end_pos) };
+                        appender.append_row(params![contig_id, sample_id, f.start_pos, last_pos, value, &f.sequence, f.sequence_prevalence])?;
                         *contig_row_counts.entry(contig_id).or_insert(0) += 1;
                     }
                 }
@@ -449,7 +474,8 @@ impl DbWriter {
                 for f in feature_points {
                     if let Some(&contig_id) = self.contig_name_to_id.get(&f.contig_name) {
                         let value = if is_scaled { (f.value * 100.0).round() as i32 } else { f.value.round() as i32 };
-                        appender.append_row(params![contig_id, sample_id, f.start_pos, f.end_pos, value])?;
+                        let last_pos: Option<i32> = if is_single_pos { None } else { Some(f.end_pos) };
+                        appender.append_row(params![contig_id, sample_id, f.start_pos, last_pos, value])?;
                         *contig_row_counts.entry(contig_id).or_insert(0) += 1;
                     }
                 }
@@ -1320,6 +1346,28 @@ fn create_variable_tables(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Feature tables that have Sequence and Sequence_prevalence columns.
+const FEATURES_WITH_SEQUENCES: &[&str] = &[
+    "Feature_mismatches",
+    "Feature_insertions",
+    "Feature_left_clippings",
+    "Feature_right_clippings",
+    "Feature_reads_starts",
+    "Feature_reads_ends",
+];
+
+/// Feature tables where Last_position is always equal to First_position (single-position bar spikes).
+/// For these tables, Last_position is stored as NULL to save storage space.
+/// At read time, COALESCE(Last_position, First_position) recovers the value.
+const SINGLE_POSITION_FEATURES: &[&str] = &[
+    "Feature_insertions",
+    "Feature_mismatches",
+    "Feature_left_clippings",
+    "Feature_right_clippings",
+    "Feature_reads_starts",
+    "Feature_reads_ends",
+];
+
 /// Create a feature table if it doesn't exist yet.
 fn create_feature_table_if_needed(
     conn: &Connection,
@@ -1331,7 +1379,25 @@ fn create_feature_table_if_needed(
         return Ok(());
     }
 
-    let table_sql = if has_stats {
+    let has_sequences = FEATURES_WITH_SEQUENCES.contains(&table_name);
+
+    let table_sql = if has_stats && has_sequences {
+        format!(
+            "CREATE TABLE {} (
+                Contig_id INTEGER,
+                Sample_id INTEGER,
+                First_position INTEGER,
+                Last_position INTEGER,
+                Value INTEGER,
+                Mean INTEGER,
+                Median INTEGER,
+                Std INTEGER,
+                Sequence TEXT,
+                Sequence_prevalence INTEGER
+            )",
+            table_name
+        )
+    } else if has_stats {
         format!(
             "CREATE TABLE {} (
                 Contig_id INTEGER,
@@ -1342,6 +1408,19 @@ fn create_feature_table_if_needed(
                 Mean INTEGER,
                 Median INTEGER,
                 Std INTEGER
+            )",
+            table_name
+        )
+    } else if has_sequences {
+        format!(
+            "CREATE TABLE {} (
+                Contig_id INTEGER,
+                Sample_id INTEGER,
+                First_position INTEGER,
+                Last_position INTEGER,
+                Value INTEGER,
+                Sequence TEXT,
+                Sequence_prevalence INTEGER
             )",
             table_name
         )

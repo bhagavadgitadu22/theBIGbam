@@ -301,6 +301,8 @@ pub fn add_compressed_feature_with_reference(
         mean: None,
         median: None,
         std: None,
+        sequence: None,
+        sequence_prevalence: None,
     }));
 
     runs
@@ -344,6 +346,8 @@ pub fn add_compressed_feature_with_median(
             mean: None,
             median: median_val,
             std: None,
+            sequence: None,
+            sequence_prevalence: None,
         }
     }));
 
@@ -394,6 +398,8 @@ pub fn add_compressed_feature_with_stats(
             mean: mean_val,
             median: median_val,
             std: std_val,
+            sequence: None,
+            sequence_prevalence: None,
         }
     }));
 

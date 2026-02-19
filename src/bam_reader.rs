@@ -105,6 +105,8 @@ pub fn process_contig_streaming(
     let mut has_reads = false;
     let mut primary_count: u64 = 0;
     let mut cigar_buf: Vec<(u32, u32)> = Vec::with_capacity(16);
+    let mut seq_buf: Vec<u8> = Vec::with_capacity(256);
+    let need_seq = flags.mapping_metrics;
 
     for result in bam.records() {
         let record = match result {
@@ -136,6 +138,17 @@ pub fn process_contig_streaming(
         } else {
             None
         };
+
+        // Extract SEQ bytes for sequence tracking (reuses buffer to avoid per-read allocation)
+        if need_seq {
+            seq_buf.clear();
+            let seq = record.seq();
+            let seq_len = seq.len();
+            seq_buf.reserve(seq_len);
+            for i in 0..seq_len {
+                seq_buf.push(seq[i]);
+            }
+        }
 
         // Compute template length and proper_pair with circular correction if needed
         let (template_length, is_proper_pair, is_non_inward) = if circular && seq_type.is_short_paired() {
@@ -274,6 +287,7 @@ pub fn process_contig_streaming(
             record.tid() != record.mtid(),
             &cigar_buf,
             md_tag,
+            if need_seq { &seq_buf } else { &[] },
             record.mapq(),
             seq_type,
             flags,

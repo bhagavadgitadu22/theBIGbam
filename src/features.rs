@@ -5,7 +5,7 @@
 //!
 //! All features are calculated in a single pass through the BAM reads for efficiency.
 
-use crate::cigar::{raw_cigar_consumes_ref, raw_cigar_is_clipping, raw_boundary_event_length, MdTag};
+use crate::cigar::{raw_cigar_consumes_ref, raw_cigar_is_clipping, raw_boundary_event_length};
 use crate::circular::{increment_circular, increment_circular_long, increment_range};
 use crate::types::{FeatureMap, SequencingType};
 use std::collections::HashMap;
@@ -98,6 +98,30 @@ pub struct FeatureArrays {
     /// Base mismatches (from MD tag).
     /// High mismatch rates may indicate errors or strain variation.
     pub mismatches: Vec<u64>,
+
+    /// Per-position counts of mismatched read bases: [A, C, G, T] counts.
+    /// Dense array for O(1) access; 16 bytes per position.
+    pub mismatch_base_counts: Vec<[u32; 4]>,
+
+    /// Sparse map: position → (insertion_sequence → count).
+    /// Full insertion sequences (no truncation). Only positions with events are allocated.
+    pub insertion_sequences: HashMap<usize, HashMap<Vec<u8>, u32>>,
+
+    /// Sparse map: position → (clip_sequence → count).
+    /// Clip sequences truncated to 20bp. Only positions with events are allocated.
+    pub left_clip_sequences: HashMap<usize, HashMap<Vec<u8>, u32>>,
+
+    /// Sparse map: position → (clip_sequence → count).
+    /// Clip sequences truncated to 20bp. Only positions with events are allocated.
+    pub right_clip_sequences: HashMap<usize, HashMap<Vec<u8>, u32>>,
+
+    /// Sparse map: position → (clip_sequence → count).
+    /// Only clips < min_clipping_length (used by reads_starts). Truncated to 20bp.
+    pub start_clip_sequences: HashMap<usize, HashMap<Vec<u8>, u32>>,
+
+    /// Sparse map: position → (clip_sequence → count).
+    /// Only clips < min_clipping_length (used by reads_ends). Truncated to 20bp.
+    pub end_clip_sequences: HashMap<usize, HashMap<Vec<u8>, u32>>,
 
     /// Sum of read lengths at each position (for computing average).
     /// Only used for long-read data.
@@ -193,6 +217,12 @@ impl FeatureArrays {
             deletions: vec![0u64; ref_length],
             deletion_lengths: vec![Vec::new(); ref_length],
             mismatches: vec![0u64; ref_length],
+            mismatch_base_counts: vec![[0u32; 4]; ref_length],
+            insertion_sequences: HashMap::new(),
+            left_clip_sequences: HashMap::new(),
+            right_clip_sequences: HashMap::new(),
+            start_clip_sequences: HashMap::new(),
+            end_clip_sequences: HashMap::new(),
             sum_read_lengths: vec![0u64; ref_length],
             count_read_lengths: vec![0u64; ref_length],
             sum_insert_sizes: vec![0u64; ref_length],
@@ -366,6 +396,65 @@ impl FeatureArrays {
         } else {
             trimmed.iter().sum::<u64>() as f64 / trimmed.len() as f64
         }
+    }
+
+    /// Compute dominant mismatch base per position.
+    /// Returns Vec of (base_char, percentage_x10) for each position.
+    /// base_char: b'A', b'C', b'G', b'T' or 0 if no mismatches.
+    /// percentage_x10: prevalence × 1000 relative to primary_reads (e.g., 35 = 3.5%)
+    /// Only includes positions where prevalence >= threshold.
+    pub fn compute_dominant_mismatch_bases(
+        &self,
+        primary_reads: &[u64],
+        threshold: f64,
+    ) -> Vec<(u8, i32)> {
+        self.mismatch_base_counts.iter().enumerate().map(|(pos, counts)| {
+            let total: u32 = counts.iter().sum();
+            if total == 0 {
+                return (0, 0);
+            }
+            let (max_idx, &max_count) = counts.iter().enumerate()
+                .max_by_key(|(_, &c)| c).unwrap();
+            let total_reads = if pos < primary_reads.len() { primary_reads[pos] } else { 0 };
+            if total_reads == 0 {
+                return (0, 0);
+            }
+            let prevalence = max_count as f64 / total_reads as f64;
+            if prevalence < threshold {
+                return (0, 0);
+            }
+            let base = match max_idx {
+                0 => b'A',
+                1 => b'C',
+                2 => b'G',
+                3 => b'T',
+                _ => 0,
+            };
+            let percentage_x10 = (prevalence * 1000.0) as i32;
+            (base, percentage_x10)
+        }).collect()
+    }
+
+    /// Compute dominant sequence per position from a sparse HashMap.
+    /// Returns HashMap<usize, (String, i32)> mapping position -> (sequence, percentage_x10)
+    /// Prevalence is relative to primary_reads (total reads at that position).
+    /// Only includes positions where prevalence >= threshold.
+    pub fn compute_dominant_sequences(
+        seqs: &HashMap<usize, HashMap<Vec<u8>, u32>>,
+        primary_reads: &[u64],
+        threshold: f64,
+    ) -> HashMap<usize, (String, i32)> {
+        seqs.iter().filter_map(|(&pos, seq_counts)| {
+            let (dom_seq, &max_count) = seq_counts.iter()
+                .max_by_key(|(_, &c)| c).unwrap();
+            let total_reads = if pos < primary_reads.len() { primary_reads[pos] } else { 0 };
+            if total_reads == 0 { return None; }
+            let prevalence = max_count as f64 / total_reads as f64;
+            if prevalence < threshold { return None; }
+            let percentage_x10 = (prevalence * 1000.0) as i32;
+            let seq_str = String::from_utf8_lossy(dom_seq).into_owned();
+            Some((pos, (seq_str, percentage_x10)))
+        }).collect()
     }
 
     /// Convert to FeatureMap for assemblycheck features.
@@ -552,6 +641,7 @@ pub fn process_read(
     mate_other_contig: bool,
     cigar_raw: &[(u32, u32)],
     md_tag: Option<&[u8]>,
+    seq: &[u8],
     mapq: u8,
     seq_type: SequencingType,
     flags: ModuleFlags,
@@ -725,6 +815,17 @@ pub fn process_read(
                 if raw_cigar_is_clipping(op) {
                     // Record at first aligned position
                     arrays.left_clipping_lengths[start].push(len);
+                    // Extract clip sequence (truncated to 20bp) for soft clips
+                    if flags.mapping_metrics && op as u8 as char == 'S' && !seq.is_empty() {
+                        let clip_len = (len as usize).min(20).min(seq.len());
+                        let clip_seq = seq[..clip_len].to_vec();
+                        arrays.left_clip_sequences
+                            .entry(start)
+                            .or_default()
+                            .entry(clip_seq)
+                            .and_modify(|c| *c += 1)
+                            .or_insert(1);
+                    }
                 }
             }
             // Check last operation for right clipping
@@ -738,53 +839,159 @@ pub fn process_read(
                         ref_length - 1
                     };
                     arrays.right_clipping_lengths[clip_pos].push(len);
+                    // Extract clip sequence (truncated to 20bp) for soft clips
+                    if flags.mapping_metrics && op as u8 as char == 'S' && !seq.is_empty() {
+                        let len_usize = len as usize;
+                        let clip_start = seq.len().saturating_sub(len_usize);
+                        let clip_len = len_usize.min(20);
+                        let clip_end = (clip_start + clip_len).min(seq.len());
+                        let clip_seq = seq[clip_start..clip_end].to_vec();
+                        arrays.right_clip_sequences
+                            .entry(clip_pos)
+                            .or_default()
+                            .entry(clip_seq)
+                            .and_modify(|c| *c += 1)
+                            .or_insert(1);
+                    }
                 }
             }
         }
     }
 
-    // --- Indels and mismatches (mapping_metrics only) ---
+    // --- Unified CIGAR + MD + SEQ walk (mapping_metrics only) ---
+    // Single walk handles indels, mismatches, and sequence extraction
     if flags.mapping_metrics && !is_secondary && !is_supplementary {
-        // --- Indels from CIGAR ---
-        // Walk through CIGAR operations to find insertions and deletions
         let mut ref_pos = raw_start;
+        let mut query_pos: usize = 0;
+
+        // MD tag parsing state
+        let md_bytes = md_tag.unwrap_or(&[]);
+        let mut md_pos: usize = 0;
+        let mut md_match_remaining: usize = 0;
+        let has_md = !md_bytes.is_empty();
+        let has_seq = !seq.is_empty();
+
         for &(op, len) in cigar_raw {
             let c = op as u8 as char;
+            let len_usize = len as usize;
+
             match c {
+                'M' | '=' | 'X' => {
+                    // Match/mismatch region - walk MD tag in parallel
+                    if has_md {
+                        let mut remaining = len_usize;
+                        while remaining > 0 {
+                            if md_match_remaining > 0 {
+                                // Consume matching bases
+                                let consume = md_match_remaining.min(remaining);
+                                ref_pos += consume;
+                                query_pos += consume;
+                                remaining -= consume;
+                                md_match_remaining -= consume;
+                            } else if md_pos < md_bytes.len() {
+                                let b = md_bytes[md_pos];
+                                if b.is_ascii_digit() {
+                                    // Parse match count
+                                    let mut num = 0usize;
+                                    while md_pos < md_bytes.len() && md_bytes[md_pos].is_ascii_digit() {
+                                        num = num * 10 + (md_bytes[md_pos] - b'0') as usize;
+                                        md_pos += 1;
+                                    }
+                                    md_match_remaining = num;
+                                } else if b.is_ascii_uppercase() {
+                                    // Mismatch: record count and read base
+                                    let normalized_pos = ref_pos % ref_length;
+                                    arrays.mismatches[normalized_pos] += 1;
+
+                                    if has_seq && query_pos < seq.len() {
+                                        let base_idx = match seq[query_pos] {
+                                            b'A' | b'a' => 0usize,
+                                            b'C' | b'c' => 1,
+                                            b'G' | b'g' => 2,
+                                            b'T' | b't' => 3,
+                                            _ => 4, // N or other - skip
+                                        };
+                                        if base_idx < 4 {
+                                            arrays.mismatch_base_counts[normalized_pos][base_idx] += 1;
+                                        }
+                                    }
+
+                                    ref_pos += 1;
+                                    query_pos += 1;
+                                    remaining -= 1;
+                                    md_pos += 1;
+                                } else if b == b'^' {
+                                    // Deletion marker in MD - shouldn't happen inside M block
+                                    // but handle gracefully
+                                    break;
+                                } else {
+                                    md_pos += 1;
+                                }
+                            } else {
+                                // MD exhausted, just advance
+                                ref_pos += remaining;
+                                query_pos += remaining;
+                                remaining = 0;
+                            }
+                        }
+                    } else {
+                        // No MD tag, just advance positions
+                        ref_pos += len_usize;
+                        query_pos += len_usize;
+                    }
+                }
                 'I' => {
                     // Insertion: extra sequence in read, not in reference
-                    // Record at current reference position
-                    arrays.insertion_lengths[ref_pos % ref_length].push(len);
-                    // Insertions don't consume reference (ref_pos stays same)
+                    let normalized_pos = ref_pos % ref_length;
+                    arrays.insertion_lengths[normalized_pos].push(len);
+
+                    // Extract full insertion sequence
+                    if has_seq && query_pos + len_usize <= seq.len() {
+                        let ins_seq = seq[query_pos..query_pos + len_usize].to_vec();
+                        arrays.insertion_sequences
+                            .entry(normalized_pos)
+                            .or_default()
+                            .entry(ins_seq)
+                            .and_modify(|c| *c += 1)
+                            .or_insert(1);
+                    }
+
+                    query_pos += len_usize;
                 }
                 'D' => {
                     // Deletion: sequence in reference, not in read
-                    // Spans multiple reference positions
-                    let len_usize = len as usize;
-                    // Store deletion length at the starting position
-                    arrays.deletion_lengths[ref_pos % ref_length].push(len);
+                    let normalized_pos = ref_pos % ref_length;
+                    arrays.deletion_lengths[normalized_pos].push(len);
                     for j in 0..len_usize {
                         arrays.deletions[(ref_pos + j) % ref_length] += 1;
                     }
-                    ref_pos += len_usize; // Deletions consume reference
+                    ref_pos += len_usize;
+
+                    // Skip deletion bases in MD tag (^ACGT...)
+                    if md_pos < md_bytes.len() && md_bytes[md_pos] == b'^' {
+                        md_pos += 1;
+                        while md_pos < md_bytes.len() && md_bytes[md_pos].is_ascii_uppercase() {
+                            md_pos += 1;
+                        }
+                    }
+                }
+                'S' => {
+                    // Soft clip - only advances query position
+                    query_pos += len_usize;
+                }
+                'N' => {
+                    // Reference skip
+                    ref_pos += len_usize;
+                }
+                'H' => {
+                    // Hard clip - no sequence in BAM, skip
                 }
                 _ => {
-                    // Other operations (M, =, X, N) that consume reference
+                    // Other ops
                     if raw_cigar_consumes_ref(op) {
-                        ref_pos += len as usize;
+                        ref_pos += len_usize;
                     }
-                    // S, H, P don't consume reference (ignored here)
                 }
-            }
-        }
-
-        // --- Mismatches from MD tag ---
-        // The MD tag describes mismatches in the alignment
-        if let Some(md_bytes) = md_tag {
-            let md = MdTag::new(md_bytes);
-            // Iterator-based: no Vec allocation, just yields positions
-            for pos in md.mismatch_positions_normalized(raw_start, ref_length) {
-                arrays.mismatches[pos] += 1;
             }
         }
     }
@@ -852,6 +1059,21 @@ pub fn process_read(
                 } else {
                     arrays.start_plus[start] += 1;
                 }
+                // Collect short clip sequence for reads_starts tooltip
+                if evt_len > 0 {
+                    if let Some(&(op, _)) = cigar_raw.first() {
+                        if op as u8 as char == 'S' && !seq.is_empty() {
+                            let clip_len = (evt_len as usize).min(20).min(seq.len());
+                            let clip_seq = seq[..clip_len].to_vec();
+                            arrays.start_clip_sequences
+                                .entry(start)
+                                .or_default()
+                                .entry(clip_seq)
+                                .and_modify(|c| *c += 1)
+                                .or_insert(1);
+                        }
+                    }
+                }
             }
 
             // Count end position and collect event length only if end matches
@@ -868,6 +1090,23 @@ pub fn process_read(
                     arrays.end_minus[end_pos] += 1;
                 } else {
                     arrays.end_plus[end_pos] += 1;
+                }
+                // Collect short clip sequence for reads_ends tooltip
+                if evt_len > 0 {
+                    if let Some(&(op, _)) = cigar_raw.last() {
+                        if op as u8 as char == 'S' && !seq.is_empty() {
+                            let clip_start = seq.len().saturating_sub(evt_len as usize);
+                            let clip_len = (evt_len as usize).min(20);
+                            let clip_end = (clip_start + clip_len).min(seq.len());
+                            let clip_seq = seq[clip_start..clip_end].to_vec();
+                            arrays.end_clip_sequences
+                                .entry(end_pos)
+                                .or_default()
+                                .entry(clip_seq)
+                                .and_modify(|c| *c += 1)
+                                .or_insert(1);
+                        }
+                    }
                 }
             }
         } else {
@@ -889,11 +1128,47 @@ pub fn process_read(
                 };
 
                 // Collect start event length
-                arrays.start_event_lengths[start].push(start_event.unwrap());
+                let start_evt_len = start_event.unwrap();
+                arrays.start_event_lengths[start].push(start_evt_len);
+
+                // Collect short clip sequence for reads_starts tooltip
+                if start_evt_len > 0 {
+                    if let Some(&(op, _)) = cigar_raw.first() {
+                        if op as u8 as char == 'S' && !seq.is_empty() {
+                            let clip_len = (start_evt_len as usize).min(20).min(seq.len());
+                            let clip_seq = seq[..clip_len].to_vec();
+                            arrays.start_clip_sequences
+                                .entry(start)
+                                .or_default()
+                                .entry(clip_seq)
+                                .and_modify(|c| *c += 1)
+                                .or_insert(1);
+                        }
+                    }
+                }
 
                 // Compute and collect end event length separately
                 let end_event = raw_boundary_event_length(cigar_raw, md_tag, is_reverse, min_clipping_length);
-                arrays.end_event_lengths[end_pos].push(end_event.unwrap_or(0));
+                let end_evt_len = end_event.unwrap_or(0);
+                arrays.end_event_lengths[end_pos].push(end_evt_len);
+
+                // Collect short clip sequence for reads_ends tooltip
+                if end_evt_len > 0 {
+                    if let Some(&(op, _)) = cigar_raw.last() {
+                        if op as u8 as char == 'S' && !seq.is_empty() {
+                            let clip_start = seq.len().saturating_sub(end_evt_len as usize);
+                            let clip_len = (end_evt_len as usize).min(20);
+                            let clip_end = (clip_start + clip_len).min(seq.len());
+                            let clip_seq = seq[clip_start..clip_end].to_vec();
+                            arrays.end_clip_sequences
+                                .entry(end_pos)
+                                .or_default()
+                                .entry(clip_seq)
+                                .and_modify(|c| *c += 1)
+                                .or_insert(1);
+                        }
+                    }
+                }
 
                 if is_reverse {
                     arrays.start_minus[start] += 1;

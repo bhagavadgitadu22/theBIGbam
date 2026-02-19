@@ -418,6 +418,10 @@ pub struct FeaturePoint {
     pub median: Option<f32>,
     /// Optional standard deviation (for clipping/insertion statistics)
     pub std: Option<f32>,
+    /// Dominant base or sequence at this run's first position (e.g., "A" for mismatch, "ACGT" for insertion)
+    pub sequence: Option<String>,
+    /// Prevalence of the dominant sequence, as percentage × 10 (e.g., 853 = 85.3%)
+    pub sequence_prevalence: Option<i32>,
 }
 
 /// Coverage data for a contig in a sample.

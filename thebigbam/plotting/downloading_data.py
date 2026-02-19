@@ -248,9 +248,11 @@ def download_feature_data_csv(db_path, contig_name, sample_names, xstart=None, x
         any_has_stats = any(table_has_stats.values())
 
         # Position filter SQL fragment
+        # Use COALESCE to handle NULL Last_position (single-position bar features)
+        _lp = "COALESCE(Last_position, First_position)"
         pos_filter = ""
         if xstart is not None and xend is not None:
-            pos_filter = f" AND Last_position >= {int(xstart)} AND First_position <= {int(xend)}"
+            pos_filter = f" AND {_lp} >= {int(xstart)} AND First_position <= {int(xend)}"
 
         # Scaled features (stored as INTEGER ×100)
         scaled_tables = {"Feature_mapq", "Contig_GCSkew"}
@@ -295,7 +297,7 @@ def download_feature_data_csv(db_path, contig_name, sample_names, xstart=None, x
                         stats_cols = f", f.Mean{scale_expr} as mean, f.Median{scale_expr} as median, f.Std{scale_expr} as std" if has_stats else (", NULL as mean, NULL as median, NULL as std" if any_has_stats else "")
                         union_parts.append(
                             f"SELECT '{safe_sample}' as sample_name, '{safe_var_name}' as feature_name, "
-                            f"f.First_position as start_position, f.Last_position as last_position, "
+                            f"f.First_position as start_position, COALESCE(f.Last_position, f.First_position) as last_position, "
                             f"f.Value{scale_expr} as value{stats_cols} "
                             f"FROM {table_name} f "
                             f"WHERE f.Contig_id = {contig_id}{pos_filter}"
@@ -304,7 +306,7 @@ def download_feature_data_csv(db_path, contig_name, sample_names, xstart=None, x
                     stats_cols = f", f.Mean{scale_expr} as mean, f.Median{scale_expr} as median, f.Std{scale_expr} as std" if has_stats else (", NULL as mean, NULL as median, NULL as std" if any_has_stats else "")
                     union_parts.append(
                         f"SELECT '{safe_var_name}' as feature_name, "
-                        f"f.First_position as start_position, f.Last_position as last_position, "
+                        f"f.First_position as start_position, COALESCE(f.Last_position, f.First_position) as last_position, "
                         f"f.Value{scale_expr} as value{stats_cols} "
                         f"FROM {table_name} f "
                         f"WHERE f.Contig_id = {contig_id}{pos_filter}"
@@ -315,7 +317,7 @@ def download_feature_data_csv(db_path, contig_name, sample_names, xstart=None, x
                 if is_all_samples:
                     union_parts.append(
                         f"SELECT s.Sample_name as sample_name, '{safe_var_name}' as feature_name, "
-                        f"f.First_position as start_position, f.Last_position as last_position, "
+                        f"f.First_position as start_position, COALESCE(f.Last_position, f.First_position) as last_position, "
                         f"f.Value{scale_expr} as value{stats_cols} "
                         f"FROM {table_name} f "
                         f"JOIN Sample s ON f.Sample_id = s.Sample_id "
@@ -324,7 +326,7 @@ def download_feature_data_csv(db_path, contig_name, sample_names, xstart=None, x
                 else:
                     union_parts.append(
                         f"SELECT '{safe_var_name}' as feature_name, "
-                        f"f.First_position as start_position, f.Last_position as last_position, "
+                        f"f.First_position as start_position, COALESCE(f.Last_position, f.First_position) as last_position, "
                         f"f.Value{scale_expr} as value{stats_cols} "
                         f"FROM {table_name} f "
                         f"WHERE f.Contig_id = {contig_id} AND f.Sample_id IN ({sample_ids_sql}){pos_filter}"

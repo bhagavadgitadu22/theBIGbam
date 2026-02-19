@@ -654,10 +654,59 @@ fn add_features_from_arrays(
             mean: None,
             median: None,
             std: None,
+            sequence: None,
+            sequence_prevalence: None,
         }));
 
         let mismatches_f64: Vec<f64> = arrays.mismatches.iter().map(|&x| x as f64).collect();
         _mismatch_runs = add_compressed_feature_with_reference(&mismatches_f64, Some(&primary_reads_f64), "mismatches", contig_name, config, output);
+
+        // --- Compute dominant bases/sequences and attach to compressed runs ---
+        let threshold = config.bar_ratio * 0.01; // Convert percentage to fraction
+        let dominant_mismatches = arrays.compute_dominant_mismatch_bases(&arrays.primary_reads, threshold);
+        let dominant_insertions = FeatureArrays::compute_dominant_sequences(&arrays.insertion_sequences, &arrays.primary_reads, threshold);
+        let dominant_left_clips = FeatureArrays::compute_dominant_sequences(&arrays.left_clip_sequences, &arrays.primary_reads, threshold);
+        let dominant_right_clips = FeatureArrays::compute_dominant_sequences(&arrays.right_clip_sequences, &arrays.primary_reads, threshold);
+
+        // Attach dominant values to FeaturePoints by scanning the output
+        // (features were just appended above, so they're at the end of the output vec)
+        for fp in output.iter_mut().rev() {
+            // Stop when we hit features from a different contig or non-mapping features
+            if fp.contig_name != contig_name {
+                break;
+            }
+            let pos_idx = (fp.start_pos - 1) as usize; // 1-indexed → 0-indexed
+            match fp.feature.as_str() {
+                "mismatches" => {
+                    if pos_idx < dominant_mismatches.len() {
+                        let (base, pct) = dominant_mismatches[pos_idx];
+                        if base != 0 {
+                            fp.sequence = Some(String::from(base as char));
+                            fp.sequence_prevalence = Some(pct);
+                        }
+                    }
+                }
+                "insertions" => {
+                    if let Some((seq_str, pct)) = dominant_insertions.get(&pos_idx) {
+                        fp.sequence = Some(seq_str.clone());
+                        fp.sequence_prevalence = Some(*pct);
+                    }
+                }
+                "left_clippings" => {
+                    if let Some((seq_str, pct)) = dominant_left_clips.get(&pos_idx) {
+                        fp.sequence = Some(seq_str.clone());
+                        fp.sequence_prevalence = Some(*pct);
+                    }
+                }
+                "right_clippings" => {
+                    if let Some((seq_str, pct)) = dominant_right_clips.get(&pos_idx) {
+                        fp.sequence = Some(seq_str.clone());
+                        fp.sequence_prevalence = Some(*pct);
+                    }
+                }
+                _ => {}
+            }
+        }
     }
 
     // Paired-reads module
@@ -673,6 +722,8 @@ fn add_features_from_arrays(
             mean: None,
             median: None,
             std: None,
+            sequence: None,
+            sequence_prevalence: None,
         }));
 
         let mate_unmapped_f64: Vec<f64> = arrays.mate_not_mapped.iter().map(|&x| x as f64).collect();
@@ -686,6 +737,8 @@ fn add_features_from_arrays(
             mean: None,
             median: None,
             std: None,
+            sequence: None,
+            sequence_prevalence: None,
         }));
 
         let mate_other_contig_f64: Vec<f64> = arrays.mate_on_another_contig.iter().map(|&x| x as f64).collect();
@@ -699,6 +752,8 @@ fn add_features_from_arrays(
             mean: None,
             median: None,
             std: None,
+            sequence: None,
+            sequence_prevalence: None,
         }));
 
         // Insert sizes (curve for paired reads, self-referential)
@@ -747,6 +802,32 @@ fn add_features_from_arrays(
             &reads_ends_original, &end_evt_medians,
             Some(&coverage_reduced_f64), "reads_ends", contig_name, config, output,
         );
+
+        // Attach dominant clip sequences to reads_starts/reads_ends FeaturePoints
+        let threshold = config.bar_ratio * 0.01; // Convert percentage to fraction
+        let dominant_start_clips = FeatureArrays::compute_dominant_sequences(&arrays.start_clip_sequences, &arrays.coverage_reduced, threshold);
+        let dominant_end_clips = FeatureArrays::compute_dominant_sequences(&arrays.end_clip_sequences, &arrays.coverage_reduced, threshold);
+        for fp in output.iter_mut().rev() {
+            if fp.contig_name != contig_name {
+                break;
+            }
+            let pos_idx = (fp.start_pos - 1) as usize;
+            match fp.feature.as_str() {
+                "reads_starts" => {
+                    if let Some((seq_str, pct)) = dominant_start_clips.get(&pos_idx) {
+                        fp.sequence = Some(seq_str.clone());
+                        fp.sequence_prevalence = Some(*pct);
+                    }
+                }
+                "reads_ends" => {
+                    if let Some((seq_str, pct)) = dominant_end_clips.get(&pos_idx) {
+                        fp.sequence = Some(seq_str.clone());
+                        fp.sequence_prevalence = Some(*pct);
+                    }
+                }
+                _ => {}
+            }
+        }
 
         // === STEP 2: Calculate aligned fraction and global metrics ===
         let aligned_count = arrays.coverage_reduced.iter().filter(|&&x| x > 0).count();
