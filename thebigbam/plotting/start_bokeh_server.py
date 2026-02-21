@@ -74,7 +74,7 @@ def build_controls(conn):
         """)
         for contig_name, sample_name in cur.fetchall():
             sample_to_contigs.setdefault(sample_name, set()).add(contig_name)
-        contig_to_samples.setdefault(contig_name, set()).add(sample_name)
+            contig_to_samples.setdefault(contig_name, set()).add(sample_name)
 
     # Get variables that have data (their feature table exists)
     cur.execute("SELECT DISTINCT Feature_table_name FROM Variable")
@@ -435,7 +435,6 @@ def create_layout(db_path):
             else:
                 allowed_samples = {pair[1] for pair in filtered_pairs}
             completions = [s for s in completions if s in allowed_samples]
-
         update_widget_completions(widgets['sample_select'], completions)
 
     def update_section_titles():
