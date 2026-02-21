@@ -29,7 +29,7 @@ use crate::compress::{
 };
 use crate::db::{DbWriter, MisassemblyData, MicrodiversityData, SideMisassemblyData, TopologyData, GCContentData, RepeatsData};
 use crate::gc_content::{compute_gc_content, compute_gc_skew, GCParams};
-use crate::features::{CdsIndex, FeatureArrays, ModuleFlags, compute_dominant_codon_changes};
+use crate::features::{CdsIndex, FeatureArrays, ModuleFlags, compute_codon_changes_from_summaries};
 use crate::parser::{parse_annotations, compute_annotation_sequences};
 use crate::types::{
     ContigInfo, FeaturePoint, PackagingData, PlotType, PresenceData, SequencingType
@@ -501,6 +501,7 @@ fn add_features_from_arrays(
     flags: ModuleFlags,
     primary_count: u64,
     repeats: &[RepeatsData],
+    cds_index: Option<&CdsIndex>,
     output: &mut Vec<FeaturePoint>,
 ) -> (Option<PackagingData>, Option<(MisassemblyData, MicrodiversityData, SideMisassemblyData, TopologyData)>) {
     let pt_config = config.phagetermini_config;
@@ -672,8 +673,11 @@ fn add_features_from_arrays(
         let dominant_left_clips = FeatureArrays::compute_dominant_sequences(&arrays.left_clip_sequences, &arrays.primary_reads, threshold);
         let dominant_right_clips = FeatureArrays::compute_dominant_sequences(&arrays.right_clip_sequences, &arrays.primary_reads, threshold);
 
-        // Compute dominant codon changes from per-read codon tracking
-        let dominant_codons = compute_dominant_codon_changes(&arrays.codon_changes);
+        // Compute codon changes from position-level mismatch summaries
+        let dominant_codons = compute_codon_changes_from_summaries(
+            &arrays.mismatch_base_counts, &arrays.primary_reads,
+            cds_index, contig_length, threshold,
+        );
 
         // Attach dominant values to FeaturePoints by scanning the output
         // (features were just appended above, so they're at the end of the output vec)
@@ -1042,7 +1046,7 @@ pub fn process_sample(
 
             // Process contig using streaming - single pass over reads
             // Early coverage check happens inside process_contig_streaming
-            let (mut arrays, coverage_pct, primary_count) = match process_contig_streaming(&mut bam, &ref_name, ref_length, seq_type, flags, config.circular, config.min_aligned_fraction, config.phagetermini_config.min_clipping_length, cds_index.as_ref()) {
+            let (mut arrays, coverage_pct, primary_count) = match process_contig_streaming(&mut bam, &ref_name, ref_length, seq_type, flags, config.circular, config.min_aligned_fraction, config.phagetermini_config.min_clipping_length) {
                 Ok(Some(result)) => result,
                 Ok(None) => return None,
                 Err(e) => {
@@ -1061,7 +1065,7 @@ pub fn process_sample(
 
             // Calculate features for this contig
             let mut features = Vec::new();
-            let (packaging_info, metrics_info) = add_features_from_arrays(&mut arrays, &ref_name, ref_length, config, seq_type, flags, primary_count, repeats, &mut features);
+            let (packaging_info, metrics_info) = add_features_from_arrays(&mut arrays, &ref_name, ref_length, config, seq_type, flags, primary_count, repeats, cds_index.as_ref(), &mut features);
             let coverage_median = arrays.coverage_median() as f32;
             let coverage_trimmed_mean = arrays.coverage_trimmed_mean(0.05) as f32;
 

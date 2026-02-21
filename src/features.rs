@@ -123,10 +123,6 @@ pub struct FeatureArrays {
     /// Only clips < min_clipping_length (used by reads_ends). Truncated to 20bp.
     pub end_clip_sequences: HashMap<usize, HashMap<Vec<u8>, u32>>,
 
-    /// Sparse map: position → {(codon_category, codon_change, aa_change) → count}.
-    /// Only positions with CDS mismatches get entries.
-    pub codon_changes: HashMap<usize, HashMap<(String, String, String), u32>>,
-
     /// Sum of read lengths at each position (for computing average).
     /// Only used for long-read data.
     pub sum_read_lengths: Vec<u64>,
@@ -227,7 +223,6 @@ impl FeatureArrays {
             right_clip_sequences: HashMap::new(),
             start_clip_sequences: HashMap::new(),
             end_clip_sequences: HashMap::new(),
-            codon_changes: HashMap::new(),
             sum_read_lengths: vec![0u64; ref_length],
             count_read_lengths: vec![0u64; ref_length],
             sum_insert_sizes: vec![0u64; ref_length],
@@ -622,26 +617,35 @@ fn translate_codon(codon: &[u8; 3]) -> Option<(char, &'static str)> {
     })
 }
 
-/// Analyze mismatches from a single read against CDS annotations.
+/// Compute codon changes from per-position mismatch summaries (post-processing).
 ///
-/// For each mismatch position, finds the covering CDS, computes the codon change
-/// considering ALL mismatches from this read in the same codon, classifies as
-/// synonymous/non-synonymous, and increments codon_changes counts.
+/// Instead of analyzing codons per-read (O(reads_with_mismatches)), this computes
+/// codon changes once from the accumulated mismatch_base_counts (O(positions_with_mismatches)).
+/// For each position with mismatches above the threshold, finds the dominant mismatch base,
+/// looks up the covering CDS, and classifies the codon change.
+///
+/// # Trade-off
+/// Each mismatch position is evaluated independently. In the rare case (~0.01%) where two
+/// mismatches in the same codon originate from the same read, they are not combined into
+/// a single mutant codon. This has negligible impact on classification accuracy.
 ///
 /// # Arguments
-/// * `mismatches` - Vec of (0-based ref position, read base as u8) from this read's MD tag walk
-/// * `cds_index` - CDS lookup index for this contig
-/// * `codon_changes` - Sparse map: position -> {(category, codon_change, aa_change) -> count}
+/// * `mismatch_base_counts` - Per-position [A, C, G, T] mismatch counts (dense array)
+/// * `primary_reads` - Per-position primary read depth (for prevalence threshold)
+/// * `cds_index` - CDS lookup index for this contig (None if no annotations)
 /// * `ref_length` - Reference length for circular modulo
-pub fn analyze_read_codon_changes(
-    mismatches: &[(usize, u8)],
-    cds_index: &CdsIndex,
-    codon_changes: &mut HashMap<usize, HashMap<CodonInfo, u32>>,
+/// * `threshold` - Minimum prevalence fraction to report a dominant mismatch
+pub fn compute_codon_changes_from_summaries(
+    mismatch_base_counts: &[[u32; 4]],
+    primary_reads: &[u64],
+    cds_index: Option<&CdsIndex>,
     ref_length: usize,
-) {
-    if mismatches.is_empty() || cds_index.is_empty() {
-        return;
-    }
+    threshold: f64,
+) -> HashMap<usize, CodonInfo> {
+    let cds_idx = match cds_index {
+        Some(idx) if !idx.is_empty() => idx,
+        _ => return HashMap::new(),
+    };
 
     let complement = |b: u8| -> u8 {
         match b {
@@ -653,17 +657,33 @@ pub fn analyze_read_codon_changes(
         }
     };
 
-    // Group mismatches by (CDS pointer identity, codon_index) for multi-mismatch codon handling
-    // Key: (CDS start, codon_index) -> Vec<(ref_pos_0based, read_base, pos_in_codon)>
-    let mut codon_groups: HashMap<(i64, usize), Vec<(usize, u8, usize)>> = HashMap::new();
+    let bases = [b'A', b'C', b'G', b'T'];
+    let mut result = HashMap::new();
 
-    for &(ref_pos_0based, read_base) in mismatches {
-        let pos_1based = (ref_pos_0based % ref_length) as i64 + 1;
+    for (pos, counts) in mismatch_base_counts.iter().enumerate() {
+        let total: u32 = counts.iter().sum();
+        if total == 0 {
+            continue;
+        }
 
-        if let Some(cds) = cds_index.find_cds(pos_1based) {
+        // Find dominant mismatch base
+        let (max_idx, &max_count) = counts.iter().enumerate()
+            .max_by_key(|(_, &c)| c).unwrap();
+        let total_reads = if pos < primary_reads.len() { primary_reads[pos] } else { 0 };
+        if total_reads == 0 {
+            continue;
+        }
+        let prevalence = max_count as f64 / total_reads as f64;
+        if prevalence < threshold {
+            continue;
+        }
+
+        let dominant_base = bases[max_idx];
+        let pos_1based = (pos % ref_length) as i64 + 1;
+
+        if let Some(cds) = cds_idx.find_cds(pos_1based) {
             let nuc_bytes = cds.nucleotide_sequence.as_bytes();
 
-            // Compute offset within the CDS nucleotide sequence
             let offset = if cds.strand == -1 {
                 (cds.end - pos_1based) as usize
             } else {
@@ -677,87 +697,47 @@ pub fn analyze_read_codon_changes(
             let codon_idx = offset / 3;
             let pos_in_codon = offset % 3;
 
-            // Convert read base for reverse strand
+            let codon_start = codon_idx * 3;
+            let codon_end = codon_start + 3;
+            if codon_end > nuc_bytes.len() {
+                continue;
+            }
+
+            let ref_codon = &nuc_bytes[codon_start..codon_end];
+
+            // Build mutant codon with dominant mismatch at this position
+            let mut mut_codon = [
+                ref_codon[0].to_ascii_uppercase(),
+                ref_codon[1].to_ascii_uppercase(),
+                ref_codon[2].to_ascii_uppercase(),
+            ];
             let alt_base = if cds.strand == -1 {
-                complement(read_base)
+                complement(dominant_base)
             } else {
-                read_base.to_ascii_uppercase()
+                dominant_base
             };
-
-            codon_groups
-                .entry((cds.start, codon_idx))
-                .or_default()
-                .push((ref_pos_0based, alt_base, pos_in_codon));
-        } else {
-            // Position is not inside any CDS — record as Intergenic
-            let info = ("Intergenic".to_string(), String::new(), String::new());
-            codon_changes
-                .entry(ref_pos_0based)
-                .or_default()
-                .entry(info)
-                .and_modify(|c| *c += 1)
-                .or_insert(1);
-        }
-    }
-
-    // Process each codon group: build mutant codon with ALL mismatches from this read
-    for ((_cds_start, codon_idx), group) in &codon_groups {
-        // Find the CDS again (cheap)
-        let first_pos = group[0].0;
-        let pos_1based = (first_pos % ref_length) as i64 + 1;
-        let Some(cds) = cds_index.find_cds(pos_1based) else { continue };
-        let nuc_bytes = cds.nucleotide_sequence.as_bytes();
-
-        let codon_start = codon_idx * 3;
-        let codon_end = codon_start + 3;
-        if codon_end > nuc_bytes.len() {
-            continue;
-        }
-
-        let ref_codon = &nuc_bytes[codon_start..codon_end];
-
-        // Build mutant codon with all mismatches from this read
-        let mut mut_codon = [ref_codon[0].to_ascii_uppercase(), ref_codon[1].to_ascii_uppercase(), ref_codon[2].to_ascii_uppercase()];
-        for &(_, alt_base, pos_in_codon) in group {
             mut_codon[pos_in_codon] = alt_base;
-        }
 
-        // Translate both codons
-        let ref_codon_upper = [ref_codon[0].to_ascii_uppercase(), ref_codon[1].to_ascii_uppercase(), ref_codon[2].to_ascii_uppercase()];
-        let Some((ref_aa, _)) = translate_codon(&ref_codon_upper) else { continue };
-        let Some((mut_aa, mut_name)) = translate_codon(&mut_codon) else { continue };
+            // Translate both codons
+            let ref_codon_upper = [
+                ref_codon[0].to_ascii_uppercase(),
+                ref_codon[1].to_ascii_uppercase(),
+                ref_codon[2].to_ascii_uppercase(),
+            ];
+            let Some((ref_aa, _)) = translate_codon(&ref_codon_upper) else { continue };
+            let Some((mut_aa, mut_name)) = translate_codon(&mut_codon) else { continue };
 
-        let category = if ref_aa == mut_aa { "Synonymous" } else { "Non-synonymous" };
-        let codon_change_str = String::from_utf8_lossy(&mut_codon).into_owned();
-        let aa_change_str = format!("{} ({})", mut_aa, mut_name);
+            let category = if ref_aa == mut_aa { "Synonymous" } else { "Non-synonymous" };
+            let codon_change_str = String::from_utf8_lossy(&mut_codon).into_owned();
+            let aa_change_str = format!("{} ({})", mut_aa, mut_name);
 
-        // Record for ALL mismatch positions in this group
-        for &(ref_pos, _, _) in group {
-            let info = (category.to_string(), codon_change_str.clone(), aa_change_str.clone());
-            codon_changes
-                .entry(ref_pos)
-                .or_default()
-                .entry(info)
-                .and_modify(|c| *c += 1)
-                .or_insert(1);
+            result.insert(pos, (category.to_string(), codon_change_str, aa_change_str));
+        } else {
+            result.insert(pos, ("Intergenic".to_string(), String::new(), String::new()));
         }
     }
-}
 
-/// Compute dominant codon change per position from accumulated counts.
-/// Returns a HashMap of position -> (category, codon_change, aa_change) for the most common change.
-pub fn compute_dominant_codon_changes(
-    codon_changes: &HashMap<usize, HashMap<CodonInfo, u32>>,
-) -> HashMap<usize, CodonInfo> {
-    codon_changes
-        .iter()
-        .filter_map(|(&pos, changes)| {
-            changes
-                .iter()
-                .max_by_key(|(_, &count)| count)
-                .map(|(info, _)| (pos, info.clone()))
-        })
-        .collect()
+    result
 }
 
 // ============================================================================
@@ -892,7 +872,6 @@ pub fn process_read(
     flags: ModuleFlags,
     circular: bool,
     min_clipping_length: u32,
-    cds_index: Option<&CdsIndex>,
 ) {
     // -------------------------------------------------------------------------
     // Calculate positions
@@ -1117,10 +1096,6 @@ pub fn process_read(
         let has_md = !md_bytes.is_empty();
         let has_seq = !seq.is_empty();
 
-        // Collect per-read mismatches for codon analysis
-        let track_codons = cds_index.is_some();
-        let mut read_mismatches: Vec<(usize, u8)> = if track_codons { Vec::new() } else { Vec::new() };
-
         for &(op, len) in cigar_raw {
             let c = op as u8 as char;
             let len_usize = len as usize;
@@ -1164,10 +1139,6 @@ pub fn process_read(
                                         };
                                         if base_idx < 4 {
                                             arrays.mismatch_base_counts[normalized_pos][base_idx] += 1;
-                                        }
-                                        // Collect for per-read codon analysis
-                                        if track_codons && base_idx < 4 {
-                                            read_mismatches.push((ref_pos, read_base));
                                         }
                                     }
 
@@ -1250,17 +1221,6 @@ pub fn process_read(
             }
         }
 
-        // Per-read codon analysis: group mismatches by codon and classify
-        if track_codons && !read_mismatches.is_empty() {
-            if let Some(cds_idx) = cds_index {
-                analyze_read_codon_changes(
-                    &read_mismatches,
-                    cds_idx,
-                    &mut arrays.codon_changes,
-                    ref_length,
-                );
-            }
-        }
     }
 
 

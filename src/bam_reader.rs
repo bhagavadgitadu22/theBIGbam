@@ -7,7 +7,7 @@ use anyhow::{Context, Result};
 use rust_htslib::bam::{self, Read as BamRead};
 use std::path::Path;
 
-use crate::features::{process_read, CdsIndex, FeatureArrays, ModuleFlags};
+use crate::features::{process_read, FeatureArrays, ModuleFlags};
 use crate::types::SequencingType;
 
 // ============================================================================
@@ -87,7 +87,6 @@ pub fn process_contig_streaming(
     circular: bool,
     min_aligned_fraction: f64,
     min_clipping_length: u32,
-    cds_index: Option<&CdsIndex>,
 ) -> Result<Option<(FeatureArrays, f64, u64)>> {
     // -------------------------------------------------------------------------
     // Step 1: Check if this contig exists in the BAM file
@@ -294,7 +293,6 @@ pub fn process_contig_streaming(
             flags,
             circular,
             min_clipping_length,
-            cds_index,
         );
     }
 

@@ -2,43 +2,33 @@
 
 When an annotation file is provided, each mismatch position inside a CDS is annotated with its codon impact: whether the base substitution is **synonymous** (same amino acid) or **non-synonymous** (different amino acid). Positions outside any CDS are labelled **Intergenic**.
 
-## Per-read codon awareness
+## Position-summary codon analysis
 
-A key design choice is that codon changes are evaluated **per read**, not per position independently. This matters when a single read carries multiple mismatches within the same codon.
-
-**Example:** Reference codon is `ATG` (Met). A read has mismatches at both position 1 (A→C) and position 2 (T→G). Evaluating each position alone would give mutant codons `CTG` and `AGG`, but the actual codon in that read is `CGG` (Arg). The per-read approach captures this correctly.
+Codon changes are computed from **per-position mismatch summaries** during post-processing, rather than per-read during BAM traversal. This is an O(positions_with_mismatches) operation instead of O(reads_with_mismatches), which keeps runtime proportional to genome size rather than sequencing depth.
 
 ### Algorithm
 
-For each read, during the MD tag walk:
+After all reads for a contig have been processed:
 
-1. **Collect mismatches**: all `(genome_position, read_base)` pairs from the MD tag are recorded.
-2. **Map to CDS**: each mismatch position is looked up against a sorted index of CDS intervals (binary search). Positions not in any CDS are recorded as Intergenic.
-3. **Group by codon**: mismatches falling in the same CDS and same codon (determined by `offset_in_cds / 3`) are grouped together.
-4. **Build the mutant codon**: starting from the reference codon (extracted from the CDS nucleotide sequence), **all** mismatches from this read are substituted simultaneously. For reverse-strand CDS, bases are complemented before substitution.
+1. **Identify mismatch positions**: iterate positions where `mismatch_base_counts[pos]` has any non-zero entry (i.e. at least one read carried a mismatch here).
+2. **Find dominant base**: at each position, the alternative base (A, C, G, or T) with the highest count is selected. It must exceed the prevalence threshold (relative to primary read depth) to be reported.
+3. **Map to CDS**: the position is looked up against a sorted index of CDS intervals (binary search). Positions not in any CDS are recorded as Intergenic.
+4. **Build the mutant codon**: starting from the reference codon (extracted from the CDS nucleotide sequence), the dominant mismatch base is substituted at the appropriate codon position. For reverse-strand CDS, the base is complemented before substitution.
 5. **Translate and classify**: both reference and mutant codons are translated using the standard genetic code. If the amino acid is unchanged, the change is Synonymous; otherwise Non-synonymous.
-6. **Record**: the resulting `(category, mutant_codon, amino_acid_change)` tuple is counted at each affected genome position.
+
+### Per-position independence
+
+Each mismatch position is evaluated independently. In the rare case where two mismatches in the same codon originate from the same read (e.g., two adjacent SNPs), the tool evaluates each position separately rather than combining them into a single mutant codon. This affects <0.01% of mismatches and has negligible impact on synonymous/non-synonymous classification, since the dominant mismatch at each position is independent of neighbouring positions.
 
 ### Dominant selection
 
-After processing all reads for a contig, each genome position may have accumulated multiple distinct codon change variants (from different read subpopulations). The variant with the **highest read count** is selected as the dominant one and stored in the database.
+Both `Sequence` and `Codon_change` are derived from the same dominant base at each position:
 
-**Example with subpopulations:** Consider a codon where position B is mutated in all variant reads, but position A is only mutated in some of them:
+- **`Sequence` / `Sequence_prevalence`** (tooltip: Sequence / Prevalence): the dominant **nucleotide** at this position, selected by counting how many reads carry each alternative base.
 
-- 50 reads: only B mutated → mutant codon `TYG`, translates to Val (Synonymous)
-- 30 reads: A and B mutated → mutant codon `XYG`, translates to Phe (Non-synonymous)
+- **`Codon_change` / `AA_change`** (tooltip: Codon / Amino acid): the codon containing the dominant nucleotide substitution at this position, with the rest of the codon taken from the reference sequence.
 
-At position B, both variants compete. The B-alone variant wins (50 > 30), so position B is stored as Synonymous with codon `TYG`. Position A only has the double-mutant variant (30 reads), so it is stored as Non-synonymous with codon `XYG`.
-
-### Two independent dominant selections
-
-Each mismatch position stores two kinds of dominant information that are computed independently:
-
-- **`Sequence` / `Sequence_prevalence`** (tooltip: Sequence / Prevalence): the dominant **nucleotide** at this position, selected by counting how many reads carry each alternative base. This is a per-position metric — it only looks at the single nucleotide change at this position, regardless of what happens at neighbouring positions in the same codon.
-
-- **`Codon_change` / `AA_change`** (tooltip: Codon / Amino acid): the dominant **codon variant**, selected by counting how many reads carry each distinct whole-codon combination. This is a per-codon metric — it considers all mismatches within the codon simultaneously.
-
-In nearly all cases the two agree: the dominant nucleotide at a position will be the same base found in the dominant codon. They can differ in rare situations where read subpopulations carry different combinations of mutations within the same codon. In the example above, all 80 reads agree on the same base change at position B (so `Sequence` reflects 80 reads), but only 50 of those reads share the same codon context (so `Codon_change` reflects the 50-read subpopulation). The nucleotide in the dominant codon will still match `Sequence` here, but in more complex scenarios with three or more subpopulations they could theoretically disagree.
+Because both use the same dominant base, `Sequence` and `Codon_change` are always consistent.
 
 ## Database columns
 
@@ -56,4 +46,6 @@ Codon columns are NULL for mismatch positions where no dominant base was identif
 
 ## CDS index
 
-CDS intervals are extracted from the annotation file during parsing. For each contig, a sorted list of CDS intervals (start, end, strand, nucleotide sequence) is built. Lookup uses binary search on CDS start positions, scanning backwards to handle overlapping/nested CDS features correctly. Only longest isoforms are included when locus tag information is available.
+CDS intervals are extracted from the annotation file during parsing. For each contig, a sorted list of CDS intervals (start, end, strand, nucleotide sequence) is built. Lookup uses binary search on CDS start positions, scanning backwards to handle overlapping/nested CDS features correctly.
+
+When multiple isoforms share the same locus tag, only the **longest isoform** has its nucleotide sequence computed and is included in the CDS index for codon analysis. All isoforms are still displayed in the gene map, but codon/amino acid annotations are derived from the longest one only. This simplifies visualization by avoiding conflicting or redundant annotations at overlapping positions.
