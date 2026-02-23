@@ -6,7 +6,7 @@ import sys
 from thebigbam.utils import (
     read_mapping, add_sample_metadata, add_contig_metadata
 )
-from thebigbam.database import add_variable, calculating_data
+from thebigbam.database import add_variable, calculating_data, export_data
 from thebigbam.plotting import start_bokeh_server
 
 # Path helpers
@@ -30,6 +30,8 @@ SCRIPTS = {
     'remove-contig-metadata': 'Remove a user-added metadata column from Contig table',
 
     'mapping-per-sample': 'Map reads for a single sample (one CSV row)',
+
+    'export': 'Export a metric as contig x sample matrix (TSV)',
 }
 
 def build_argparser():
@@ -81,6 +83,10 @@ def build_argparser():
     sp.add_argument('-d', '--db', required=True)
     sp.add_argument('--colname', required=True, help='Name of the column to remove')
 
+    # export command
+    sp = sub.add_parser('export', help=SCRIPTS['export'])
+    export_data.add_export_args(sp)
+
     # mapping commands (use shared add_*_args functions from mapping modules)
     sp = sub.add_parser('mapping-per-sample', help=SCRIPTS['mapping-per-sample'])
     read_mapping.add_mapping_per_sample_args(sp)
@@ -114,6 +120,9 @@ def main(argv=None):
 
     if args.cmd == 'serve':
         return start_bokeh_server.run_serve(args)
+
+    if args.cmd == 'export':
+        return export_data.run_export(args)
 
     # mapping commands
     if args.cmd == 'mapping-per-sample':
