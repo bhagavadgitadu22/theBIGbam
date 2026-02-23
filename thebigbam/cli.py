@@ -1,5 +1,4 @@
 import argparse
-import os
 import sys
 
 # Import command modules so we can share arg definitions and run functions
@@ -8,9 +7,6 @@ from thebigbam.utils import (
 )
 from thebigbam.database import add_variable, calculating_data, export_data
 from thebigbam.plotting import start_bokeh_server
-
-# Path helpers
-BASE_DIR = os.path.dirname(__file__)
 
 SCRIPTS = {
     'calculate': "Run feature calculations over alignment files",

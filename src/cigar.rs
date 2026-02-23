@@ -69,139 +69,6 @@ impl CigarOp {
         )
     }
 
-    /// Check if this operation consumes the query (read sequence).
-    ///
-    /// "Consumes query" means we advance along the read sequence.
-    /// Used for calculating read length and sequence positions.
-    #[inline]
-    pub fn consumes_query(&self) -> bool {
-        matches!(
-            self,
-            Self::Match | Self::Insertion | Self::SoftClip | Self::SeqMatch | Self::SeqMismatch
-        )
-    }
-}
-
-// ============================================================================
-// CIGAR ELEMENT (SINGLE OPERATION WITH LENGTH)
-// ============================================================================
-
-/// A single CIGAR operation with its length.
-///
-/// For example, in "50M2I30M":
-/// - First element: CigarElement { op: Match, len: 50 }
-/// - Second element: CigarElement { op: Insertion, len: 2 }
-/// - Third element: CigarElement { op: Match, len: 30 }
-#[derive(Clone, Copy, Debug)]
-pub struct CigarElement {
-    pub op: CigarOp,  // The operation type (M, I, D, etc.)
-    pub len: u32,     // Number of bases this operation covers
-}
-
-impl CigarElement {
-    /// Create from raw (op_char, length) tuple as returned by rust-htslib.
-    ///
-    /// # Rust Concept: Option::map()
-    /// `option.map(|x| transform(x))` transforms the inner value if Some,
-    /// leaves None unchanged. Like: `x.map(f)` == `if x.is_some() { Some(f(x.unwrap())) } else { None }`
-    #[inline]
-    pub fn from_raw(op: u32, len: u32) -> Option<Self> {
-        // If from_u32 returns Some(op), transform it into Some(CigarElement)
-        CigarOp::from_u32(op).map(|op| Self { op, len })
-    }
-}
-
-// ============================================================================
-// COMPLETE CIGAR STRING
-// ============================================================================
-
-/// A complete CIGAR string as a sequence of elements.
-///
-/// # Rust Concept: Tuple Struct
-/// `struct Cigar(pub Vec<CigarElement>)` is a "tuple struct" - it's like a struct
-/// but with unnamed fields accessed by index (self.0). Used when there's only
-/// one field and we want a distinct type for type safety.
-///
-/// # Rust Concept: Default Trait
-/// `#[derive(Default)]` gives us `Cigar::default()` which returns an empty Cigar.
-/// Useful for initializing before filling with data.
-#[derive(Clone, Debug, Default)]
-pub struct Cigar(pub Vec<CigarElement>);
-
-impl Cigar {
-    /// Create from raw tuples of (op_char, length) as returned by rust-htslib.
-    ///
-    /// # Rust Concept: filter_map()
-    /// `filter_map` combines filter and map: it takes a closure returning Option,
-    /// keeps only the Some values, and unwraps them. Invalid operations are silently skipped.
-    pub fn from_raw(raw: &[(u32, u32)]) -> Self {
-        Self(
-            raw.iter()
-                .filter_map(|&(op, len)| CigarElement::from_raw(op, len))
-                .collect(),
-        )
-    }
-
-    /// Check if empty (no CIGAR operations).
-    #[inline]
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()  // self.0 accesses the inner Vec
-    }
-
-    /// Get the first operation (or None if empty).
-    ///
-    /// # Rust Concept: Option<&T>
-    /// Returns a reference to the element, not a copy. We don't need ownership,
-    /// just to look at it. This avoids unnecessary copying.
-    #[inline]
-    pub fn first(&self) -> Option<&CigarElement> {
-        self.0.first()
-    }
-
-    /// Get the last operation (or None if empty).
-    #[inline]
-    pub fn last(&self) -> Option<&CigarElement> {
-        self.0.last()
-    }
-
-    /// Check if the first operation is a clipping (soft or hard clip).
-    ///
-    /// # Rust Concept: method chaining with Option
-    /// `.map(|e| ...)` transforms Some(element) -> Some(bool)
-    /// `.unwrap_or(false)` extracts the bool, defaulting to false if None
-    #[inline]
-    pub fn starts_with_clipping(&self) -> bool {
-        self.first().map(|e| e.op.is_clipping()).unwrap_or(false)
-    }
-
-    /// Check if the last operation is a clipping.
-    #[inline]
-    pub fn ends_with_clipping(&self) -> bool {
-        self.last().map(|e| e.op.is_clipping()).unwrap_or(false)
-    }
-
-    /// Check if an end starts with a match (not clipped, not insertion).
-    ///
-    /// This is used for PhageTerm analysis: we want to know if the read actually
-    /// aligns at its start/end position, or if it's clipped/inserted there.
-    ///
-    /// `at_start`: if true, check the first op; if false, check the last op.
-    pub fn starts_with_match(&self, at_start: bool) -> bool {
-        let elem = if at_start { self.first() } else { self.last() };
-        match elem {
-            Some(e) => !matches!(e.op, CigarOp::SoftClip | CigarOp::HardClip | CigarOp::Insertion),
-            None => false,
-        }
-    }
-
-    /// Iterate over operations.
-    ///
-    /// # Rust Concept: impl Iterator
-    /// `-> impl Iterator<Item = &CigarElement>` means "returns something that
-    /// implements Iterator". The caller doesn't need to know the exact type.
-    pub fn iter(&self) -> impl Iterator<Item = &CigarElement> {
-        self.0.iter()
-    }
 }
 
 // ============================================================================
@@ -290,14 +157,6 @@ impl<'a> MdTag<'a> {
     /// This returns an iterator that computes positions on-demand.
     /// We don't allocate a vector of all mismatches upfront - we yield
     /// them one at a time as the caller iterates. Memory efficient!
-    pub fn mismatch_positions(&self) -> MdMismatchIter<'a> {
-        MdMismatchIter {
-            bytes: self.bytes,
-            pos: 0,           // Current position in byte slice
-            ref_offset: 0,    // Current position along reference
-        }
-    }
-
     /// Iterate over mismatch positions normalized to circular genome.
     ///
     /// For circular genomes, positions wrap around using modulo.
@@ -398,102 +257,12 @@ impl<'a> Iterator for MdMismatchNormalizedIter<'a> {
     }
 }
 
-/// Iterator over mismatch positions in an MD tag.
-///
-/// Unlike the normalized version, this yields absolute offsets from read start,
-/// along with the reference base that was mismatched.
-pub struct MdMismatchIter<'a> {
-    bytes: &'a [u8],
-    pos: usize,
-    ref_offset: usize,
-}
-
-impl<'a> Iterator for MdMismatchIter<'a> {
-    // Yields (offset_from_read_start, reference_base) for each mismatch
-    type Item = (usize, u8);
-
-    fn next(&mut self) -> Option<Self::Item> {
-        while self.pos < self.bytes.len() {
-            let c = self.bytes[self.pos];
-
-            if c.is_ascii_digit() {
-                // Parse match run - skip matching bases
-                let mut num = 0usize;
-                while self.pos < self.bytes.len() && self.bytes[self.pos].is_ascii_digit() {
-                    num = num * 10 + (self.bytes[self.pos] - b'0') as usize;
-                    self.pos += 1;
-                }
-                self.ref_offset += num;
-            } else if c == b'^' {
-                // Skip deletion bases
-                self.pos += 1;
-                while self.pos < self.bytes.len() && self.bytes[self.pos].is_ascii_uppercase() {
-                    self.ref_offset += 1;
-                    self.pos += 1;
-                }
-            } else if c.is_ascii_uppercase() {
-                // Mismatch found - yield position and the reference base
-                let offset = self.ref_offset;
-                let base = c;  // The base is what the reference had
-                self.ref_offset += 1;
-                self.pos += 1;
-                return Some((offset, base));
-            } else {
-                self.pos += 1;
-            }
-        }
-        None
-    }
-}
-
-// ============================================================================
-// HELPER FUNCTIONS
-// ============================================================================
-
-/// Helper to check if a read starts/ends with a match based on CIGAR and MD tag.
-///
-/// # Bioinformatics Context
-/// For PhageTerm analysis, we need to know if a read truly aligns at its
-/// start/end position. A read might report position 100, but if it starts
-/// with soft clipping or a mismatch, position 100 isn't actually aligned.
-///
-/// This function checks BOTH:
-/// 1. CIGAR says it starts with M/=/X (not S/H/I)
-/// 2. MD tag confirms the first/last base is a match (not mismatch)
-pub fn has_match_at_position(cigar: &Cigar, md: Option<&[u8]>, at_start: bool) -> bool {
-    // Step 1: Check CIGAR - must not start with clip/insertion
-    if !cigar.starts_with_match(at_start) {
-        return false;
-    }
-
-    // Step 2: If MD tag exists, verify it also indicates a match
-    // Rust Concept: Pattern matching with guards
-    // `Some(bytes) if !bytes.is_empty()` only matches if Some AND condition is true
-    match md {
-        Some(bytes) if !bytes.is_empty() => {
-            let md_tag = MdTag::new(bytes);
-            if at_start {
-                md_tag.has_match_at_start()
-            } else {
-                md_tag.has_match_at_end()
-            }
-        }
-        Some(_) => false, // Empty MD tag - can't confirm match
-        None => false,    // No MD tag - can't confirm match
-    }
-}
-
 // ============================================================================
 // RAW CIGAR HELPERS (ZERO-ALLOCATION)
 // ============================================================================
 // These functions work directly with rust-htslib's raw CIGAR format: &[(u32, u32)]
-// where each tuple is (operation_char, length). This avoids allocating our
-// CigarElement structs when we just need quick checks.
-//
-// # Performance Optimization
-// The typed Cigar struct above is cleaner but requires allocation.
-// These "raw" helpers operate on slices directly - zero allocation.
-// In hot paths (called millions of times), this matters!
+// where each tuple is (operation_char, length). They operate on slices directly
+// with zero allocation, which matters in hot paths (called millions of times).
 
 /// Check if raw CIGAR starts/ends with a match (no clipping/insertion).
 ///

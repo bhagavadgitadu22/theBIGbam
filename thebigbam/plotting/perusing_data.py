@@ -1,6 +1,3 @@
-from bokeh.models import Div, ColumnDataSource, DataTable, TableColumn
-
-
 ## Function to generate HTML and open in new browser window
 def generate_and_open_peruse_html(conn, contig_name, sample_names):
     """Generate HTML summary and open in new browser window.
@@ -448,55 +445,3 @@ def generate_summary_table_html(data, column_list):
     
     return "\n".join(html_parts)
 
-## Helper function to generate summary table (Bokeh DataTable - kept for compatibility)
-def generate_summary_table(data, column_list):
-    """Create Bokeh DataTable from data dict with specified columns.
-
-    Args:
-        data: Dict with column names as keys and lists of values
-        column_list: List of column names to include (Sample is always prepended)
-
-    Returns:
-        Bokeh DataTable widget, or None if no data columns exist
-    """
-    # Filter to columns that exist in data
-    available_cols = ["Sample"] + [col for col in column_list if col in data]
-    if len(available_cols) <= 1:  # Only Sample column
-        return None
-
-    # Round float values to 2 significant figures
-    formatted_data = {}
-    for col in available_cols:
-        formatted_data[col] = [round_to_n_sigfigs(v, 2) for v in data[col]]
-
-    source = ColumnDataSource(formatted_data)
-
-    # Create TableColumn for each column with width based on max content length
-    columns = []
-    for col in available_cols:
-        title = column_list.get(col, col) if col != "Sample" else "Sample"
-        # Find max length across title and all values
-        max_len = len(title)
-        for val in formatted_data[col]:
-            if val is not None:
-                max_len = max(max_len, len(str(val)))
-        # Calculate width (~8px per character + padding)
-        width = max_len * 8
-        columns.append(TableColumn(field=col, title=title, width=width))
-
-    # Calculate height based on number of rows (header ~30px + ~25px per row)
-    num_rows = len(data["Sample"])
-    table_height = 30 + (num_rows * 25)
-
-    table = DataTable(
-        source=source,
-        columns=columns,
-        sortable=True,
-        reorderable=True,
-        index_position=None,
-        autosize_mode="none",
-        sizing_mode="stretch_width",
-        height=table_height
-    )
-
-    return table

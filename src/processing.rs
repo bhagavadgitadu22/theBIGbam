@@ -366,7 +366,7 @@ fn merge_sequences_from_fasta(contigs: &mut [ContigInfo], fasta_path: &Path) -> 
 /// Run autoblast (self-BLAST) on contigs that have sequence data.
 /// Uses rayon for per-contig parallelization.
 /// If blastn is not on PATH, prints a warning and returns empty vec.
-fn run_autoblast(contigs: &[ContigInfo], threads: usize) -> Result<Vec<RepeatsData>> {
+fn run_autoblast(contigs: &[ContigInfo], _threads: usize) -> Result<Vec<RepeatsData>> {
     // Filter contigs that have sequence data
     let contigs_with_seq: Vec<&ContigInfo> = contigs.iter().filter(|c| c.sequence.is_some()).collect();
     if contigs_with_seq.is_empty() {
@@ -386,10 +386,6 @@ fn run_autoblast(contigs: &[ContigInfo], threads: usize) -> Result<Vec<RepeatsDa
     eprintln!("\n### Running autoblast on {} contigs with sequences...", contigs_with_seq.len());
 
     // Use rayon to parallelize across contigs
-    let _pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(threads)
-        .build();
-
     let all_repeats: Vec<Vec<RepeatsData>> = contigs_with_seq
         .par_iter()
         .filter_map(|contig| {
@@ -623,8 +619,6 @@ fn add_features_from_arrays(
     // Assemblycheck features
     let mut left_clip_runs: Vec<Run> = Vec::new();
     let mut right_clip_runs: Vec<Run> = Vec::new();
-    let mut _insertion_runs: Vec<Run> = Vec::new();
-    let mut _mismatch_runs: Vec<Run> = Vec::new();
     if flags.mapping_metrics || flags.phagetermini {
         // Clippings and insertions with statistics
         let left_clip_counts: Vec<f64> = arrays.left_clipping_lengths.iter().map(|v| v.len() as f64).collect();
@@ -677,7 +671,7 @@ fn add_features_from_arrays(
                 var.sqrt()
             }
         }).collect();
-        _insertion_runs = add_compressed_feature_with_stats(&insertion_counts, &insertion_means, &insertion_medians, &insertion_stds,
+        let _ = add_compressed_feature_with_stats(&insertion_counts, &insertion_means, &insertion_medians, &insertion_stds,
             Some(&primary_reads_f64), "insertions", contig_name, config, output);
 
         // Other mapping metrics features (no statistics)
@@ -702,7 +696,7 @@ fn add_features_from_arrays(
         }));
 
         let mismatches_f64: Vec<f64> = arrays.mismatches.iter().map(|&x| x as f64).collect();
-        _mismatch_runs = add_compressed_feature_with_reference(&mismatches_f64, Some(&primary_reads_f64), "mismatches", contig_name, config, output);
+        let _ = add_compressed_feature_with_reference(&mismatches_f64, Some(&primary_reads_f64), "mismatches", contig_name, config, output);
 
         // --- Compute dominant bases/sequences and attach to compressed runs ---
         let threshold = config.bar_ratio * 0.01; // Convert percentage to fraction

@@ -3,8 +3,6 @@
 This module contains functions for exporting data from the theBIGbam database
 to CSV files. Returns CSV content as strings for browser download.
 """
-import io
-import csv
 
 
 def make_safe_filename(name):

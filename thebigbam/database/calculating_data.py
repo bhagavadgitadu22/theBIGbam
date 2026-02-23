@@ -1,5 +1,4 @@
 import argparse, sys, os
-import duckdb
 from pathlib import Path
 from multiprocessing import cpu_count
 

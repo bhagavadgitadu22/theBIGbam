@@ -1,5 +1,4 @@
 from pathlib import Path
-import shutil
 
 from Bio import SeqIO
 
@@ -10,30 +9,11 @@ def _double_fasta(in_path: Path, out_path: Path) -> None:
             rec.seq = rec.seq + rec.seq
             SeqIO.write(rec, fh, "fasta")
 
-def map_with_mapper(assembly_file: Path, output_file: Path) -> None:
-    """Run mapper + samtools pipeline and produce final indexed BAM at `output_file`.
-
-    This function expects `minimap2` and `samtools` to be on PATH.
-    """
-    for exe in ("minimap2", "samtools"):
-        if shutil.which(exe) is None:
-            raise FileNotFoundError(f"Required executable not found on PATH: {exe}")
-
-    assembly = Path(assembly_file)
-    if not assembly.exists():
-        raise FileNotFoundError(f"Assembly file not found: {assembly}")
-
-    _double_fasta(assembly, output_file)
-    print(f"Circular mapping: created doubled assembly at {output_file}", flush=True)
-
-def add_args(parser):
-    parser.add_argument('-a', '--assembly', required=True, help='Reference assembly to map against (fasta file)')
-    parser.add_argument('-o', '--output', required=True, help='Output BAM path (will be written)')
-
 if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description="Double fasta sequences for circular mapping")
-    add_args(parser)
+    parser.add_argument('-a', '--assembly', required=True, help='Reference assembly to map against (fasta file)')
+    parser.add_argument('-o', '--output', required=True, help='Output BAM path (will be written)')
     args = parser.parse_args()
     _double_fasta(Path(args.assembly), Path(args.output))

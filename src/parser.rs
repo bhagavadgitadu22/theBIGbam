@@ -531,7 +531,7 @@ pub fn parse_fasta(path: &Path) -> Result<Vec<(String, Vec<u8>)>> {
 // ============================================================================
 
 /// Compute the reverse complement of a DNA sequence.
-pub fn reverse_complement(dna: &[u8]) -> Vec<u8> {
+fn reverse_complement(dna: &[u8]) -> Vec<u8> {
     dna.iter()
         .rev()
         .map(|&b| match b {
@@ -546,7 +546,7 @@ pub fn reverse_complement(dna: &[u8]) -> Vec<u8> {
 
 /// Translate a DNA sequence to protein using the standard genetic code.
 /// Handles partial codons at the end by ignoring them.
-pub fn translate_dna(dna: &[u8]) -> String {
+fn translate_dna(dna: &[u8]) -> String {
     let mut protein = String::with_capacity(dna.len() / 3 + 1);
     for codon in dna.chunks(3) {
         if codon.len() < 3 {
