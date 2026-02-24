@@ -134,9 +134,7 @@ These features count where reads start and end, which can reveal DNA packaging c
 
 ## Genome module
 
-TODO: if only assembly file repeats ok
-
-Features describing intrinsic genomic properties, independent of sequencing data.
+Features describing intrinsic genomic properties, independent of sequencing data. These are computed when an annotation file (`-g`) or assembly file (`-a`) is provided.
 
 | Subplot | Feature          | Description                                                                                                                                                                                 | Use case                                                                                                                                                          |
 | ------- | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -156,5 +154,3 @@ Features describing intrinsic genomic properties, independent of sequencing data
 
 - [Assembly Check Metrics](ASSEMBLY_CHECK.md) - Filtering metrics based on these features
 - [Phage Packaging](PHAGE_PACKAGING.md) - How packaging mechanisms are detected from terminus patterns
-
-This document describes all features computed by theBIGbam and stored in the DuckDB database. Features are organized by **module** and **subplot** as they appear in the visualization interface.

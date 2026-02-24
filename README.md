@@ -37,7 +37,6 @@ thebigbam calculate \
  -g tests/HK97/HK97_GCF_000848825.1_pharokka.gbk \
  -b tests/HK97/ \
  -o tests/HK97/test.db \
- --circular \
  -t 2
 ```
 
@@ -71,22 +70,29 @@ A genbank file containing annotations of your contigs of interest can also be pr
 Calculate command takes at least a directory of mapping files (-b) and an output path for the database (-o):
 
 ```sh
-thebigbam calculate -b examples/inputs/HK97/bams --circular -g examples/inputs/HK97/HK97_GCF_000848825.1_pharokka.gbk --annotation_tool pharokka -m "Coverage","Misalignment"-o examples/outputs/HK97/HK97.db -t 4 
+thebigbam calculate \
+  -b examples/inputs/HK97/bams \
+  -g examples/inputs/HK97/HK97_GCF_000848825.1_pharokka.gbk \
+  -m "Coverage,Misalignment" \
+  -o examples/outputs/HK97/HK97.db \
+  -t 4
 ```
 
 Here several optional parameters are added:
 
-- --circular is necessary if the mapping files were generated using the --circular option of the tool
+- -g option to provide an annotation file (GenBank `.gbk`/`.gbff` or GFF3 `.gff` format)
 
-- -g option to provide an annotation file (GENBANK .gbk extension)
-
-- --annotation_tool to specify the bioinformatic tool used to generate the annotation file: it is used to color the genes on the genome track during the visualization
+- -m option to select which modules to compute (comma-separated). If omitted, all modules are computed
 
 - -t option to specify the number of threads available to speed up computation
 
+- -s / --sequencing_type to force the sequencing type (`long`, `paired-short`, or `single-short`). If omitted, it is auto-detected per sample from BAM flags
+
+**Note:** If your BAM files were generated using `thebigbam mapping-per-sample --circular`, the circular mapping information is automatically detected from the BAM headers during `calculate` — no additional flag is needed.
+
 ### What input files do I need?
 
-TODO: allow only genbank file without mapping files
+You need at least one of the following: BAM mapping files (`-b`) or an annotation file (`-g`). If only an annotation file is provided, contig-level data (annotations, GC content, repeats) is populated without any sample-level mapping features.
 
 #### Mapping files:
 
@@ -108,13 +114,13 @@ samtools calmd -b example.sorted.bam ref.fasta > example.sorted.md.bam
 
 Alternatively, if you do not have sorted mapping files with MD tags (.bam extension), you can generate them using the scripts provided in [the preprocessing section](docs/PREPROCESSING.md). The mapping scripts use a modified version of the standard mapper (minimap2) to allow for seamless circular mapping. 
 
-**Warning:** If you use those mapping scripts with the --circular option, do not forget to specify the --circular flag as well when computing the database.
+**Note:** If you use those mapping scripts with the `--circular` option, the circular mapping information is embedded in the BAM file headers and will be automatically detected during `calculate`.
 
 #### Annotation file:
 
 **Parameter (optional, strongly recommended):** --genbank FILE, short-version -g
 
-Annotation assembly file should be a GENBANK file (.gbk extension) made with the tool of your choice: bakta for bacteria, pharokka or phold for phages, eggnog-mapper, etc.
+Annotation file should be in GenBank (`.gbk`, `.gbff`, `.gb`) or GFF3 (`.gff`, `.gff3`) format, made with the tool of your choice: bakta for bacteria, pharokka or phold for phages, eggnog-mapper, etc.
 
 ### Which features can I calculate?
 
@@ -140,7 +146,7 @@ A more detailed explanation of the modules and the features it contains is avail
 
 Discarding the reads to only keep the main features of the mappings (like the coverage per position) already allows the DuckDB database to be way lighter than the original BAM file. The database itself is also structured to be as light as possible. 
 
-First, the database is organised per contig per sample (qualified as a contig/sample pair thereafter). Only pairs relative to a contig present in a sample are stored in the database. The definition of a presence can be tweaked via two parameters: **--min_aligned_fraction** controls the minimum percentage of positions that received reads (default 50%, meaning a contig is considered present only if more than half of it received reads), and **--min_coverage_depth** sets the minimum mean coverage depth required for contig inclusion (default 5×), filtering out contigs with very low depth that produce noisy signals.
+First, the database is organised per contig per sample (qualified as a contig/sample pair thereafter). Only pairs relative to a contig present in a sample are stored in the database. The definition of a presence can be tweaked via two parameters: **--min_aligned_fraction** controls the minimum percentage of positions that received reads (default 50%, meaning a contig is considered present only if more than half of it received reads), and **--min_coverage_depth** sets the minimum mean coverage depth required for contig inclusion (default 0, i.e. disabled — set to e.g. 5 to filter out contigs with very low depth that produce noisy signals).
 
 To further reduce the size of the database, values per feature are compressed rather than saving all positions. The type of compression depends on the type of plots:
 
@@ -152,7 +158,7 @@ To further reduce the size of the database, values per feature are compressed ra
   
   Contig features use a separate parameter with a lower default value because only one value needs to be computed per contig and per position (O(n²)), whereas mapping features require computing one value per contig, per position, and per sample in which the contig is present (O(n³)).
 
-- Only positions with values above a defined percentage of the local coverage are retained for Bar plots (Misalignment and Phage termini module except for "Coverage reduced" feature). For each position, values are compared to the local coverage and discarded if they fall below the **--compress_ratio** threshold (default 10% ie 0.1), ensuring that only meaningful peaks are preserved.
+- Only positions with values above a defined percentage of the local coverage are retained for Bar plots (Misalignment and Phage termini module except for "Coverage reduced" feature). For each position, values are compared to the local coverage and discarded if they fall below the **--coverage_percentage** threshold (default 10%), ensuring that only meaningful peaks are preserved.
 
 The output is a DuckDB database that is typically ~100× smaller than the original BAM files, while retaining the essential characteristics of the mapping data.
 
@@ -163,9 +169,7 @@ Once the database has been computed, it can be visualized interactively using `t
 Example command:
 
 ```bash
-# the copy-paste of the file is necessary in my windows setup to avoid issues
-cp examples/outputs/HK97/HK97.db ~/HK97.db
-thebigbam serve --db ~/HK97.db --port 5006
+thebigbam serve --db examples/outputs/HK97/HK97.db --port 5006
 ```
 
 When accessing the web server (http://localhost:5006), you will be presented with a web interface:
@@ -182,9 +186,7 @@ You are initially in the **One Sample** mode, which allows exploration of all co
 
 - **Filtering**: Only pairs of contig/samples matching the selected filters are available in the **Contigs** and **Samples** sections. For instance, if the contig length filter is set to >10 kbp, only contigs longer than this threshold will appear in the **Contigs** section, and only samples containing at least one such contig will appear in the **Samples** section. To consult the list of filters available have a look at [the filtering page](docs/FILTERS.md)
 
-- **Contigs**: Select the contig you want to explore. If a GenBank file was provided when creating the database, genomic features can be selected for plotting by clicking on the contig features. Currently, gene maps and repeats are supported
-
-TODO: update list of features available and explain contigs part with figure
+- **Contigs**: Select the contig you want to explore. If an annotation file was provided when creating the database, genomic features (gene maps, repeats, GC content, GC skew) can be selected for plotting by clicking on the contig features
 
 - **Samples**: Select the sample you want to explore
 
@@ -195,8 +197,6 @@ Finally, click **Apply** to visualize the requested features for the selected co
 #### All Samples mode
 
 **All Samples** mode enables comparison of a specific feature across multiple samples. Compared to the **One Sample** mode, the **Samples** section is omitted, and only a single feature can be selected in the **Variables** section.
-
-TODO: add Contigs only mode as a simpler mode
 
 ### Plotting
 
@@ -229,8 +229,6 @@ For features that depend on local coverage depth (clippings, indels, mismatches,
 
 This normalization reveals whether anomalies are proportional to coverage (expected sequencing noise) or represent true biological signal or assembly errors that persist regardless of depth.
 
-TODO: add image with zoom on the tools, explain the download possibilities as well
-
 ---
 
 ## Additional utilities
@@ -241,4 +239,14 @@ Consult the [PREPROCESSING.md](docs/PREPROCESSING.md) for additional scripts to 
 
 ### Database maintenance
 
-Consult [DATABASE.md](docs/DATABASE.md) for instructions on how to read and modify your database after its initial creation. 
+Consult [DATABASE.md](docs/DATABASE.md) for instructions on how to read and modify your database after its initial creation.
+
+### Exporting data
+
+Export any metric as a contig x sample TSV matrix:
+
+```bash
+thebigbam export -d my_database.db --metric Coverage_mean -o coverage.tsv
+```
+
+Run `thebigbam export -h` to see the full list of available metrics.

@@ -8,7 +8,7 @@ theBIGbam is a hybrid Python/Rust tool that combines fast Rust-based BAM process
 
 ## Detailed Installation
 
-### Step 1: Install Rust 1.7+
+### Step 1: Install Rust 1.70+
 
 Rust is needed to compile the fast calculation engine. This is a one-time setup.
 
@@ -31,10 +31,6 @@ source $HOME/.cargo/env  # Add Rust to your PATH
 rustc --version
 cargo --version
 ```
-
-TODO: if not works possibly you need rustup default stable from the theBIGbam root?
-sudo apt install -y clang libclang-dev
-module load llvm was enough to make it work for me
 
 ### Step 2: Install Python 3.9+
 
@@ -109,7 +105,6 @@ thebigbam calculate \
   -g tests/HK97/HK97_GCF_000848825.1_pharokka.gbk \
   -b tests/HK97/ \
   -o tests/HK97/test.db \
-  --circular \
   -t 2
 
 # Visualize interactively the test data
@@ -121,8 +116,9 @@ thebigbam serve --db tests/HK97/test.db --port 5006
 
 **"rust-htslib" compilation errors:**
 
-- On Linux: Install development headers: `sudo apt-get install libbz2-dev liblzma-dev zlib1g-dev`
+- On Linux: Install development headers: `sudo apt-get install libbz2-dev liblzma-dev zlib1g-dev clang libclang-dev`
 - On macOS: `brew install xz bzip2 zlib`
+- On HPC clusters: you may need to load the LLVM module first: `module load llvm`
 
 **"maturin: command not found" or build fails:**
 

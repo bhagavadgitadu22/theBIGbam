@@ -309,6 +309,130 @@ def remove_contig_metadata(db_path, colname):
     print(f"Removed column '{colname}' from Contig table.")
 
 
+def _table_exists(conn, table_name):
+    """Check if a table exists in the database."""
+    return conn.execute(
+        "SELECT 1 FROM information_schema.tables WHERE table_name = ?", [table_name]
+    ).fetchone() is not None
+
+
+def _delete_from(conn, table_name, column, value):
+    """Delete rows from a table if it exists. Returns number of deleted rows."""
+    if not _table_exists(conn, table_name):
+        return 0
+    count = conn.execute(
+        f'SELECT COUNT(*) FROM "{table_name}" WHERE "{column}" = ?', [value]
+    ).fetchone()[0]
+    if count > 0:
+        conn.execute(f'DELETE FROM "{table_name}" WHERE "{column}" = ?', [value])
+    return count
+
+
+def _get_feature_tables(conn):
+    """Get all feature table names from the Variable table."""
+    if not _table_exists(conn, 'Variable'):
+        return []
+    return [
+        r[0] for r in conn.execute(
+            "SELECT Feature_table_name FROM Variable WHERE Feature_table_name IS NOT NULL"
+        ).fetchall()
+    ]
+
+
+def _table_has_column(conn, table_name, column_name):
+    """Check if a table has a specific column."""
+    cols = [r[0] for r in conn.execute(f'DESCRIBE "{table_name}"').fetchall()]
+    return column_name in cols
+
+
+def remove_sample(db_path, sample_name):
+    """Remove a sample and all its associated data from the database."""
+    conn = duckdb.connect(db_path)
+
+    if not _table_exists(conn, 'Sample'):
+        conn.close()
+        print("No Sample table in database (genbank-only mode).")
+        return
+
+    row = conn.execute(
+        "SELECT Sample_id FROM Sample WHERE Sample_name = ?", [sample_name]
+    ).fetchone()
+    if row is None:
+        conn.close()
+        print(f"Error: sample '{sample_name}' not found in database.")
+        return
+    sample_id = row[0]
+
+    # Delete PhageTermini via PhageMechanisms packaging IDs
+    if _table_exists(conn, 'PhageMechanisms') and _table_exists(conn, 'PhageTermini'):
+        conn.execute(
+            "DELETE FROM PhageTermini WHERE Packaging_id IN "
+            "(SELECT Packaging_id FROM PhageMechanisms WHERE Sample_id = ?)",
+            [sample_id],
+        )
+
+    # Delete from all fixed tables that reference Sample_id
+    for table in [
+        'PhageMechanisms', 'Coverage', 'Misassembly', 'Microdiversity',
+        'Side_misassembly', 'Topology',
+    ]:
+        _delete_from(conn, table, 'Sample_id', sample_id)
+
+    # Delete from dynamic feature tables
+    for ft in _get_feature_tables(conn):
+        if _table_exists(conn, ft) and _table_has_column(conn, ft, 'Sample_id'):
+            _delete_from(conn, ft, 'Sample_id', sample_id)
+
+    # Delete the sample row itself
+    conn.execute("DELETE FROM Sample WHERE Sample_id = ?", [sample_id])
+    conn.close()
+    print(f"Removed sample '{sample_name}' and all associated data.")
+
+
+def remove_contig(db_path, contig_name):
+    """Remove a contig and all its associated data from the database."""
+    conn = duckdb.connect(db_path)
+
+    row = conn.execute(
+        "SELECT Contig_id FROM Contig WHERE Contig_name = ?", [contig_name]
+    ).fetchone()
+    if row is None:
+        conn.close()
+        print(f"Error: contig '{contig_name}' not found in database.")
+        return
+    contig_id = row[0]
+
+    # Delete PhageTermini via PhageMechanisms packaging IDs
+    if _table_exists(conn, 'PhageMechanisms') and _table_exists(conn, 'PhageTermini'):
+        conn.execute(
+            "DELETE FROM PhageTermini WHERE Packaging_id IN "
+            "(SELECT Packaging_id FROM PhageMechanisms WHERE Contig_id = ?)",
+            [contig_id],
+        )
+
+    # Delete from all fixed tables that reference Contig_id
+    for table in [
+        'PhageMechanisms', 'Coverage', 'Misassembly', 'Microdiversity',
+        'Side_misassembly', 'Topology',
+        'Contig_sequence', 'Contig_annotation',
+        'Contig_directRepeats', 'Contig_invertedRepeats',
+        'Contig_GCContent', 'Contig_GCSkew',
+        'Contig_direct_repeat_count', 'Contig_inverted_repeat_count',
+        'Contig_direct_repeat_identity', 'Contig_inverted_repeat_identity',
+    ]:
+        _delete_from(conn, table, 'Contig_id', contig_id)
+
+    # Delete from dynamic feature tables
+    for ft in _get_feature_tables(conn):
+        if _table_exists(conn, ft) and _table_has_column(conn, ft, 'Contig_id'):
+            _delete_from(conn, ft, 'Contig_id', contig_id)
+
+    # Delete the contig row itself
+    conn.execute("DELETE FROM Contig WHERE Contig_id = ?", [contig_id])
+    conn.close()
+    print(f"Removed contig '{contig_name}' and all associated data.")
+
+
 def main(argv=None):
     import argparse
 

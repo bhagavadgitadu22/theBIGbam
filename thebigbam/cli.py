@@ -22,6 +22,8 @@ SCRIPTS = {
     'list-contigs': 'List contigs from DB',
     'list-sample-metadata': 'List user-added metadata columns on Sample table',
     'list-contig-metadata': 'List user-added metadata columns on Contig table',
+    'remove-sample': 'Remove a sample and all its data from DB',
+    'remove-contig': 'Remove a contig and all its data from DB',
     'remove-sample-metadata': 'Remove a user-added metadata column from Sample table',
     'remove-contig-metadata': 'Remove a user-added metadata column from Contig table',
 
@@ -70,6 +72,14 @@ def build_argparser():
 
     sp = sub.add_parser('list-contig-metadata', help=SCRIPTS['list-contig-metadata'])
     sp.add_argument('-d', '--db', required=True)
+
+    sp = sub.add_parser('remove-sample', help=SCRIPTS['remove-sample'])
+    sp.add_argument('-d', '--db', required=True)
+    sp.add_argument('--name', required=True, help='Name of the sample to remove')
+
+    sp = sub.add_parser('remove-contig', help=SCRIPTS['remove-contig'])
+    sp.add_argument('-d', '--db', required=True)
+    sp.add_argument('--name', required=True, help='Name of the contig to remove')
 
     sp = sub.add_parser('remove-sample-metadata', help=SCRIPTS['remove-sample-metadata'])
     sp.add_argument('-d', '--db', required=True)
@@ -190,6 +200,24 @@ def main(argv=None):
             return 0
         except Exception as e:
             print(f"Error removing contig metadata: {e}")
+            return 2
+
+    if args.cmd == 'remove-sample':
+        try:
+            from thebigbam.database import database_getters
+            database_getters.remove_sample(args.db, args.name)
+            return 0
+        except Exception as e:
+            print(f"Error removing sample: {e}")
+            return 2
+
+    if args.cmd == 'remove-contig':
+        try:
+            from thebigbam.database import database_getters
+            database_getters.remove_contig(args.db, args.name)
+            return 0
+        except Exception as e:
+            print(f"Error removing contig: {e}")
             return 2
 
     # fallback

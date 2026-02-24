@@ -14,7 +14,7 @@ use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use rayon::prelude::*;
 use rust_htslib::bam::{IndexedReader, Read as BamRead};
 use rust_htslib::htslib;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -33,7 +33,7 @@ use crate::gc_content::{compute_gc_content, compute_gc_skew, GCParams};
 use crate::features::{CdsIndex, FeatureArrays, ModuleFlags, compute_codon_changes_from_summaries};
 use crate::parser::{parse_annotations, compute_annotation_sequences};
 use crate::types::{
-    ContigInfo, FeaturePoint, PackagingData, PlotType, PresenceData, SequencingType
+    ContigInfo, FeatureAnnotation, FeaturePoint, PackagingData, PlotType, PresenceData, SequencingType
 };
 
 use crate::processing_phage_packaging::{
@@ -1242,6 +1242,7 @@ pub fn run_all_samples(
     modules: &[String],
     config: &ProcessConfig,
     _create_indexes: bool, // Ignored - DuckDB uses zone maps instead of indexes
+    extend_db: &Path,
 ) -> Result<ProcessResult> {
     unsafe {
         htslib::hts_set_log_level(htslib::htsLogLevel_HTS_LOG_ERROR);
@@ -1261,6 +1262,7 @@ pub fn run_all_samples(
     eprintln!("\n### Parsing input files...");
 
     let has_genbank = !genbank_path.as_os_str().is_empty();
+    let is_extending = !extend_db.as_os_str().is_empty();
 
     // For BAM-only mode, do a quiet @CO-only scan for contig extraction (no log messages).
     // The full detection with logging happens once at step 5 below.
@@ -1303,8 +1305,113 @@ pub fn run_all_samples(
 
     std::thread::sleep(std::time::Duration::from_millis(50));
 
-    // 4. Create database, write annotations
-    let db_writer = DbWriter::create(output_db, &contigs, &annotations, !bam_files.is_empty())?;
+    // 4. Create or open database
+    // For extend mode: read existing contigs, determine new contigs, open existing DB
+    let (db_writer, new_contigs_for_blast) = if is_extending {
+        // Read existing contig names from the database
+        let existing_conn = duckdb::Connection::open(extend_db)
+            .with_context(|| format!("Failed to open existing database: {}", extend_db.display()))?;
+
+        let mut existing_contig_names: HashSet<String> = HashSet::new();
+        let mut existing_contigs: Vec<ContigInfo> = Vec::new();
+        {
+            let mut stmt = existing_conn.prepare("SELECT Contig_name, Contig_length FROM Contig")?;
+            let rows = stmt.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })?;
+            for row in rows {
+                let (name, length) = row?;
+                existing_contig_names.insert(name.clone());
+                existing_contigs.push(ContigInfo {
+                    name,
+                    length: length as usize,
+                    sequence: None,
+                });
+            }
+        }
+
+        // Detect if DB was created with annotations (genbank mode)
+        let db_has_annotations: bool = existing_conn
+            .query_row("SELECT COUNT(*) FROM Contig_annotation", [], |row| row.get::<_, i64>(0))
+            .unwrap_or(0) > 0;
+
+        drop(existing_conn);
+
+        // Determine new contigs based on DB origin mode
+        let new_contigs: Vec<ContigInfo>;
+        let mut new_annotations: Vec<FeatureAnnotation>;
+
+        if has_genbank {
+            // GenBank provided: filter to only NEW contig names
+            // Build parser contig_id → contig_name mapping (parser uses 1-based IDs)
+            let parser_id_to_name: HashMap<i64, String> = contigs.iter()
+                .enumerate()
+                .map(|(i, c)| ((i + 1) as i64, c.name.clone()))
+                .collect();
+            let new_contig_names: HashSet<String> = contigs.iter()
+                .filter(|c| !existing_contig_names.contains(&c.name))
+                .map(|c| c.name.clone())
+                .collect();
+            new_contigs = contigs.into_iter()
+                .filter(|c| new_contig_names.contains(&c.name))
+                .collect();
+            // Filter annotations to only new contigs, and remap contig_ids
+            // DbWriter::open will assign new IDs starting from max_contig_id + 1
+            // Build a mapping from new contig name → position in new_contigs vec
+            let new_contig_name_to_pos: HashMap<String, usize> = new_contigs.iter()
+                .enumerate()
+                .map(|(i, c)| (c.name.clone(), i))
+                .collect();
+            new_annotations = annotations.into_iter()
+                .filter(|a| {
+                    parser_id_to_name.get(&a.contig_id)
+                        .map(|name| new_contig_names.contains(name))
+                        .unwrap_or(false)
+                })
+                .collect();
+            // Remap contig_ids: use position+1 in new_contigs vec as temp IDs
+            // DbWriter::open will add max_contig_id offset
+            for ann in &mut new_annotations {
+                if let Some(name) = parser_id_to_name.get(&ann.contig_id) {
+                    if let Some(&pos) = new_contig_name_to_pos.get(name) {
+                        ann.contig_id = (pos + 1) as i64;
+                    }
+                }
+            }
+            if !new_contigs.is_empty() {
+                eprintln!("Found {} new contigs to add (filtered from {} total)", new_contigs.len(), new_contigs.len() + existing_contig_names.len());
+            }
+        } else if !db_has_annotations {
+            // BAM-only mode, DB was also BAM-only: auto-add new contigs from BAM headers
+            new_contigs = contigs.into_iter()
+                .filter(|c| !existing_contig_names.contains(&c.name))
+                .collect();
+            new_annotations = Vec::new();
+            if !new_contigs.is_empty() {
+                eprintln!("Found {} new contigs from BAM headers", new_contigs.len());
+            }
+        } else {
+            // BAM-only extend on genbank DB: no new contigs, process against existing only
+            new_contigs = Vec::new();
+            new_annotations = Vec::new();
+            eprintln!("No new contigs (genbank-mode database, no -g/-a provided)");
+        }
+
+        // Build all_contigs for BAM processing: existing + new
+        // Replace contigs vec with the combined list
+        contigs = existing_contigs;
+        for nc in &new_contigs {
+            contigs.push(nc.clone());
+        }
+        annotations = new_annotations.clone();
+
+        let writer = DbWriter::open(extend_db, &new_contigs, &new_annotations, !bam_files.is_empty())?;
+        (writer, new_contigs)
+    } else {
+        let new_contigs_for_blast = contigs.clone();
+        let writer = DbWriter::create(output_db, &contigs, &annotations, !bam_files.is_empty())?;
+        (writer, new_contigs_for_blast)
+    };
 
     // 5. Auto-detect circularity per sample (now with contigs available for length comparison)
     let circularity_map = if !bam_files.is_empty() {
@@ -1313,10 +1420,11 @@ pub fn run_all_samples(
         HashMap::new()
     };
 
-    // 6. If sequences available, run autoblast with rayon
-    let has_sequences = contigs.iter().any(|c| c.sequence.is_some());
+    // 6. If sequences available, run autoblast with rayon (only for new contigs in extend mode)
+    let blast_contigs = &new_contigs_for_blast;
+    let has_sequences = blast_contigs.iter().any(|c| c.sequence.is_some());
     let repeats = if has_sequences {
-        let reps = run_autoblast(&contigs, config.threads)?;
+        let reps = run_autoblast(blast_contigs, config.threads)?;
         if !reps.is_empty() {
             db_writer.write_repeats(&reps)?;
         }
@@ -1325,8 +1433,8 @@ pub fn run_all_samples(
         Vec::new()
     };
 
-    // 7. Compute and write GC content and GC skew from sequence data (if available)
-    let gc_data: Vec<GCContentData> = contigs
+    // 7. Compute and write GC content and GC skew from sequence data (only for new contigs)
+    let gc_data: Vec<GCContentData> = blast_contigs
         .iter()
         .filter_map(|contig| {
             contig.sequence.as_ref().map(|seq| {

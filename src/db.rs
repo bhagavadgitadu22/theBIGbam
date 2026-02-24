@@ -28,6 +28,7 @@ use crate::types::{feature_table_name, ContigInfo, FeatureAnnotation, FeaturePoi
 pub struct DbWriter {
     conn: Mutex<Connection>,
     has_bam: bool,
+    is_extend: bool,
     contig_name_to_id: HashMap<String, i64>,
     sample_name_to_id: Mutex<HashMap<String, i64>>,
     next_sample_id: Mutex<i64>,
@@ -78,10 +79,137 @@ impl DbWriter {
         Ok(Self {
             conn: Mutex::new(conn),
             has_bam,
+            is_extend: false,
             contig_name_to_id,
             sample_name_to_id: Mutex::new(HashMap::new()),
             next_sample_id: Mutex::new(1),
             created_tables: Mutex::new(HashSet::new()),
+        })
+    }
+
+    /// Open an existing database for extending with new samples/contigs.
+    pub fn open(
+        db_path: &Path,
+        new_contigs: &[ContigInfo],
+        new_annotations: &[FeatureAnnotation],
+        has_bam: bool,
+    ) -> Result<Self> {
+        let conn = Connection::open(db_path)
+            .with_context(|| format!("Failed to open database: {}", db_path.display()))?;
+
+        // Read existing contig name -> id mapping
+        let mut contig_name_to_id: HashMap<String, i64> = HashMap::new();
+        let mut max_contig_id: i64 = 0;
+        {
+            let mut stmt = conn.prepare("SELECT Contig_id, Contig_name FROM Contig")?;
+            let rows = stmt.query_map([], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })?;
+            for row in rows {
+                let (id, name) = row?;
+                if id > max_contig_id {
+                    max_contig_id = id;
+                }
+                contig_name_to_id.insert(name, id);
+            }
+        }
+
+        // Insert new contigs with IDs continuing from max
+        if !new_contigs.is_empty() {
+            let mut appender = conn.appender("Contig")
+                .context("Failed to create Contig appender")?;
+            for (i, contig) in new_contigs.iter().enumerate() {
+                let contig_id = max_contig_id + 1 + i as i64;
+                let null_int: Option<i32> = None;
+                appender.append_row(params![
+                    contig_id,
+                    &contig.name,
+                    contig.length as i64,
+                    null_int, null_int, null_int, null_int, null_int,
+                ])?;
+                contig_name_to_id.insert(contig.name.clone(), contig_id);
+            }
+            appender.flush().context("Failed to flush new Contig appender")?;
+
+            // Insert new contig sequences
+            insert_contig_sequences_with_offset(&conn, new_contigs, max_contig_id)?;
+
+            // Insert new annotations (remap contig_ids: parser uses 1-based, we offset by max_contig_id)
+            if !new_annotations.is_empty() {
+                let remapped: Vec<FeatureAnnotation> = new_annotations.iter().map(|a| {
+                    let mut ann = a.clone();
+                    ann.contig_id += max_contig_id;
+                    ann
+                }).collect();
+                insert_annotations(&conn, &remapped)?;
+                // Repopulate Annotated_types from full Contig_annotation table
+                conn.execute("DELETE FROM Annotated_types", [])?;
+                populate_annotated_types(&conn)?;
+            }
+
+            eprintln!("Extended database with {} new contigs", new_contigs.len());
+        }
+
+        // Read existing sample name -> id mapping
+        let mut sample_name_to_id: HashMap<String, i64> = HashMap::new();
+        let mut max_sample_id: i64 = 0;
+        {
+            let has_sample_table: bool = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'Sample'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )? > 0;
+            if has_sample_table {
+                let mut stmt = conn.prepare("SELECT Sample_id, Sample_name FROM Sample")?;
+                let rows = stmt.query_map([], |row| {
+                    Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+                })?;
+                for row in rows {
+                    let (id, name) = row?;
+                    if id > max_sample_id {
+                        max_sample_id = id;
+                    }
+                    sample_name_to_id.insert(name, id);
+                }
+            }
+        }
+
+        // Detect existing feature tables
+        let mut created_tables: HashSet<String> = HashSet::new();
+        {
+            let mut stmt = conn.prepare(
+                "SELECT table_name FROM information_schema.tables WHERE table_name LIKE 'Feature_%'"
+            )?;
+            let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+            for row in rows {
+                created_tables.insert(row?);
+            }
+        }
+
+        // Drop existing materialized tables and views (will be recreated in finalize)
+        for table in &[
+            "Contig_direct_repeat_count", "Contig_inverted_repeat_count",
+            "Contig_direct_repeat_identity", "Contig_inverted_repeat_identity",
+        ] {
+            conn.execute(&format!("DROP TABLE IF EXISTS {}", table), [])?;
+        }
+        for view in &[
+            "Explicit_coverage", "Explicit_misassembly", "Explicit_microdiversity",
+            "Explicit_side_misassembly", "Explicit_topology",
+            "Explicit_phage_mechanisms", "Explicit_phage_termini",
+        ] {
+            conn.execute(&format!("DROP VIEW IF EXISTS {}", view), [])?;
+        }
+
+        Ok(Self {
+            conn: Mutex::new(conn),
+            has_bam,
+            is_extend: true,
+            contig_name_to_id,
+            sample_name_to_id: Mutex::new(sample_name_to_id),
+            next_sample_id: Mutex::new(max_sample_id + 1),
+            created_tables: Mutex::new(created_tables),
         })
     }
 
@@ -729,11 +857,13 @@ impl DbWriter {
         let conn = self.conn.into_inner().unwrap();
         let created_tables = self.created_tables.into_inner().unwrap();
 
-        // Create derived views
+        // Create derived views (in extend mode, views were dropped in open())
         create_views(&conn, self.has_bam)?;
 
-        // Delete Variable entries for features without tables
-        cleanup_unused_variables(&conn, &created_tables)?;
+        if !self.is_extend {
+            // Delete Variable entries for features without tables (only for fresh DBs)
+            cleanup_unused_variables(&conn, &created_tables)?;
+        }
 
         // Drop empty module tables and their views (prevents empty UI sections)
         if self.has_bam {
@@ -750,6 +880,11 @@ impl DbWriter {
     /// Get the contig ID for a contig name.
     pub fn get_contig_id(&self, name: &str) -> Option<i64> {
         self.contig_name_to_id.get(name).copied()
+    }
+
+    /// Get all contig names currently in the database.
+    pub fn contig_names(&self) -> Vec<String> {
+        self.contig_name_to_id.keys().cloned().collect()
     }
 }
 
@@ -1191,6 +1326,27 @@ fn insert_contig_sequences(conn: &Connection, contigs: &[ContigInfo]) -> Result<
     Ok(())
 }
 
+/// Insert contig sequences for new contigs with an ID offset (for extend mode).
+fn insert_contig_sequences_with_offset(conn: &Connection, contigs: &[ContigInfo], id_offset: i64) -> Result<()> {
+    let mut appender = conn.appender("Contig_sequence")
+        .context("Failed to create Contig_sequence appender")?;
+
+    let mut count = 0;
+    for (i, contig) in contigs.iter().enumerate() {
+        if let Some(ref seq) = contig.sequence {
+            let seq_str = String::from_utf8_lossy(seq).into_owned();
+            appender.append_row(params![id_offset + 1 + i as i64, &seq_str])?;
+            count += 1;
+        }
+    }
+
+    appender.flush().context("Failed to flush Contig_sequence appender")?;
+    if count > 0 {
+        eprintln!("Stored sequences for {}/{} new contigs", count, contigs.len());
+    }
+    Ok(())
+}
+
 /// Insert the standard genetic code codon table (64 codons).
 fn insert_codon_table(conn: &Connection) -> Result<()> {
     let mut appender = conn.appender("Codon_table")
@@ -1468,7 +1624,7 @@ fn create_feature_table_if_needed(
 
     let table_sql = if has_stats && has_sequences {
         format!(
-            "CREATE TABLE {} (
+            "CREATE TABLE IF NOT EXISTS {} (
                 Contig_id INTEGER,
                 Sample_id INTEGER,
                 First_position INTEGER,
@@ -1484,7 +1640,7 @@ fn create_feature_table_if_needed(
         )
     } else if has_stats {
         format!(
-            "CREATE TABLE {} (
+            "CREATE TABLE IF NOT EXISTS {} (
                 Contig_id INTEGER,
                 Sample_id INTEGER,
                 First_position INTEGER,
@@ -1498,7 +1654,7 @@ fn create_feature_table_if_needed(
         )
     } else if has_sequences && has_codons {
         format!(
-            "CREATE TABLE {} (
+            "CREATE TABLE IF NOT EXISTS {} (
                 Contig_id INTEGER,
                 Sample_id INTEGER,
                 First_position INTEGER,
@@ -1514,7 +1670,7 @@ fn create_feature_table_if_needed(
         )
     } else if has_sequences {
         format!(
-            "CREATE TABLE {} (
+            "CREATE TABLE IF NOT EXISTS {} (
                 Contig_id INTEGER,
                 Sample_id INTEGER,
                 First_position INTEGER,
@@ -1527,7 +1683,7 @@ fn create_feature_table_if_needed(
         )
     } else {
         format!(
-            "CREATE TABLE {} (
+            "CREATE TABLE IF NOT EXISTS {} (
                 Contig_id INTEGER,
                 Sample_id INTEGER,
                 First_position INTEGER,

@@ -11,7 +11,7 @@ except ImportError:
     _rust = None
 
 
-def calculating_all_features_parallel(list_modules, bam_files, output_db, min_aligned_fraction, min_coverage_depth, curve_ratio, bar_ratio, contig_variation_percentage=0.1, n_sample_cores=None, sequencing_type=None, genbank_path=None, assembly_path=None):
+def calculating_all_features_parallel(list_modules, bam_files, output_db, min_aligned_fraction, min_coverage_depth, curve_ratio, bar_ratio, contig_variation_percentage=0.1, n_sample_cores=None, sequencing_type=None, genbank_path=None, assembly_path=None, extend_db=None):
     """Process all BAM files in parallel using Rust bindings."""
     if not HAS_RUST:
         sys.exit("ERROR: Rust bindings (thebigbam_rs) are required but not available. Please install them first.")
@@ -36,6 +36,7 @@ def calculating_all_features_parallel(list_modules, bam_files, output_db, min_al
             contig_variation_percentage=float(contig_variation_percentage),
             create_indexes=True,
             assembly_path=assembly_path if assembly_path else "",
+            extend_db=extend_db if extend_db else "",
         )
     except Exception as e:
         print(f"ERROR: Rust processing failed: {e}", flush=True)
@@ -60,12 +61,14 @@ def add_calculate_args(parser):
     parser.add_argument('--variation_percentage', type=float, default=50, help='Run-length encoding ratio for independent features like coverage (default: 50%%)')
     parser.add_argument('--coverage_percentage', type=float, default=10, help='Compressing ratio for features depending on coverage: only values above this %% of the local coverage are kept (default: 10%%)')
     parser.add_argument('--contig_variation_percentage', type=float, default=10, help='Run-length encoding ratio for contig-level features like GC content (default: 10%%)')
+    parser.add_argument('--extend', action='store_true', help='Extend an existing database with new samples (and optionally new contigs)')
 
 VALID_MODULES = ["Coverage", "Misalignment", "Long-reads", "Paired-reads", "Phage termini"]
 
 def run_calculate_args(args):
     genbank_path = getattr(args, 'genbank', None)
     assembly_path = getattr(args, 'assembly', None)
+    is_extending = getattr(args, 'extend', False)
 
     # Handle optional bam_files
     bam_files = []
@@ -78,38 +81,91 @@ def run_calculate_args(args):
             bam_files = [args.bam_files]
         else:
             sys.exit(f"ERROR: BAM path not found: {args.bam_files}")
-    
+
     # Validate: need at least genbank OR bam_files
     if not bam_files and not genbank_path:
         sys.exit("ERROR: You must provide either --bam_files or --genbank (or both).")
-    
+
     if not bam_files:
         print("No BAM files provided. Will only populate contig-level data from GenBank.", flush=True)
 
-    # Handle modules - if no BAM files, modules are ignored
-    if args.modules is None:
-        # Default: all modules (but they require BAM files)
-        requested_modules = VALID_MODULES.copy() if bam_files else []
+    output_db = args.output
+
+    # --- Extend mode validation ---
+    if is_extending:
+        if not os.path.exists(output_db):
+            sys.exit(f"ERROR: Database '{output_db}' not found. --extend requires an existing database.")
+
+        if not bam_files:
+            sys.exit("ERROR: --extend requires BAM files to add new samples.")
+
+        import duckdb
+        conn = duckdb.connect(output_db, read_only=True)
+
+        # Get existing sample names
+        existing_samples = set()
+        if conn.execute("SELECT 1 FROM information_schema.tables WHERE table_name = 'Sample'").fetchone():
+            existing_samples = {r[0] for r in conn.execute("SELECT Sample_name FROM Sample").fetchall()}
+
+        # Detect modules from existing Variable table
+        existing_modules = sorted({
+            r[0] for r in conn.execute("SELECT DISTINCT Module FROM Variable").fetchall()
+        } & set(VALID_MODULES))
+
+        conn.close()
+
+        # Check for sample name collisions
+        new_sample_names = [Path(bam).stem for bam in bam_files]
+        for name in new_sample_names:
+            if name in existing_samples:
+                sys.exit(
+                    f"ERROR: Sample '{name}' already exists in database.\n"
+                    f"  If this is a different sample, rename your BAM file.\n"
+                    f"  If it is the same sample with updated mappings, first run:\n"
+                    f"    thebigbam remove-sample --db {output_db} --name {name}\n"
+                    f"  Then re-run calculate --extend."
+                )
+
+        # Override modules with existing DB modules
+        if args.modules is not None:
+            print(f"WARNING: --modules is ignored in extend mode. Using modules from existing database: {', '.join(existing_modules)}", flush=True)
+        requested_modules = existing_modules
+
+        # Print warning
+        print(
+            "\nWARNING: Extending an existing database. Please ensure:\n"
+            "  - Contig names are consistent between your former and new BAM mappings\n"
+            "  - If you added custom variables or metadata for existing samples/contigs,\n"
+            "    you will need to add them for the new data as well\n"
+            "  - If new contigs are added, existing samples will NOT have mapping data\n"
+            "    for those contigs. To add that data, remove those samples with\n"
+            "    `thebigbam remove-sample` and re-add them with updated BAM mappings\n"
+            "    that include the new contigs.\n",
+            flush=True,
+        )
     else:
-        requested_modules = [m.strip() for m in args.modules.split(",")]
-        # Validate module names
-        for module in requested_modules:
-            if module not in VALID_MODULES:
-                sys.exit(f"ERROR: Unknown module '{module}'. Valid modules are: {', '.join(VALID_MODULES)}")
-        # Warn if modules specified but no BAM files
-        if not bam_files and requested_modules:
-            print(f"WARNING: Modules {requested_modules} require BAM files - they will be skipped.", flush=True)
-            requested_modules = []
+        # Normal mode
+        if os.path.exists(output_db):
+            sys.exit(f"ERROR: Output file '{output_db}' already exists. Please provide a new path to avoid overwriting.")
+
+        # Handle modules - if no BAM files, modules are ignored
+        if args.modules is None:
+            requested_modules = VALID_MODULES.copy() if bam_files else []
+        else:
+            requested_modules = [m.strip() for m in args.modules.split(",")]
+            for module in requested_modules:
+                if module not in VALID_MODULES:
+                    sys.exit(f"ERROR: Unknown module '{module}'. Valid modules are: {', '.join(VALID_MODULES)}")
+            if not bam_files and requested_modules:
+                print(f"WARNING: Modules {requested_modules} require BAM files - they will be skipped.", flush=True)
+                requested_modules = []
+
     min_aligned_fraction = args.min_aligned_fraction
     min_coverage_depth = args.min_coverage_depth
     variation_percentage = args.variation_percentage
     coverage_percentage = args.coverage_percentage
     contig_variation_percentage = args.contig_variation_percentage
     n_cores = int(args.threads)
-
-    output_db = args.output
-    if os.path.exists(output_db):
-        sys.exit(f"ERROR: Output file '{output_db}' already exists. Please provide a new path to avoid overwriting.")
 
     if genbank_path and not os.path.exists(genbank_path):
         sys.exit(f"ERROR: Annotation file not found: {genbank_path}")
@@ -129,6 +185,7 @@ def run_calculate_args(args):
         contig_variation_percentage=contig_variation_percentage, n_sample_cores=n_cores,
         sequencing_type=args.sequencing_type, genbank_path=genbank_path,
         assembly_path=assembly_path,
+        extend_db=output_db if is_extending else None,
     )
 
 

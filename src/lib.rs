@@ -78,7 +78,7 @@ mod python {
     ///         - "samples_failed": int
     ///         - "total_time": float (seconds)
     #[pyfunction]
-    #[pyo3(signature = (genbank_path, bam_files, output_db, modules, threads, sequencing_type=None, min_aligned_fraction=50.0, min_coverage_depth=0.0, curve_ratio=10.0, bar_ratio=10.0, contig_variation_percentage=10.0, create_indexes=true, assembly_path=""))]
+    #[pyo3(signature = (genbank_path, bam_files, output_db, modules, threads, sequencing_type=None, min_aligned_fraction=50.0, min_coverage_depth=0.0, curve_ratio=10.0, bar_ratio=10.0, contig_variation_percentage=10.0, create_indexes=true, assembly_path="", extend_db=""))]
     fn process_all_samples<'py>(
         py: Python<'py>,
         genbank_path: &str,
@@ -94,6 +94,7 @@ mod python {
         contig_variation_percentage: f64,
         create_indexes: bool,
         assembly_path: &str,
+        extend_db: &str,
     ) -> PyResult<Bound<'py, PyDict>> {
         use crate::gc_content::GCParams;
         use crate::processing::{run_all_samples, ProcessConfig};
@@ -128,6 +129,7 @@ mod python {
                 &modules,
                 &config,
                 create_indexes,
+                Path::new(extend_db),
             )
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{}", e)))
         })?;

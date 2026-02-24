@@ -1,35 +1,76 @@
-Need module load llvm for HPC cluster
-I work in base environment (where I also installed minimap2...)
+# Developer Notes
 
-To serve plots in cluster:
+## Building for development
 
-```bash
-thebigbam serve \
-  --db examples/outputs/AKIRA/akira.db \
-  --port 5006
-ssh -N -L 5006:localhost:5006 boutroux@jed.epfl.ch
-```
-
-To avoid recompiling everything everytime, I had to change the target dir for cargo builds:
+Install in editable mode with maturin (Rust changes take effect after rebuild, Python changes take effect immediately):
 
 ```bash
-export CARGO_TARGET_DIR=~/.cargo-target/thebigbam
-# OR maybe this helped: export PATH='/home/boutroux/.duckdb/cli/latest':$PATH
+pip install maturin
 maturin develop --release
 ```
 
-To interrogate SQL databases, use commands like:
+To speed up repeated builds, set a persistent target directory so Cargo does not recompile from scratch:
 
 ```bash
-duckdb examples/outputs/phageterm_long_short_and_nextera/phageterm_long_short_and_nextera_duckdb.db "SELECT * FROM Explicit_phage_mechanisms;"
+export CARGO_TARGET_DIR=~/.cargo-target/thebigbam
+maturin develop --release
 ```
 
-CI (best practice)
+For faster compilation without optimization (useful during development):
 
-- run: cargo test
-- run: maturin develop --release
-- run: pytest tests/ -v
+```bash
+maturin develop  # Without --release
+```
 
-For detailed tests:
+## HPC cluster setup
+
+On HPC systems, you may need to load the LLVM module before compiling:
+
+```bash
+module load llvm
+```
+
+If compilation fails with clang/libclang errors:
+
+```bash
+sudo apt install -y clang libclang-dev  # Debian/Ubuntu
+```
+
+## Serving plots remotely
+
+To access the Bokeh server running on a remote cluster, use SSH port forwarding:
+
+```bash
+# On the cluster
+thebigbam serve --db my_database.db --port 5006
+
+# On your local machine
+ssh -N -L 5006:localhost:5006 user@cluster.example.com
+# Then open http://localhost:5006 in your browser
+```
+
+## Querying the database directly
+
+You can inspect the DuckDB database directly using the DuckDB CLI:
+
+```bash
+duckdb my_database.db "SELECT * FROM Explicit_phage_mechanisms;"
+duckdb my_database.db "SELECT * FROM Explicit_coverage LIMIT 10;"
+duckdb my_database.db "SHOW TABLES;"
+```
+
+## Running tests
+
+```bash
+# Rust tests
+cargo test
+
+# Build Python bindings
+maturin develop --release
+
+# Python tests
+pytest tests/ -v
+
+# Single test with output
 pytest tests/test_pipeline.py::test_calculate_linear_bams -v -s
-  The -s flag will show the print output so we can see the SAM file size, unsorted BAM size, etc.
+```
