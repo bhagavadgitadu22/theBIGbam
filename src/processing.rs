@@ -203,6 +203,7 @@ fn validate_inputs(
     modules: &[String],
     genbank_path: &Path,
     assembly_path: &Path,
+    extend_db: &Path,
 ) -> Result<()> {
     let flags = ModuleFlags::from_modules(modules);
     let needs_md = flags.needs_md();
@@ -271,8 +272,10 @@ fn validate_inputs(
         }
     }
 
-    // 3. Sequence check (only when modules include Phage termini)
-    if flags.phagetermini {
+    // 3. Sequence check (only when modules include Phage termini, skip in extend mode
+    //    because sequences are already stored in the DB's Contig_sequence table)
+    let is_extending = !extend_db.as_os_str().is_empty();
+    if flags.phagetermini && !is_extending {
         let has_genbank = !genbank_path.as_os_str().is_empty() && genbank_path.exists();
         let has_assembly = !assembly_path.as_os_str().is_empty() && assembly_path.exists();
         if !has_genbank && !has_assembly {
@@ -1255,7 +1258,7 @@ pub fn run_all_samples(
 
     // 1. Strict upfront validation — fail early with actionable errors
     if !bam_files.is_empty() {
-        validate_inputs(bam_files, modules, genbank_path, assembly_path)?;
+        validate_inputs(bam_files, modules, genbank_path, assembly_path, extend_db)?;
     }
 
     // 2. Parse annotations (GenBank/GFF3) or extract contigs from BAMs

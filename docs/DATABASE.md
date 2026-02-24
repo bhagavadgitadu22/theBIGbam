@@ -88,5 +88,6 @@ thebigbam calculate --extend -b third_batch/ -g new_contigs.gbk -o my_database.d
 - **New contigs and existing samples:** When new contigs are introduced during an extend operation, existing samples will **not** have mapping data for those contigs. If you need coverage data for all samples on all contigs, you should remove the affected samples with `thebigbam remove-sample` and re-add them with BAM files that were mapped against the complete set of contigs (old + new).
 
 - **New contig handling depends on database origin:**
+  
   - If the database was created with annotation files (`-g`/`-a`), new contigs are only added if you also provide `-g`/`-a` during extend.
   - If the database was created in BAM-only mode (no annotation files), new contigs found in BAM headers are automatically added.
