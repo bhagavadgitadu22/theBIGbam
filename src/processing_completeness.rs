@@ -55,6 +55,8 @@ pub fn compute_all_metrics(
     circularising_insert_sizes: &[i32],
     all_proper_insert_sizes: &[i32],
     contig_end_mates_mapped_on_another_contig: u64,
+    // Circularity gate: at least one read with ≥20bp on both sides of junction
+    circularising_confirmed: bool,
     // Side misassembly: needs clip runs for left/right side detection
     left_clip_runs: &[Run],
     right_clip_runs: &[Run],
@@ -301,13 +303,13 @@ pub fn compute_all_metrics(
 
     // === Topology ===
     // Circularising reads percentage based on mean coverage at junction
-    let circularising_reads = if circularising_reads_count > 0 {
+    let circularising_reads = if circularising_confirmed && circularising_reads_count > 0 {
         Some(circularising_reads_count)
     } else {
         None
     };
 
-    let circularising_reads_percentage = if circularising_reads_count > 0 && !primary_reads.is_empty() {
+    let circularising_reads_percentage = if circularising_confirmed && circularising_reads_count > 0 && !primary_reads.is_empty() {
         let first = primary_reads[0] as f64;
         let last = primary_reads[primary_reads.len() - 1] as f64;
         let mean_junction_coverage = (first + last) / 2.0;

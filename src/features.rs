@@ -10,6 +10,26 @@ use crate::circular::{increment_circular, increment_circular_long, increment_ran
 use crate::types::{FeatureAnnotation, FeatureMap, SequencingType};
 use std::collections::HashMap;
 
+/// Maximum number of unique sequence variants tracked per position.
+/// 10 is enough to reliably capture the dominant biological variant
+/// while bounding memory usage.
+const MAX_SEQS_PER_POS: usize = 10;
+
+/// Track a sequence variant at a given position, capping the number of
+/// unique variants stored per position to [`MAX_SEQS_PER_POS`].
+fn track_sequence(
+    map: &mut HashMap<usize, HashMap<Vec<u8>, u32>>,
+    pos: usize,
+    seq: &[u8],
+) {
+    let inner = map.entry(pos).or_default();
+    if let Some(count) = inner.get_mut(seq) {
+        *count += 1;
+    } else if inner.len() < MAX_SEQS_PER_POS {
+        inner.insert(seq.to_vec(), 1);
+    }
+}
+
 // ============================================================================
 // Feature Arrays - Central Data Structure
 // ============================================================================
@@ -153,6 +173,8 @@ pub struct FeatureArrays {
     /// Total count of reads that support genome circularity.
     /// In circular mode: reads crossing the mid-position of doubled contig.
     pub circularising_reads_count: u64,
+    /// At least one read with ≥20bp mapped on both sides of the junction.
+    pub circularising_confirmed: bool,
 
     /// Count of non-inward read pairs spanning both contig ends (paired-end only).
     pub circularising_inserts_count: u64,
@@ -231,6 +253,7 @@ impl FeatureArrays {
             mate_not_mapped: vec![0u64; ref_length],
             mate_on_another_contig: vec![0u64; ref_length],
             circularising_reads_count: 0,
+            circularising_confirmed: false,
             circularising_inserts_count: 0,
             circularising_insert_sizes: Vec::new(),
             all_proper_insert_sizes: Vec::new(),
@@ -1043,13 +1066,7 @@ pub fn process_read(
                     // Extract clip sequence (truncated to 20bp) for soft clips
                     if flags.mapping_metrics && op as u8 as char == 'S' && !seq.is_empty() {
                         let clip_len = (len as usize).min(20).min(seq.len());
-                        let clip_seq = seq[..clip_len].to_vec();
-                        arrays.left_clip_sequences
-                            .entry(start)
-                            .or_default()
-                            .entry(clip_seq)
-                            .and_modify(|c| *c += 1)
-                            .or_insert(1);
+                        track_sequence(&mut arrays.left_clip_sequences, start, &seq[..clip_len]);
                     }
                 }
             }
@@ -1070,13 +1087,7 @@ pub fn process_read(
                         let clip_start = seq.len().saturating_sub(len_usize);
                         let clip_len = len_usize.min(20);
                         let clip_end = (clip_start + clip_len).min(seq.len());
-                        let clip_seq = seq[clip_start..clip_end].to_vec();
-                        arrays.right_clip_sequences
-                            .entry(clip_pos)
-                            .or_default()
-                            .entry(clip_seq)
-                            .and_modify(|c| *c += 1)
-                            .or_insert(1);
+                        track_sequence(&mut arrays.right_clip_sequences, clip_pos, &seq[clip_start..clip_end]);
                     }
                 }
             }
@@ -1171,15 +1182,16 @@ pub fn process_read(
                     let normalized_pos = ref_pos % ref_length;
                     arrays.insertion_lengths[normalized_pos].push(len);
 
-                    // Extract full insertion sequence
+                    // Extract insertion sequence (capped to 40bp: first 20 + "..." + last 20)
                     if has_seq && query_pos + len_usize <= seq.len() {
-                        let ins_seq = seq[query_pos..query_pos + len_usize].to_vec();
-                        arrays.insertion_sequences
-                            .entry(normalized_pos)
-                            .or_default()
-                            .entry(ins_seq)
-                            .and_modify(|c| *c += 1)
-                            .or_insert(1);
+                        if len_usize <= 40 {
+                            track_sequence(&mut arrays.insertion_sequences, normalized_pos, &seq[query_pos..query_pos + len_usize]);
+                        } else {
+                            let mut v = seq[query_pos..query_pos + 20].to_vec();
+                            v.extend_from_slice(b"...");
+                            v.extend_from_slice(&seq[query_pos + len_usize - 20..query_pos + len_usize]);
+                            track_sequence(&mut arrays.insertion_sequences, normalized_pos, &v);
+                        }
                     }
 
                     query_pos += len_usize;
@@ -1291,13 +1303,7 @@ pub fn process_read(
                     if let Some(&(op, _)) = cigar_raw.first() {
                         if op as u8 as char == 'S' && !seq.is_empty() {
                             let clip_len = (evt_len as usize).min(20).min(seq.len());
-                            let clip_seq = seq[..clip_len].to_vec();
-                            arrays.start_clip_sequences
-                                .entry(start)
-                                .or_default()
-                                .entry(clip_seq)
-                                .and_modify(|c| *c += 1)
-                                .or_insert(1);
+                            track_sequence(&mut arrays.start_clip_sequences, start, &seq[..clip_len]);
                         }
                     }
                 }
@@ -1325,13 +1331,7 @@ pub fn process_read(
                             let clip_start = seq.len().saturating_sub(evt_len as usize);
                             let clip_len = (evt_len as usize).min(20);
                             let clip_end = (clip_start + clip_len).min(seq.len());
-                            let clip_seq = seq[clip_start..clip_end].to_vec();
-                            arrays.end_clip_sequences
-                                .entry(end_pos)
-                                .or_default()
-                                .entry(clip_seq)
-                                .and_modify(|c| *c += 1)
-                                .or_insert(1);
+                            track_sequence(&mut arrays.end_clip_sequences, end_pos, &seq[clip_start..clip_end]);
                         }
                     }
                 }
@@ -1363,13 +1363,7 @@ pub fn process_read(
                     if let Some(&(op, _)) = cigar_raw.first() {
                         if op as u8 as char == 'S' && !seq.is_empty() {
                             let clip_len = (start_evt_len as usize).min(20).min(seq.len());
-                            let clip_seq = seq[..clip_len].to_vec();
-                            arrays.start_clip_sequences
-                                .entry(start)
-                                .or_default()
-                                .entry(clip_seq)
-                                .and_modify(|c| *c += 1)
-                                .or_insert(1);
+                            track_sequence(&mut arrays.start_clip_sequences, start, &seq[..clip_len]);
                         }
                     }
                 }
@@ -1386,13 +1380,7 @@ pub fn process_read(
                             let clip_start = seq.len().saturating_sub(end_evt_len as usize);
                             let clip_len = (end_evt_len as usize).min(20);
                             let clip_end = (clip_start + clip_len).min(seq.len());
-                            let clip_seq = seq[clip_start..clip_end].to_vec();
-                            arrays.end_clip_sequences
-                                .entry(end_pos)
-                                .or_default()
-                                .entry(clip_seq)
-                                .and_modify(|c| *c += 1)
-                                .or_insert(1);
+                            track_sequence(&mut arrays.end_clip_sequences, end_pos, &seq[clip_start..clip_end]);
                         }
                     }
                 }

@@ -1001,6 +1001,7 @@ fn add_features_from_arrays(
             &arrays.circularising_insert_sizes,
             &arrays.all_proper_insert_sizes,
             arrays.contig_end_mates_mapped_on_another_contig,
+            arrays.circularising_confirmed,
             &left_clip_runs,
             &right_clip_runs,
         );

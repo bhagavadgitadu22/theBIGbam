@@ -28,7 +28,6 @@ use crate::types::{feature_table_name, ContigInfo, FeatureAnnotation, FeaturePoi
 pub struct DbWriter {
     conn: Mutex<Connection>,
     has_bam: bool,
-    is_extend: bool,
     contig_name_to_id: HashMap<String, i64>,
     sample_name_to_id: Mutex<HashMap<String, i64>>,
     next_sample_id: Mutex<i64>,
@@ -79,7 +78,6 @@ impl DbWriter {
         Ok(Self {
             conn: Mutex::new(conn),
             has_bam,
-            is_extend: false,
             contig_name_to_id,
             sample_name_to_id: Mutex::new(HashMap::new()),
             next_sample_id: Mutex::new(1),
@@ -205,7 +203,6 @@ impl DbWriter {
         Ok(Self {
             conn: Mutex::new(conn),
             has_bam,
-            is_extend: true,
             contig_name_to_id,
             sample_name_to_id: Mutex::new(sample_name_to_id),
             next_sample_id: Mutex::new(max_sample_id + 1),
@@ -860,10 +857,8 @@ impl DbWriter {
         // Create derived views (in extend mode, views were dropped in open())
         create_views(&conn, self.has_bam)?;
 
-        if !self.is_extend {
-            // Delete Variable entries for features without tables (only for fresh DBs)
-            cleanup_unused_variables(&conn, &created_tables)?;
-        }
+        // Delete Variable entries for features without tables
+        cleanup_unused_variables(&conn, &created_tables)?;
 
         // Drop empty module tables and their views (prevents empty UI sections)
         if self.has_bam {

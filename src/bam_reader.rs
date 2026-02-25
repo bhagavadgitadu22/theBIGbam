@@ -193,6 +193,12 @@ pub fn process_contig_streaming(
             // Detect reads crossing the boundary (mid-position of doubled contig)
             if raw_start < ref_length && raw_end > ref_length {
                 arrays.circularising_reads_count += 1;
+                // Gate: confirm circularity if ≥20bp mapped on both sides
+                let left_overlap = ref_length - raw_start;
+                let right_overlap = raw_end - ref_length;
+                if left_overlap >= 20 && right_overlap >= 20 {
+                    arrays.circularising_confirmed = true;
+                }
                 true
             } else {
                 false
