@@ -171,7 +171,7 @@ pub struct FeatureArrays {
     // Circularising reads tracking
     // -------------------------------------------------------------------------
     /// Total count of reads that support genome circularity.
-    /// In circular mode: reads crossing the mid-position of doubled contig.
+    /// In circular mode: reads whose alignment extends past LN (SAM-spec circular).
     pub circularising_reads_count: u64,
     /// At least one read with ≥20bp mapped on both sides of the junction.
     pub circularising_confirmed: bool,
@@ -906,7 +906,7 @@ pub fn process_read(
     let raw_start = ref_start as usize;
     let raw_end = ref_end as usize;
 
-    // For circular genomes with doubled references, always apply modulo for array bounds.
+    // For circular genomes (SAM-spec), apply modulo for array bounds.
     // Keep raw_end for increment_circular to detect wrapping correctly.
     let start = raw_start % ref_length;
     let end = raw_end;

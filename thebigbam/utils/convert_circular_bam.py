@@ -38,7 +38,6 @@ import pysam
 # ---------------------------------------------------------------------------
 
 _CIRCULAR_CO = "theBIGbam:circular=true"
-_SPEC_CO = "theBIGbam:circular=spec"
 _WARNING_CO = (
     "WARNING: This BAM follows the SAM specification for circular genomes "
     "(section 1.4): POS + alignment length may exceed SQ:LN, with coordinates "
@@ -56,13 +55,8 @@ def _build_converted_header(header: pysam.AlignmentHeader) -> dict:
     for sq in hd.get("SQ", []):
         sq["LN"] = sq["LN"] // 2
 
-    # Update CO lines
-    new_co = []
-    for co in hd.get("CO", []):
-        if _CIRCULAR_CO in co:
-            new_co.append(co.replace(_CIRCULAR_CO, _SPEC_CO))
-        else:
-            new_co.append(co)
+    # Keep existing CO lines as-is (circular=true tag stays) and add warning
+    new_co = list(hd.get("CO", []))
     new_co.append(_WARNING_CO)
     hd["CO"] = new_co
 

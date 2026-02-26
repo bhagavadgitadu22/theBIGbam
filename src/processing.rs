@@ -129,15 +129,14 @@ fn check_missing_md_tags(bam: &mut IndexedReader) -> bool {
     checked > 0 && missing_md == checked
 }
 
-/// Detect whether a sample BAM was mapped circularly (doubled assembly).
+/// Detect whether a sample BAM was mapped circularly (SAM-spec circular BAM).
 ///
 /// Detection strategy:
 /// 1. Check BAM `@CO` header for `theBIGbam:circular=true/false` (written by mapping-per-sample)
-/// 2. Compare BAM contig lengths vs FASTA contig lengths (2× = circular, 1× = linear)
-/// 3. If ambiguous, return an error
+/// 2. If no tag found, assume linear
 fn detect_sample_circularity(
     bam: &IndexedReader,
-    contigs: &[ContigInfo],
+    _contigs: &[ContigInfo],
     sample_name: &str,
 ) -> Result<bool> {
     let header = bam.header();
@@ -162,36 +161,8 @@ fn detect_sample_circularity(
         }
     }
 
-    // 2. Compare BAM contig lengths vs FASTA contig lengths
-    if header.target_count() == 0 {
-        return Ok(false);
-    }
-
-    let ref_name = std::str::from_utf8(header.tid2name(0))
-        .context("Invalid UTF-8 in BAM reference name")?;
-    let bam_length = header.target_len(0).unwrap_or(0) as usize;
-
-    // Find matching contig in GenBank/FASTA list
-    if let Some(contig_info) = contigs.iter().find(|c| c.name == ref_name) {
-        let fasta_length = contig_info.length;
-        if bam_length == fasta_length * 2 {
-            eprintln!("  Sample '{}': circular=true (BAM contigs are 2× FASTA length)", sample_name);
-            return Ok(true);
-        } else if bam_length == fasta_length {
-            eprintln!("  Sample '{}': circular=false (BAM contigs match FASTA length)", sample_name);
-            return Ok(false);
-        } else {
-            return Err(anyhow::anyhow!(
-                "Sample '{}': ambiguous circularity — BAM contig '{}' length {} \
-                 does not match FASTA length {} or 2× FASTA length {}. \
-                 Use theBIGbam mapping-per-sample to produce BAMs with circularity metadata.",
-                sample_name, ref_name, bam_length, fasta_length, fasta_length * 2
-            ));
-        }
-    }
-
-    // No matching contig in FASTA (BAM-only mode) — assume linear
-    eprintln!("  Sample '{}': circular=false (no FASTA reference to compare)", sample_name);
+    // 2. No header tag found — assume linear
+    eprintln!("  Sample '{}': circular=false (no circularity tag in BAM header)", sample_name);
     Ok(false)
 }
 
@@ -1184,13 +1155,11 @@ pub fn process_sample(
 
 /// Extract contig information from BAM file headers.
 /// Deduplicates contigs across all BAM files.
-/// Uses per-sample circularity map: circular BAMs have doubled contig lengths.
-fn extract_contigs_from_bams(bam_files: &[PathBuf], circularity_map: &HashMap<PathBuf, bool>) -> Result<Vec<ContigInfo>> {
+fn extract_contigs_from_bams(bam_files: &[PathBuf], _circularity_map: &HashMap<PathBuf, bool>) -> Result<Vec<ContigInfo>> {
     let mut contig_map: HashMap<String, usize> = HashMap::new();
 
     // Scan all BAM files to collect unique contigs
     for bam_path in bam_files {
-        let circular = circularity_map.get(bam_path).copied().unwrap_or(false);
         let bam = IndexedReader::from_path(bam_path)
             .with_context(|| format!("Failed to open BAM file: {}", bam_path.display()))?;
         let header = bam.header();
@@ -1199,10 +1168,7 @@ fn extract_contigs_from_bams(bam_files: &[PathBuf], circularity_map: &HashMap<Pa
             let ref_name = std::str::from_utf8(header.tid2name(tid))
                 .context("Invalid UTF-8 in reference name")?
                 .to_string();
-            let bam_length = header.target_len(tid).unwrap_or(0) as usize;
-
-            // For circular genomes, BAM length is doubled, so actual length is half
-            let actual_length = if circular { bam_length / 2 } else { bam_length };
+            let actual_length = header.target_len(tid).unwrap_or(0) as usize;
 
             // Use the contig if not seen, or verify length matches
             contig_map.entry(ref_name.clone())

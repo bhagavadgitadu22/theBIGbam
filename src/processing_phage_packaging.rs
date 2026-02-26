@@ -417,7 +417,7 @@ pub fn filter_and_merge_to_areas_with_diagnostics(
     }
 
     // Step 3b: DTR both-copies confirmation
-    // In a doubled assembly with DTRs, boundary clippings are artifacts (reads
+    // In a circular assembly with DTRs, boundary clippings are artifacts (reads
     // can't extend past the contig edge). Real biological clippings appear at
     // both DTR copies; artifacts appear at only one. Zero any clipping that
     // lacks a counterpart at the equivalent position in the other copy.

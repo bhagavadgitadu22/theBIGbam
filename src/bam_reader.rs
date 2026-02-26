@@ -151,45 +151,46 @@ pub fn process_contig_streaming(
             }
         }
 
-        // Compute template length and proper_pair with circular correction if needed
-        let (template_length, is_proper_pair, is_non_inward) = if circular && seq_type.is_short_paired() {
-            // In circular mode, insert_size and is_proper_pair from BAM are based on doubled assembly
-            // We need to recompute based on the actual circular genome coordinates
+        // Compute template length and proper_pair
+        // BAM proper pair flag is unreliable (mapper-dependent), so recompute for all short-paired reads
+        let (template_length, is_proper_pair, is_non_inward) = if seq_type.is_short_paired() {
             let pos1 = record.pos() as usize;
             let pos2 = record.mpos() as usize;
 
-            // Both positions modulo actual genome length
-            let p1 = pos1 % ref_length;
-            let p2 = pos2 % ref_length;
+            let (corrected_tlen, corrected_proper) = if circular {
+                // Circular: shortest path around the genome
+                let p1 = pos1 % ref_length;
+                let p2 = pos2 % ref_length;
+                let direct = (p1 as i32 - p2 as i32).abs();
+                let wrapped = ref_length as i32 - direct;
+                let tlen = direct.min(wrapped);
 
-            // Distance could wrap around - take the minimum of direct and wrapped distance
-            let direct = (p1 as i32 - p2 as i32).abs();
-            let wrapped = ref_length as i32 - direct;
-            let corrected_tlen = direct.min(wrapped);
+                let same_ref = record.tid() == record.mtid();
+                let opposite_strands = record.is_reverse() != record.is_mate_reverse();
+                let reasonable = tlen > 0 && tlen < 10000;
+                (tlen, same_ref && opposite_strands && reasonable)
+            } else {
+                // Linear: use absolute insert size, recompute proper pair
+                let tlen = record.insert_size().abs() as i32;
+                let same_ref = record.tid() == record.mtid();
+                let opposite_strands = record.is_reverse() != record.is_mate_reverse();
+                let reasonable = tlen > 0 && tlen < 10000;
+                (tlen, same_ref && opposite_strands && reasonable)
+            };
 
-            // Recompute proper_pair: pairs are proper if they're on same contig, opposite strands,
-            // facing each other, and within reasonable insert size
-            let same_ref = record.tid() == record.mtid();
-            let opposite_strands = record.is_reverse() != record.is_mate_reverse();
-            let reasonable_distance = corrected_tlen > 0 && corrected_tlen < 10000; // typical paired-end insert size range
-            let corrected_proper = same_ref && opposite_strands && reasonable_distance;
-
-            // Non-inward: same contig, mate mapped, but not proper pair
-            let non_inward = same_ref && !record.is_mate_unmapped() && !corrected_proper;
+            let non_inward = record.tid() == record.mtid()
+                && !record.is_mate_unmapped()
+                && !corrected_proper;
 
             (corrected_tlen, corrected_proper, non_inward)
         } else {
-            let non_inward = seq_type.is_short_paired()
-                && record.tid() == record.mtid()
-                && !record.is_mate_unmapped()
-                && !record.is_proper_pair();
-            (record.insert_size().abs() as i32, record.is_proper_pair(), non_inward)
+            (record.insert_size().abs() as i32, record.is_proper_pair(), false)
         };
 
         // Track circularising reads (primary alignments only, circular mode only)
         // In SAM-spec circular BAMs, POS is always < LN, so origin-crossing
         // reads are detected by alignment end extending past LN.
-        let is_circularising_read = if circular && !record.is_secondary() && !record.is_supplementary() {
+        let _is_circularising_read = if circular && !record.is_secondary() && !record.is_supplementary() {
             let raw_start = record.pos() as usize;
             let raw_end = cigar_view.end_pos() as usize;
 
@@ -212,7 +213,7 @@ pub fn process_contig_streaming(
 
         // Track circularising inserts & contig-end anomalies (primary paired-end only)
         // Skip reads already counted as circularising reads to avoid double-counting
-        if !is_circularising_read && seq_type.is_short_paired() && !record.is_secondary() && !record.is_supplementary() {
+        if seq_type.is_short_paired() && !record.is_secondary() && !record.is_supplementary() {
             // In SAM-spec circular BAMs, POS is already in [0, ref_length)
             let pos = record.pos() as usize;
             let near_left = pos < 1000;
@@ -244,7 +245,10 @@ pub fn process_contig_streaming(
                         let mate_near_right = mpos >= ref_length.saturating_sub(1000);
                         if (near_left && mate_near_right) || (near_right && mate_near_left) {
                             arrays.circularising_inserts_count += 1;
-                            arrays.circularising_insert_sizes.push(template_length);
+                            // Use wrapped distance: these pairs span the contig boundary,
+                            // so the true insert size is ref_length - raw_tlen
+                            let wrapped_tlen = ref_length as i32 - template_length;
+                            arrays.circularising_insert_sizes.push(wrapped_tlen.abs());
                         }
                     }
                 }
