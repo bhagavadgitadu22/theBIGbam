@@ -97,7 +97,8 @@ pub fn process_contig_streaming(
         return Ok(None);
     }
 
-    bam.fetch((contig_name, 0, ref_length as i64 * 2))
+    // SAM-spec circular BAMs have real LN; all reads have POS < LN
+    bam.fetch((contig_name, 0, ref_length as i64))
         .with_context(|| format!("Failed to fetch reads for contig: {}", contig_name))?;
 
     let mut arrays = FeatureArrays::new(ref_length);
@@ -186,12 +187,13 @@ pub fn process_contig_streaming(
         };
 
         // Track circularising reads (primary alignments only, circular mode only)
+        // In SAM-spec circular BAMs, POS is always < LN, so origin-crossing
+        // reads are detected by alignment end extending past LN.
         let is_circularising_read = if circular && !record.is_secondary() && !record.is_supplementary() {
             let raw_start = record.pos() as usize;
             let raw_end = cigar_view.end_pos() as usize;
 
-            // Detect reads crossing the boundary (mid-position of doubled contig)
-            if raw_start < ref_length && raw_end > ref_length {
+            if raw_end > ref_length {
                 arrays.circularising_reads_count += 1;
                 // Gate: confirm circularity if ≥20bp mapped on both sides
                 let left_overlap = ref_length - raw_start;
@@ -199,6 +201,7 @@ pub fn process_contig_streaming(
                 if left_overlap >= 20 && right_overlap >= 20 {
                     arrays.circularising_confirmed = true;
                 }
+                arrays.circularising_min_overlaps.push(left_overlap.min(right_overlap));
                 true
             } else {
                 false
@@ -210,7 +213,8 @@ pub fn process_contig_streaming(
         // Track circularising inserts & contig-end anomalies (primary paired-end only)
         // Skip reads already counted as circularising reads to avoid double-counting
         if !is_circularising_read && seq_type.is_short_paired() && !record.is_secondary() && !record.is_supplementary() {
-            let pos = if circular { record.pos() as usize % ref_length } else { record.pos() as usize };
+            // In SAM-spec circular BAMs, POS is already in [0, ref_length)
+            let pos = record.pos() as usize;
             let near_left = pos < 1000;
             let near_right = pos >= ref_length.saturating_sub(1000);
 
@@ -218,31 +222,19 @@ pub fn process_contig_streaming(
                 // Circularising inserts: read1 near one end, mate near opposite end
                 if record.is_first_in_template() {
                     if circular {
-                        // In circular mode, junction-spanning pairs have raw positions on
-                        // different halves of the doubled contig:
-                        let raw_pos = record.pos() as usize;
-                        let raw_mpos = record.mpos() as usize;
-                        let pos_in_first_half = raw_pos < ref_length;
-                        let mate_in_first_half = raw_mpos < ref_length;
-
-                        if pos_in_first_half != mate_in_first_half {
-                            let mpos = raw_mpos % ref_length;
-                            let mate_near_left = mpos < 1000;
-                            let mate_near_right = mpos >= ref_length.saturating_sub(1000);
-                            if (near_left && mate_near_right) || (near_right && mate_near_left) {
-                                // Two valid orientations for junction-spanning inserts:
-                                // 1) Middle of doubled contig: reads straddle ref_length boundary
-                                //    → BAM aligner sees proper inward pair (small insert)
-                                // 2) Opposite ends of doubled contig: one near start, one near end
-                                //    → BAM aligner sees non-inward pair (huge insert)
-                                let bam_proper = record.is_proper_pair();
-                                let bam_non_inward = !record.is_proper_pair()
-                                    && record.tid() == record.mtid()
-                                    && !record.is_mate_unmapped();
-                                if bam_proper || bam_non_inward {
-                                    arrays.circularising_inserts_count += 1;
-                                    arrays.circularising_insert_sizes.push(template_length);
-                                }
+                        // In SAM-spec circular mode, both mates have POS < LN.
+                        // Junction-spanning pairs have one mate near each end.
+                        let mpos = record.mpos() as usize;
+                        let mate_near_left = mpos < 1000;
+                        let mate_near_right = mpos >= ref_length.saturating_sub(1000);
+                        if (near_left && mate_near_right) || (near_right && mate_near_left) {
+                            let bam_proper = record.is_proper_pair();
+                            let bam_non_inward = !record.is_proper_pair()
+                                && record.tid() == record.mtid()
+                                && !record.is_mate_unmapped();
+                            if bam_proper || bam_non_inward {
+                                arrays.circularising_inserts_count += 1;
+                                arrays.circularising_insert_sizes.push(template_length);
                             }
                         }
                     } else if is_non_inward {

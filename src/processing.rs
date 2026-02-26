@@ -596,15 +596,8 @@ fn add_features_from_arrays(
         add_compressed_feature(&primary_reads_minus_f64, "primary_reads_minus_only", contig_name, config, output);
         
         // Secondary reads (self-referential curve)
-        // When circular=true, subtract primary coverage to remove artifact secondary alignments from doubled assembly
-        let secondary_reads_f64: Vec<f64> = if is_circular {
-            arrays.secondary_reads.iter()
-                .zip(&arrays.primary_reads)
-                .map(|(&sec, &cov)| if sec > cov { (sec - cov) as f64 } else { 0.0 })
-                .collect()
-        } else {
-            arrays.secondary_reads.iter().map(|&x| x as f64).collect()
-        };
+        // Ghost secondary alignments are filtered out during mapping (convert_circular_bam)
+        let secondary_reads_f64: Vec<f64> = arrays.secondary_reads.iter().map(|&x| x as f64).collect();
         add_compressed_feature(&secondary_reads_f64, "secondary_reads", contig_name, config, output);
         
         // Supplementary reads (self-referential curve)
@@ -1002,6 +995,7 @@ fn add_features_from_arrays(
             &arrays.all_proper_insert_sizes,
             arrays.contig_end_mates_mapped_on_another_contig,
             arrays.circularising_confirmed,
+            &arrays.circularising_min_overlaps,
             &left_clip_runs,
             &right_clip_runs,
         );
@@ -1063,7 +1057,8 @@ pub fn process_sample(
             // Extract header info before mutable borrow
             let ref_name = std::str::from_utf8(bam.header().tid2name(tid)).ok()?.to_string();
             let bam_length = bam.header().target_len(tid).unwrap_or(0) as usize;
-            let ref_length = if is_circular { bam_length / 2 } else { bam_length };
+            // SAM-spec circular BAMs already have the real LN in the header
+            let ref_length = bam_length;
 
             // Skip if contig not in GenBank list
             let contig_info = contigs.iter().find(|c| c.name == ref_name);

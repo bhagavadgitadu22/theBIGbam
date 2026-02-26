@@ -3,7 +3,7 @@ import sys
 
 # Import command modules so we can share arg definitions and run functions
 from thebigbam.utils import (
-    read_mapping, add_sample_metadata, add_contig_metadata
+    read_mapping, add_sample_metadata, add_contig_metadata,
 )
 from thebigbam.database import add_variable, calculating_data, export_data
 from thebigbam.plotting import start_bokeh_server

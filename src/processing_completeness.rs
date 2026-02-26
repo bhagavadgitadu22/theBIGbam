@@ -57,6 +57,8 @@ pub fn compute_all_metrics(
     contig_end_mates_mapped_on_another_contig: u64,
     // Circularity gate: at least one read with ≥20bp on both sides of junction
     circularising_confirmed: bool,
+    // Min overlaps for each circularising read (for median computation)
+    circularising_min_overlaps: &[usize],
     // Side misassembly: needs clip runs for left/right side detection
     left_clip_runs: &[Run],
     right_clip_runs: &[Run],
@@ -337,10 +339,24 @@ pub fn compute_all_metrics(
         None
     };
 
+    let median_circularising_len = if circularising_confirmed && !circularising_min_overlaps.is_empty() {
+        let mut sorted = circularising_min_overlaps.to_vec();
+        sorted.sort_unstable();
+        let mid = sorted.len() / 2;
+        if sorted.len() % 2 == 0 {
+            Some(((sorted[mid - 1] + sorted[mid]) / 2) as i64)
+        } else {
+            Some(sorted[mid] as i64)
+        }
+    } else {
+        None
+    };
+
     let topology = TopologyData {
         contig_name: contig_name.to_string(),
         circularising_reads,
         circularising_reads_percentage,
+        median_circularising_len,
         circularising_inserts,
         circularising_insert_size_deviation: circ_insert_deviation,
     };

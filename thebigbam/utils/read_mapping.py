@@ -9,6 +9,8 @@ from typing import Optional
 
 from Bio import SeqIO
 
+from thebigbam.utils.convert_circular_bam import convert_circular_bam
+
 MAPPER_CHOICES = [
     'minimap2-sr', 'bwa-mem2',
     'minimap2-ont', 'minimap2-pb', 'minimap2-hifi',
@@ -248,6 +250,10 @@ def map_with_mapper(threads: int, assembly_file: Path, mapper: str, read1: Optio
 
         # Re-index after header rewrite
         subprocess.run(["samtools", "index", "-@", str(threads), str(output_file)], check=True)
+
+        # Convert doubled-reference circular BAM to SAM-spec circular BAM
+        if circular:
+            convert_circular_bam(output_file, output_file, threads=threads)
 
     finally:
         # cleanup temporary files

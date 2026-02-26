@@ -175,6 +175,8 @@ pub struct FeatureArrays {
     pub circularising_reads_count: u64,
     /// At least one read with ≥20bp mapped on both sides of the junction.
     pub circularising_confirmed: bool,
+    /// For each circularising read, min(left_overlap, right_overlap).
+    pub circularising_min_overlaps: Vec<usize>,
 
     /// Count of non-inward read pairs spanning both contig ends (paired-end only).
     pub circularising_inserts_count: u64,
@@ -254,6 +256,7 @@ impl FeatureArrays {
             mate_on_another_contig: vec![0u64; ref_length],
             circularising_reads_count: 0,
             circularising_confirmed: false,
+            circularising_min_overlaps: Vec::new(),
             circularising_inserts_count: 0,
             circularising_insert_sizes: Vec::new(),
             all_proper_insert_sizes: Vec::new(),

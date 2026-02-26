@@ -503,11 +503,12 @@ impl DbWriter {
             if let Some(&contig_id) = self.contig_name_to_id.get(&d.contig_name) {
                 let circ_reads = d.circularising_reads.map(|v| v as i64);
                 let circ_pct = d.circularising_reads_percentage;
+                let median_circ_len = d.median_circularising_len;
                 let circ_inserts = d.circularising_inserts.map(|v| v as i64);
                 let circ_dev = d.circularising_insert_size_deviation;
                 appender.append_row(params![
                     contig_id, sample_id,
-                    circ_reads, circ_pct, circ_inserts, circ_dev
+                    circ_reads, circ_pct, median_circ_len, circ_inserts, circ_dev
                 ])?;
             }
         }
@@ -1183,6 +1184,7 @@ fn create_core_tables(conn: &Connection, has_bam: bool) -> Result<()> {
             Sample_id INTEGER,
             Circularising_reads INTEGER,
             Circularising_reads_percentage INTEGER,
+            Median_circularising_len INTEGER,
             Circularising_inserts INTEGER,
             Circularising_insert_size_deviation INTEGER
         )",
@@ -1917,8 +1919,9 @@ fn create_views(conn: &Connection, has_bam: bool) -> Result<()> {
          SELECT
              c.Contig_name,
              s.Sample_name,
-             COALESCE(t.Circularising_reads, 0) AS Circularising_reads,
-             COALESCE(t.Circularising_reads_percentage, 0) AS Circularising_reads_prevalence,
+             t.Circularising_reads AS Circularising_reads,
+             t.Circularising_reads_percentage AS Circularising_reads_prevalence,
+             t.Median_circularising_len AS Median_circularising_len,
              CASE WHEN s.Sequencing_type = 'paired-short' THEN COALESCE(t.Circularising_inserts, 0) ELSE NULL END AS Circularising_inserts,
              CASE WHEN s.Sequencing_type = 'paired-short' THEN COALESCE(t.Circularising_insert_size_deviation, 0) ELSE NULL END AS Circularising_insert_size_deviation,
              CASE WHEN s.Sequencing_type != 'paired-short' THEN NULL WHEN cov.Coverage_mean > 0 THEN COALESCE(t.Circularising_inserts, 0) * 1000.0 / cov.Coverage_mean ELSE 0 END AS Normalized_circularising_inserts
@@ -2180,6 +2183,7 @@ pub struct TopologyData {
     pub contig_name: String,
     pub circularising_reads: Option<u64>,
     pub circularising_reads_percentage: Option<i32>,
+    pub median_circularising_len: Option<i64>,
     pub circularising_inserts: Option<u64>,
     pub circularising_insert_size_deviation: Option<i32>,
 }
