@@ -1480,12 +1480,12 @@ fn process_samples_parallel(
     let is_tty = atty::is(Stream::Stderr);
     let start_time = std::time::Instant::now();
 
-    // Smart parallelization based on dataset characteristics:
-    // - Many contigs (metagenomic ≥500): limit concurrency to prevent OOM
-    // - Few contigs (phage/small genomes <500): full parallelism
-    //
-    // Sequential mode only for single-threaded operation
-    if config.threads == 1 {
+    // Sequential sample processing when:
+    // - Single thread: no parallelism needed
+    // - Many contigs (≥500): inner per-contig parallelism already saturates threads,
+    //   outer sample parallelism causes all samples to progress simultaneously
+    //   without any completing. Sequential ensures samples finish one-by-one.
+    if config.threads == 1 || contigs.len() >= 500 {
         return process_samples_sequential(bam_files, contigs, modules, config, circularity_map, db_writer, is_tty, repeats, annotations);
     }
 
