@@ -6,3 +6,8 @@ dependencies:
   - samtools=1.23
   - bwa-mem2=2.3
   - minimap2=2.30
+  - rust>=1.72
+  - libclang
+  - python=3.12
+  - blast
+

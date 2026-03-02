@@ -81,7 +81,7 @@ This installs in "editable" mode - changes to Python code take effect immediatel
 **Using conda/mamba (easiest):**
 
 ```bash
-mamba env create -f thebigbam_env.yaml
+conda env create -f thebigbam_env.yaml
 conda activate thebigbam
 pip install .  # Re-install in conda environment
 ```

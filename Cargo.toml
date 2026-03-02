@@ -20,7 +20,7 @@ python = ["pyo3"]
 
 [dependencies]
 # BAM/SAM reading
-rust-htslib = "0.51"
+rust-htslib = { version = "0.44", features = ["static"] }
 
 # Parallelism
 rayon = "1.10"

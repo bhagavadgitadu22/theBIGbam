@@ -16,9 +16,47 @@ Built with **Rust** for fast BAM processing and **Python/Bokeh** for interactive
 
 # Quick Start
 
-You need Rust and Python installed. Install Rust following instructions at: https://rust-lang.org/tools/install/
+You need conda installed. If you don't have it yet, you can install Miniconda following instructions at: https://docs.conda.io/en/latest/miniconda.html
 
 Then in command-line:
+
+```bash
+conda env create -f thebigbam_env.yaml
+conda activate thebigbam
+pip install git+https://github.com/bhagavadgitadu22/theBIGbam
+```
+
+Be aware that it may take quite some time to compile the Rust code during installation.
+
+To reduce the installation size, you can at the end remove the rust cache:
+
+```bash
+cargo clean
+```
+
+### Errors
+
+To avoid potential compilation errors:
+
+- On Linux: Install development headers: `sudo apt-get install libbz2-dev liblzma-dev zlib1g-dev clang libclang-dev`
+- On macOS: `brew install xz bzip2 zlib`
+- On HPC clusters: you may need to load the LLVM module first: `module load llvm`
+
+If you cannot use any of these methods and still get errors related to `libclang` during installation such as :
+
+```bash
+thread 'main' (3889591) panicked at /home/gmichoud/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/bindgen-0.69.5/lib.rs:622:31:
+        Unable to find libclang: "couldn't find any valid shared libraries matching: ['libclang.so', 'libclang-*.so', 'libclang.so.*', 'libclang-*.so.*'], set the `LIBCLANG_PATH` environment variable to a path where one of these files can be found (invalid: [])"
+        
+```
+
+Please set the `LIBCLANG_PATH` environment variable to the path where your `libclang` library is located. For example:
+
+```bash
+export LIBCLANG_PATH=$(python -c "import os; print(os.environ['CONDA_PREFIX'] + '/lib')")
+```
+
+Then try installing again.
 
 ```bash
 pip install git+https://github.com/bhagavadgitadu22/theBIGbam
@@ -44,6 +82,12 @@ thebigbam calculate \
 
 ```bash
 thebigbam serve --db tests/HK97/test.db --port 5006
+```
+
+If you're using wsl, you may need to install the package `wslu` to allow opening the browser from the wsl terminal:
+
+```bash
+sudo apt install wslu
 ```
 
 Open browser to http://localhost:5006
