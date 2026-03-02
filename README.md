@@ -21,6 +21,37 @@ You need Rust and Python installed. Install Rust following instructions at: http
 Then in command-line:
 
 ```bash
+conda create -n thebigbam python=3.9 rust libclang clang
+conda activate thebigbam
+pip install git+https://github.com/bhagavadgitadu22/theBIGbam
+```
+
+Be aware that it may take a few minutes to compile the Rust code during installation, especially if you are installing in a new environment for the first time.
+
+### Errors
+
+If you see this error during installation:
+
+```
+thread 'main' (3889591) panicked at /home/gmichoud/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/bindgen-0.69.5/lib.rs:622:31:
+        Unable to find libclang: "couldn't find any valid shared libraries matching: ['libclang.so', 'libclang-*.so', 'libclang.so.*', 'libclang-*.so.*'], set the `LIBCLANG_PATH` environment variable to a path where one of these files can be found (invalid: [])"
+        note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+      💥 maturin failed
+        Caused by: Failed to build a native library through cargo
+        Caused by: Cargo build finished with "exit status: 101": `env -u CARGO PYO3_BUILD_EXTENSION_MODULE="1" PYO3_ENVIRONMENT_SIGNATURE="cpython-3.9-64bit" PYO3_PYTHON="/work/river/Software/miniconda3/envs/thebigbam/bin/python3.9" PYTHON_SYS_EXECUTABLE="/work/river/Software/miniconda3/envs/thebigbam/bin/python3.9" "cargo" "rustc" "--profile" "release" "--features" "python" "--message-format" "json-render-diagnostics" "--manifest-path" "/scratch/gmichoud/Martin/theBIGbam/Cargo.toml" "--lib" "--crate-type" "cdylib" "--" "-C" "strip=symbols"`
+      Error: command ['maturin', 'pep517', 'build-wheel', '-i', '/work/river/Software/miniconda3/envs/thebigbam/bin/python3.9', '--compatibility', 'off'] returned non-zero exit status 1
+      [end of output]
+```
+
+Please set the `LIBCLANG_PATH` environment variable to the path where your `libclang` library is located. For example:
+
+```bash
+export LIBCLANG_PATH=$(python -c "import os; print(os.environ['CONDA_PREFIX'] + '/lib')")
+```
+
+Then try installing again.
+
+```bash
 pip install git+https://github.com/bhagavadgitadu22/theBIGbam
 ```
 
