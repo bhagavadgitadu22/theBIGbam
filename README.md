@@ -16,7 +16,7 @@ Built with **Rust** for fast BAM processing and **Python/Bokeh** for interactive
 
 # Quick Start
 
-You need Rust and Python installed. Install Rust following instructions at: https://rust-lang.org/tools/install/
+You need conda installed. If you don't have it yet, you can install Miniconda following instructions at: https://docs.conda.io/en/latest/miniconda.html
 
 Then in command-line:
 
@@ -36,17 +36,18 @@ cargo clean
 
 ### Errors
 
-If you see this error during installation:
+To avoid potential compilation errors:
 
-```
+- On Linux: Install development headers: `sudo apt-get install libbz2-dev liblzma-dev zlib1g-dev clang libclang-dev`
+- On macOS: `brew install xz bzip2 zlib`
+- On HPC clusters: you may need to load the LLVM module first: `module load llvm`
+
+If you cannot use and of these methods and still get errors related to `libclang` during installation such as :
+
+```bash
 thread 'main' (3889591) panicked at /home/gmichoud/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/bindgen-0.69.5/lib.rs:622:31:
         Unable to find libclang: "couldn't find any valid shared libraries matching: ['libclang.so', 'libclang-*.so', 'libclang.so.*', 'libclang-*.so.*'], set the `LIBCLANG_PATH` environment variable to a path where one of these files can be found (invalid: [])"
-        note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
-      💥 maturin failed
-        Caused by: Failed to build a native library through cargo
-        Caused by: Cargo build finished with "exit status: 101": `env -u CARGO PYO3_BUILD_EXTENSION_MODULE="1" PYO3_ENVIRONMENT_SIGNATURE="cpython-3.9-64bit" PYO3_PYTHON="/work/river/Software/miniconda3/envs/thebigbam/bin/python3.9" PYTHON_SYS_EXECUTABLE="/work/river/Software/miniconda3/envs/thebigbam/bin/python3.9" "cargo" "rustc" "--profile" "release" "--features" "python" "--message-format" "json-render-diagnostics" "--manifest-path" "/scratch/gmichoud/Martin/theBIGbam/Cargo.toml" "--lib" "--crate-type" "cdylib" "--" "-C" "strip=symbols"`
-      Error: command ['maturin', 'pep517', 'build-wheel', '-i', '/work/river/Software/miniconda3/envs/thebigbam/bin/python3.9', '--compatibility', 'off'] returned non-zero exit status 1
-      [end of output]
+        
 ```
 
 Please set the `LIBCLANG_PATH` environment variable to the path where your `libclang` library is located. For example:

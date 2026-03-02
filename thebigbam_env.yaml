@@ -7,5 +7,7 @@ dependencies:
   - bwa-mem2=2.3
   - minimap2=2.30
   - rust>=1.72
-  - liclang
+  - libclang
   - python=3.12
+  - blast
+
