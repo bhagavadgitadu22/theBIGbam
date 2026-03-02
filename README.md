@@ -21,12 +21,18 @@ You need Rust and Python installed. Install Rust following instructions at: http
 Then in command-line:
 
 ```bash
-conda create -n thebigbam python=3.9 rust libclang clang
+conda env create -f thebigbam_env.yaml
 conda activate thebigbam
 pip install git+https://github.com/bhagavadgitadu22/theBIGbam
 ```
 
-Be aware that it may take a few minutes to compile the Rust code during installation, especially if you are installing in a new environment for the first time.
+Be aware that it may take quite some time to compile the Rust code during installation.
+
+To reduce the installation size, you can at the end remove the rust cache:
+
+```bash
+cargo clean
+```
 
 ### Errors
 
