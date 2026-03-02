@@ -984,7 +984,7 @@ def create_layout(db_path):
     toggle_stylesheet = InlineStyleSheet(css=toggle_css_text)
 
     # Load logo as base64 to avoid static file serving issues
-    logo_path = os.path.join(static_path, "logo.png")
+    logo_path = os.path.join(static_path, "LOGO.png")
     with open(logo_path, "rb") as f:
         logo_b64 = base64.b64encode(f.read()).decode("utf-8")
 

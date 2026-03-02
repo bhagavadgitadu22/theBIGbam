@@ -83,6 +83,12 @@ thebigbam calculate \
 thebigbam serve --db tests/HK97/test.db --port 5006
 ```
 
+If you're using wsl, you may need to install the package `wslu` to allow opening the browser from the wsl terminal:
+
+```bash
+sudo apt install wslu
+```
+
 Open browser to http://localhost:5006
 
 See [the installation guide](docs/INSTALL.md) for more detailed instructions.
