@@ -19,11 +19,6 @@ classifiers = [
     "Programming Language :: Rust",
 ]
 
-[project.urls]
-Homepage = "https://github.com/bhagavadgitadu22/theBIGbam"
-Repository = "https://github.com/bhagavadgitadu22/theBIGbam"
-Issues = "https://github.com/bhagavadgitadu22/theBIGbam/issues"
-
 dependencies = [
     "bokeh>=3.0",
     "panel>=1.0",
@@ -32,6 +27,11 @@ dependencies = [
     "dna-features-viewer>=1.0",
     "duckdb>=1.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/bhagavadgitadu22/theBIGbam"
+Repository = "https://github.com/bhagavadgitadu22/theBIGbam"
+Issues = "https://github.com/bhagavadgitadu22/theBIGbam/issues"
 
 [project.optional-dependencies]
 dev = [

@@ -15,6 +15,7 @@
 //! - Simpler concurrency model (single writer, multiple readers)
 
 use anyhow::{Context, Result};
+use chrono::Local;
 use duckdb::{params, Connection};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -851,6 +852,88 @@ impl DbWriter {
     }
 
     /// Finalize the database after all samples are processed.
+    /// Write initial metadata rows into the Database_metadata table.
+    pub fn write_metadata(
+        &self,
+        modules: &[String],
+        min_aligned_fraction: f64,
+        min_coverage_depth: f64,
+        curve_ratio: f64,
+        bar_ratio: f64,
+        contig_variation_percentage: f64,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let now = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+
+        // Build version string with optional git short hash
+        let mut version = env!("CARGO_PKG_VERSION").to_string();
+        if let Ok(output) = std::process::Command::new("git")
+            .args(["rev-parse", "--short", "HEAD"])
+            .output()
+        {
+            let hash = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !hash.is_empty() {
+                version = format!("{}+{}", version, hash);
+            }
+        }
+
+        let modules_str = modules.join(",");
+
+        let rows: Vec<(&str, String)> = vec![
+            ("Date_of_creation", now.clone()),
+            ("Date_of_last_modification", now),
+            ("Tool_version_used_for_creation", version.clone()),
+            ("Tool_version_used_for_last_modification", version),
+            ("Modules", modules_str),
+            ("Min_aligned_fraction", min_aligned_fraction.to_string()),
+            ("Min_coverage_depth", min_coverage_depth.to_string()),
+            ("Variation_percentage", curve_ratio.to_string()),
+            ("Coverage_percentage", bar_ratio.to_string()),
+            ("Contig_variation_percentage", contig_variation_percentage.to_string()),
+        ];
+
+        for (key, value) in &rows {
+            conn.execute(
+                "INSERT INTO Database_metadata (Key, Value) VALUES (?, ?)",
+                params![key, value],
+            )
+            .with_context(|| format!("Failed to insert metadata key '{}'", key))?;
+        }
+
+        Ok(())
+    }
+
+    /// Update modification-related metadata (for extend mode).
+    pub fn update_metadata_modification(&self) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let now = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+
+        let mut version = env!("CARGO_PKG_VERSION").to_string();
+        if let Ok(output) = std::process::Command::new("git")
+            .args(["rev-parse", "--short", "HEAD"])
+            .output()
+        {
+            let hash = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !hash.is_empty() {
+                version = format!("{}+{}", version, hash);
+            }
+        }
+
+        conn.execute(
+            "UPDATE Database_metadata SET Value = ? WHERE Key = 'Date_of_last_modification'",
+            params![now],
+        )
+        .context("Failed to update Date_of_last_modification")?;
+
+        conn.execute(
+            "UPDATE Database_metadata SET Value = ? WHERE Key = 'Tool_version_used_for_last_modification'",
+            params![version],
+        )
+        .context("Failed to update Tool_version_used_for_last_modification")?;
+
+        Ok(())
+    }
+
     pub fn finalize(self) -> Result<()> {
         let conn = self.conn.into_inner().unwrap();
         let created_tables = self.created_tables.into_inner().unwrap();
@@ -1244,16 +1327,26 @@ fn create_core_tables(conn: &Connection, has_bam: bool) -> Result<()> {
     )
     .context("Failed to create Annotated_types table")?;
 
-    // Constants table - stores metadata flags about database content
+    // Constants_for_plotting table - stores metadata flags about database content
     // Pre-computed at database creation time (not per-request)
     conn.execute(
-        "CREATE TABLE Constants (
+        "CREATE TABLE Constants_for_plotting (
             Constant TEXT PRIMARY KEY,
             Status BOOLEAN
         )",
         [],
     )
-    .context("Failed to create Constants table")?;
+    .context("Failed to create Constants_for_plotting table")?;
+
+    // Database_metadata table - tracks how the database was created/modified
+    conn.execute(
+        "CREATE TABLE Database_metadata (
+            Key TEXT PRIMARY KEY,
+            Value TEXT
+        )",
+        [],
+    )
+    .context("Failed to create Database_metadata table")?;
 
     // Contig_sequence table - stores full contig sequences for visualization
     conn.execute(
@@ -1512,9 +1605,9 @@ fn insert_annotations(conn: &Connection, annotations: &[FeatureAnnotation]) -> R
     }
     let has_isoforms = locus_tag_counts.values().any(|&count| count > 1);
     
-    // Insert constants into Constants table
+    // Insert constants into Constants_for_plotting table
     conn.execute(
-        "INSERT INTO Constants (Constant, Status) VALUES ('pharokka', ?), ('isoforms', ?)",
+        "INSERT INTO Constants_for_plotting (Constant, Status) VALUES ('pharokka', ?), ('isoforms', ?)",
         params![has_pharokka_function, has_isoforms],
     )
     .context("Failed to insert constants")?;

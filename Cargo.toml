@@ -51,6 +51,9 @@ tempfile = "3"
 # Statistics (Poisson test for phage packaging peak significance)
 statrs = "0.18"
 
+# Date/time formatting for metadata
+chrono = "0.4"
+
 # PyO3 bindings (optional, enabled via "python" feature)
 pyo3 = { version = "0.23", features = ["extension-module", "anyhow"], optional = true }
 

@@ -2,6 +2,8 @@ import duckdb
 import csv
 import re
 
+from thebigbam.database.database_getters import update_database_metadata
+
 
 def config_feature_subplot(subplot, module, plot_type, color, title, alpha=0.8, fill_alpha=0.4, size=1, help=""):
     """Configure feature subplot parameters."""
@@ -224,6 +226,7 @@ def run_add_variable(args):
             if rows_to_insert:
                 cur.executemany(f"INSERT INTO {feature_table} (Contig_id, Sample_id, First_position, Last_position, Value) VALUES (?, ?, ?, ?, ?)", rows_to_insert)
 
+        update_database_metadata(conn)
         conn.commit()
         print(f"Variable '{var_name}' added and {len(rows_to_insert)} records inserted into '{feature_table}'")
 
@@ -272,6 +275,7 @@ def run_remove_variable(args):
         # Remove the Variable metadata row
         cur.execute("DELETE FROM Variable WHERE Variable_id=?", (variable_id,))
 
+        update_database_metadata(conn)
         conn.commit()
         print(f"Variable '{var_name}' removed from the database.")
 

@@ -4,6 +4,29 @@ import duckdb
 ANNOTATION_EXCLUDED_COLUMNS = {'Contig_id', 'Start', 'End', 'Strand', 'Longest_isoform', 'Locus_tag'}
 
 
+def update_database_metadata(conn):
+    """Update Date_of_last_modification and Tool_version_used_for_last_modification."""
+    from importlib.metadata import version
+    import subprocess
+    from datetime import datetime
+
+    tool_version = version('thebigbam')
+    try:
+        h = subprocess.run(['git', 'rev-parse', '--short', 'HEAD'],
+                          capture_output=True, text=True).stdout.strip()
+        if h:
+            tool_version = f"{tool_version}+{h}"
+    except Exception:
+        pass
+
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        conn.execute("UPDATE Database_metadata SET Value = ? WHERE Key = 'Date_of_last_modification'", [now])
+        conn.execute("UPDATE Database_metadata SET Value = ? WHERE Key = 'Tool_version_used_for_last_modification'", [tool_version])
+    except Exception:
+        pass  # Older databases without Database_metadata table
+
+
 def get_filtering_metadata(db_path: str) -> dict:
     """
     Get column metadata for Filtering2 UI.
@@ -289,6 +312,7 @@ def remove_sample_metadata(db_path, colname):
         print(f"Error: column '{colname}' does not exist on Sample table.")
         return
     conn.execute(f'ALTER TABLE Sample DROP COLUMN "{colname}"')
+    update_database_metadata(conn)
     conn.close()
     print(f"Removed column '{colname}' from Sample table.")
 
@@ -305,6 +329,7 @@ def remove_contig_metadata(db_path, colname):
         print(f"Error: column '{colname}' does not exist on Contig table.")
         return
     conn.execute(f'ALTER TABLE Contig DROP COLUMN "{colname}"')
+    update_database_metadata(conn)
     conn.close()
     print(f"Removed column '{colname}' from Contig table.")
 
@@ -385,6 +410,7 @@ def remove_sample(db_path, sample_name):
 
     # Delete the sample row itself
     conn.execute("DELETE FROM Sample WHERE Sample_id = ?", [sample_id])
+    update_database_metadata(conn)
     conn.close()
     print(f"Removed sample '{sample_name}' and all associated data.")
 
@@ -429,6 +455,7 @@ def remove_contig(db_path, contig_name):
 
     # Delete the contig row itself
     conn.execute("DELETE FROM Contig WHERE Contig_id = ?", [contig_id])
+    update_database_metadata(conn)
     conn.close()
     print(f"Removed contig '{contig_name}' and all associated data.")
 

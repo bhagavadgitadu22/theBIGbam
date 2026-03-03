@@ -6,6 +6,8 @@ additional metadata columns from a user-provided CSV file.
 import csv
 import duckdb
 
+from thebigbam.database.database_getters import update_database_metadata
+
 
 def add_add_sample_metadata_args(parser):
     """Define command-line arguments for add-sample-metadata."""
@@ -181,8 +183,9 @@ def run_add_sample_metadata(args):
             conn.execute(update_sql, values)
             updated_count += 1
         
+        update_database_metadata(conn)
         conn.close()
-        
+
         # Report results
         print(f"\nUpdated {updated_count} sample(s) with {len(new_columns)} new column(s)")
         

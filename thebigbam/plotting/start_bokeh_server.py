@@ -1555,34 +1555,34 @@ def create_layout(db_path):
     try:
         cur = conn.cursor()
         result = cur.execute(
-            "SELECT Status FROM Constants WHERE Constant = 'pharokka'"
+            "SELECT Status FROM Constants_for_plotting WHERE Constant = 'pharokka'"
         ).fetchone()
         has_pharokka_functions = result[0] if result else False
-        
+
         if has_pharokka_functions:
             phage_colors_cbg = CheckboxGroup(
                 labels=["Use phage color scheme for CDS"],
                 active=[]
             )
     except Exception:
-        pass  # Constants table might not exist in older databases
+        pass  # Constants_for_plotting table might not exist in older databases
 
     # Plot isoforms checkbox - only show if at least one locus_tag appears more than once
     plot_isoforms_cbg = None
     try:
         cur = conn.cursor()
         result = cur.execute(
-            "SELECT Status FROM Constants WHERE Constant = 'isoforms'"
+            "SELECT Status FROM Constants_for_plotting WHERE Constant = 'isoforms'"
         ).fetchone()
         has_isoforms = result[0] if result else False
-        
+
         if has_isoforms:
             plot_isoforms_cbg = CheckboxGroup(
                 labels=["Plot isoforms"],
                 active=[]  # Unchecked by default
             )
     except Exception:
-        pass  # Constants table or isoforms constant might not exist in older databases
+        pass  # Constants_for_plotting table or isoforms constant might not exist in older databases
 
     # Build combined labels: Genome features (without Gene map) + Custom contig features
     combined_labels = []
@@ -1943,6 +1943,31 @@ def add_serve_args(parser):
     parser.add_argument("--port", type=int, default=5006, help="Port to serve Panel app")
 
 def run_serve(args):
+    # Print database metadata if available
+    import duckdb as _duckdb
+    _conn = _duckdb.connect(args.db, read_only=True)
+    try:
+        rows = _conn.execute("SELECT Key, Value FROM Database_metadata").fetchall()
+        meta = dict(rows)
+        db_name = os.path.basename(args.db)
+        params = []
+        for key in ['Modules', 'Min_aligned_fraction', 'Min_coverage_depth',
+                     'Variation_percentage', 'Coverage_percentage', 'Contig_variation_percentage']:
+            if key in meta:
+                params.append(f"{key}={meta[key]}")
+        print(f"Database '{db_name}': "
+              f"\n Created on {meta.get('Date_of_creation', '?')} "
+              f"(v{meta.get('Tool_version_used_for_creation', '?')}) "
+              f"\n Last modified on {meta.get('Date_of_last_modification', '?')} "
+              f"(v{meta.get('Tool_version_used_for_last_modification', '?')})")
+        if params:
+            params_str = '\n '.join(params)
+            print(f"Calculate parameters used:\n {params_str}")
+    except Exception:
+        pass  # Older databases without metadata
+    finally:
+        _conn.close()
+
     # Create a factory function that Panel will call for each session
     def create_app():
         return create_layout(args.db)

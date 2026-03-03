@@ -1371,10 +1371,19 @@ pub fn run_all_samples(
         annotations = new_annotations.clone();
 
         let writer = DbWriter::open(extend_db, &new_contigs, &new_annotations, !bam_files.is_empty())?;
+        writer.update_metadata_modification()?;
         (writer, new_contigs)
     } else {
         let new_contigs_for_blast = contigs.clone();
         let writer = DbWriter::create(output_db, &contigs, &annotations, !bam_files.is_empty())?;
+        writer.write_metadata(
+            modules,
+            config.min_aligned_fraction,
+            config.min_coverage_depth,
+            config.curve_ratio,
+            config.bar_ratio,
+            config.contig_variation_percentage,
+        )?;
         (writer, new_contigs_for_blast)
     };
 
