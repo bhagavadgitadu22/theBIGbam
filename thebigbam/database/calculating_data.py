@@ -53,7 +53,7 @@ def add_calculate_args(parser):
     parser.add_argument("-g", "--genbank", help="Path to annotation file: GenBank (.gbk, .gbff) or GFF3 (.gff) format. Required if no BAM files provided.")
     parser.add_argument("-b", "--bam_files", help="Path to bam file or directory containing mapping files (BAM format). Optional if genbank is provided.")
     parser.add_argument("-o", "--output", required=True, help="Output database file path (.db)")
-    parser.add_argument("-m", "--modules", required=False, default=None, help="List of modules to compute (comma-separated). If not provided, all modules are computed. Options: Coverage, Misalignment, Long-reads, Paired-reads, Phage termini")
+    parser.add_argument("-m", "--modules", required=False, default=None, help="List of modules to compute (comma-separated). If not provided, all modules are computed. Options: coverage, misalignment, longreads, pairedreads, termini")
     parser.add_argument("-a", "--assembly", help="Path to assembly FASTA file (only needed for autoblast when genbank lacks sequence data)")
     parser.add_argument('-s', '--sequencing_type', choices=['long', 'paired-short', 'single-short'], help='Sequencing type (long or short allowed)')
     parser.add_argument("--min_aligned_fraction", type=int, default=50, help="Minimum alignment-length coverage proportion for contig inclusion (default: 50%%)")
@@ -63,7 +63,15 @@ def add_calculate_args(parser):
     parser.add_argument('--contig_variation_percentage', type=float, default=10, help='Run-length encoding ratio for contig-level features like GC content (default: 10%%)')
     parser.add_argument('--extend', action='store_true', help='Extend an existing database with new samples (and optionally new contigs)')
 
-VALID_MODULES = ["Coverage", "Misalignment", "Long-reads", "Paired-reads", "Phage termini"]
+# CLI names → internal module names (stored in DB/Rust)
+MODULE_ALIASES = {
+    "coverage": "Coverage",
+    "misalignment": "Misalignment",
+    "longreads": "Long-reads",
+    "pairedreads": "Paired-reads",
+    "phagetermini": "Phage termini",
+}
+VALID_MODULES = list(MODULE_ALIASES.keys())
 
 def run_calculate_args(args):
     genbank_path = getattr(args, 'genbank', None)
@@ -110,7 +118,7 @@ def run_calculate_args(args):
         # Detect modules from existing Variable table
         existing_modules = sorted({
             r[0] for r in conn.execute("SELECT DISTINCT Module FROM Variable").fetchall()
-        } & set(VALID_MODULES))
+        } & set(MODULE_ALIASES.values()))
 
         conn.close()
 
@@ -150,12 +158,13 @@ def run_calculate_args(args):
 
         # Handle modules - if no BAM files, modules are ignored
         if args.modules is None:
-            requested_modules = VALID_MODULES.copy() if bam_files else []
+            requested_modules = list(MODULE_ALIASES.values()) if bam_files else []
         else:
-            requested_modules = [m.strip() for m in args.modules.split(",")]
+            requested_modules = [m.strip().lower() for m in args.modules.split(",")]
             for module in requested_modules:
-                if module not in VALID_MODULES:
+                if module not in MODULE_ALIASES:
                     sys.exit(f"ERROR: Unknown module '{module}'. Valid modules are: {', '.join(VALID_MODULES)}")
+            requested_modules = [MODULE_ALIASES[m] for m in requested_modules]
             if not bam_files and requested_modules:
                 print(f"WARNING: Modules {requested_modules} require BAM files - they will be skipped.", flush=True)
                 requested_modules = []

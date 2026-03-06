@@ -187,8 +187,8 @@ def build_summary_data(conn, contig_name, sample_names):
         "Coverage_trimmed_mean": "Coverage trimmed mean",
         "RPKM": "RPKM",
         "TPM": "TPM",
-        "Coverage_sd": "Coverage sd",
-        "Coverage_variation": "Coverage variation",
+        "Coverage_coefficient_of_variation": "Coverage coefficient of variation",
+        "Coverage_relative_coverage_roughness": "Coverage relative coverage roughness",
     }
 
     misassembly_cols = {

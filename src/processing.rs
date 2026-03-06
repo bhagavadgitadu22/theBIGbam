@@ -1076,7 +1076,7 @@ pub fn process_sample(
             let above_expected = coverage_pct >= (1.0 - (-0.883 * coverage_mean as f64).exp()) * 100.0;
 
             // Calculate coverage variation using Fano factor style normalization
-            let coverage_variation = if arrays.primary_reads.len() > 1 && coverage_mean > 0.0 {
+            let coverage_relative_coverage_roughness = if arrays.primary_reads.len() > 1 && coverage_mean > 0.0 {
                 let n = arrays.primary_reads.len();
                 let mean_cov = coverage_mean as f64;
                 let sum_squared_diff: f64 = arrays.primary_reads
@@ -1093,7 +1093,7 @@ pub fn process_sample(
             };
 
             // Coverage SD: Coefficient of Variation (CV) = std_dev / mean
-            let coverage_sd = if arrays.primary_reads.len() > 0 && coverage_mean > 0.0 {
+            let coverage_coefficient_of_variation = if arrays.primary_reads.len() > 0 && coverage_mean > 0.0 {
                 let mean_cov = coverage_mean as f64;
                 let n = arrays.primary_reads.len() as f64;
                 let variance: f64 = arrays.primary_reads
@@ -1114,8 +1114,8 @@ pub fn process_sample(
                 coverage_pct: coverage_pct as f32,
                 above_expected_aligned_fraction: above_expected,
                 read_count: primary_count,
-                coverage_variation,
-                coverage_sd,
+                coverage_relative_coverage_roughness,
+                coverage_coefficient_of_variation,
                 coverage_mean,
                 coverage_median,
                 coverage_trimmed_mean,

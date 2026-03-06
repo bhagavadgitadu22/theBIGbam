@@ -67,17 +67,25 @@ def _build_converted_header(header: pysam.AlignmentHeader) -> dict:
 # Ghost alignment filtering
 # ---------------------------------------------------------------------------
 
+def _contained_in_circular(inner_start, inner_end, outer_start, outer_end, orig_ln):
+    """Check if [inner_start, inner_end) is fully contained in [outer_start, outer_end) on a circular reference."""
+    inner_len = inner_end - inner_start
+    outer_len = outer_end - outer_start
+    if inner_len <= 0 or outer_len <= 0 or inner_len > orig_ln:
+        return False
+    if outer_len >= orig_ln:
+        return True
+    offset = (inner_start - outer_start) % orig_ln
+    return offset + inner_len <= outer_len
+
+
 def _filter_ghost_alignments(reads, original_lengths):
     """Filter ghost secondary/supplementary alignments from a read name group.
 
-    Ghost secondaries arise because the mapper maps the same read to both
-    copies of the doubled reference.  A secondary is a ghost if its
-    ``pos % original_ln`` matches any primary's position on the same contig.
-
-    Ghost supplementaries are rarer: a non-junction supplementary could
-    appear twice (once per copy).  We discard a supplementary only if
-    another supplementary of the same query name has the same
-    ``pos % original_ln`` on the same contig.
+    A secondary or supplementary is a ghost if its aligned interval is fully
+    contained within any primary's aligned interval on the same contig
+    (in circular coordinates).  Ghost supplementaries are also deduplicated
+    by ``pos % original_ln``.
 
     Returns (kept_reads, n_ghost_secondary, n_ghost_supplementary,
     mapq_fix_reads) where mapq_fix_reads is a set of read objects whose
@@ -97,39 +105,52 @@ def _filter_ghost_alignments(reads, original_lengths):
         else:
             primaries.append(read)
 
-    # Build set of (tid, pos_mod) for all primary alignments
-    primary_positions = set()
+    # Build list of (tid, ref_start, ref_end) for all primary alignments
+    primary_intervals = []
     for r in primaries:
         if not r.is_unmapped:
             tid = r.reference_id
             if 0 <= tid < len(original_lengths):
-                primary_positions.add((tid, r.reference_start % original_lengths[tid]))
+                primary_intervals.append((tid, r.reference_start, r.reference_end))
 
-    # Filter ghost secondaries
+    # Filter ghost secondaries (fully contained in a primary's circular interval)
     kept_sec = []
     n_ghost_sec = 0
     for r in secondaries:
         tid = r.reference_id
         if 0 <= tid < len(original_lengths):
-            pos_mod = r.reference_start % original_lengths[tid]
-            if (tid, pos_mod) in primary_positions:
+            orig_ln = original_lengths[tid]
+            is_ghost = any(
+                p_tid == tid and _contained_in_circular(
+                    r.reference_start, r.reference_end, p_start, p_end, orig_ln)
+                for p_tid, p_start, p_end in primary_intervals
+            )
+            if is_ghost:
                 n_ghost_sec += 1
                 continue
         kept_sec.append(r)
 
-    # Filter ghost supplementaries (duplicate supp at same pos_mod)
+    # Filter ghost supplementaries (fully contained in primary, or duplicate pos_mod)
     kept_supp = []
     n_ghost_supp = 0
-    seen_supp_positions = set()
+    seen_supp_keys = set()
     for r in supplementaries:
         tid = r.reference_id
         if 0 <= tid < len(original_lengths):
-            pos_mod = r.reference_start % original_lengths[tid]
-            key = (tid, pos_mod)
-            if key in seen_supp_positions:
+            orig_ln = original_lengths[tid]
+            if any(
+                p_tid == tid and _contained_in_circular(
+                    r.reference_start, r.reference_end, p_start, p_end, orig_ln)
+                for p_tid, p_start, p_end in primary_intervals
+            ):
                 n_ghost_supp += 1
                 continue
-            seen_supp_positions.add(key)
+            pos_mod = r.reference_start % orig_ln
+            key = (tid, pos_mod)
+            if key in seen_supp_keys:
+                n_ghost_supp += 1
+                continue
+            seen_supp_keys.add(key)
         kept_supp.append(r)
 
     # Identify primaries needing MAPQ fix: ghosts were removed and

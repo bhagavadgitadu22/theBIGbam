@@ -68,8 +68,8 @@ Additional columns might be available depending on the information you added per
 | Coverage_trimmed_mean           | Trimmed mean coverage (excluding extreme values)                                                                                                                                             |
 | RPKM                            | Reads Per Kilobase per Million mapped reads                                                                                                                                                  |
 | TPM                             | Transcripts Per Million                                                                                                                                                                      |
-| Coverage_sd                     | Standard deviation of coverage across positions                                                                                                                                              |
-| Coverage_variation              | Measures coverage smoothness: *Coverage_variation = sqrt( sum((Coverage[i+1] - Coverage[i])^2) / (n-1) ) / Mean_coverage*. A low value means gradual changes, a high value means sharp jumps |
+| Coverage_coefficient_of_variation | Coefficient of variation of coverage across positions                                                                                                                                              |
+| Coverage_relative_coverage_roughness | Measures coverage smoothness: *Coverage_relative_coverage_roughness = sqrt( sum((Coverage[i+1] - Coverage[i])^2) / (n-1) ) / Mean_coverage*. A low value means gradual changes, a high value means sharp jumps |
 
 ## Misassembly
 

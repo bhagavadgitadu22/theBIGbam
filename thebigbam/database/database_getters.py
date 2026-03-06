@@ -50,11 +50,11 @@ def get_filtering_metadata(db_path: str) -> dict:
     category_config = {
         'Contig': {
             'source': 'Contig',
-            'exclude': ['Contig_id', 'Contig_name']
+            'exclude': ['Contig_id']
         },
         'Sample': {
             'source': 'Sample',
-            'exclude': ['Sample_id', 'Sample_name']
+            'exclude': ['Sample_id']
         },
         'Coverage': {
             'source': 'Explicit_coverage',

@@ -55,7 +55,7 @@ statrs = "0.18"
 chrono = "0.4"
 
 # PyO3 bindings (optional, enabled via "python" feature)
-pyo3 = { version = "0.23", features = ["extension-module", "anyhow"], optional = true }
+pyo3 = { version = "0.23", features = ["extension-module", "abi3-py39", "anyhow"], optional = true }
 
 [profile.release]
 lto = true

@@ -291,8 +291,8 @@ impl DbWriter {
                 let cov_mean = (p.coverage_mean * 10.0).round() as i32;
                 let cov_median = (p.coverage_median * 10.0).round() as i32;
                 let cov_trimmed_mean = (p.coverage_trimmed_mean * 10.0).round() as i32;
-                let cov_sd = p.coverage_sd.round() as i32;
-                let cov_var = p.coverage_variation.round() as i32;
+                let cov_sd = p.coverage_coefficient_of_variation.round() as i32;
+                let cov_var = p.coverage_relative_coverage_roughness.round() as i32;
                 appender.append_row(params![contig_id, sample_id, cov_pct, above_expected, read_count, cov_mean, cov_median, cov_trimmed_mean, cov_sd, cov_var])?;
             }
         }
@@ -1097,8 +1097,8 @@ fn create_core_tables(conn: &Connection, has_bam: bool) -> Result<()> {
             Coverage_mean INTEGER,
             Coverage_median INTEGER,
             Coverage_trimmed_mean INTEGER,
-            Coverage_sd INTEGER,
-            Coverage_variation INTEGER,
+            Coverage_coefficient_of_variation INTEGER,
+            Coverage_relative_coverage_roughness INTEGER,
             PRIMARY KEY (Contig_id, Sample_id)
         )",
         [],
@@ -1929,8 +1929,8 @@ fn create_views(conn: &Connection, has_bam: bool) -> Result<()> {
              p.Coverage_trimmed_mean / 10.0 AS Coverage_trimmed_mean,
              rb.RPKM,
              CASE WHEN rs.total_rpkm > 0 THEN (rb.RPKM / rs.total_rpkm) * 1e6 ELSE 0 END AS TPM,
-             ROUND(p.Coverage_sd / 1000000.0, 2) AS Coverage_sd,
-             ROUND(p.Coverage_variation / 1000000.0, 4) AS Coverage_variation
+             ROUND(p.Coverage_coefficient_of_variation / 1000000.0, 2) AS Coverage_coefficient_of_variation,
+             ROUND(p.Coverage_relative_coverage_roughness / 1000000.0, 4) AS Coverage_relative_coverage_roughness
          FROM Coverage p
          JOIN Contig c ON p.Contig_id = c.Contig_id
          JOIN Sample s ON p.Sample_id = s.Sample_id
