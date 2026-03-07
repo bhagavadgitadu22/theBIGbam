@@ -60,8 +60,13 @@ jobs:
           args: --release --strip --out dist
           manylinux: 2_28
           before-script-linux: |
-            yum install -y perl-core llvm-toolset zlib-devel bzip2-devel xz-devel
-            LIBCLANG_PATH=$(find /usr -name 'libclang.so*' -print -quit | xargs dirname)
+            if command -v yum &>/dev/null; then
+              yum install -y perl-core llvm-toolset zlib-devel bzip2-devel xz-devel
+            elif command -v apt-get &>/dev/null; then
+              apt-get update
+              apt-get install -y libclang-dev zlib1g-dev libbz2-dev liblzma-dev
+            fi
+            LIBCLANG_PATH=$(find /usr -name 'libclang.so*' -print -quit 2>/dev/null | xargs dirname 2>/dev/null || true)
             export LIBCLANG_PATH
 
       - uses: actions/upload-artifact@v4
