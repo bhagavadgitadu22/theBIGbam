@@ -60,9 +60,11 @@ jobs:
           manylinux: auto
           before-script-linux: |
             if command -v dnf &> /dev/null; then
-              dnf install -y perl-core clang-devel
+              dnf install -y perl-core llvm-toolset
+              export LIBCLANG_PATH=$(find /usr -name 'libclang.so*' -print -quit | xargs dirname)
             elif command -v yum &> /dev/null; then
-              yum install -y perl-core clang-devel
+              yum install -y perl-core llvm-toolset
+              export LIBCLANG_PATH=$(find /usr -name 'libclang.so*' -print -quit | xargs dirname)
             elif command -v apk &> /dev/null; then
               apk add perl-utils
             fi
