@@ -40,8 +40,8 @@ jobs:
           # Linux aarch64 (cross-compiled via QEMU in manylinux container)
           - os: ubuntu-latest
             target: aarch64-unknown-linux-gnu
-          # macOS Intel (native runner)
-          - os: macos-13
+          # macOS Intel (cross-compiled from ARM runner)
+          - os: macos-14
             target: x86_64-apple-darwin
           # macOS Apple Silicon (native runner)
           - os: macos-14
@@ -65,6 +65,12 @@ jobs:
             elif command -v apt-get &>/dev/null; then
               apt-get update
               apt-get install -y libclang-dev zlib1g-dev libbz2-dev liblzma-dev
+              # Point bindgen to the cross-compilation sysroot so it finds
+              # the correct target headers instead of host x86_64 headers
+              SYSROOT=$(find /usr -path "*/aarch64-unknown-linux-gnu/sysroot" -type d 2>/dev/null | head -1)
+              if [ -n "$SYSROOT" ]; then
+                export BINDGEN_EXTRA_CLANG_ARGS_aarch64_unknown_linux_gnu="--sysroot=$SYSROOT"
+              fi
             fi
             LIBCLANG_PATH=$(find /usr -name 'libclang.so*' -print -quit 2>/dev/null | xargs dirname 2>/dev/null || true)
             export LIBCLANG_PATH
