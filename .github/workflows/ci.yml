@@ -60,9 +60,9 @@ jobs:
           manylinux: auto
           before-script-linux: |
             if command -v dnf &> /dev/null; then
-              dnf install -y perl-core
+              dnf install -y perl-core clang-devel
             elif command -v yum &> /dev/null; then
-              yum install -y perl-core
+              yum install -y perl-core clang-devel
             elif command -v apk &> /dev/null; then
               apk add perl-utils
             fi
