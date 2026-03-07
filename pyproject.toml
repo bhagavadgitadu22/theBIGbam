@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "thebigbam"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Compression and interactive exploration of large-scale sequencing alignments with circular mapping support"
 readme = "README.md"
 authors = [{ name = "Martin Boutroux", email = "martinboutroux@outlook.fr" }]
