@@ -28,7 +28,7 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           command: develop
-          args: --extras dev --strip=false
+          args: --extras dev
       - name: Run Python tests
         run: pytest tests/ -v
 
@@ -60,7 +60,7 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
-          args: --release --out dist
+          args: --release --strip --out dist
           manylinux: auto
       - uses: actions/upload-artifact@v4
         with:

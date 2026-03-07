@@ -51,5 +51,3 @@ module-name = "thebigbam_rs"
 python-packages = ["thebigbam"]
 # Include static files in the package
 include = ["static/*"]
-# Strip debug symbols
-strip = true
