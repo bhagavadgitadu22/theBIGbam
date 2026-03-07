@@ -58,7 +58,14 @@ jobs:
           target: ${{ matrix.target }}
           args: --release --strip --out dist -i python3.9
           manylinux: auto
-          before-script-linux: yum install -y perl-IPC-Cmd
+          before-script-linux: |
+            if command -v dnf &> /dev/null; then
+              dnf install -y perl-IPC-Cmd
+            elif command -v yum &> /dev/null; then
+              yum install -y perl-IPC-Cmd
+            elif command -v apk &> /dev/null; then
+              apk add perl-utils
+            fi
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-${{ matrix.target }}
