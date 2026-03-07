@@ -1,6 +1,6 @@
 [package]
 name = "thebigbam_calc"
-version = "1.0.0"
+version = "0.1.0"
 edition = "2021"
 description = "Compression and interactive exploration of large-scale sequencing alignments with circular mapping support"
 license = "MIT"
