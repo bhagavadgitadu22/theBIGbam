@@ -27,3 +27,11 @@ The denominator is the total number of primary reads covering that position (fro
 ### Allocation avoidance
 
 The `track_sequence` helper accepts a byte slice (`&[u8]`) rather than an owned `Vec<u8>`. A heap allocation (`to_vec()`) only occurs when a genuinely new variant needs to be inserted into the map. In the common case — the sequence is already tracked (just increment) or the map is full (just drop) — no allocation happens. This avoids millions of unnecessary per-read allocations during the BAM pass.
+
+The algorithm tracks the minimum and maximum values within each run, and a new entry is created when the range of values in the run exceeds a threshold relative to the smallest absolute value, defined as:
+
+\text{max}(\text{run}) - \text{min}(\text{run}) > r \times \min(|\text{min}(\text{run})|, |\text{max}(\text{run})|)
+
+where r is the allowed variation ratio. This range-based criterion is symmetric (independent of position order) and prevents drift on gradual monotonic changes. The stored value for each run is the average of all values in the run.
+
+Contig features use a separate parameter with a lower default value because only one value needs to be computed per contig and per position (O(n²)), whereas mapping features require computing one value per contig, per position, and per sample in which the contig is present (O(n³)).

@@ -8,27 +8,6 @@ permissions:
   contents: read
 
 jobs:
-  # test:
-  #   runs-on: ubuntu-latest
-  #   env:
-  #     VIRTUAL_ENV: ${{ github.workspace }}/.venv
-  #   steps:
-  #     - uses: actions/checkout@v4
-  #     - uses: actions/setup-python@v5
-  #       with:
-  #         python-version: "3.12"
-  #     - name: Create virtualenv
-  #       run: |
-  #         python -m venv .venv
-  #         echo "${{ github.workspace }}/.venv/bin" >> $GITHUB_PATH
-  #     - name: Build and install
-  #       uses: PyO3/maturin-action@v1
-  #       with:
-  #         command: develop
-  #         args: --extras dev
-  #     - name: Run Python tests
-  #       run: pytest tests/ -v
-
   build-wheels:
     strategy:
       fail-fast: false

@@ -6,21 +6,22 @@ package:
   version: {{ version }}
 
 source:
-  url: https://pypi.org/packages/source/t/thebigbam/thebigbam-{{ version }}.tar.gz
-  sha256: <filled after PyPI publish>
+  url: https://pypi.org/packages/source/t/{{ name }}/{{ name }}-{{ version }}.tar.gz
+  sha256: b8f13feacce5a4cd4c462c7d853018e6c55a42866a65123fcfed253617509bdb
 
 build:
   number: 0
-  skip: True  # [win]
+  skip: true  # [win]
+  run_exports:
+    - {{ pin_subpackage("thebigbam", max_pin="x.x") }}
   script:
-    - cargo-bundle-licenses --format yaml --output THIRDPARTY.yml
     - {{ PYTHON }} -m pip install . --no-deps --no-build-isolation -vvv
 
 requirements:
   build:
     - {{ compiler('c') }}
+    - {{ compiler('cxx') }}
     - {{ compiler('rust') }}
-    - cargo-bundle-licenses
   host:
     - python >=3.9
     - pip
@@ -28,7 +29,7 @@ requirements:
   run:
     - python >=3.9
     - bokeh >=3.0
-    - panel >=1.0
+    - panel >=1.4
     - biopython >=1.79
     - pysam >=0.20
     - dna-features-viewer >=1.0
@@ -47,10 +48,8 @@ test:
 about:
   home: https://github.com/bhagavadgitadu22/theBIGbam
   license: MIT
-  license_file:
-    - LICENSE
-    - THIRDPARTY.yml
-  summary: "Compression and interactive exploration of large-scale sequencing alignments with circular mapping support"
+  license_file: LICENSE
+  summary: Compression and interactive exploration of large-scale sequencing alignments with circular mapping support
   dev_url: https://github.com/bhagavadgitadu22/theBIGbam
 
 extra:

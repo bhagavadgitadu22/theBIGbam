@@ -58,17 +58,17 @@ Additional columns might be available depending on the information you added per
 
 ## Coverage
 
-| Metric                          | Definition                                                                                                                                                                                   |
-| ------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Aligned_fraction_percentage     | Percentage of the contig length covered by at least one mapped read                                                                                                                          |
-| Above_expected_aligned_fraction | Whether the aligned fraction is above what would be expected given the coverage depth                                                                                                        |
-| Read_count                      | Number of reads mapping to this contig for this sample                                                                                                                                       |
-| Coverage_mean                   | Mean number of reads mapping per position                                                                                                                                                    |
-| Coverage_median                 | Median number of reads mapping per position                                                                                                                                                  |
-| Coverage_trimmed_mean           | Trimmed mean coverage (excluding extreme values)                                                                                                                                             |
-| RPKM                            | Reads Per Kilobase per Million mapped reads                                                                                                                                                  |
-| TPM                             | Transcripts Per Million                                                                                                                                                                      |
-| Coverage_coefficient_of_variation | Coefficient of variation of coverage across positions                                                                                                                                              |
+| Metric                               | Definition                                                                                                                                                                                                     |
+| ------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Aligned_fraction_percentage          | Percentage of the contig length covered by at least one mapped read                                                                                                                                            |
+| Above_expected_aligned_fraction      | Whether the aligned fraction is above what would be expected given the coverage depth                                                                                                                          |
+| Read_count                           | Number of reads mapping to this contig for this sample                                                                                                                                                         |
+| Coverage_mean                        | Mean number of reads mapping per position                                                                                                                                                                      |
+| Coverage_median                      | Median number of reads mapping per position                                                                                                                                                                    |
+| Coverage_trimmed_mean                | Trimmed mean coverage (excluding extreme values)                                                                                                                                                               |
+| RPKM                                 | Reads Per Kilobase per Million mapped reads                                                                                                                                                                    |
+| TPM                                  | Transcripts Per Million                                                                                                                                                                                        |
+| Coverage_coefficient_of_variation    | Coefficient of variation of coverage across positions                                                                                                                                                          |
 | Coverage_relative_coverage_roughness | Measures coverage smoothness: *Coverage_relative_coverage_roughness = sqrt( sum((Coverage[i+1] - Coverage[i])^2) / (n-1) ) / Mean_coverage*. A low value means gradual changes, a high value means sharp jumps |
 
 ## Misassembly

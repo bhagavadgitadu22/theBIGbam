@@ -20,33 +20,23 @@ python = ["pyo3"]
 
 [dependencies]
 # BAM/SAM reading
-rust-htslib = "0.51"
+rust-htslib = { version = "0.51", default-features = false }
 
 # Parallelism
 rayon = "1.10"
-
-# CLI
-clap = { version = "4", features = ["derive"] }
 
 # GenBank parsing
 gb-io = "0.9"
 
 # Error handling
 anyhow = "1"
-thiserror = "2"
 
 # Progress and logging
 indicatif = "0.17"
 atty = "0.2"
 
-# Path handling
-walkdir = "2"
-
 # DuckDB for metadata.db (columnar, better compression)
 duckdb = { version = "1.1", features = ["bundled"] }
-
-# Temp files for autoblast
-tempfile = "3"
 
 # Statistics (Poisson test for phage packaging peak significance)
 statrs = "0.18"

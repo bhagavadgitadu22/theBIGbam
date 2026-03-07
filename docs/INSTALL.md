@@ -1,50 +1,37 @@
 # Installation Guide
 
-theBIGbam is a hybrid Python/Rust tool that combines fast Rust-based BAM processing with interactive Python visualization. Installation requires three components:
+theBIGbam is a hybrid Python/Rust tool that combines fast Rust-based BAM processing with interactive Python visualization.
 
-1. **Rust toolchain** (to compile the fast calculation engine)
-2. **Python environment** (for the CLI and visualization)
-3. **External tools** (optional, only needed if you want to do mapping/annotation)
+## Option 2: conda (includes mapping tools)
 
-## Detailed Installation
+```bash
+conda install -c bioconda thebigbam
+```
 
-### Step 1: Install Rust 1.70+
+This installs theBIGbam along with **samtools**, **minimap2**, and **bwa-mem2** — everything needed for both BAM processing and read mapping.
 
-Rust is needed to compile the fast calculation engine. This is a one-time setup.
+Option 1: pip (recommended)
 
-**Linux, macOS, or WSL:**
+Pre-built wheels are available for Linux and macOS — no Rust toolchain needed:
+
+```bash
+pip install thebigbam
+```
+
+**Note:** If you need read mapping capabilities (`thebigbam mapping-per-sample`), you must install **samtools**, **minimap2**, and/or **bwa-mem2** separately. See [External Tools](#external-tools) below.
+
+## Option 3: from source
+
+Requires the Rust toolchain and Python 3.9+.
+
+### Step 1: Install Rust
 
 ```bash
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-source $HOME/.cargo/env  # Add Rust to your PATH
+source $HOME/.cargo/env
 ```
 
-**Windows:**
-
-1. Download [rustup-init.exe](https://rustup.rs/)
-2. Run the installer and follow prompts
-3. Restart your terminal
-
-**Verify Rust installation:**
-
-```bash
-rustc --version
-cargo --version
-```
-
-### Step 2: Install Python 3.9+
-
-Check if you have Python installed:
-
-```bash
-python --version  # or python3 --version
-```
-
-If not installed, download from [python.org](https://www.python.org/downloads/) or use your system package manager.
-
-### Step 3: Install theBIGbam
-
-**For users (recommended):**
+### Step 2: Install theBIGbam
 
 ```bash
 git clone https://github.com/bhagavadgitadu22/theBIGbam
@@ -52,13 +39,9 @@ cd theBIGbam
 pip install .
 ```
 
-This will:
+This compiles the Rust code (5-10 minutes first time) and installs all Python dependencies.
 
-- Compile the Rust code (takes 5-10 minutes first time)
-- Install Python dependencies (bokeh, biopython, pysam, etc.)
-- Create the `thebigbam` command
-
-**For developers:**
+### For developers
 
 ```bash
 git clone https://github.com/bhagavadgitadu22/theBIGbam
@@ -67,32 +50,25 @@ pip install maturin
 maturin develop --release
 ```
 
-This installs in "editable" mode - changes to Python code take effect immediately without reinstalling.
+Changes to Python code take effect immediately without reinstalling.
 
-### Step 4: (Optional) Install External Tools
+## External Tools
 
-**Only needed if you want to:**
+**Only needed if you want to use `thebigbam mapping-per-sample` to map reads.** If you already have BAM files, skip this.
 
-- Map reads to assemblies (minimap2, samtools)
-- Annotate genomes (pharokka, bakta)
+Required tools for mapping:
 
-**If you already have BAM files and GenBank annotations, skip this step.**
+- **samtools** — BAM file manipulation
+- **minimap2** — Read aligner (long reads or short reads)
+- **bwa-mem2** — Alternative read aligner (short reads)
 
-**Using conda/mamba (easiest):**
+Install via conda (easiest):
 
 ```bash
-mamba env create -f thebigbam_env.yaml
-conda activate thebigbam
-pip install .  # Re-install in conda environment
+conda install -c bioconda samtools minimap2 bwa-mem2
 ```
 
-This installs:
-
-- **minimap2** - Read aligner
-- bwa-mem2 - Alternative read aligner
-- **samtools** - BAM file manipulation
-
-Alternatively, install these tools individually via your system package manager or from their official sources.
+Or install individually from their official sources.
 
 ## Verify Installation
 
@@ -140,17 +116,20 @@ thebigbam serve --db tests/HK97/test.db --port 5006
 
 ## Updating
 
+**pip or conda:**
+
+```bash
+pip install --upgrade thebigbam
+# or
+conda update -c bioconda thebigbam
+```
+
+**From source:**
+
 ```bash
 cd theBIGbam
 git pull
 pip install --force-reinstall .
-```
-
-For developers:
-
-```bash
-git pull
-maturin develop --release
 ```
 
 ## Uninstalling
@@ -158,5 +137,3 @@ maturin develop --release
 ```bash
 pip uninstall thebigbam
 ```
-
-The Rust toolchain and external tools (conda environment) remain installed and can be removed separately if desired.

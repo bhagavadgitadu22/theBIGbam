@@ -1,47 +1,53 @@
 <div align="center">
-  <img src="static/LOGO.png" alt="image" width="300" />
+  <img src="https://raw.githubusercontent.com/bhagavadgitadu22/theBIGbam/main/static/LOGO.png" alt="image" width="300" />
 </div>
 
-Interactive visualization of mapping-derived features for genomes. Designed to work efficiently even with large metagenomic datasets.
+TheBIGbam is a **genome browser** and **alignment viewer** designed for massive metagenomic and metatranscriptomic datasets. 
 
-theBIGbam processes BAM alignment files to extract and visualize genomic features including:
+It enables compression and visualization of **large genomic annotation (GenBank)** and **alignment files (BAM)**. 
 
-- **Coverage tracks** (primary, secondary, supplementary reads)
-- **Assembly quality features** (clippings, indels, mismatches)
-- **Paired-read features** (read and insert lengths, )
-- **Termini detection** (positions of reads starts/ends, useful for identifying phage packaging sites)
+It supports the generation of alignments with **explicit circular-genome mapping**.
 
-Built with **Rust** for fast BAM processing and **Python/Bokeh** for interactive visualization.
+Built with **Rust** for fast BAM processing and **Python + Bokeh** for interactive visualization.
 
 ---
 
-# Quick Start
+# Installation
 
-You need Rust and Python installed. Install Rust following instructions at: https://rust-lang.org/tools/install/
-
-Then in command-line:
+## Option 1: conda
 
 ```bash
-pip install git+https://github.com/bhagavadgitadu22/theBIGbam
+conda install -c bioconda thebigbam
 ```
 
-## Check main command works
+This also installs **samtools**, **minimap2**, and **bwa-mem2** for read mapping.
+
+## Option 2: pip
+
+```bash
+pip install thebigbam
+```
+
+Mapping tools need to be installed independently.
+
+## Check installation succeeded
+
+First check main command works:
 
 ```bash
 thebigbam -h
 ```
 
-## Run quick test with example data
+Then run test with HK97 example data:
 
 ```bash
 thebigbam calculate \
  -g tests/HK97/HK97_GCF_000848825.1_pharokka.gbk \
  -b tests/HK97/ \
- -o tests/HK97/test.db \
- -t 2
+ -o tests/HK97/test.db
 ```
 
-## Visualize interactively the test data
+Finally visualize interactively the test data:
 
 ```bash
 thebigbam serve --db tests/HK97/test.db --port 5006
@@ -49,57 +55,70 @@ thebigbam serve --db tests/HK97/test.db --port 5006
 
 Open browser to http://localhost:5006
 
-See [the installation guide](docs/INSTALL.md) for more detailed instructions.
+See [the installation guide](docs/INSTALL.md) for more detailed instructions
 
 ---
 
 # Main usage
 
-theBIGbam consists of two main steps: 
+TheBIGbam consists of 3 main steps: 
 
-- Generation of a DuckDB database summarizing your genomic and mapping features with Rust, using your input files
+- (optional) Generation of alignment files for your samples with circular-genome support
+- Generation of a DuckDB database summarizing your genomic and mapping files with Rust
 - Interactive visualization of the DuckDB database content using Python and Bokeh
+
+## Quick usage with HK97 test data
+
+```sh
+# optionally if you downloaded the mapping dependencies
+thebigbam mapping-per-sample \
+  -r1 tests/HK97/HK97_R1_illumina.fastq.gz \
+  -r2 tests/HK97/HK97_R2_illumina.fastq.gz \
+  -a tests/HK97/HK97_GCF_000848825.1.fasta \
+  --circular -o tests/HK97/HK97_illumina_circular.bam
+
+thebigbam calculate \
+  -b examples/tests/HK97 \
+  -g examples/tests/HK97/HK97_GCF_000848825.1_pharokka.gbk \
+  -m coverage,misalignment \
+  -o examples/outputs/HK97/HK97.db \
+  -t 4
+
+thebigbam serve --db examples/outputs/HK97/HK97.db --port 5006
+```
 
 ## Database computation
 
-This is the core of theBIGbam. It takes a list of BAM files containing read mappings against contigs of interest and extracts relevant features to store them in a DuckDB database. Individual read information is discarded in favor of lightweight per-position averages.
+`thebigbam calculate` command converts large BAM files and associated annotated assemblies into a compact, queryable DuckDB database.
 
-A genbank file containing annotations of your contigs of interest can also be provided to be added in the database.
-
-### Quick usage with the HK97 test data
-
-Calculate command takes at least a directory of mapping files (-b) and an output path for the database (-o):
+Example command:
 
 ```sh
-thebigbam calculate \
-  -b examples/inputs/HK97/bams \
-  -g examples/inputs/HK97/HK97_GCF_000848825.1_pharokka.gbk \
-  -m "Coverage,Misalignment" \
-  -o examples/outputs/HK97/HK97.db \
-  -t 4
+thebigbam calculate  
+-b examples/tests/HK97  
+-g examples/tests/HK97/HK97_GCF_000848825.1_pharokka.gbk  
+-m coverage,misalignment  
+-o examples/outputs/HK97/HK97.db  
+-t 4
 ```
-
-Here several optional parameters are added:
-
-- -g option to provide an annotation file (GenBank `.gbk`/`.gbff` or GFF3 `.gff` format)
-
-- -m option to select which modules to compute (comma-separated). If omitted, all modules are computed
-
-- -t option to specify the number of threads available to speed up computation
-
-- -s / --sequencing_type to force the sequencing type (`long`, `paired-short`, or `single-short`). If omitted, it is auto-detected per sample from BAM flags
-
-**Note:** If your BAM files were generated using `thebigbam mapping-per-sample --circular`, the circular mapping information is automatically detected from the BAM headers during `calculate` — no additional flag is needed.
 
 ### What input files do I need?
 
-You need at least one of the following: BAM mapping files (`-b`) or an annotation file (`-g`). If only an annotation file is provided, contig-level data (annotations, GC content, repeats) is populated without any sample-level mapping features.
+You need to provide at least one of the following: 
 
-#### Mapping files:
+- BAM mapping files (`-b`)
+
+- A GenBank annotation file (`-g`)
+
+If only an annotation file is provided, contig-level data (annotations, GC content, repeats) is calculated without any sample-level mapping features. 
+
+If only BAM files are provided, an assembly file of contigs (FASTA format) can be supplied with `-a` to allow the computation of sequence-dependent, mapping-derived features.
+
+#### Alignment files
 
 **Parameter:** --bam_files DIRECTORY, short-version -b
 
-Your mapping files need to be **sorted BAM files with MD tags**. If you have mapping files but not in the right format, Samtools is your friend! 
+Your mapping files need to be **sorted BAM files with MD tags**. If you have mapping files but not in the right format, SAMtools is your friend! 
 
 ```bash
 # to convert a SAM/BAM file in a sorted BAM file
@@ -113,31 +132,29 @@ samtools index example.sorted.bam
 samtools calmd -b example.sorted.bam ref.fasta > example.sorted.md.bam
 ```
 
-Alternatively, if you do not have sorted mapping files with MD tags (.bam extension), you can generate them using the scripts provided in [the preprocessing section](docs/PREPROCESSING.md). The mapping scripts use a modified version of the standard mapper (minimap2) to allow for seamless circular mapping. 
+For more details on how to prepare your alignment files or how to generate them altogether, you can consult [the preprocessing section](docs/PREPROCESSING.md).
 
-**Note:** If you use those mapping scripts with the `--circular` option, the circular mapping information is embedded in the BAM file headers and will be automatically detected during `calculate`.
+#### Annotation file
 
-#### Annotation file:
+**Parameter:** --genbank FILE, short-version -g
 
-**Parameter (optional, strongly recommended):** --genbank FILE, short-version -g
-
-Annotation file should be in GenBank (`.gbk`, `.gbff`, `.gb`) or GFF3 (`.gff`, `.gff3`) format, made with the tool of your choice: bakta for bacteria, pharokka or phold for phages, eggnog-mapper, etc.
+Annotation file should be in GenBank (`.gbk`, `.gbff`, `.gb`) or GFF3 (`.gff`, `.gff3`) format, made with the tool of your choice: bakta for bacteria, pharokka or phold for phages, eggnog-mapper for eukaryotes, etc.
 
 ### Which features can I calculate?
 
 **Parameter (optional):** --modules COMMA-SEPARATED LIST, short version -m
 
-theBIGbam performs fast Rust-based computations on your BAM files to extract relevant values and discard irrelevant information. All modules are computed and stored in the database unless you provide a specific subset of modules.
+**When BAM files are provided**, theBIGbam performs fast Rust-based computations on them to extract relevant values. Individual read information is discarded in favor of lightweight per-position averages for each contig in each sample.
 
-5 modules exist at the moment:
+All mapping-derived modules are computed and stored in the database unless you provide a specific subset of modules. 5 mapping-derived modules exist at the moment:
 
 - **Coverage**: computes per-position coverage for primary, secondary, and supplementary reads, as well as the mapping quality (MAPQ)
 - **Misalignment:** computes per-position number of clippings, insertions, deletions and mismatches
 - **Long-reads:** computes per-position average length of reads
-- **Paired-reads:** computes per-position average insert size of reads along with the number of incorrect pair orientations (non-inward pairs, mate unmapped or mapping or another contig)
-- **Phage termini:** compute per-position coverage for primary-reads starting with an exact match. Among those reads, the number of mapped reads starting and ending is computed along with the tau ratio calculating the proportion of reads terminating at each position relative to the coverage
+- **Paired-reads:** computes per-position average insert size of reads along with the number of incorrect pair orientations (non-inward pairs, mates unmapped or mapping or another contig)
+- **Phage termini:** compute per-position coverage for primary-reads starting with an exact match (a short clipping < 5 bp is tolerated). Among those reads, the number of mapped reads starting and ending is computed. This module requires sequences to be provided
 
-If an annotation file is provided, the **Genome** module is also computed. It keeps track of the contig annotations (positions of the coding sequences and their functions) and calculates the repeats contained within each contig using an autoblast.
+**When contig sequences are provided**, the **Genome** module is computed. It calculates GC content, GC skew and the repeats contained within each contig using an autoblast. If annotations are available (GenBank file provided), contig annotations (e.g. positions of the coding sequences and their functions) are also saved.
 
 A more detailed explanation of the modules and the features it contains is available in [the features section](docs/FEATURES.md).
 
@@ -147,21 +164,37 @@ A more detailed explanation of the modules and the features it contains is avail
 
 Discarding the reads to only keep the main features of the mappings (like the coverage per position) already allows the DuckDB database to be way lighter than the original BAM file. The database itself is also structured to be as light as possible. 
 
-First, the database is organised per contig per sample (qualified as a contig/sample pair thereafter). Only pairs relative to a contig present in a sample are stored in the database. The definition of a presence can be tweaked via two parameters: **--min_aligned_fraction** controls the minimum percentage of positions that received reads (default 50%, meaning a contig is considered present only if more than half of it received reads), and **--min_coverage_depth** sets the minimum mean coverage depth required for contig inclusion (default 0, i.e. disabled — set to e.g. 5 to filter out contigs with very low depth that produce noisy signals).
+First, the database is organised per contig per sample (qualified as a contig/sample pair thereafter). Only pairs relative to a contig present in a sample are stored in the database. The definition of a presence can be tweaked via two parameters: 
+
+- **--min_aligned_fraction** controls the minimum percentage of positions that received reads (default 50%, meaning a contig is considered present only if more than half of it received reads)
+
+- **--min_coverage_depth** sets the minimum mean coverage depth required for contig inclusion (default 0, i.e. disabled — set to e.g. 5 to filter out contigs with very low depth that produce noisy signals).
 
 To further reduce the size of the database, values per feature are compressed rather than saving all positions. The type of compression depends on the type of plots:
 
-- A **Run-Length Encoding approach (RLE)** is applied to the Curve plots (features from Coverage, Paired-reads and Long-reads module, "Coverage reduced" feature in Phage termini module). RLE stores consecutive genomic positions with similar values as a single entry, preserving the overall signal while substantially reducing storage size. The algorithm tracks the minimum and maximum values within each run, and a new entry is created when the range of values in the run exceeds a threshold relative to the smallest absolute value, defined as:
-  
-  $\text{max}(\text{run}) - \text{min}(\text{run}) > r \times \min(|\text{min}(\text{run})|, |\text{max}(\text{run})|)$
-  
-  where $r$ is the allowed variation ratio. This range-based criterion is symmetric (independent of position order) and prevents drift on gradual monotonic changes. The stored value for each run is the average of all values in the run. The allowed percentage of variation can be adjusted using the **--variation_percentage** parameter (default 50% ie 0.5) for mapping-related features, and the **--contig_variation_percentage** parameter (default: 10% ie 0.1) for contig-related features.
-  
-  Contig features use a separate parameter with a lower default value because only one value needs to be computed per contig and per position (O(n²)), whereas mapping features require computing one value per contig, per position, and per sample in which the contig is present (O(n³)).
+- A **Run-Length Encoding approach (RLE)** is applied to the continuous plots (features from Coverage, Paired-reads and Long-reads module, "Coverage reduced" feature in Phage termini module). RLE stores consecutive genomic positions with similar values as a single entry, preserving the overall signal while substantially reducing storage size. The allowed percentage of variation can be adjusted using the **--variation_percentage** parameter (default 50% ie 0.5) for mapping-related features, and the **--contig_variation_percentage** parameter (default: 10% ie 0.1) for contig-related features
 
-- Only positions with values above a defined percentage of the local coverage are retained for Bar plots (Misalignment and Phage termini module except for "Coverage reduced" feature). For each position, values are compared to the local coverage and discarded if they fall below the **--coverage_percentage** threshold (default 10%), ensuring that only meaningful peaks are preserved.
+- Only positions with values above a defined percentage of the local coverage are retained for Bar plots (Misalignment and Phage termini module except for "Coverage reduced" feature). For each position, values are compared to the local coverage and discarded if they fall below the **--coverage_percentage** threshold (default 10%), ensuring that only meaningful peaks are preserved
 
-The output is a DuckDB database that is typically ~100× smaller than the original BAM files, while retaining the essential characteristics of the mapping data.
+The output is a DuckDB database that is typically **10–100 times smaller** than the original BAM files while retaining the essential characteristics of the mapping data. When using **theBIGbam** only for a **GenBank file**, the main objective is visualization, as the output database is typically **similar in size to the original file**.
+
+For more information see [the compression section](docs/COMPRESSION.md).
+
+### Metrics computed per contig and per sample
+
+In addition to per-position information, summary metrics are computed and stored in the database per contig, per sample and per contig–sample pair. These metrics combine the per-position values into average values like the coverage mean to help identify informative contig–sample pairs without requiring specific hypotheses.
+
+Metrics belong to 4 categories: 
+
+- **Presence detection**
+
+- **Misassembly**
+
+- **Microdiversity**
+
+- **Topology**
+
+A description of all metrics is available in [the filters section](docs/FILTERS.md).
 
 ## Visualization
 
@@ -176,7 +209,7 @@ thebigbam serve --db examples/outputs/HK97/HK97.db --port 5006
 When accessing the web server (http://localhost:5006), you will be presented with a web interface:
 
 <div align="center">
-  <img src="static/VISUALIZATION.png" alt="image" width="800" />
+  <img src="https://raw.githubusercontent.com/bhagavadgitadu22/theBIGbam/main/static/VISUALIZATION.png" alt="image" width="800" />
 </div>
 
 ### Selection panel
@@ -187,57 +220,79 @@ You are initially in the **One Sample** mode, which allows exploration of all co
 
 - **Filtering**: Only pairs of contig/samples matching the selected filters are available in the **Contigs** and **Samples** sections. For instance, if the contig length filter is set to >10 kbp, only contigs longer than this threshold will appear in the **Contigs** section, and only samples containing at least one such contig will appear in the **Samples** section. To consult the list of filters available have a look at [the filtering page](docs/FILTERS.md)
 
-- **Contigs**: Select the contig you want to explore. If an annotation file was provided when creating the database, genomic features (gene maps, repeats, GC content, GC skew) can be selected for plotting by clicking on the contig features
+- **Contigs**: Select the contig you want to explore. If sequences and/or annotations were provided when creating the database, genomic features (gene maps, repeats, GC content, GC skew) can be selected for plotting by clicking on the contig features
 
 - **Samples**: Select the sample you want to explore
 
 - **Variables**: Select the features to plot. You can either use the checkboxes to select all features from a module or click individual features within a module
 
+- **Plotting parameters**: You can customize several aesthetic aspects of the plots (e.g. the heights of the genomic feature tracks and mapping-derived plots)
+
 Finally, click **Apply** to visualize the requested features for the selected contig and sample. Alternatively, click **Peruse Data** to display tables containing the metrics and feature values.
 
 #### All Samples mode
 
-**All Samples** mode enables comparison of a specific feature across multiple samples. Compared to the **One Sample** mode, the **Samples** section is omitted, and only a single feature can be selected in the **Variables** section.
+**All Samples** mode enables comparison of a specific feature across multiple samples. Compared to the **One Sample** mode, the **Samples** section is omitted, and only a single feature can be selected in the **Variables** section (e.g. mismatches on the figure above).
 
 ### Plotting
 
-All plots leverage the full capabilities of Bokeh: you can pan, zoom, and hover over specific points to inspect local values (genomic position in base pairs and corresponding y-values).
+Genomic tracks are plotted at the top and mapping-derived features below. On the figure for instance, you can see the gene map, the sequence track and the codon track. Below are displayed the mismatch track for the samples in display (All Samples mode).
 
-Buttons in the top-right section allow you to disable pan, zoom, or hover interactions, reset the plots to their original state, and **export the current view as a PNG image**.
+All plots leverage the full capabilities of Bokeh: you can pan, zoom, and hover over specific points to inspect local values. For misalignment tracks, the dominant alternative sequences among the misaligned reads is displayed, in addition with the potential replacement codon for mismatches (for example a Glycine on the figure above).
+
+Buttons in the top-right section allow you to disable pan, zoom, or hover interactions, reset the plots to their original state, and **export the current view as a PNG image**. In addition, the green button **SHOW SUMMARY** opens a new html page showing the metrics computed per contig per sample for the contig and samples in display. The blue buttons allow you to download:
+
+- The metrics relative to the contig (**DOWNLOAD CONTIG SUMMARY**)
+
+- The metrics relative to the contig per sample for all samples in display (**DOWNLOAD METRICS SUMMARY**)
+
+- All data plotted at the moment (considering all points without adaptive resolution rendering) (**DOWNLOAD DATA**)
 
 #### Adaptive resolution rendering
 
-theBIGbam adapts the level of detail based on the viewing window size to ensure smooth, responsive plotting:
+Sequences and contig annotations only make sense when looking at a small window: by default sequences are plotted for ≤ 1 kbp window and gene maps are plotted for ≤ 100 kbp window. 
 
-- **Full resolution (≤ 10 kb windows)**: All compressed RLE data points are expanded and plotted. Tooltips are enabled, showing exact position and value when hovering over data points. This provides maximum detail for focused exploration of specific genomic regions.
+Thehe level of detail of the other plots is adapted to the viewing window size to ensure responsive plotting:
 
-- **Downsampled view (> 10 kb windows)**: SQL-side binning reduces the number of points sent to the browser:
-  
-  - The visible window is divided into **1000 fixed-width bins**
-  - Each RLE segment is assigned to a bin based on its **midpoint position**
-  - Values within each bin are **averaged** to produce a single representative point per bin
-  - Tooltips are disabled to improve performance
-  - The x-coordinate for each bin is its **center position**
+- **Full resolution (≤ 100 kbp window)**: All data points are plotted
 
-This two-tier approach balances detail and performance: small windows provide single-base resolution for detailed inspection, while large windows show trends across megabase-scale regions without overwhelming the browser.
+- **Downsampled view (> 100 kbp window)**: SQL-side binning reduces the number of points sent to the browser: the visible window is divided into **1000 fixed-width bins** and the **maximum** value per bin is kept to preserve spikes and outliers
 
-#### Coverage normalization
+The binning thresholds are configurable in the **Plotting parameters** via 3 spinners:
 
-For features that depend on local coverage depth (clippings, indels, mismatches, reads starts/ends, paired-read anomalies), an optional **"Plot relative to local coverage"** checkbox normalizes values to facilitate comparison across regions with varying coverage:
+- **Feature plots without binning** (default: 100 kbp)
 
-- **Enabled**: Y-axis shows the **ratio** of events to local coverage (value ÷ coverage), scaled between 0 and 1. For example, a value of 0.10 means 10% of reads at that position have the feature (e.g., 10 clippings per 100× coverage, or 50 clippings per 500× coverage).
+- **Gene map (bp)** (default: 100 kbp)
 
-- **Disabled** (default): Y-axis shows **absolute counts** (e.g., number of clippings, insertions, mismatches).
+- **Sequence plots (bp)** (default: 1000 bp)
 
-This normalization reveals whether anomalies are proportional to coverage (expected sequencing noise) or represent true biological signal or assembly errors that persist regardless of depth.
+For more information consult [the visualization section](docs/VISUALIZATION.md).
+
+## Mapping
+
+TheBIGbam is not a read aligner: it relies on [minimap2](https://github.com/lh3/minimap2) or [bwa-mem2](https://github.com/bwa-mem2/bwa-mem2) for alignment, applying minimal modifications to generate output compatible with `thebigbam calculate` command. `thebigbam mapping-per-sample` command produces sorted, indexed BAM files with MD tags. 
+
+Default mapping uses minimap2 for short reads while keeping secondary and supplementary reads. The mapper settings can be changed with the `--mapper` option.
+
+The `--circular` flag is a specificity of theBIGbam mapping allowing explicit circular genome support. To do that, each contig is duplicated prior to alignment, enabling seamless mapping across the junction. Artificial secondary and supplementary alignments arising from the duplication are removed, and reads are reassigned to their correct positions before output. This approach preserves consistent coverage at contig ends of circular genomes. 
+
+Example command: 
+
+```sh
+thebigbam mapping-per-sample  
+-r1 tests/HK97/HK97_R1_illumina.fastq.gz  
+-r2 tests/HK97/HK97_R2_illumina.fastq.gz  
+-a tests/HK97/HK97_GCF_000848825.1.fasta  
+--circular -o tests/HK97/HK97_illumina_circular.bam
+```
+
+For more details on theBIGbam mapping command, you can consult [the preprocessing section](docs/PREPROCESSING.md).
 
 ---
 
 ## Additional utilities
 
-### Preprocessing
-
-Consult the [PREPROCESSING.md](docs/PREPROCESSING.md) for additional scripts to help with assembly annotation and read mapping.
+# 
 
 ### Database maintenance
 
