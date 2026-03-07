@@ -7,7 +7,8 @@ Interactive visualization of mapping-derived features for genomes. Designed to w
 theBIGbam processes BAM alignment files to extract and visualize genomic features including:
 
 - **Coverage tracks** (primary, secondary, supplementary reads)
-- **Assembly quality features** (clippings, indels, mismatches, read lengths, paired-end properties)
+- **Assembly quality features** (clippings, indels, mismatches)
+- **Paired-read features** (read and insert lengths, )
 - **Termini detection** (positions of reads starts/ends, useful for identifying phage packaging sites)
 
 Built with **Rust** for fast BAM processing and **Python/Bokeh** for interactive visualization.
@@ -211,6 +212,7 @@ theBIGbam adapts the level of detail based on the viewing window size to ensure 
 - **Full resolution (≤ 10 kb windows)**: All compressed RLE data points are expanded and plotted. Tooltips are enabled, showing exact position and value when hovering over data points. This provides maximum detail for focused exploration of specific genomic regions.
 
 - **Downsampled view (> 10 kb windows)**: SQL-side binning reduces the number of points sent to the browser:
+  
   - The visible window is divided into **1000 fixed-width bins**
   - Each RLE segment is assigned to a bin based on its **midpoint position**
   - Values within each bin are **averaged** to produce a single representative point per bin

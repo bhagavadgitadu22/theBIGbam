@@ -2,10 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [master]
     tags: ["v*"]
-  pull_request:
-    branches: [master]
 
 permissions:
   contents: read
@@ -45,7 +42,7 @@ jobs:
           - os: ubuntu-latest
             target: aarch64-unknown-linux-gnu
           # macOS x86_64
-          - os: macos-13
+          - os: macos-14
             target: x86_64-apple-darwin
           # macOS ARM
           - os: macos-14
@@ -60,7 +57,7 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
-          args: --release --strip --out dist
+          args: --release --strip --out dist -i python3.9
           manylinux: auto
       - uses: actions/upload-artifact@v4
         with:
