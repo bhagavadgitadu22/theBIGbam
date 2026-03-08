@@ -1,4 +1,4 @@
-# Installation Guide
+# Installation guide
 
 ## Option 1: conda (includes mapping tools)
 

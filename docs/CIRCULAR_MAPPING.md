@@ -1,4 +1,4 @@
-# Mapping with circular genome support
+# On mapping with circular genome support
 
 Circular genome support during mapping allows reads to span contig ends, which is important for assessing contig completeness and topology. This mapping benefits all complete circular elements, particularly smaller contigs, where terminal regions constitute a larger fraction, and long-read datasets, where reads are more likely to span contig boundaries.
 

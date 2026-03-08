@@ -361,18 +361,19 @@ Consult [DATABASE.md](docs/DATABASE.md) for instructions on reading and modifyin
 
 # Additional in-depth documentation pages
 
-- [Installation](docs/INSTALL.md)
-- [Usage](docs/USAGE.md)
-- [Features](docs/FEATURES.md)
-- [Filters](docs/FILTERS.md)
-- [Visualization](docs/VISUALIZATION.md)
-- [Plot interpretation](docs/PLOT_INTERPRETATION.md)
-- [Preprocessing](docs/PREPROCESSING.md)
-- [Compression](docs/COMPRESSION.md)
-- [Database](docs/DATABASE.md)
-- [Misalignment](docs/MISALIGNMENT.md)
-- [Phage packaging](docs/PHAGE_PACKAGING.md)
-- [Assembly check](docs/ASSEMBLY_CHECK.md)
-- [Developers note](docs/DEVELOPERS_NOTE.md)
+- [Installation guide](docs/INSTALL.md)
+- [How to run theBIGbam on big projects?](docs/USAGE.md)
+- [On mapping with circular genome support](docs/CIRCULAR_MAPPING.md)
+- [Features](docs/FEATURES.md) TO-DO
+- [Compression](docs/COMPRESSION.md) TO-DO
+- [Filters](docs/FILTERS.md) TO-DO
+- [Misalignment](docs/MISALIGNMENT.md) TO-DO
+- [Phage packaging](docs/PHAGE_PACKAGING.md) TO-DO
+- [Assembly check](docs/ASSEMBLY_CHECK.md) TO-DO, to merge with FILTERS.md
+- [Database](docs/DATABASE.md) TO-DO
+- [Visualization](docs/VISUALIZATION.md) TO-DO
+- [Plot interpretation](docs/PLOT_INTERPRETATION.md) TO-DO, discard?
+- [Developers note](docs/DEVELOPERS_NOTE.md) TO-DO, to merge with contributing?
+- [Contributing](CONTRIBUTING.md) TO-DO
 
 TO-DO: check the list!

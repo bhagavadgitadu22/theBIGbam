@@ -44,6 +44,9 @@ statrs = "0.18"
 # Date/time formatting for metadata
 chrono = "0.4"
 
+# Temp files for autoblast
+tempfile = "3"
+
 # PyO3 bindings (optional, enabled via "python" feature)
 pyo3 = { version = "0.23", features = ["extension-module", "abi3-py39", "anyhow"], optional = true }
 
