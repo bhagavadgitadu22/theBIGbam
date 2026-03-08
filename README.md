@@ -361,7 +361,7 @@ Consult [DATABASE.md](docs/DATABASE.md) for instructions on reading and modifyin
 
 # Additional in-depth documentation pages
 
-- [Installation guide](docs/INSTALL.md)
+- [Installation guide](docs/INSTALL.md), probably useless, remove redundancies and move rest to developers note
 - [How to run theBIGbam on big projects?](docs/USAGE.md)
 - [On mapping with circular genome support](docs/CIRCULAR_MAPPING.md)
 - [Features](docs/FEATURES.md) TO-DO
