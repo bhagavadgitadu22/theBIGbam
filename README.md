@@ -1,14 +1,41 @@
 <div align="center">
-  <img src="https://raw.githubusercontent.com/bhagavadgitadu22/theBIGbam/master/static/LOGO.png" alt="image" width="300" />
+  <img src="https://raw.githubusercontent.com/bhagavadgitadu22/theBIGbam/master/static/LOGO.png" alt="image" width="400" />
 </div>
 
 TheBIGbam is a **genome browser** and **alignment viewer** designed for massive metagenomic and metatranscriptomic datasets. 
 
-It enables compression and visualization of **large genomic annotation (GenBank)** and **alignment files (BAM)**. 
-
-It supports the generation of alignments with **explicit circular-genome mapping**.
+It enables compression and visualization of **large genomic annotation (GenBank)** and **alignment files (BAM)**. It supports the generation of alignments with **explicit circular-genome mapping**.
 
 Built with **Rust** for fast BAM processing and **Python + Bokeh** for interactive visualization.
+
+---
+
+# Table of contents
+
+- [Installation](#installation)
+  * [Option 1: conda](#option-1-conda)
+  * [Option 2: pip](#option-2-pip)
+  * [Check installation succeeded](#check-installation-succeeded)
+- [Main usage](#main-usage)
+  * [Quick usage with HK97 test data](#quick-usage-with-hk97-test-data)
+  * [Database computation](#database-computation)
+    + [What input files do I need?](#what-input-files-do-i-need)
+      - [Alignment files](#alignment-files)
+      - [Annotation file](#annotation-file)
+    + [Which features can I calculate?](#which-features-can-i-calculate)
+    + [Database compression](#database-compression)
+    + [Metrics computed per contig and per sample](#metrics-computed-per-contig-and-per-sample)
+  * [Visualization](#visualization)
+    + [Selection panel](#selection-panel)
+      - [One Sample mode](#one-sample-mode)
+      - [All Samples mode](#all-samples-mode)
+    + [Plotting](#plotting)
+      - [Adaptive resolution rendering](#adaptive-resolution-rendering)
+  * [Mapping](#mapping)
+    * [Circular genome support](#mapping-with-circular-genome-support)
+* [Additional utilities](#additional-utilities)
+  + [Exporting data](#exporting-data)
+  + [Database maintenance](#database-maintenance)
 
 ---
 
@@ -136,7 +163,7 @@ samtools index example.sorted.bam
 samtools calmd -b example.sorted.bam ref.fasta > example.sorted.md.bam
 ```
 
-For more details on how to prepare your alignment files or how to generate them altogether, you can consult [the preprocessing section](docs/PREPROCESSING.md).
+Alternatively, you can produce your alignment files directly in theBIGbam as specified in the [Mapping](#mapping) section.
 
 #### Annotation file
 
@@ -276,7 +303,25 @@ When zooming or panning, you need to re-click APPLY to refresh the plots with th
 
 TheBIGbam is not a read aligner: it relies on [minimap2](https://github.com/lh3/minimap2) or [bwa-mem2](https://github.com/bwa-mem2/bwa-mem2) for alignment, applying minimal modifications to generate output compatible with `thebigbam calculate` command. `thebigbam mapping-per-sample` command produces sorted, indexed BAM files with MD tags. 
 
-Default mapping uses minimap2 for short reads while keeping secondary and supplementary reads. The mapper settings can be changed with the `--mapper` option.
+Default mapping uses minimap2 for short reads while keeping secondary and supplementary reads. The mapper preset of settings can be changed with the `--mapper` option:
+
+- **minimap2-sr**: minimap2 with short-reads preset
+
+- **minimap2-sr-secondary**: minimap2 short-read preset, but retains secondary alignments (default)
+
+- **bwa-mem2**: BWA-MEM2 for short reads
+
+- **minimap2-ont**: minimap2 with Oxford Nanopore preset
+
+- **minimap2-pb**: minimap2 with PacBio CLR preset
+
+- **minimap2-hifi**: minimap2 with PacBio HiFi preset
+
+- **minimap2-no-preset**: minimap2 with no preset (advanced users, parameters can be provided using `--minimap2-params` instead)
+
+Additional parameters can be provided to minimap2 and bwa-mem2 using the `--minimap2-params` and  `--bwa-params` options. Those paramaters takes precedence over the presets parameters if different values for the same parameter are provided.
+
+### Mapping with circular genome support
 
 The `--circular` flag is a specificity of theBIGbam mapping allowing explicit circular genome support. To do that, each contig is duplicated prior to alignment, enabling seamless mapping across the junction. Artificial secondary and supplementary alignments arising from the duplication are removed, and reads are reassigned to their correct positions before output. This approach preserves consistent coverage at contig ends of circular genomes. 
 
@@ -290,13 +335,13 @@ thebigbam mapping-per-sample
 --circular -o tests/HK97/HK97_illumina_circular.bam
 ```
 
-For more details on theBIGbam mapping command, you can consult [the preprocessing section](docs/PREPROCESSING.md).
+For more details on theBIGbam circular genome support, you can consult [the circular mapping page](docs/CIRCULAR_MAPPING.md).
 
 ---
 
-## Additional utilities
+# Additional utilities
 
-### Exporting data
+## Exporting data
 
 Export any metric as a TSV matrix (with contigs as rows and samples as columns):
 
@@ -306,6 +351,26 @@ thebigbam export -d tests/HK97/HK97.db --metric Coverage_mean -o tests/HK97/cove
 
 Run `thebigbam export -h` to see the full list of available metrics.
 
-### Database maintenance
+## Database maintenance
 
 Consult [DATABASE.md](docs/DATABASE.md) for instructions on reading and modifying the database after it has been created. The documentation explains how to add, remove, or list samples, contigs, and variables. It also describes how to query the database directly using SQL.
+
+---
+
+# Additional in-depth documentation pages
+
+- [Installation](docs/INSTALL.md)
+- [Usage](docs/USAGE.md)
+- [Features](docs/FEATURES.md)
+- [Filters](docs/FILTERS.md)
+- [Visualization](docs/VISUALIZATION.md)
+- [Plot interpretation](docs/PLOT_INTERPRETATION.md)
+- [Preprocessing](docs/PREPROCESSING.md)
+- [Compression](docs/COMPRESSION.md)
+- [Database](docs/DATABASE.md)
+- [Misalignment](docs/MISALIGNMENT.md)
+- [Phage packaging](docs/PHAGE_PACKAGING.md)
+- [Assembly check](docs/ASSEMBLY_CHECK.md)
+- [Developers note](docs/DEVELOPERS_NOTE.md)
+
+TO-DO: check the list!

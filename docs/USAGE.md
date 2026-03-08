@@ -68,6 +68,8 @@ On the figure below, we selected the evolutionary path leading to node 111 in th
 
 On the figure, we zoomed in around position 1,237,440 to see the appearance of a particular mismatch. When zooming, we need to re-click APPLY to refresh the plots. If zooming close enough, as here, we see the sequence and codons appearing below the gene map on the top tracks.
 
+---
+
 ## Use case 2: large dataset, 50k contigs, 192 samples
 
 We tested the tool on an in-house large dataset of 192 glacier-fed stream metagenomes collected worldwide. We first assembled all metagenomes using MEGAHIT and identified all viral contigs > 10 kbp using geNomad. We combined the viral contigs found in all samples and dereplicated them using scripts from CheckV (at 95% identity and 75% coverage). We ended up with 50,043 viral contigs > 10 kbp (mostly viruses of bacteria a.k.a. bacteriophages).
@@ -106,6 +108,8 @@ sbatch -q serial -N 1 -n 1 -c 32 -t 60:00:00 --wrap="thebigbam calculate -t 32 -
 
 The command takes 13 hours and 61 GB of RAM to compute with 32 threads. The final DuckDB database takes 30 GB to compare with the initial 350 GB of alignment files and 3 GB of annotations (12x compression factor).
 
+---
+
 ## Use case 3: biobank collection extended regularly
 
 Not all projects compute the database once for a fixed set of contigs and samples. In long-term projects, new contigs and samples may be added regularly. The `--extend` flag of the `calculate` command allows an existing theBIGbam database to be updated with these additional data.
@@ -127,5 +131,3 @@ thebigbam calculate -t 8 -b new_phage.bam -g pharokka_new_phage/pharokka.gbk -o 
 When extending a database, previously processed samples will not contain mapping information for newly added contigs. If this information is required, those samples must be removed and reprocessed using updated BAM files that include the new contigs as references.
 
 This is not useful for the collection presented here, but it may be relevant in **Use Case 2**. For example, if a new glacier-fed stream metagenome is sequenced, additional viral contigs may be assembled that were present but not assembled in previously sequenced metagenomes. Detecting these would require remapping all samples to the updated reference set. However, remapping all samples can be computationally expensive and should only be performed if it is expected to substantially affect the final results.
-
-
