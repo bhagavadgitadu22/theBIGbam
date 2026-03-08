@@ -6,7 +6,7 @@
 conda install -c bioconda thebigbam
 ```
 
-This installs theBIGbam along with **samtools**, **minimap2**, and **bwa-mem2** — everything needed for both BAM processing and read mapping.
+This installs theBIGbam along with **samtools**, **minimap2**, **bwa-mem2**, and **BLAST+** — everything needed for BAM processing, read mapping, and repeat detection.
 
 ---
 
@@ -67,10 +67,12 @@ With this installations:
 - **minimap2** — Read aligner (long reads or short reads)
 - **bwa-mem2** — Alternative read aligner (short reads)
 
-They are installed directly with option 1. Otherwise they can be installed separately via conda:
+Additionally, **BLAST+** is needed for terminal repeat detection (autoblast). Without it, repeat detection is silently skipped.
+
+All of these are installed directly with option 1. Otherwise they can be installed separately via conda:
 
 ```bash
-conda install -c bioconda samtools minimap2 bwa-mem2
+conda install -c bioconda samtools minimap2 bwa-mem2 blast
 ```
 
 Or install individually from their official sources.

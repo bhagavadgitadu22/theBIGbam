@@ -41,16 +41,19 @@ Built with **Rust** for fast BAM processing and **Python + Bokeh** for interacti
 
 # Installation
 
-## Option 1: conda
+## Option 1 (recommended): conda
 
 ```bash
 conda install -c bioconda thebigbam
 ```
 
-This also installs **samtools**, **minimap2**, and **bwa-mem2** for read mapping.
+This also installs **samtools**, **minimap2**, **bwa-mem2**, and **BLAST+** (for repeat detection).
 
 ## Option 2: pip
 
+Make sure you have python>=3.10 installed. You can check your Python version with `python -v` or `python3 -v`.
+
+Then you can install theBIGbam with pip:
 ```bash
 pip install thebigbam
 ```

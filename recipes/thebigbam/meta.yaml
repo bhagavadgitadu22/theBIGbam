@@ -1,5 +1,5 @@
 {% set name = "thebigbam" %}
-{% set version = "0.1.0" %}
+{% set version = "0.1.2" %}
 
 package:
   name: {{ name }}
@@ -7,11 +7,11 @@ package:
 
 source:
   url: https://pypi.org/packages/source/t/{{ name }}/{{ name }}-{{ version }}.tar.gz
-  sha256: b8f13feacce5a4cd4c462c7d853018e6c55a42866a65123fcfed253617509bdb
+  sha256: 3f568546d59f8cc4b27ad14c28a0120b7a7779a22a4c2d5d3386d5e0f5bc8a73
 
 build:
   number: 0
-  skip: true  # [win]
+  skip: true  # [win or py<310 or py>313]
   run_exports:
     - {{ pin_subpackage("thebigbam", max_pin="x.x") }}
   script:
@@ -22,21 +22,23 @@ requirements:
     - {{ compiler('c') }}
     - {{ compiler('cxx') }}
     - {{ compiler('rust') }}
+    - clangdev
   host:
-    - python >=3.10
+    - python >=3.10,<3.14
     - pip
     - maturin >=1.4,<2.0
   run:
-    - python >=3.10
+    - python >=3.10,<3.14
     - bokeh >=3.0
     - panel >=1.4
     - biopython >=1.79
     - pysam >=0.20
-    - dna-features-viewer >=1.0
+    - dna_features_viewer >=1.0
     - python-duckdb >=1.0
     - samtools
     - bwa-mem2
     - minimap2
+    - blast
 
 test:
   imports:
