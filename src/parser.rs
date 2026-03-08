@@ -15,8 +15,11 @@
 //!
 //! Use the main entry point `parse_annotations()` which auto-detects format:
 //! ```rust
-//! let (contigs, annotations) = parse_annotations(path, annotation_tool)?;
+//! let (contigs, annotations) = parse_annotations(path)?;
 //! ```
+//!
+//! Pharokka-specific fields (`phrog`, `function` categories) are extracted
+//! automatically when present — no annotation tool flag needed.
 
 use anyhow::{anyhow, Context, Result};
 use gb_io::reader::SeqReader;

@@ -9,70 +9,58 @@ from thebigbam.database import add_variable, calculating_data, export_data
 from thebigbam.plotting import start_bokeh_server
 
 SCRIPTS = {
+    'mapping-per-sample': 'Map reads for a single sample (one CSV row)',
     'calculate': "Run feature calculations over alignment files",
-    'add-variable': "Add an external variable from CSV to DB",
-    'remove-variable': "Remove a Custom variable from DB",
-    'add-sample-metadata': "Add sample metadata from CSV as new columns in Sample table",
-    'add-contig-metadata': "Add contig metadata from CSV as new columns in Contig table",
-
     'serve': "Start interactive Bokeh server",
 
-    'list-variables': 'List variables and metadata from DB',
-    'list-samples': 'List samples from DB',
-    'list-contigs': 'List contigs from DB',
-    'list-sample-metadata': 'List user-added metadata columns on Sample table',
-    'list-contig-metadata': 'List user-added metadata columns on Contig table',
+    'export': 'Export a metric as contig x sample matrix (TSV)',
+
+    'add-sample-metadata': "Add sample metadata from CSV as new columns in Sample table",
+    'add-contig-metadata': "Add contig metadata from CSV as new columns in Contig table",
+    'add-variable': "Add an external variable from CSV to DB",
+
     'remove-sample': 'Remove a sample and all its data from DB',
     'remove-contig': 'Remove a contig and all its data from DB',
     'remove-sample-metadata': 'Remove a user-added metadata column from Sample table',
     'remove-contig-metadata': 'Remove a user-added metadata column from Contig table',
+    'remove-variable': "Remove a Custom variable from DB",
 
-    'mapping-per-sample': 'Map reads for a single sample (one CSV row)',
-
-    'export': 'Export a metric as contig x sample matrix (TSV)',
+    'list-samples': 'List samples from DB',
+    'list-contigs': 'List contigs from DB',
+    'list-sample-metadata': 'List user-added metadata columns on Sample table',
+    'list-contig-metadata': 'List user-added metadata columns on Contig table',
+    'list-variables': 'List variables and metadata from DB',
 }
 
 def build_argparser():
     p = argparse.ArgumentParser(prog="thebigbam", description="theBIGbam command-line front-end")
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    # modify database commands
+    # main commands
+    sp = sub.add_parser('mapping-per-sample', help=SCRIPTS['mapping-per-sample'])
+    read_mapping.add_mapping_per_sample_args(sp)
+
     sp = sub.add_parser('calculate', help=SCRIPTS['calculate'])
     calculating_data.add_calculate_args(sp)
 
-    sp = sub.add_parser('add-variable', help=SCRIPTS['add-variable'])
-    add_variable.add_add_variable_args(sp)
+    sp = sub.add_parser('serve', help=SCRIPTS['serve'])
+    start_bokeh_server.add_serve_args(sp)
 
-    sp = sub.add_parser('remove-variable', help=SCRIPTS['remove-variable'])
-    add_variable.add_remove_variable_args(sp)
+    # export command
+    sp = sub.add_parser('export', help=SCRIPTS['export'])
+    export_data.add_export_args(sp)
 
+    # adding data to the db
     sp = sub.add_parser('add-sample-metadata', help=SCRIPTS['add-sample-metadata'])
     add_sample_metadata.add_add_sample_metadata_args(sp)
 
     sp = sub.add_parser('add-contig-metadata', help=SCRIPTS['add-contig-metadata'])
     add_contig_metadata.add_add_contig_metadata_args(sp)
 
-    # plotting commands
-    sp = sub.add_parser('serve', help=SCRIPTS['serve'])
-    start_bokeh_server.add_serve_args(sp)
+    sp = sub.add_parser('add-variable', help=SCRIPTS['add-variable'])
+    add_variable.add_add_variable_args(sp)
 
-    # database inspection
-    sp = sub.add_parser('list-variables', help=SCRIPTS['list-variables'])
-    sp.add_argument('-d', '--db', required=True)
-    sp.add_argument('--detailed', action='store_true', help='Enable detailed output')
-
-    sp = sub.add_parser('list-samples', help=SCRIPTS['list-samples'])
-    sp.add_argument('-d', '--db', required=True)
-
-    sp = sub.add_parser('list-contigs', help=SCRIPTS['list-contigs'])
-    sp.add_argument('-d', '--db', required=True)
-
-    sp = sub.add_parser('list-sample-metadata', help=SCRIPTS['list-sample-metadata'])
-    sp.add_argument('-d', '--db', required=True)
-
-    sp = sub.add_parser('list-contig-metadata', help=SCRIPTS['list-contig-metadata'])
-    sp.add_argument('-d', '--db', required=True)
-
+    # removing data from the db
     sp = sub.add_parser('remove-sample', help=SCRIPTS['remove-sample'])
     sp.add_argument('-d', '--db', required=True)
     sp.add_argument('--name', required=True, help='Name of the sample to remove')
@@ -89,13 +77,25 @@ def build_argparser():
     sp.add_argument('-d', '--db', required=True)
     sp.add_argument('--colname', required=True, help='Name of the column to remove')
 
-    # export command
-    sp = sub.add_parser('export', help=SCRIPTS['export'])
-    export_data.add_export_args(sp)
+    sp = sub.add_parser('remove-variable', help=SCRIPTS['remove-variable'])
+    add_variable.add_remove_variable_args(sp)
 
-    # mapping commands (use shared add_*_args functions from mapping modules)
-    sp = sub.add_parser('mapping-per-sample', help=SCRIPTS['mapping-per-sample'])
-    read_mapping.add_mapping_per_sample_args(sp)
+    # database inspection
+    sp = sub.add_parser('list-samples', help=SCRIPTS['list-samples'])
+    sp.add_argument('-d', '--db', required=True)
+
+    sp = sub.add_parser('list-contigs', help=SCRIPTS['list-contigs'])
+    sp.add_argument('-d', '--db', required=True)
+
+    sp = sub.add_parser('list-sample-metadata', help=SCRIPTS['list-sample-metadata'])
+    sp.add_argument('-d', '--db', required=True)
+
+    sp = sub.add_parser('list-contig-metadata', help=SCRIPTS['list-contig-metadata'])
+    sp.add_argument('-d', '--db', required=True)
+
+    sp = sub.add_parser('list-variables', help=SCRIPTS['list-variables'])
+    sp.add_argument('-d', '--db', required=True)
+    sp.add_argument('--detailed', action='store_true', help='Enable detailed output')
 
     return p
 
@@ -109,28 +109,6 @@ def main(argv=None):
         print(f"Warning: Unknown/unused arguments provided: {' '.join(extras)}", file=sys.stderr)
 
     # Dispatch to module run functions (shared-args approach)
-    if args.cmd == 'calculate':
-        return calculating_data.run_calculate_args(args)
-
-    if args.cmd == 'add-variable':
-        return add_variable.run_add_variable(args)
-
-    if args.cmd == 'remove-variable':
-        return add_variable.run_remove_variable(args)
-
-    if args.cmd == 'add-sample-metadata':
-        return add_sample_metadata.run_add_sample_metadata(args)
-
-    if args.cmd == 'add-contig-metadata':
-        return add_contig_metadata.run_add_contig_metadata(args)
-
-    if args.cmd == 'serve':
-        return start_bokeh_server.run_serve(args)
-
-    if args.cmd == 'export':
-        return export_data.run_export(args)
-
-    # mapping commands
     if args.cmd == 'mapping-per-sample':
         try:
             return read_mapping.run_mapping_per_sample(args)
@@ -138,16 +116,66 @@ def main(argv=None):
             print(f"Error running mapping-per-sample: {e}")
             return 2
 
-    # DB inspection commands (call into package functions)
-    if args.cmd == 'list-variables':
+    if args.cmd == 'calculate':
+        return calculating_data.run_calculate_args(args)
+
+    if args.cmd == 'serve':
+        return start_bokeh_server.run_serve(args)
+
+    if args.cmd == 'export':
+        return export_data.run_export(args)
+    
+    # adding data to the db (call into package functions)
+    if args.cmd == 'add-sample-metadata':
+        return add_sample_metadata.run_add_sample_metadata(args)
+
+    if args.cmd == 'add-contig-metadata':
+        return add_contig_metadata.run_add_contig_metadata(args)
+    
+    if args.cmd == 'add-variable':
+        return add_variable.run_add_variable(args)
+
+    # removing data from the db (call into package functions)
+    if args.cmd == 'remove-sample-metadata':
+            try:
+                from thebigbam.database import database_getters
+                database_getters.remove_sample_metadata(args.db, args.colname)
+                return 0
+            except Exception as e:
+                print(f"Error removing sample metadata: {e}")
+                return 2
+
+    if args.cmd == 'remove-contig-metadata':
         try:
             from thebigbam.database import database_getters
-            database_getters.list_variables(args.db, args.detailed)
+            database_getters.remove_contig_metadata(args.db, args.colname)
             return 0
         except Exception as e:
-            print(f"Error listing variables: {e}")
+            print(f"Error removing contig metadata: {e}")
             return 2
 
+    if args.cmd == 'remove-sample':
+        try:
+            from thebigbam.database import database_getters
+            database_getters.remove_sample(args.db, args.name)
+            return 0
+        except Exception as e:
+            print(f"Error removing sample: {e}")
+            return 2
+
+    if args.cmd == 'remove-contig':
+        try:
+            from thebigbam.database import database_getters
+            database_getters.remove_contig(args.db, args.name)
+            return 0
+        except Exception as e:
+            print(f"Error removing contig: {e}")
+            return 2
+        
+    if args.cmd == 'remove-variable':
+        return add_variable.run_remove_variable(args)
+
+    # DB inspection commands (call into package functions)
     if args.cmd == 'list-samples':
         try:
             from thebigbam.database import database_getters
@@ -184,41 +212,14 @@ def main(argv=None):
             print(f"Error listing contig metadata: {e}")
             return 2
 
-    if args.cmd == 'remove-sample-metadata':
-        try:
-            from thebigbam.database import database_getters
-            database_getters.remove_sample_metadata(args.db, args.colname)
-            return 0
-        except Exception as e:
-            print(f"Error removing sample metadata: {e}")
-            return 2
-
-    if args.cmd == 'remove-contig-metadata':
-        try:
-            from thebigbam.database import database_getters
-            database_getters.remove_contig_metadata(args.db, args.colname)
-            return 0
-        except Exception as e:
-            print(f"Error removing contig metadata: {e}")
-            return 2
-
-    if args.cmd == 'remove-sample':
-        try:
-            from thebigbam.database import database_getters
-            database_getters.remove_sample(args.db, args.name)
-            return 0
-        except Exception as e:
-            print(f"Error removing sample: {e}")
-            return 2
-
-    if args.cmd == 'remove-contig':
-        try:
-            from thebigbam.database import database_getters
-            database_getters.remove_contig(args.db, args.name)
-            return 0
-        except Exception as e:
-            print(f"Error removing contig: {e}")
-            return 2
+    if args.cmd == 'list-variables':
+            try:
+                from thebigbam.database import database_getters
+                database_getters.list_variables(args.db, args.detailed)
+                return 0
+            except Exception as e:
+                print(f"Error listing variables: {e}")
+                return 2
 
     # fallback
     print("Unknown command", args.cmd)

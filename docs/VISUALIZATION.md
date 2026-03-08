@@ -210,8 +210,6 @@ Located in the **Plotting parameters → Max window size for plotting** section:
 
 The downsampling threshold for curve/bar features is currently not exposed in the UI (fixed at 100 kb).
 
-
-
 Coverage normalization
 
 For features that depend on local coverage depth (clippings, indels, mismatches, reads starts/ends, paired-read anomalies), an optional **"Plot relative to local coverage"** checkbox normalizes values to facilitate comparison across regions with varying coverage:

@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="https://raw.githubusercontent.com/bhagavadgitadu22/theBIGbam/main/static/LOGO.png" alt="image" width="300" />
+  <img src="https://raw.githubusercontent.com/bhagavadgitadu22/theBIGbam/master/static/LOGO.png" alt="image" width="300" />
 </div>
 
 TheBIGbam is a **genome browser** and **alignment viewer** designed for massive metagenomic and metatranscriptomic datasets. 
@@ -70,7 +70,7 @@ TheBIGbam consists of 3 main steps:
 ## Quick usage with HK97 test data
 
 ```sh
-# optionally if you downloaded the mapping dependencies
+# only available if you downloaded the mapping dependencies
 thebigbam mapping-per-sample \
   -r1 tests/HK97/HK97_R1_illumina.fastq.gz \
   -r2 tests/HK97/HK97_R2_illumina.fastq.gz \
@@ -78,29 +78,33 @@ thebigbam mapping-per-sample \
   --circular -o tests/HK97/HK97_illumina_circular.bam
 
 thebigbam calculate \
-  -b examples/tests/HK97 \
-  -g examples/tests/HK97/HK97_GCF_000848825.1_pharokka.gbk \
+  -b tests/HK97 \
+  -g tests/HK97/HK97_GCF_000848825.1_pharokka.gbk \
   -m coverage,misalignment \
-  -o examples/outputs/HK97/HK97.db \
+  -o tests/HK97/HK97.db \
   -t 4
 
-thebigbam serve --db examples/outputs/HK97/HK97.db --port 5006
+thebigbam serve --db tests/HK97/HK97.db --port 5006
 ```
+
+For more complex examples see [the usage page](docs/USAGE.md).
 
 ## Database computation
 
 `thebigbam calculate` command converts large BAM files and associated annotated assemblies into a compact, queryable DuckDB database.
 
-Example command:
+Example command to compute the database for a single sample containing paired-end short reads mapped to the reference genome of phage HK97:
 
 ```sh
 thebigbam calculate  
--b examples/tests/HK97  
--g examples/tests/HK97/HK97_GCF_000848825.1_pharokka.gbk  
+-b tests/HK97  
+-g tests/HK97/HK97_GCF_000848825.1_pharokka.gbk  
 -m coverage,misalignment  
--o examples/outputs/HK97/HK97.db  
+-o tests/HK97/HK97.db  
 -t 4
 ```
+
+For more complex examples see [the usage page](docs/USAGE.md).
 
 ### What input files do I need?
 
@@ -203,13 +207,13 @@ Once the database has been computed, it can be visualized interactively using `t
 Example command:
 
 ```bash
-thebigbam serve --db examples/outputs/HK97/HK97.db --port 5006
+thebigbam serve --db tests/HK97/HK97.db --port 5006
 ```
 
 When accessing the web server (http://localhost:5006), you will be presented with a web interface:
 
 <div align="center">
-  <img src="https://raw.githubusercontent.com/bhagavadgitadu22/theBIGbam/main/static/VISUALIZATION.png" alt="image" width="800" />
+  <img src="https://raw.githubusercontent.com/bhagavadgitadu22/theBIGbam/master/static/VISUALIZATION.png" alt="image" width="800" />
 </div>
 
 ### Selection panel
@@ -252,7 +256,7 @@ Buttons in the top-right section allow you to disable pan, zoom, or hover intera
 
 Sequences and contig annotations only make sense when looking at a small window: by default sequences are plotted for ≤ 1 kbp window and gene maps are plotted for ≤ 100 kbp window. 
 
-Thehe level of detail of the other plots is adapted to the viewing window size to ensure responsive plotting:
+The level of detail of the other plots is adapted to the viewing window size to ensure responsive plotting:
 
 - **Full resolution (≤ 100 kbp window)**: All data points are plotted
 
@@ -266,7 +270,7 @@ The binning thresholds are configurable in the **Plotting parameters** via 3 spi
 
 - **Sequence plots (bp)** (default: 1000 bp)
 
-For more information consult [the visualization section](docs/VISUALIZATION.md).
+When zooming or panning, you need to re-click APPLY to refresh the plots with the current window size. For more information consult [the visualization section](docs/VISUALIZATION.md).
 
 ## Mapping
 
@@ -292,18 +296,16 @@ For more details on theBIGbam mapping command, you can consult [the preprocessin
 
 ## Additional utilities
 
-# 
-
-### Database maintenance
-
-Consult [DATABASE.md](docs/DATABASE.md) for instructions on how to read and modify your database after its initial creation.
-
 ### Exporting data
 
-Export any metric as a contig x sample TSV matrix:
+Export any metric as a TSV matrix (with contigs as rows and samples as columns):
 
 ```bash
-thebigbam export -d my_database.db --metric Coverage_mean -o coverage.tsv
+thebigbam export -d tests/HK97/HK97.db --metric Coverage_mean -o tests/HK97/coverage.tsv
 ```
 
 Run `thebigbam export -h` to see the full list of available metrics.
+
+### Database maintenance
+
+Consult [DATABASE.md](docs/DATABASE.md) for instructions on reading and modifying the database after it has been created. The documentation explains how to add, remove, or list samples, contigs, and variables. It also describes how to query the database directly using SQL.

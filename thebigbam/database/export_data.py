@@ -96,11 +96,14 @@ available metrics (grouped by module):
   phage mechanisms:
     Packaging_mechanism, Repeat_length,
     Terminase_distance, Terminase_percentage
+
+  NOTE: not all metrics may be available depending on which modules
+  were calculated. export reports an error for metrics that are not available.
 """
 
 
 def add_export_args(parser):
-    """Register CLI arguments for the export subcommand."""
+    """Register CLI arguments for the  subcommand."""
     import argparse
 
     parser.formatter_class = argparse.RawDescriptionHelpFormatter
