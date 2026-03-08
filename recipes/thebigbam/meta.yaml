@@ -23,11 +23,11 @@ requirements:
     - {{ compiler('cxx') }}
     - {{ compiler('rust') }}
   host:
-    - python >=3.9
+    - python >=3.10
     - pip
     - maturin >=1.4,<2.0
   run:
-    - python >=3.9
+    - python >=3.10
     - bokeh >=3.0
     - panel >=1.4
     - biopython >=1.79

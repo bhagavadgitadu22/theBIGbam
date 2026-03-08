@@ -377,3 +377,4 @@ Consult [DATABASE.md](docs/DATABASE.md) for instructions on reading and modifyin
 - [Contributing](CONTRIBUTING.md) TO-DO
 
 TO-DO: check the list!
+Specify that links only work on main github page not pypi page

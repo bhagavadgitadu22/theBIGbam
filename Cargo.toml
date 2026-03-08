@@ -1,6 +1,6 @@
 [package]
 name = "thebigbam_calc"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 description = "Compression and interactive exploration of large-scale sequencing alignments with circular mapping support"
 license = "MIT"
@@ -48,7 +48,7 @@ chrono = "0.4"
 tempfile = "3"
 
 # PyO3 bindings (optional, enabled via "python" feature)
-pyo3 = { version = "0.23", features = ["extension-module", "abi3-py39", "anyhow"], optional = true }
+pyo3 = { version = "0.23", features = ["extension-module", "abi3-py310", "anyhow"], optional = true }
 
 [profile.release]
 lto = true

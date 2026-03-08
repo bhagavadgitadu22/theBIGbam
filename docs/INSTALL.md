@@ -22,7 +22,7 @@ pip install thebigbam
 
 ## Option 3: from source
 
-Requires the Rust toolchain and Python 3.9+.
+Requires the Rust toolchain and Python 3.10+.
 
 ### Step 1: Install Rust
 
