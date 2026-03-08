@@ -171,6 +171,8 @@ Alternatively, you can produce your alignment files directly in theBIGbam as spe
 
 Annotation file should be in GenBank (`.gbk`, `.gbff`, `.gb`) or GFF3 (`.gff`, `.gff3`) format, made with the tool of your choice: bakta for bacteria, pharokka or phold for phages, eggnog-mapper for eukaryotes, etc.
 
+Examples of commands to generate such annotations are available in [the usage page](docs/USAGE.md).
+
 ### Which features can I calculate?
 
 **Parameter (optional):** --modules COMMA-SEPARATED LIST, short version -m

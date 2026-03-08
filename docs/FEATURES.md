@@ -1,10 +1,10 @@
-# # Computed features
+# Computed features
 
-This document describes all features computed from the mapping files by theBIGbam and stored in the DuckDB database. Most features are defined by the SAM/BAM standard and documented in the [SAM specification](https://samtools.github.io/hts-specs/SAMv1.pdf). You can consult it for additional information.
+This document describes all features computed from the input files by theBIGbam and stored in the DuckDB database. Features are organized by **module** as they appear in the visualization interface. Within a module, each subplot displays 1 or 2 features that are plotted together.
 
-Features are organized by **module** as they appear in the visualization interface. Within a module, each subplot displays 1 or 2 features that are plotted together.
+5 modules comprise mapping-derived features. Most of them are defined by the SAM/BAM standard and documented in the [SAM specification](https://samtools.github.io/hts-specs/SAMv1.pdf). You can consult it for additional information.
 
-In addition, genomic features are stored when an optional annotation file is provided.
+1 additional module comprises genomic features computed from the annotation or assembly file provided.
 
 ---
 
