@@ -13,27 +13,29 @@ Built with **Rust** for fast BAM processing and **Python + Bokeh** for interacti
 # Table of contents
 
 - [Installation](#installation)
-  * [Check installation succeeded](#check-installation-succeeded)
+   * [Check installation succeeded](#check-installation-succeeded)
 - [Main usage](#main-usage)
-  * [Quick usage with HK97 test data](#quick-usage-with-hk97-test-data)
-  * [Database computation](#database-computation)
-    + [What input files do I need?](#what-input-files-do-i-need)
-      - [Alignment files](#alignment-files)
-      - [Annotation file](#annotation-file)
-    + [Which features can I calculate?](#which-features-can-i-calculate)
-    + [Database compression](#database-compression)
-    + [Metrics computed per contig and per sample](#metrics-computed-per-contig-and-per-sample)
-  * [Visualization](#visualization)
-    + [Selection panel](#selection-panel)
-      - [One Sample mode](#one-sample-mode)
-      - [All Samples mode](#all-samples-mode)
-    + [Plotting](#plotting)
-      - [Adaptive resolution rendering](#adaptive-resolution-rendering)
-  * [Mapping](#mapping)
-    * [Circular genome support](#mapping-with-circular-genome-support)
-* [Additional utilities](#additional-utilities)
-  + [Exporting data](#exporting-data)
-  + [Database maintenance](#database-maintenance)
+   * [Quick usage with HK97 test data](#quick-usage-with-hk97-test-data)
+   * [Database computation](#database-computation)
+      + [What input files do I need?](#what-input-files-do-i-need)
+         - [Alignment files](#alignment-files)
+         - [Annotation file](#annotation-file)
+      + [Which features can I calculate?](#which-features-can-i-calculate)
+      + [Database compression](#database-compression)
+      + [Metrics computed per contig and per sample](#metrics-computed-per-contig-and-per-sample)
+   * [Visualization](#visualization)
+      + [Serving from a remote server](#serving-from-a-remote-server)
+      + [Web interface overview](#web-interface-overview)
+         - [One Sample mode](#one-sample-mode)
+         - [All Samples mode](#all-samples-mode)
+         - [Plotting](#plotting)
+         - [Adaptive resolution rendering](#adaptive-resolution-rendering)
+   * [Mapping](#mapping)
+      + [Mapping with circular genome support](#mapping-with-circular-genome-support)
+- [Additional utilities](#additional-utilities)
+   * [Exporting data](#exporting-data)
+   * [Database maintenance](#database-maintenance)
+- [Additional in-depth documentation pages](#additional-in-depth-documentation-pages)
 
 ---
 
@@ -56,14 +58,20 @@ python3.10 -m pip install thebigbam
 
 ## Check installation succeeded
 
-First check main command works:
+Check main command works:
 
 ```bash
 thebigbam -h
 ```
 
-Then run test with HK97 example data:
+You can download the tests directory from the git repository to assess your installation:
+```bash
+git clone --filter=blob:none --sparse https://github.com/bhagavadgitadu22/theBIGbam
+cd theBIGbam
+git sparse-checkout set tests
+```
 
+Then check the calculate command works:
 ```bash
 thebigbam calculate \
  -g tests/HK97/HK97_GCF_000848825.1_pharokka.gbk \
@@ -76,8 +84,7 @@ Finally visualize interactively the test data:
 ```bash
 thebigbam serve --db tests/HK97/test.db --port 5006
 ```
-
-Open browser to http://localhost:5006
+Open browser to http://localhost:5006 to see the visualization. If working from a remote server, see the [Visualisation](#visualisation) section.
 
 ---
 
@@ -234,13 +241,25 @@ Example command:
 thebigbam serve --db tests/HK97/HK97.db --port 5006
 ```
 
+### Serving from a remote server
+
+If calculating and serving the database from remote machine without graphical interface, you can use SSH port forwarding to access the visualization on your local machine. For example, if your remote server is `remote.server.com` and you want to forward port `5006`, you can run the following command on your local machine:
+```bash
+ssh -N -L 5006:localhost:5006 user@remote.server.com
+```
+
+If running the job on a compute node, you first need to find which node your job is running on (e.g. node042) using `squeue -u $USER`, then tunnel through the login node to the compute node:
+```bash
+ssh -L 5006:node042:5006 user@cluster.address
+```
+
+### Web interface overview
+
 When accessing the web server (http://localhost:5006), you will be presented with a web interface:
 
 <div align="center">
   <img src="https://raw.githubusercontent.com/bhagavadgitadu22/theBIGbam/master/static/VISUALIZATION.png" alt="image" width="800" />
 </div>
-
-### Selection panel
 
 #### One Sample mode
 
@@ -262,7 +281,7 @@ Finally, click **Apply** to visualize the requested features for the selected co
 
 **All Samples** mode enables comparison of a specific feature across multiple samples. Compared to the **One Sample** mode, the **Samples** section is omitted, and only a single feature can be selected in the **Variables** section (e.g. mismatches on the figure above).
 
-### Plotting
+#### Plotting
 
 Genomic tracks are plotted at the top and mapping-derived features below. On the figure for instance, you can see the gene map, the sequence track and the codon track. Below are displayed the mismatch track for the samples in display (All Samples mode).
 
