@@ -46,7 +46,7 @@ You will need conda installed on your computer.
 We create a fresh environment with python 3.10 and the required dependencies (samtools, minimap2, and bwa-mem2 for the mapping commands, BLAST+ for repeat detection):
 
 ```bash
-conda create -n thebigbam -c conda-forge -c bioconda python=3.10 samtools minimap2 bwa-mem2 blast
+conda create -n thebigbam -c conda-forge -c bioconda python=3.10 samtools=1.23 minimap2=2.30 bwa-mem2=2.3 blast=2.17
 conda activate thebigbam
 ```
 
