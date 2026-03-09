@@ -41,24 +41,20 @@ Built with **Rust** for fast BAM processing and **Python + Bokeh** for interacti
 
 # Installation
 
-## Option 1 (recommended): conda
+You will need conda installed on your computer. 
+
+We create a fresh environment with python 3.10 and the required dependencies (samtools, minimap2, and bwa-mem2 for the mapping commands, BLAST+ for repeat detection). 
 
 ```bash
-conda install -c bioconda thebigbam
+conda create -n thebigbam -c conda-forge -c bioconda python=3.10 samtools minimap2 bwa-mem2 blast
+conda activate thebigbam
 ```
 
-This also installs **samtools**, **minimap2**, **bwa-mem2**, and **BLAST+** (for repeat detection).
+We then install thebigbam via pip in this environment:
 
-## Option 2: pip
-
-Make sure you have python>=3.10 installed. You can check your Python version with `python -v` or `python3 -v`.
-
-Then you can install theBIGbam with pip:
 ```bash
-pip install thebigbam
+python3.10 -m pip install thebigbam
 ```
-
-Mapping tools need to be installed independently.
 
 ## Check installation succeeded
 
@@ -84,8 +80,6 @@ thebigbam serve --db tests/HK97/test.db --port 5006
 ```
 
 Open browser to http://localhost:5006
-
-See [the installation guide](docs/INSTALL.md) for more detailed instructions
 
 ---
 
@@ -364,7 +358,6 @@ Consult [DATABASE.md](docs/DATABASE.md) for instructions on reading and modifyin
 
 # Additional in-depth documentation pages
 
-- [Installation guide](docs/INSTALL.md), probably useless, remove redundancies and move rest to developers note
 - [How to run theBIGbam on big projects?](docs/USAGE.md)
 - [On mapping with circular genome support](docs/CIRCULAR_MAPPING.md)
 - [Features](docs/FEATURES.md) TO-DO
@@ -378,6 +371,7 @@ Consult [DATABASE.md](docs/DATABASE.md) for instructions on reading and modifyin
 - [Plot interpretation](docs/PLOT_INTERPRETATION.md) TO-DO, discard?
 - [Developers note](docs/DEVELOPERS_NOTE.md) TO-DO, to merge with contributing?
 - [Contributing](CONTRIBUTING.md) TO-DO
+- Installation guide to remove?
 
 TO-DO: check the list!
 Specify that links only work on main github page not pypi page
