@@ -12,7 +12,7 @@ Built with **Rust** for fast BAM processing and **Python + Bokeh** for interacti
 
 # Table of contents
 
-- [Installation](#installation)](#installation)
+- [Installation](#installation)
   * [Check installation succeeded](#check-installation-succeeded)
 - [Main usage](#main-usage)
   * [Quick usage with HK97 test data](#quick-usage-with-hk97-test-data)
