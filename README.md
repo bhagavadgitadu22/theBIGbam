@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="https://raw.githubusercontent.com/bhagavadgitadu22/theBIGbam/master/static/LOGO.png" alt="image" width="400" />
+  <img src="https://raw.githubusercontent.com/bhagavadgitadu22/theBIGbam/master/thebigbam/static/LOGO.png" alt="image" width="400" />
 </div>
 
 TheBIGbam is a **genome browser** and **alignment viewer** designed for massive metagenomic and metatranscriptomic datasets. 
