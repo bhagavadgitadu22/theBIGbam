@@ -260,7 +260,7 @@ ssh -L 5006:node042:5006 user@cluster.address
 When accessing the web server (http://localhost:5006), you will be presented with a web interface:
 
 <div align="center">
-  <img src="https://raw.githubusercontent.com/bhagavadgitadu22/theBIGbam/master/static/VISUALIZATION.png" alt="image" width="800" />
+  <img src="https://raw.githubusercontent.com/bhagavadgitadu22/theBIGbam/master/docs/images/VISUALIZATION.png" alt="image" width="800" />
 </div>
 
 #### One Sample mode

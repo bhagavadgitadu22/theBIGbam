@@ -20,7 +20,7 @@ Multiple sections can be added using the pink "+ Add AND/OR" button.
 
 Clicking "+ Add AND/OR" adds a new **connector** and a new **filter row**. You can choose whether the logical operator is **AND** or **OR**.
 
-<img title="" src="../static/FILTERING.png" alt="image" data-align="center" width="323">
+<img title="" src="images/FILTERING.png" alt="image" data-align="center" width="323">
 
 This two-level grouping allows expressive compound queries. For example, the example above is equivalent to the condition:
 

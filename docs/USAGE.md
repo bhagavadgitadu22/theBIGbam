@@ -64,7 +64,7 @@ thebigbam serve --db ecoli_megaplate.db
 
 On the figure below, we selected the evolutionary path leading to node 111 in the **Filtering** section of the **All Samples** mode. We picked the Mismatches variable as the plotted variable to see the mismatches appearing and disappearing along this path. To make it easily readable, we order samples by Root_distance in the **Plotting parameters**: 
 
-![image](https://raw.githubusercontent.com/bhagavadgitadu22/theBIGbam/master/static/VISUALIZATION.png)
+![image](https://raw.githubusercontent.com/bhagavadgitadu22/theBIGbam/master/docs/images/VISUALIZATION.png)
 
 On the figure, we zoomed in around position 1,237,440 to see the appearance of a particular mismatch. When zooming, we need to re-click APPLY to refresh the plots. If zooming close enough, as here, we see the sequence and codons appearing below the gene map on the top tracks.
 
