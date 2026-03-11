@@ -1,5 +1,11 @@
 # Database command control
 
+### Duckdb database
+
+To create a lightweight database, we chose DuckDB for database management due to its columnar structure, which enables efficient storage and fast SQL-like queries, and because it is an embedded engine that avoids the need for a separate server process (Raasveldt and Mühleisen 2019). While DuckDB may face limitations when scaling to extremely large databases (~ 1 TB or more), theBIGbam is expected to remain well below this mark in typical use cases.
+
+explain database structure
+
 ### Updating the database
 
 Example command:

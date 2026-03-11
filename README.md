@@ -13,28 +13,28 @@ Built with **Rust** for fast BAM processing and **Python + Bokeh** for interacti
 # Table of contents
 
 - [Installation](#installation)
-   * [Check installation succeeded](#check-installation-succeeded)
+  * [Check installation succeeded](#check-installation-succeeded)
 - [Main usage](#main-usage)
-   * [Quick usage with HK97 test data](#quick-usage-with-hk97-test-data)
-   * [Database computation](#database-computation)
-      + [What input files do I need?](#what-input-files-do-i-need)
-         - [Alignment files](#alignment-files)
-         - [Annotation file](#annotation-file)
-      + [Which features can I calculate?](#which-features-can-i-calculate)
-      + [Database compression](#database-compression)
-      + [Metrics computed per contig and per sample](#metrics-computed-per-contig-and-per-sample)
-   * [Visualization](#visualization)
-      + [Serving from a remote server](#serving-from-a-remote-server)
-      + [Web interface overview](#web-interface-overview)
-         - [One Sample mode](#one-sample-mode)
-         - [All Samples mode](#all-samples-mode)
-         - [Plotting](#plotting)
-         - [Adaptive resolution rendering](#adaptive-resolution-rendering)
-   * [Mapping](#mapping)
-      + [Mapping with circular genome support](#mapping-with-circular-genome-support)
+  * [Quick usage with HK97 test data](#quick-usage-with-hk97-test-data)
+  * [Database computation](#database-computation)
+    + [What input files do I need?](#what-input-files-do-i-need)
+      - [Alignment files](#alignment-files)
+      - [Annotation file](#annotation-file)
+    + [Which features can I calculate?](#which-features-can-i-calculate)
+    + [Database compression](#database-compression)
+    + [Metrics computed per contig and per sample](#metrics-computed-per-contig-and-per-sample)
+  * [Visualization](#visualization)
+    + [Serving from a remote server](#serving-from-a-remote-server)
+    + [Web interface overview](#web-interface-overview)
+      - [One Sample mode](#one-sample-mode)
+      - [All Samples mode](#all-samples-mode)
+      - [Plotting](#plotting)
+      - [Adaptive resolution rendering](#adaptive-resolution-rendering)
+  * [Mapping](#mapping)
+    + [Mapping with circular genome support](#mapping-with-circular-genome-support)
 - [Additional utilities](#additional-utilities)
-   * [Exporting data](#exporting-data)
-   * [Database maintenance](#database-maintenance)
+  * [Exporting data](#exporting-data)
+  * [Database maintenance](#database-maintenance)
 - [Additional in-depth documentation pages](#additional-in-depth-documentation-pages)
 
 ---
@@ -65,6 +65,7 @@ thebigbam -h
 ```
 
 You can download the tests directory from the git repository to assess your installation:
+
 ```bash
 git clone --filter=blob:none --sparse https://github.com/bhagavadgitadu22/theBIGbam
 cd theBIGbam
@@ -72,6 +73,7 @@ git sparse-checkout set tests
 ```
 
 Then check the calculate command works:
+
 ```bash
 thebigbam calculate \
  -g tests/HK97/HK97_GCF_000848825.1_pharokka.gbk \
@@ -84,6 +86,7 @@ Finally visualize interactively the test data:
 ```bash
 thebigbam serve --db tests/HK97/test.db --port 5006
 ```
+
 Open browser to http://localhost:5006 to see the visualization. If working from a remote server, see the [Visualisation](#visualisation) section.
 
 ---
@@ -222,11 +225,8 @@ In addition to per-position information, summary metrics are computed and stored
 Metrics belong to 4 categories: 
 
 - **Presence detection**
-
 - **Misassembly**
-
 - **Microdiversity**
-
 - **Topology**
 
 A description of all metrics is available in [the filters section](docs/FILTERS.md).
@@ -244,11 +244,13 @@ thebigbam serve --db tests/HK97/HK97.db --port 5006
 ### Serving from a remote server
 
 If calculating and serving the database from remote machine without graphical interface, you can use SSH port forwarding to access the visualization on your local machine. For example, if your remote server is `remote.server.com` and you want to forward port `5006`, you can run the following command on your local machine:
+
 ```bash
 ssh -N -L 5006:localhost:5006 user@remote.server.com
 ```
 
 If running the job on a compute node, you first need to find which node your job is running on (e.g. node042) using `squeue -u $USER`, then tunnel through the login node to the compute node:
+
 ```bash
 ssh -L 5006:node042:5006 user@cluster.address
 ```

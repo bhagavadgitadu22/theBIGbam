@@ -12,9 +12,11 @@ This approach preserves consistent coverage at contig ends of circular genomes, 
 
 ## Impact of circular mapping on the HK97 genome
 
-We mapped both short and long reads to the 39.7 kbp genome of the model bacteriophage HK97 (NC_002167.1) using `thebigbam mapping-per-sample` command in default and circular modes to assess the difference.
+We mapped both short and long reads to the 39.7 kbp genome of the model bacteriophage HK97 (NC_002167.1) using `thebigbam mapping-per-sample` command in default and circular modes to assess the difference. The reference genome was rotated by 1 kbp to prevent the under-covered COS 3′ termini from appearing at the contig ends.
 
 Circular mapping approximately doubled coverage at both contig ends. At the 3′ end, circular mapping increased coverage from 100 to 197 for short reads and from 2,482 to 6,337 for long reads. The region of improved coverage spanned approximately half the average read length (e.g. 75 bp for short reads) from each contig end. Circular mapping using long reads increased the global mean coverage from 5,000 to 5,700.
+
+
 
 ## SAM specification for circular genomes
 

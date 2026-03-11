@@ -49,5 +49,3 @@ features = ["python"]
 module-name = "thebigbam_rs"
 # Explicitly include the Python package
 python-packages = ["thebigbam"]
-# Include static files in the package
-include = ["static/*"]

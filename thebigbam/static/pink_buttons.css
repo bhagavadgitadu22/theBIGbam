@@ -1,0 +1,12 @@
+.bk-btn-group .bk-btn {
+    background: #fc62b8 !important;
+    border-color: #cc2b84 !important;
+    font-weight: bold !important;
+    color: white !important;
+}
+
+.bk-btn-group .bk-btn.bk-active {
+    background: #cc2b84 !important;
+    border-color: #cc2b84 !important;
+    color: white !important;
+}

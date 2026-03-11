@@ -72,6 +72,19 @@ Features designed for detecting phage DNA packaging sites and terminus types. Th
 
 (see the [PhageTerm publication](https://www.nature.com/articles/s41598-017-07910-5))
 
+Subplot: Coverage Reduced
+
+#### Coverage Reduced
+
+- **Description:** Coverage counting only "clean" reads without clipping or mismatches at their ends
+- **How it's computed:** Count reads that:
+  - Start with an exact match (no 5' clipping or mismatch)
+  - For long reads: also end with an exact match
+- **Use case:** Provides cleaner signal for terminus detection by excluding reads with noisy ends that could obscure true packaging sites
+- **Display:** Shown as a continuous curve
+
+Moreover, only read boundaries that align with an exact match to the reference sequence are considered (clippings <5 bp are tolerated). Additionally, not all read boundaries are equally informative depending on the sequencing technology. For long-read sequencing data, both boundaries may represent fragment termini and can therefore be used for detection. In contrast, only start positions of short reads are informative for terminus detection, as sequencing terminates once the expected read length is reached (e.g., ~150 bp), even if the DNA fragment has not been fully sequenced.
+
 ### Subplot: Reads Termini
 
 | Subplot       | Feature                    | Description                                                                                                                             | Use case                                                                                                                                                    |
@@ -94,41 +107,6 @@ These features count where reads start and end, which can reveal DNA packaging c
 - **Description:** Count of read 3' ends at each position
 - **How it's computed:** Count how many reads have their last aligned base at each position
 - **Interpretation:** Peaks indicate positions where DNA molecules frequently end. Combined with Read Starts, helps identify terminus types
-
-### Subplot: Coverage Reduced
-
-#### Coverage Reduced
-
-- **Description:** Coverage counting only "clean" reads without clipping or mismatches at their ends
-- **How it's computed:** Count reads that:
-  - Start with an exact match (no 5' clipping or mismatch)
-  - For long reads: also end with an exact match
-- **Use case:** Provides cleaner signal for terminus detection by excluding reads with noisy ends that could obscure true packaging sites
-- **Display:** Shown as a continuous curve
-
-### Subplot: Tau
-
-#### Tau (τ)
-
-- **Description:** Normalized measure of read terminus enrichment relative to coverage
-
-- **How it's computed:**
-  
-  ```
-  τ = (Read Starts + Read Ends) / Coverage Reduced
-  ```
-  
-  Averaged over the positions in each compressed data run
-
-- **Value range:** 0 to ~2 (can exceed 2 at very sharp termini)
-
-- **Interpretation:**
-  
-  - **τ ≈ 0:** Few read termini relative to coverage (typical for internal regions)
-  - **τ > 0.5:** Enrichment of read termini, suggesting a potential packaging site
-  - **τ approaching 2:** Very strong terminus signal (both starts and ends enriched)
-
-- **Use case:** Tau normalizes terminus counts by coverage, making it easier to identify true packaging sites that would otherwise be obscured by coverage variation
 
 ---
 

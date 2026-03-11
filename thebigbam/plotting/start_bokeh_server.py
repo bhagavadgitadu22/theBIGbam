@@ -965,7 +965,7 @@ def create_layout(db_path):
     widgets = build_controls(conn)
 
     # Load the CSS and logo
-    static_path = os.path.join(os.path.dirname(__file__), "..", "..", "static")
+    static_path = os.path.join(os.path.dirname(__file__), "..", "static")
     css_path = os.path.join(static_path, "bokeh_styles.css")
     with open(css_path) as f:
         css_text = f.read()
@@ -1972,7 +1972,7 @@ def run_serve(args):
     def create_app():
         return create_layout(args.db)
 
-    static_path = os.path.join(os.path.dirname(__file__), "..", "..", "static")
+    static_path = os.path.join(os.path.dirname(__file__), "..", "static")
     pn.serve(
         create_app,
         port=args.port,

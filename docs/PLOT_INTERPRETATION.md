@@ -14,11 +14,11 @@ These two coverage tracks use different counting rules and can yield different v
 
 As a result, at any given position either metric can be higher than the other:
 
-| Scenario | Which is higher? | Likely cause |
-|---|---|---|
-| Coverage > Coverage Reduced | Coverage Reduced is lower | Many reads have clipped ends at this position, suggesting the assembly may be missing sequence |
-| Coverage Reduced > Coverage | Coverage is lower | Some reads have internal mismatches at this position, suggesting microdiversity in the population |
-| Coverage Reduced << Coverage globally | Coverage Reduced much lower everywhere | Reads were not properly trimmed before mapping — adapter sequences likely remain |
+| Scenario                              | Which is higher?                       | Likely cause                                                                                      |
+| ------------------------------------- | -------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| Coverage > Coverage Reduced           | Coverage Reduced is lower              | Many reads have clipped ends at this position, suggesting the assembly may be missing sequence    |
+| Coverage Reduced > Coverage           | Coverage is lower                      | Some reads have internal mismatches at this position, suggesting microdiversity in the population |
+| Coverage Reduced << Coverage globally | Coverage Reduced much lower everywhere | Reads were not properly trimmed before mapping — adapter sequences likely remain                  |
 
 ---
 
