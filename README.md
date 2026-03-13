@@ -41,20 +41,21 @@ Built with **Rust** for fast BAM processing and **Python + Bokeh** for interacti
 
 # Installation
 
-You will need conda installed on your computer. 
+If you have conda installed on your computer, you can directly install theBIGbam with its dependencies (samtools, minimap2 and bwa-mem2 for mapping commands and blast for repeat detection):
 
-We create a fresh environment with python 3.10 and the required dependencies (samtools, minimap2, and bwa-mem2 for the mapping commands, BLAST+ for repeat detection):
+```sh
+conda create -n thebigbam -c conda-forge -c bioconda thebigbam
+```
+
+Alternatively, you can first install the dependencies in a python 3.10 environment before installing theBIGbam via pip:
 
 ```bash
 conda create -n thebigbam -c conda-forge -c bioconda python=3.10 samtools=1.23 minimap2=2.30 bwa-mem2=2.3 blast=2.17
 conda activate thebigbam
-```
-
-We then install thebigbam via pip in this environment:
-
-```bash
 python3.10 -m pip install thebigbam
 ```
+
+In the example we used conda, but the dependencies can be installed using any package manager (e.g. `apt` on Linux, `brew` on macOS) or from the binaries provided on their respective websites. If you do not plan to use the per-sample mapping command, `samtools`, `minimap2`, and `bwa-mem2` are optional.
 
 ## Check installation succeeded
 
