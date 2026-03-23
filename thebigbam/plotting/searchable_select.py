@@ -29,25 +29,30 @@ class SearchableSelect(JSComponent):
         select.setAttribute('placeholder', model.placeholder);
         container.appendChild(select);
 
-        const buildOptions = () => {
-            return model.options.map(o => ({value: o, text: o}));
-        };
+        let allOptions = model.options.map(o => ({value: o, text: o}));
+
+        // Seed the pre-set value so it displays correctly
+        const initialOptions = [];
+        if (model.value) {
+            initialOptions.push({value: model.value, text: model.value});
+        }
 
         const ts = new TomSelect(select, {
             create: false,
             maxOptions: null,
             placeholder: model.placeholder,
-            options: buildOptions(),
+            options: allOptions,
             items: model.value ? [model.value] : [],
             onChange: (val) => { model.value = val; }
         });
 
         model.on('options', () => {
             const currentVal = model.value;
+            allOptions = model.options.map(o => ({value: o, text: o}));
             ts.clearOptions();
-            ts.addOptions(buildOptions());
-            // Restore value if still valid, otherwise clear
-            if (model.options.includes(currentVal)) {
+            ts.addOptions(allOptions);
+            // Restore the current value if still valid
+            if (currentVal && model.options.includes(currentVal)) {
                 ts.setValue(currentVal, true);
             } else {
                 ts.setValue('', true);
@@ -55,6 +60,10 @@ class SearchableSelect(JSComponent):
         });
 
         model.on('value', () => {
+            // Ensure the option exists before setting value
+            if (model.value && !ts.options[model.value]) {
+                ts.addOption({value: model.value, text: model.value});
+            }
             ts.setValue(model.value, true);
         });
 

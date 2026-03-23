@@ -2,24 +2,13 @@
 Coverage validation tests for theBIGbam pipeline.
 
 Tests that coverage values in the database match expected values from CSV files.
+All coverage features are now stored as compressed BLOBs in the Feature_blob table.
 """
 
 import os
 import pytest
 import duckdb
-
-
-def expand_rle_to_array(rows, length):
-    """Convert RLE rows (first_pos, last_pos, value) to per-position array.
-
-    Database positions are 1-indexed (1 to length), convert to 0-indexed.
-    """
-    arr = [0] * length
-    for first_pos, last_pos, value in rows:
-        start = first_pos - 1
-        end = last_pos
-        arr[start:end] = [value] * (end - start)
-    return arr
+import numpy as np
 
 
 def get_contig_length(conn, contig_id):
@@ -27,6 +16,34 @@ def get_contig_length(conn, contig_id):
     return conn.execute(
         "SELECT Contig_length FROM Contig WHERE Contig_id = ?", (contig_id,)
     ).fetchone()[0]
+
+
+def blob_to_int_array(conn, contig_id, sample_id, feature_name, length):
+    """Decode a Feature_blob entry to a per-position integer array.
+
+    Returns a list of integers (length = contig length), 0-filled for positions
+    without data. Dense blobs cover every position; sparse blobs only have events.
+    """
+    from thebigbam.database.blob_decoder import feature_name_to_id, decode_blob
+
+    fid = feature_name_to_id(feature_name)
+    row = conn.execute(
+        "SELECT Data FROM Feature_blob WHERE Contig_id=? AND Sample_id=? AND Feature_id=?",
+        (contig_id, sample_id, fid)
+    ).fetchone()
+    if row is None:
+        return [0] * length
+
+    data = decode_blob(row[0])
+    x = data["x"]
+    y = data["y"]
+
+    arr = [0] * length
+    for i in range(len(x)):
+        pos = int(x[i])
+        if 0 <= pos < length:
+            arr[pos] = int(round(y[i]))
+    return arr
 
 
 def fold_coverage(arr, target_length):
@@ -40,48 +57,18 @@ def fold_coverage(arr, target_length):
 
 
 def get_coverage_arrays(conn, contig_id, sample_id):
-    """Get primary, secondary, supplementary coverage arrays from database."""
+    """Get primary, secondary, supplementary coverage arrays from Feature_blob."""
     length = get_contig_length(conn, contig_id)
-    cur = conn.cursor()
-
-    cur.execute("""
-        SELECT First_position, Last_position, Value
-        FROM Feature_primary_reads
-        WHERE Contig_id = ? AND Sample_id = ?
-        ORDER BY First_position
-    """, (contig_id, sample_id))
-    primary = expand_rle_to_array(cur.fetchall(), length)
-
-    cur.execute("""
-        SELECT First_position, Last_position, Value
-        FROM Feature_secondary_reads
-        WHERE Contig_id = ? AND Sample_id = ?
-        ORDER BY First_position
-    """, (contig_id, sample_id))
-    secondary = expand_rle_to_array(cur.fetchall(), length)
-
-    cur.execute("""
-        SELECT First_position, Last_position, Value
-        FROM Feature_supplementary_reads
-        WHERE Contig_id = ? AND Sample_id = ?
-        ORDER BY First_position
-    """, (contig_id, sample_id))
-    supplementary = expand_rle_to_array(cur.fetchall(), length)
-
+    primary = blob_to_int_array(conn, contig_id, sample_id, "primary_reads", length)
+    secondary = blob_to_int_array(conn, contig_id, sample_id, "secondary_reads", length)
+    supplementary = blob_to_int_array(conn, contig_id, sample_id, "supplementary_reads", length)
     return primary, secondary, supplementary
 
 
 def get_coverage_reduced(conn, contig_id, sample_id):
-    """Get coverage_reduced array from database."""
+    """Get coverage_reduced array from Feature_blob."""
     length = get_contig_length(conn, contig_id)
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT First_position, Last_position, Value
-        FROM Feature_coverage_reduced
-        WHERE Contig_id = ? AND Sample_id = ?
-        ORDER BY First_position
-    """, (contig_id, sample_id))
-    return expand_rle_to_array(cur.fetchall(), length)
+    return blob_to_int_array(conn, contig_id, sample_id, "coverage_reduced", length)
 
 
 @pytest.mark.parametrize("sample_name,coverage_file", [
@@ -213,8 +200,8 @@ def test_validate_coverage_reduced(linear_db, circular_db, db_type, sample_name)
     ("circular", "5000_read_pairs_concat_circular"),
     ("circular", "100_long_reads_concat_circular"),
 ])
-def test_validate_simple_RLE(linear_db_simple, circular_db_simple, db_type, sample_name):
-    """Test that primary_reads contains only one RLE row (uniform coverage) without percentage options."""
+def test_validate_simple_coverage(linear_db_simple, circular_db_simple, db_type, sample_name):
+    """Test that primary_reads is uniform (single value) without percentage options."""
     db_path = linear_db_simple if db_type == "linear" else circular_db_simple
 
     conn = duckdb.connect(db_path, read_only=True)
@@ -224,14 +211,10 @@ def test_validate_simple_RLE(linear_db_simple, circular_db_simple, db_type, samp
     sample_id = cur.fetchone()[0]
     cur.execute("SELECT Contig_id FROM Contig LIMIT 1")
     contig_id = cur.fetchone()[0]
+    length = get_contig_length(conn, contig_id)
 
-    cur.execute("""
-        SELECT COUNT(*)
-        FROM Feature_primary_reads
-        WHERE Contig_id = ? AND Sample_id = ?
-    """, (contig_id, sample_id))
-    row_count = cur.fetchone()[0]
-
+    primary = blob_to_int_array(conn, contig_id, sample_id, "primary_reads", length)
     conn.close()
 
-    assert row_count == 1, f"Expected 1 RLE row for {sample_name}, got {row_count}"
+    unique_values = set(primary)
+    assert len(unique_values) == 1, f"Expected uniform coverage for {sample_name}, got {len(unique_values)} distinct values"

@@ -6,7 +6,7 @@
 //!   significant positions are grouped into runs with average values.
 
 use crate::processing::ProcessConfig;
-use crate::types::{get_plot_type, FeaturePoint, PlotType};
+use crate::types::{get_plot_type, PlotType};
 
 // ============================================================================
 // RUN STRUCTURE
@@ -265,154 +265,63 @@ pub fn merge_identical_runs(runs: Vec<Run>) -> Vec<Run> {
 }
 
 
-/// Compress and add feature points to the output vector.
+/// Compress a feature signal using adaptive RLE.
+///
+/// Convenience wrapper around `add_compressed_feature_with_reference` with no reference signal.
 #[inline]
 pub fn add_compressed_feature(
     values: &[f64],
     feature: &str,
-    contig_name: &str,
+    _contig_name: &str,
     config: &ProcessConfig,
-    output: &mut Vec<FeaturePoint>,
 ) {
-    add_compressed_feature_with_reference(values, None, feature, contig_name, config, output);
+    add_compressed_feature_with_reference(values, None, feature, config);
 }
 
-/// Compress and add feature points with optional coverage reference.
+/// Compress a feature signal with optional coverage reference.
 ///
-/// For bar plots, uses coverage as reference for context-aware compression.
+/// Returns the compressed runs (used downstream for metrics like clipping runs).
 #[inline]
 pub fn add_compressed_feature_with_reference(
     values: &[f64],
     reference: Option<&[f64]>,
     feature: &str,
-    contig_name: &str,
     config: &ProcessConfig,
-    output: &mut Vec<FeaturePoint>,
 ) -> Vec<Run> {
     let plot_type = get_plot_type(feature);
-    let runs = compress_signal_with_reference(values, reference, plot_type, config.curve_ratio, config.bar_ratio);
-
-    output.extend(runs.iter().map(|run| FeaturePoint {
-        contig_name: contig_name.to_string(),
-        feature: feature.to_string(),
-        start_pos: run.start_pos,
-        end_pos: run.end_pos,
-        value: run.value_relative.unwrap_or(run.value),
-        mean: None,
-        median: None,
-        std: None,
-        sequence: None,
-        sequence_prevalence: None,
-        codon_category: None,
-        codon_change: None,
-        aa_change: None,
-    }));
-
-    runs
+    compress_signal_with_reference(values, reference, plot_type, config.curve_ratio, config.bar_ratio)
 }
 
-/// Compress and add feature points with median only (for reads_starts/reads_ends).
+/// Compress a feature signal with median statistics (for reads_starts/reads_ends).
 ///
-/// Like `add_compressed_feature_with_stats` but only stores median per run.
-/// Mean and Std are set to None.
+/// Returns the compressed runs.
 #[inline]
 pub fn add_compressed_feature_with_median(
     counts: &[f64],
-    medians: &[f64],
+    _medians: &[f64],
     reference: Option<&[f64]>,
     feature: &str,
-    contig_name: &str,
     config: &ProcessConfig,
-    output: &mut Vec<FeaturePoint>,
 ) -> Vec<Run> {
     let plot_type = get_plot_type(feature);
-    let runs = compress_signal_with_reference(counts, reference, plot_type, config.curve_ratio, config.bar_ratio);
-
-    output.extend(runs.iter().map(|run| {
-        let start_idx = (run.start_pos - 1) as usize;
-        let end_idx = run.end_pos as usize;
-
-        let median_val = if start_idx < medians.len() {
-            let range_median: f64 = medians[start_idx..end_idx.min(medians.len())].iter().sum::<f64>()
-                / (end_idx - start_idx) as f64;
-            Some(range_median as f32)
-        } else {
-            None
-        };
-
-        FeaturePoint {
-            contig_name: contig_name.to_string(),
-            feature: feature.to_string(),
-            start_pos: run.start_pos,
-            end_pos: run.end_pos,
-            value: run.value_relative.unwrap_or(run.value),
-            mean: None,
-            median: median_val,
-            std: None,
-            sequence: None,
-            sequence_prevalence: None,
-            codon_category: None,
-            codon_change: None,
-            aa_change: None,
-        }
-    }));
-
-    runs
+    compress_signal_with_reference(counts, reference, plot_type, config.curve_ratio, config.bar_ratio)
 }
 
-/// Compress and add feature points with statistics (for clippings/insertions).
+/// Compress a feature signal with statistics (for clippings/insertions).
 ///
-/// Includes mean, median, and standard deviation from the length vectors.
+/// Returns the compressed runs (used for clipping run metrics).
 #[inline]
 pub fn add_compressed_feature_with_stats(
     counts: &[f64],
-    means: &[f64],
-    medians: &[f64],
-    stds: &[f64],
+    _means: &[f64],
+    _medians: &[f64],
+    _stds: &[f64],
     reference: Option<&[f64]>,
     feature: &str,
-    contig_name: &str,
     config: &ProcessConfig,
-    output: &mut Vec<FeaturePoint>,
 ) -> Vec<Run> {
     let plot_type = get_plot_type(feature);
-    let runs = compress_signal_with_reference(counts, reference, plot_type, config.curve_ratio, config.bar_ratio);
-
-    output.extend(runs.iter().map(|run| {
-        // For the run's position range, compute average statistics
-        let start_idx = (run.start_pos - 1) as usize;
-        let end_idx = run.end_pos as usize;
-        
-        let (mean_val, median_val, std_val) = if start_idx < means.len() {
-            let range_mean: f64 = means[start_idx..end_idx.min(means.len())].iter().sum::<f64>() 
-                / (end_idx - start_idx) as f64;
-            let range_median: f64 = medians[start_idx..end_idx.min(medians.len())].iter().sum::<f64>() 
-                / (end_idx - start_idx) as f64;
-            let range_std: f64 = stds[start_idx..end_idx.min(stds.len())].iter().sum::<f64>() 
-                / (end_idx - start_idx) as f64;
-            (Some(range_mean as f32), Some(range_median as f32), Some(range_std as f32))
-        } else {
-            (None, None, None)
-        };
-
-        FeaturePoint {
-            contig_name: contig_name.to_string(),
-            feature: feature.to_string(),
-            start_pos: run.start_pos,
-            end_pos: run.end_pos,
-            value: run.value_relative.unwrap_or(run.value),
-            mean: mean_val,
-            median: median_val,
-            std: std_val,
-            sequence: None,
-            sequence_prevalence: None,
-            codon_category: None,
-            codon_change: None,
-            aa_change: None,
-        }
-    }));
-
-    runs
+    compress_signal_with_reference(counts, reference, plot_type, config.curve_ratio, config.bar_ratio)
 }
 
 #[cfg(test)]

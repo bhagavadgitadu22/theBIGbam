@@ -328,12 +328,11 @@ pub fn variables_for_module(module: &str) -> impl Iterator<Item = &'static Varia
     VARIABLES.iter().filter(move |v| v.module == module)
 }
 
-/// Generate the database table name for a feature.
-///
-/// Convention: `Feature_<name>` (e.g., "Feature_coverage", "Feature_reads_starts")
+/// Map feature name to a 1-based feature_id for the Feature_blob table.
+/// Returns None if the feature is not found in VARIABLES.
 #[inline]
-pub fn feature_table_name(feature: &str) -> String {
-    format!("Feature_{}", feature)
+pub fn feature_name_to_id(name: &str) -> Option<i16> {
+    VARIABLES.iter().position(|v| v.name == name).map(|i| (i + 1) as i16)
 }
 
 // ============================================================================
@@ -386,52 +385,6 @@ pub struct FeatureAnnotation {
     pub nucleotide_sequence: Option<String>,
     /// Protein sequence for CDS features (translated from nucleotide_sequence)
     pub protein_sequence: Option<String>,
-}
-
-/// A single data point for a calculated feature.
-///
-/// After calculating features (coverage, reads_starts, etc.) and compressing
-/// the signal, we store individual (position, value) points.
-///
-/// # Why compress?
-/// A 50kb phage genome at single-base resolution = 50,000 points per feature.
-/// With 10 features × 100 samples = 50 million points! Compression reduces
-/// A single feature data point (run-length encoded).
-///
-/// Each FeaturePoint represents a run of consecutive positions with the same value.
-/// For singleton points (spikes), start_pos == end_pos.
-///
-/// Before compression, genomic signals have millions of (position, value) pairs.
-/// Run-length encoding with adaptive thresholding reduces storage by encoding
-/// constant regions as single runs while preserving rapid changes as short runs.
-#[derive(Clone, Debug)]
-pub struct FeaturePoint {
-    /// Which contig this point belongs to
-    pub contig_name: String,
-    /// Which feature (e.g., "coverage", "reads_starts")
-    pub feature: String,
-    /// First position in the run (1-indexed, inclusive)
-    pub start_pos: i32,
-    /// Last position in the run (1-indexed, inclusive)
-    pub end_pos: i32,
-    /// The value for this run (relative to coverage for coverage-dependent features)
-    pub value: f32,
-    /// Optional mean (for clipping/insertion statistics)
-    pub mean: Option<f32>,
-    /// Optional median (for clipping/insertion statistics)
-    pub median: Option<f32>,
-    /// Optional standard deviation (for clipping/insertion statistics)
-    pub std: Option<f32>,
-    /// Dominant base or sequence at this run's first position (e.g., "A" for mismatch, "ACGT" for insertion)
-    pub sequence: Option<String>,
-    /// Prevalence of the dominant sequence, as percentage × 10 (e.g., 853 = 85.3%)
-    pub sequence_prevalence: Option<i32>,
-    /// Codon category: "Synonymous", "Non-synonymous", or "Intergenic" (mismatches only)
-    pub codon_category: Option<String>,
-    /// Mutant codon (e.g., "ACG") for mismatch positions in CDS
-    pub codon_change: Option<String>,
-    /// Amino acid change description (e.g., "V (Valine)") for mismatch positions in CDS
-    pub aa_change: Option<String>,
 }
 
 /// Coverage data for a contig in a sample.

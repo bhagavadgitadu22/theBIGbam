@@ -32,10 +32,13 @@ def verify_database(db_path: str):
     var_count = conn.execute("SELECT COUNT(*) FROM Variable").fetchone()[0]
     assert var_count > 0, "No variables in database"
 
-    # Check for expected coverage variable
-    variables = conn.execute("SELECT Feature_table_name FROM Variable").fetchall()
-    var_names = [v[0] for v in variables]
-    assert "Feature_primary_reads" in var_names, f"Missing primary_reads variable. Found: {var_names}"
+    # Check that Feature_blob table exists and has data
+    tables = conn.execute("SHOW TABLES").fetchall()
+    table_names = [t[0] for t in tables]
+    assert "Feature_blob" in table_names, f"Missing 'Feature_blob' table. Found: {table_names}"
+
+    blob_count = conn.execute("SELECT COUNT(*) FROM Feature_blob").fetchone()[0]
+    assert blob_count > 0, "No feature blobs in database"
 
     conn.close()
 

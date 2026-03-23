@@ -5,7 +5,7 @@ import sys
 from thebigbam.utils import (
     read_mapping, add_sample_metadata, add_contig_metadata,
 )
-from thebigbam.database import add_variable, calculating_data, export_data
+from thebigbam.database import add_variable, calculating_data, export_data, inspect_blob
 from thebigbam.plotting import start_bokeh_server
 
 SCRIPTS = {
@@ -30,6 +30,8 @@ SCRIPTS = {
     'list-sample-metadata': 'List user-added metadata columns on Sample table',
     'list-contig-metadata': 'List user-added metadata columns on Contig table',
     'list-variables': 'List variables and metadata from DB',
+
+    'inspect': 'List values taken by a feature in a given contig-sample pair (decode and display BLOB contents)',
 }
 
 def build_argparser():
@@ -96,6 +98,10 @@ def build_argparser():
     sp = sub.add_parser('list-variables', help=SCRIPTS['list-variables'])
     sp.add_argument('-d', '--db', required=True)
     sp.add_argument('--detailed', action='store_true', help='Enable detailed output')
+
+    # inspect command
+    sp = sub.add_parser('inspect', help=SCRIPTS['inspect'])
+    inspect_blob.add_inspect_args(sp)
 
     return p
 
@@ -211,6 +217,9 @@ def main(argv=None):
         except Exception as e:
             print(f"Error listing contig metadata: {e}")
             return 2
+
+    if args.cmd == 'inspect':
+        return inspect_blob.run_inspect(args)
 
     if args.cmd == 'list-variables':
             try:

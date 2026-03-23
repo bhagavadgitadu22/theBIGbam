@@ -1952,7 +1952,7 @@ def run_serve(args):
         db_name = os.path.basename(args.db)
         params = []
         for key in ['Modules', 'Min_aligned_fraction', 'Min_coverage_depth',
-                     'Variation_percentage', 'Coverage_percentage', 'Contig_variation_percentage']:
+                     'Coverage_percentage', 'Contig_variation_percentage']:
             if key in meta:
                 params.append(f"{key}={meta[key]}")
         print(f"Database '{db_name}': "

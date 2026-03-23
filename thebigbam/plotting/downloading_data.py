@@ -273,122 +273,165 @@ def download_feature_data_csv(db_path, contig_name, sample_names, xstart=None, x
             conn.close()
             return None
 
-        # Check which tables have stats columns
-        all_tables = set(r[0] for r in variable_rows)
-        table_has_stats = {}
-        for table_name in all_tables:
-            try:
-                cur.execute(f"PRAGMA table_info({table_name})")
-                cols = {r[1] for r in cur.fetchall()}
-                table_has_stats[table_name] = all(c in cols for c in ['Mean', 'Median', 'Std'])
-            except Exception:
-                table_has_stats[table_name] = False
-
-        any_has_stats = any(table_has_stats.values())
-
         # Position filter SQL fragment
-        # Use COALESCE to handle NULL Last_position (single-position bar features)
         _lp = "COALESCE(Last_position, First_position)"
         pos_filter = ""
         if xstart is not None and xend is not None:
             pos_filter = f" AND {_lp} >= {int(xstart)} AND First_position <= {int(xend)}"
 
         # Scaled features (stored as INTEGER ×100)
-        scaled_tables = {"Feature_mapq", "Contig_GCSkew"}
-
-        # Relative-scaled features (stored as INTEGER ×1000)
-        RELATIVE_SCALED_FEATURES = {
-            "Feature_left_clippings", "Feature_right_clippings", "Feature_insertions", "Feature_deletions",
-            "Feature_mismatches", "Feature_reads_starts", "Feature_reads_ends", "Feature_non_inward_pairs",
-            "Feature_mate_not_mapped", "Feature_mate_on_another_contig"
-        }
+        scaled_tables = {"Contig_GCSkew"}
 
         # Tables with a different column schema (Position1/Position2 instead of First_position/Last_position)
         non_standard_schema_tables = {"Contig_directRepeats", "Contig_invertedRepeats"}
 
-        # Build UNION ALL query across all feature tables
+        # Tables that are now stored in Contig_blob (no longer RLE tables)
+        contig_blob_tables = {
+            "Contig_GCContent", "Contig_GCSkew",
+            "Contig_direct_repeat_count", "Contig_inverted_repeat_count",
+            "Contig_direct_repeat_identity", "Contig_inverted_repeat_identity",
+        }
+
+        # Build UNION ALL query for any remaining Contig_* RLE tables
         union_parts = []
         for table_name, var_name, subplot_name in variable_rows:
-            is_contig_table = table_name.startswith("Contig_")
-
-            # Skip tables with non-standard column schema
-            if table_name == "Feature_primary_reads":
+            # Skip Feature_blob and Contig_blob — handled below via Python decoding
+            if not table_name.startswith("Contig_"):
                 continue
             if table_name in non_standard_schema_tables:
                 continue
+            if table_name in contig_blob_tables:
+                continue
 
-            # Determine scaling factor
-            if table_name in RELATIVE_SCALED_FEATURES:
-                scale_expr = " / 1000.0"
-            elif table_name in scaled_tables:
-                scale_expr = " / 100.0"
-            else:
-                scale_expr = ""
-
+            scale_expr = " / 100.0" if table_name in scaled_tables else ""
             safe_var_name = var_name.replace("'", "''")
-            has_stats = table_has_stats.get(table_name, False)
 
-            if is_contig_table:
-                # Contig-level tables have no Sample_id — emit one row per sample with same data
-                if is_all_samples:
-                    for sid in sample_ids:
-                        safe_sample = sample_id_to_name[sid].replace("'", "''")
-                        stats_cols = f", f.Mean{scale_expr} as mean, f.Median{scale_expr} as median, f.Std{scale_expr} as std" if has_stats else (", NULL as mean, NULL as median, NULL as std" if any_has_stats else "")
-                        union_parts.append(
-                            f"SELECT '{safe_sample}' as sample_name, '{safe_var_name}' as feature_name, "
-                            f"f.First_position as start_position, COALESCE(f.Last_position, f.First_position) as last_position, "
-                            f"f.Value{scale_expr} as value{stats_cols} "
-                            f"FROM {table_name} f "
-                            f"WHERE f.Contig_id = {contig_id}{pos_filter}"
-                        )
-                else:
-                    stats_cols = f", f.Mean{scale_expr} as mean, f.Median{scale_expr} as median, f.Std{scale_expr} as std" if has_stats else (", NULL as mean, NULL as median, NULL as std" if any_has_stats else "")
+            if is_all_samples:
+                for sid in sample_ids:
+                    safe_sample = sample_id_to_name[sid].replace("'", "''")
                     union_parts.append(
-                        f"SELECT '{safe_var_name}' as feature_name, "
+                        f"SELECT '{safe_sample}' as sample_name, '{safe_var_name}' as feature_name, "
                         f"f.First_position as start_position, COALESCE(f.Last_position, f.First_position) as last_position, "
-                        f"f.Value{scale_expr} as value{stats_cols} "
+                        f"f.Value{scale_expr} as value "
                         f"FROM {table_name} f "
                         f"WHERE f.Contig_id = {contig_id}{pos_filter}"
                     )
             else:
-                # Sample-level tables
-                stats_cols = f", f.Mean{scale_expr} as mean, f.Median{scale_expr} as median, f.Std{scale_expr} as std" if has_stats else (", NULL as mean, NULL as median, NULL as std" if any_has_stats else "")
-                if is_all_samples:
-                    union_parts.append(
-                        f"SELECT s.Sample_name as sample_name, '{safe_var_name}' as feature_name, "
-                        f"f.First_position as start_position, COALESCE(f.Last_position, f.First_position) as last_position, "
-                        f"f.Value{scale_expr} as value{stats_cols} "
-                        f"FROM {table_name} f "
-                        f"JOIN Sample s ON f.Sample_id = s.Sample_id "
-                        f"WHERE f.Contig_id = {contig_id} AND f.Sample_id IN ({sample_ids_sql}){pos_filter}"
-                    )
-                else:
-                    union_parts.append(
-                        f"SELECT '{safe_var_name}' as feature_name, "
-                        f"f.First_position as start_position, COALESCE(f.Last_position, f.First_position) as last_position, "
-                        f"f.Value{scale_expr} as value{stats_cols} "
-                        f"FROM {table_name} f "
-                        f"WHERE f.Contig_id = {contig_id} AND f.Sample_id IN ({sample_ids_sql}){pos_filter}"
-                    )
+                union_parts.append(
+                    f"SELECT '{safe_var_name}' as feature_name, "
+                    f"f.First_position as start_position, COALESCE(f.Last_position, f.First_position) as last_position, "
+                    f"f.Value{scale_expr} as value "
+                    f"FROM {table_name} f "
+                    f"WHERE f.Contig_id = {contig_id}{pos_filter}"
+                )
 
-        if not union_parts:
+        # === BLOB export: decode Feature_blob entries and add as CSV rows ===
+        blob_csv_rows = []
+        blob_features = [(tn, vn, sn) for tn, vn, sn in variable_rows if tn == "Feature_blob"]
+        if blob_features:
+            from thebigbam.database.blob_decoder import feature_name_to_id, decode_blob
+            for _, var_name_b, _ in blob_features:
+                fid = feature_name_to_id(var_name_b)
+                if fid is None:
+                    continue
+                for sid in sample_ids:
+                    try:
+                        cur.execute(
+                            "SELECT Data FROM Feature_blob WHERE Contig_id=? AND Sample_id=? AND Feature_id=?",
+                            (contig_id, sid, fid)
+                        )
+                        blob_row = cur.fetchone()
+                        if blob_row is None:
+                            continue
+                        data = decode_blob(blob_row[0])
+                        x_arr = data["x"]
+                        y_arr = data["y"]
+                        # Apply position filter
+                        if xstart is not None and xend is not None:
+                            mask = (x_arr >= (xstart - 1)) & (x_arr <= (xend - 1))
+                            x_arr = x_arr[mask]
+                            y_arr = y_arr[mask]
+                        sample_name_str = sample_id_to_name[sid]
+                        for i in range(len(x_arr)):
+                            pos = int(x_arr[i]) + 1  # 0-indexed → 1-indexed
+                            val = float(y_arr[i])
+                            if is_all_samples:
+                                blob_csv_rows.append(f"{sample_name_str},{var_name_b},{pos},{pos},{val}")
+                            else:
+                                blob_csv_rows.append(f"{var_name_b},{pos},{pos},{val}")
+                    except Exception:
+                        pass
+
+        # === Contig_blob export: decode contig-level features ===
+        contig_blob_features = [(tn, vn, sn) for tn, vn, sn in variable_rows if tn in contig_blob_tables]
+        contig_blob_name_map = {
+            "Contig_GCContent": "gc_content",
+            "Contig_GCSkew": "gc_skew",
+            "Contig_direct_repeat_count": "direct_repeat_count",
+            "Contig_inverted_repeat_count": "inverted_repeat_count",
+            "Contig_direct_repeat_identity": "direct_repeat_identity",
+            "Contig_inverted_repeat_identity": "inverted_repeat_identity",
+        }
+        if contig_blob_features:
+            from thebigbam.database.blob_decoder import contig_blob_name_to_id, decode_blob
+            for table_name, var_name_b, _ in contig_blob_features:
+                contig_feature_name = contig_blob_name_map.get(table_name)
+                if not contig_feature_name:
+                    continue
+                fid = contig_blob_name_to_id(contig_feature_name)
+                if fid is None:
+                    continue
+                try:
+                    cur.execute(
+                        "SELECT Data FROM Contig_blob WHERE Contig_id=? AND Feature_id=?",
+                        (contig_id, fid)
+                    )
+                    blob_row = cur.fetchone()
+                    if blob_row is None:
+                        continue
+                    data = decode_blob(blob_row[0])
+                    x_arr = data["x"]
+                    y_arr = data["y"]
+                    # Apply position filter
+                    if xstart is not None and xend is not None:
+                        mask = (x_arr >= (xstart - 1)) & (x_arr <= (xend - 1))
+                        x_arr = x_arr[mask]
+                        y_arr = y_arr[mask]
+                    for i in range(len(x_arr)):
+                        pos = int(x_arr[i]) + 1  # 0-indexed → 1-indexed
+                        val = float(y_arr[i])
+                        if is_all_samples:
+                            # Contig_blob is sample-independent, but we output for all samples
+                            for sid in sample_ids:
+                                sample_name_str = sample_id_to_name[sid]
+                                blob_csv_rows.append(f"{sample_name_str},{var_name_b},{pos},{pos},{val}")
+                        else:
+                            blob_csv_rows.append(f"{var_name_b},{pos},{pos},{val}")
+                except Exception:
+                    pass
+
+        if not union_parts and not blob_csv_rows:
             print(f"[downloading_data] Download data: No exportable feature tables", flush=True)
             conn.close()
             return None
+
+        if not union_parts:
+            # Only BLOB data — build CSV manually
+            if is_all_samples:
+                header = "sample_name,feature_name,start_position,last_position,value"
+            else:
+                header = "feature_name,start_position,last_position,value"
+            csv_content = header + "\n" + "\n".join(blob_csv_rows) + "\n"
+            conn.close()
+            return csv_content
 
         full_query = " UNION ALL ".join(union_parts)
 
         # Wrap with ORDER BY for deterministic output
         if is_all_samples:
-            if any_has_stats:
-                wrapper = f"SELECT sample_name, feature_name, start_position, last_position, value, mean, median, std FROM ({full_query}) ORDER BY sample_name, feature_name, start_position"
-            else:
-                wrapper = f"SELECT sample_name, feature_name, start_position, last_position, value FROM ({full_query}) ORDER BY sample_name, feature_name, start_position"
+            wrapper = f"SELECT sample_name, feature_name, start_position, last_position, value FROM ({full_query}) ORDER BY sample_name, feature_name, start_position"
         else:
-            if any_has_stats:
-                wrapper = f"SELECT feature_name, start_position, last_position, value, mean, median, std FROM ({full_query}) ORDER BY feature_name, start_position"
-            else:
-                wrapper = f"SELECT feature_name, start_position, last_position, value FROM ({full_query}) ORDER BY feature_name, start_position"
+            wrapper = f"SELECT feature_name, start_position, last_position, value FROM ({full_query}) ORDER BY feature_name, start_position"
 
         # Use DuckDB's native COPY TO for fast CSV export
         with tempfile.NamedTemporaryFile(mode='w', suffix='.csv', delete=False) as f:
@@ -401,6 +444,10 @@ def download_feature_data_csv(db_path, contig_name, sample_names, xstart=None, x
 
             with open(temp_path, 'r', encoding='utf-8') as f:
                 csv_content = f.read()
+
+            # Append BLOB-decoded rows if any
+            if blob_csv_rows:
+                csv_content = csv_content.rstrip('\n') + '\n' + '\n'.join(blob_csv_rows) + '\n'
 
             row_count = csv_content.count('\n') - 1
             print(f"[downloading_data] Data CSV generated ({row_count} rows)", flush=True)

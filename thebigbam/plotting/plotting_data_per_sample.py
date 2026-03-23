@@ -723,246 +723,203 @@ def get_variable_metadata_batch(cur, subplot_list):
     return result
 
 
-### Downsampling threshold: windows larger than this use SQL-side binning
+### Downsampling threshold: windows larger than this use zoom-level binning
 _DOWNSAMPLE_THRESHOLD = 100_000  # 100 kb
-_NUM_BINS = 1000
-
-# Features stored as relative values (value / coverage * 1000) — need ÷1000 scaling
-RELATIVE_SCALED_FEATURES = {
-    "Feature_left_clippings", "Feature_right_clippings", "Feature_insertions", "Feature_deletions",
-    "Feature_mismatches", "Feature_reads_starts", "Feature_reads_ends", "Feature_non_inward_pairs",
-    "Feature_mate_not_mapped", "Feature_mate_on_another_contig"
-}
-
-# Features stored as INTEGER × 100 — need ÷100 scaling
-_SCALED_FEATURES = ["Feature_mapq", "Contig_GCSkew"]
-
-# Features that have statistics columns (min/mean/max per position)
-_FEATURES_WITH_STATS = ["left_clippings", "right_clippings", "insertions", "reads_starts", "reads_ends"]
-
-# Features that have Sequence and Sequence_prevalence columns
-_FEATURES_WITH_SEQUENCES = ["mismatches", "insertions", "left_clippings", "right_clippings", "reads_starts", "reads_ends"]
-
-# SQL expression for Last_position that handles NULL.
-# Single-position bar features (insertions, mismatches, clippings, reads_starts/ends) store
-# NULL for Last_position to save space; COALESCE recovers First_position at read time.
-_LP = "COALESCE(Last_position, First_position)"
 
 
-def _rle_weighted_bin_sql(feature_table, is_contig_table, xstart, xend, sample_id, contig_id, cur, num_bins=_NUM_BINS, value_col="Value", has_sequences=False, type_picked="curve"):
-    """SQL MAX binning: maximum Value per bin to preserve spikes.
+# Legacy RLE constant removed - not needed for BLOB-based architecture
 
-    Each RLE row is expanded to all bins it overlaps via generate_series,
-    ensuring long RLE runs contribute to every bin they span.
 
-    For bar features (type_picked="bars"), the full run (First_position, Last_position) of the
-    max-value row is preserved. If the same run is the max in multiple adjacent bins, it is
-    emitted only once (deduplicated). No zero-fill is performed for bars.
+# ============================================================================
+# BLOB-based feature data retrieval
+# ============================================================================
 
-    For curve features, behavior is unchanged: position is clamped to bin boundaries and gaps
-    between occupied bins are zero-filled to prevent varea interpolation artifacts.
+def _has_feature_blob_table(cur):
+    """Check if the Feature_blob table exists in this database."""
+    try:
+        cur.execute("SELECT 1 FROM information_schema.tables WHERE table_name = 'Feature_blob'")
+        return cur.fetchone() is not None
+    except Exception:
+        return False
 
-    Args:
-        value_col: Column name to bin (default: "Value")
-        has_sequences: If True, also fetch Sequence and Sequence_prevalence of the max-value row.
-        type_picked: "bars" or "curve" — controls post-processing (dedup/zero-fill).
 
-    Returns for curves:
-        (x_coords, y_coords) if has_sequences=False,
-        (x_coords, y_coords, seq_coords, prev_coords) if has_sequences=True.
-    Returns for bars:
-        (x_coords, y_coords, width_coords, first_pos_coords, last_pos_coords) if has_sequences=False,
-        (x_coords, y_coords, width_coords, first_pos_coords, last_pos_coords, seq_coords, prev_coords) if has_sequences=True.
+def _get_feature_blob(cur, contig_id, sample_id, feature_name):
+    """Fetch a single feature BLOB from the Feature_blob table.
+
+    Returns raw bytes or None if not found.
     """
-    is_bars = type_picked == "bars"
-    window_size = xend - xstart + 1
-    bin_width = max(1, window_size // num_bins)
-
-    # Each RLE row is expanded to all bins it overlaps via generate_series.
-    # ARG_MAX returns attributes of the max-value row per bin.
-    seq_inner = ", f.Sequence AS seq, f.Sequence_prevalence AS seq_prev" if has_sequences else ""
-    seq_outer = (
-        f", ARG_MAX(seq, CAST(val AS DOUBLE)) AS max_seq"
-        f", ARG_MAX(seq_prev, CAST(val AS DOUBLE)) AS max_seq_prev"
-    ) if has_sequences else ""
-
-    # For bars: retrieve full run endpoints; mid_pos not needed (fp/lp give exact position).
-    # For curves: mid_pos (clamped to bin) prevents non-monotonic x from long RLE runs.
-    bars_inner = f", f.First_position AS fp, {_LP} AS lp" if is_bars else ""
-    bars_outer = (
-        f", ARG_MAX(fp, CAST(val AS DOUBLE)) AS max_fp"
-        f", ARG_MAX(lp, CAST(val AS DOUBLE)) AS max_lp"
-    ) if is_bars else ""
-    curve_mid_inner = "" if is_bars else f", (f.First_position + {_LP}) / 2 AS mid_pos"
-    curve_mid_outer = "" if is_bars else f", ARG_MAX(mid_pos, CAST(val AS DOUBLE)) AS max_pos"
-
-    if is_contig_table:
-        sql = (
-            f"SELECT bin_idx AS bin, "
-            f"MAX(CAST(val AS DOUBLE)) AS max_value"
-            f"{curve_mid_outer}{bars_outer}{seq_outer} "
-            f"FROM ("
-            f"  SELECT f.{value_col} AS val{curve_mid_inner}{bars_inner}{seq_inner}, "
-            f"  UNNEST(generate_series("
-            f"    GREATEST(0, CAST((GREATEST(f.First_position, ?) - ?) / ? AS INTEGER)), "
-            f"    LEAST(? - 1, CAST((LEAST({_LP}, ?) - ?) / ? AS INTEGER))"
-            f"  )) AS bin_idx "
-            f"  FROM {feature_table} f "
-            f"  WHERE f.Contig_id = ? AND {_LP} >= ? AND f.First_position <= ?"
-            f") sub "
-            f"GROUP BY bin_idx ORDER BY bin_idx"
+    from thebigbam.database.blob_decoder import feature_name_to_id
+    fid = feature_name_to_id(feature_name)
+    if fid is None:
+        return None
+    try:
+        cur.execute(
+            "SELECT Data FROM Feature_blob WHERE Contig_id=? AND Sample_id=? AND Feature_id=?",
+            (contig_id, sample_id, fid)
         )
-        params = (xstart, xstart, bin_width,
-                  num_bins, xend, xstart, bin_width,
-                  contig_id, xstart, xend)
-    else:
-        sql = (
-            f"SELECT bin_idx AS bin, "
-            f"MAX(CAST(val AS DOUBLE)) AS max_value"
-            f"{curve_mid_outer}{bars_outer}{seq_outer} "
-            f"FROM ("
-            f"  SELECT f.{value_col} AS val{curve_mid_inner}{bars_inner}{seq_inner}, "
-            f"  UNNEST(generate_series("
-            f"    GREATEST(0, CAST((GREATEST(f.First_position, ?) - ?) / ? AS INTEGER)), "
-            f"    LEAST(? - 1, CAST((LEAST({_LP}, ?) - ?) / ? AS INTEGER))"
-            f"  )) AS bin_idx "
-            f"  FROM {feature_table} f "
-            f"  WHERE f.Sample_id = ? AND f.Contig_id = ? AND {_LP} >= ? AND f.First_position <= ?"
-            f") sub "
-            f"GROUP BY bin_idx ORDER BY bin_idx"
+        row = cur.fetchone()
+        return row[0] if row else None
+    except Exception:
+        return None
+
+
+def _get_contig_blob(cur, contig_id, feature_name):
+    """Fetch a single Contig_blob entry for a contig-level feature.
+
+    Contig_blob stores contig-level features (gc_content, gc_skew, repeat stats).
+    Unlike Feature_blob, Contig_blob has no sample dimension.
+
+    Returns raw bytes or None if not found.
+    """
+    from thebigbam.database.blob_decoder import contig_blob_name_to_id
+    fid = contig_blob_name_to_id(feature_name)
+    if fid is None:
+        return None
+    try:
+        cur.execute(
+            "SELECT Data FROM Contig_blob WHERE Contig_id=? AND Feature_id=?",
+            (contig_id, fid)
         )
-        params = (xstart, xstart, bin_width,
-                  num_bins, xend, xstart, bin_width,
-                  sample_id, contig_id, xstart, xend)
+        row = cur.fetchone()
+        return row[0] if row else None
+    except Exception:
+        return None
 
-    # Optionally save EXPLAIN plan
-    if os.environ.get("BIGBAMB_PROFILE"):
-        try:
-            cur.execute(f"EXPLAIN {sql}", params)
-            explain_rows = cur.fetchall()
-            explain_file = f"explain_{feature_table}_{xstart}_{xend}.txt"
-            with open(explain_file, "w") as f:
-                for erow in explain_rows:
-                    f.write(str(erow[0]) + "\n")
-        except Exception as e:
-            print(f"[get_feature_data] Could not save EXPLAIN for {feature_table}: {e}", flush=True)
 
-    cur.execute(sql, params)
-    binned_rows = cur.fetchall()
+def _blob_to_feature_dict(blob_bytes, type_picked, xstart=None, xend=None, downsample_threshold=None):
+    """Decode a BLOB and format for Bokeh plotting.
 
-    if is_bars:
-        # --- BARS: keep full run, dedup across bins ---
-        # Row layout: (bin, max_value, max_fp, max_lp[, max_seq, max_seq_prev])
-        # Collect unique runs: same (fp, lp) appearing as max in multiple bins → emit once
-        seen = set()
-        x_coords = []
-        y_coords = []
-        width_coords = []
-        first_pos_coords = []
-        last_pos_coords = []
-        seq_coords = [] if has_sequences else None
-        prev_coords = [] if has_sequences else None
-        for row in binned_rows:
-            if has_sequences:
-                bin_idx, max_value, max_fp, max_lp, max_seq, max_seq_prev = row
-            else:
-                bin_idx, max_value, max_fp, max_lp = row
-            if max_value is None or bin_idx is None or max_fp is None or max_lp is None:
-                continue
-            fp = int(max_fp)
-            lp = int(max_lp)
-            key = (fp, lp)
-            if key in seen:
-                continue
-            seen.add(key)
-            midpoint = (fp + lp) / 2.0
-            width = lp - fp + 1
-            x_coords.append(midpoint)
-            y_coords.append(float(max_value))
-            width_coords.append(width)
-            first_pos_coords.append(fp)
-            last_pos_coords.append(lp)
-            if has_sequences:
-                seq_coords.append(max_seq if max_seq is not None else "")
-                prev_coords.append(max_seq_prev / 10.0 if max_seq_prev is not None else None)
-        if not x_coords:
-            if has_sequences:
-                return [], [], [], [], [], [], []
-            return [], [], [], [], []
-        if has_sequences:
-            return x_coords, y_coords, width_coords, first_pos_coords, last_pos_coords, seq_coords, prev_coords
-        return x_coords, y_coords, width_coords, first_pos_coords, last_pos_coords
+    Returns dict with x, y, and optional metadata arrays, or None if empty.
+    """
+    from thebigbam.database.blob_decoder import decode_blob, decode_zoom_by_bin_size
+
+    _threshold = downsample_threshold if downsample_threshold is not None else _DOWNSAMPLE_THRESHOLD
+
+    # Choose resolution based on window size
+    window = (xend - xstart) if (xstart is not None and xend is not None) else 0
+
+    if window > 100_000:
+        data = decode_zoom_by_bin_size(blob_bytes, 1000)  # 1000bp bins
+        return _format_zoom_for_bokeh(data, type_picked, xstart, xend)
+    elif window > 10_000:
+        data = decode_zoom_by_bin_size(blob_bytes, 100)  # 100bp bins
+        return _format_zoom_for_bokeh(data, type_picked, xstart, xend)
     else:
-        # --- CURVES: clamped position + zero-fill (unchanged) ---
-        # Build lookup of bin_idx -> (position, max_value[, seq, seq_prev])
-        bin_data = {}
-        for row in binned_rows:
-            if has_sequences:
-                bin_idx, max_value, max_pos, max_seq, max_seq_prev = row
-            else:
-                bin_idx, max_value, max_pos = row
-            if max_value is not None and bin_idx is not None:
-                bi = int(bin_idx)
-                bin_start = xstart + bi * bin_width
-                position = max(bin_start, min(bin_start + bin_width - 1, int(max_pos))) if max_pos is not None else int(bin_start + bin_width // 2)
-                if has_sequences:
-                    bin_data[bi] = (position, float(max_value), max_seq, max_seq_prev)
-                else:
-                    bin_data[bi] = (position, float(max_value))
+        data = decode_blob(blob_bytes)
+        if len(data.get("x", [])) == 0:
+            return None
 
-        if not bin_data:
-            if has_sequences:
-                return [], [], [], []
-            return [], []
+        x = data["x"]
+        y = data["y"]
 
-        # Zero-fill all bins between min and max occupied bins
-        # This prevents linear interpolation artifacts (triangles) in varea/line rendering
-        # For zero-filled bins, use the bin center as position
-        min_bin = min(bin_data)
-        max_bin = max(bin_data)
-        x_coords = []
-        y_coords = []
-        seq_coords = [] if has_sequences else None
-        prev_coords = [] if has_sequences else None
-        for bi in range(min_bin, max_bin + 1):
-            if bi in bin_data:
-                if has_sequences:
-                    position, value, seq, seq_prev = bin_data[bi]
-                    seq_coords.append(seq if seq is not None else "")
-                    prev_coords.append(seq_prev / 10.0 if seq_prev is not None else None)
-                else:
-                    position, value = bin_data[bi]
-                x_coords.append(position)
-                y_coords.append(value)
-            else:
-                # Zero-filled bin: use bin center (bin_width matches SQL integer division)
-                bin_center = int(xstart + (bi + 0.5) * bin_width)
-                x_coords.append(bin_center)
-                y_coords.append(0.0)
-                if has_sequences:
-                    seq_coords.append("")
-                    prev_coords.append(None)
-        if has_sequences:
-            return x_coords, y_coords, seq_coords, prev_coords
-        return x_coords, y_coords
+        # Slice to window if specified
+        if xstart is not None and xend is not None:
+            # x is 0-indexed in BLOB, positions are 1-indexed in display
+            mask = (x >= (xstart - 1)) & (x <= (xend - 1))
+            x = x[mask]
+            y = y[mask]
+            # Also slice metadata arrays
+            for key in list(data.keys()):
+                if key not in ("x", "y") and hasattr(data[key], '__len__') and len(data[key]) == len(mask):
+                    import numpy as np
+                    if isinstance(data[key], np.ndarray):
+                        data[key] = data[key][mask]
+                    elif isinstance(data[key], list):
+                        indices = [i for i, m in enumerate(mask) if m]
+                        data[key] = [data[key][i] for i in indices]
+
+        if len(x) == 0:
+            return None
+
+        # Convert 0-indexed to 1-indexed for display
+        result = {
+            "x": (x + 1).tolist(),
+            "y": y.tolist(),
+        }
+
+        # Width for bars
+        if type_picked == "bars":
+            result["width"] = [1] * len(x)
+            result["first_pos"] = result["x"]
+            result["last_pos"] = result["x"]
+
+        # Stats
+        if "mean" in data:
+            result["mean"] = data["mean"].tolist()
+            result["median"] = data["median"].tolist()
+            result["std"] = data["std"].tolist()
+
+        # Sequences
+        if "sequence" in data:
+            result["sequence"] = data["sequence"]
+            result["sequence_prevalence"] = data["sequence_prevalence"].tolist() if hasattr(data["sequence_prevalence"], 'tolist') else data["sequence_prevalence"]
+
+        # Codons
+        if "codon_category" in data:
+            result["codon_category"] = data["codon_category"]
+            result["codon_change"] = data["codon_change"]
+            result["aa_change"] = data["aa_change"]
+
+        return result
+
+
+def _format_zoom_for_bokeh(zoom_data, type_picked, xstart=None, xend=None):
+    """Format zoom level data for Bokeh plotting."""
+    bin_starts = zoom_data["bin_start"]
+    bin_ends = zoom_data["bin_end"]
+
+    # Filter to window
+    if xstart is not None and xend is not None:
+        mask = (bin_ends >= (xstart - 1)) & (bin_starts <= (xend - 1))
+        bin_starts = bin_starts[mask]
+        bin_ends = bin_ends[mask]
+        for key in zoom_data:
+            if key not in ("bin_start", "bin_end"):
+                import numpy as np
+                if isinstance(zoom_data[key], np.ndarray):
+                    zoom_data[key] = zoom_data[key][mask]
+
+    if len(bin_starts) == 0:
+        return None
+
+    # Convert to 1-indexed midpoints
+    midpoints = ((bin_starts + bin_ends) / 2.0 + 1).tolist()
+
+    if type_picked == "bars":
+        # For bars: use max to preserve spikes
+        y_values = zoom_data.get("max", zoom_data.get("mean", [])).tolist()
+        widths = (bin_ends - bin_starts + 1).tolist()
+        return {
+            "x": midpoints,
+            "y": y_values,
+            "width": widths,
+            "first_pos": (bin_starts + 1).tolist(),
+            "last_pos": (bin_ends + 1).tolist(),
+        }
+    else:
+        # For curves: use mean
+        y_values = zoom_data.get("mean", []).tolist()
+        return {
+            "x": midpoints,
+            "y": y_values,
+        }
 
 
 ### Function to get features of one variable
 def get_feature_data(cur, feature, contig_id, sample_id, xstart=None, xend=None, variable_metadata=None, downsample_threshold=None, min_relative_value=0.0):
-    """Get feature data for plotting.
+    """Get feature data for plotting from BLOB storage.
 
-    Uses SQL-side binning (midpoint assignment, 1000 bins) for windows larger than the
-    downsampling threshold (default: _DOWNSAMPLE_THRESHOLD = 100kb). For small windows or
-    undefined ranges, full-resolution RLE expansion is used.
+    Decodes Feature_blob (sample-level) or Contig_blob (contig-level) entries.
+    Uses zoom levels for large windows, base resolution for small windows.
 
     Args:
         cur: DuckDB cursor
         feature: Feature name to query
         contig_id: Contig ID
         sample_id: Sample ID
-        xstart: Optional start position for filtering (only fetch data intersecting this range)
-        xend: Optional end position for filtering (only fetch data intersecting this range)
-        variable_metadata: Optional cached result from get_variable_metadata(); avoids re-querying Variable table
+        xstart: Optional start position for filtering
+        xend: Optional end position for filtering
+        variable_metadata: Optional cached result from get_variable_metadata()
         downsample_threshold: Override the module-level _DOWNSAMPLE_THRESHOLD for this call
     """
     # Get rendering info from Variable table (Type and Size are quoted - reserved words in DuckDB)
@@ -975,22 +932,8 @@ def get_feature_data(cur, feature, contig_id, sample_id, xstart=None, xend=None,
     # example the clippings (right vs left)
     list_feature_dict = []
 
-    # Check once whether Feature_mismatches has codon columns
-    has_codon_table = False
-    try:
-        cur.execute("SELECT 1 FROM information_schema.columns WHERE table_name = 'Feature_mismatches' AND column_name = 'Codon_category'")
-        has_codon_table = cur.fetchone() is not None
-    except Exception:
-        pass
-
     for row in rows:
         type_picked, color, alpha, fill_alpha, size, title, feature_table = row
-
-        # Check if this is a mismatches table with codon annotation
-        has_codon_annotation = False
-        original_feature_table = feature_table
-        if feature_table == "Feature_mismatches" and has_codon_table:
-            has_codon_annotation = True
 
         feature_dict = {
             "type": type_picked,
@@ -1001,684 +944,84 @@ def get_feature_data(cur, feature, contig_id, sample_id, xstart=None, xend=None,
             "title": title,
             "x": [],
             "y": [],
-            "is_relative_scaled": False,  # Will be set to True for relative-scaled features
+            "is_relative_scaled": False,
         }
 
-        # Check if this feature stores scaled values (stored as INTEGER ×100)
-        is_scaled = original_feature_table in _SCALED_FEATURES
-
-        # Check if this feature stores relative values (stored as INTEGER ×1000)
-        is_relative_scaled = original_feature_table in RELATIVE_SCALED_FEATURES
-
         # Detect contig-level table (no Sample_id column)
-        is_contig_table = original_feature_table.startswith("Contig_")
+        is_contig_table = feature_table.startswith("Contig_")
 
-        # --- DOWNSAMPLING PATH: large windows (> threshold) ---
-        _threshold = downsample_threshold if downsample_threshold is not None else _DOWNSAMPLE_THRESHOLD
-        use_binning = (
-            xstart is not None and xend is not None
-            and (xend - xstart) > _threshold
-        )
-
-        if use_binning:
-            # Check if this feature has sequence columns (needed for binning path too)
-            has_sequences_bin = original_feature_table in [f"Feature_{f}" for f in _FEATURES_WITH_SEQUENCES]
-            is_bars = type_picked == "bars"
-
-            # Special case: primary_reads VIEW combines strand tables — treat as regular curve
-            if feature_table == "Feature_primary_reads":
-                x_coords, y_coords = _rle_weighted_bin_sql(
-                    "Feature_primary_reads", False, xstart, xend, sample_id, contig_id, cur
-                )
-                seq_coords_bin = []
-                prev_coords_bin = []
-                width_coords_bin = []
-                fps_bin = []
-                lps_bin = []
-            elif is_bars:
-                # Bars: get full run with dedup
-                if has_sequences_bin:
-                    x_coords, y_coords, width_coords_bin, fps_bin, lps_bin, seq_coords_bin, prev_coords_bin = _rle_weighted_bin_sql(
-                        feature_table, is_contig_table, xstart, xend,
-                        sample_id, contig_id, cur, has_sequences=True, type_picked="bars"
-                    )
-                else:
-                    x_coords, y_coords, width_coords_bin, fps_bin, lps_bin = _rle_weighted_bin_sql(
-                        feature_table, is_contig_table, xstart, xend,
-                        sample_id, contig_id, cur, type_picked="bars"
-                    )
-                    seq_coords_bin = []
-                    prev_coords_bin = []
-            elif has_sequences_bin:
-                x_coords, y_coords, seq_coords_bin, prev_coords_bin = _rle_weighted_bin_sql(
-                    feature_table, is_contig_table, xstart, xend,
-                    sample_id, contig_id, cur, has_sequences=True
-                )
-                width_coords_bin = []
-                fps_bin = []
-                lps_bin = []
-            else:
-                x_coords, y_coords = _rle_weighted_bin_sql(
-                    feature_table, is_contig_table, xstart, xend,
-                    sample_id, contig_id, cur
-                )
-                seq_coords_bin = []
-                prev_coords_bin = []
-                width_coords_bin = []
-                fps_bin = []
-                lps_bin = []
-
-            # Apply scaling after binning (MAX was on raw INTEGER values)
-            if is_relative_scaled and y_coords:
-                # Relative features stored as INTEGER × 1000
-                y_coords = [v / 1000.0 for v in y_coords]
-            elif is_scaled and y_coords:
-                # Scaled features stored as INTEGER × 100
-                y_coords = [v / 100.0 for v in y_coords]
-
-            # Filter by min_relative_value — keep all parallel arrays aligned
-            if is_relative_scaled and min_relative_value > 0.0 and x_coords:
-                filtered = [
-                    i for i, y in enumerate(y_coords) if y is None or y >= min_relative_value
-                ]
-                x_coords = [x_coords[i] for i in filtered]
-                y_coords = [y_coords[i] for i in filtered]
-                if seq_coords_bin:
-                    seq_coords_bin = [seq_coords_bin[i] for i in filtered]
-                if prev_coords_bin:
-                    prev_coords_bin = [prev_coords_bin[i] for i in filtered]
-                if width_coords_bin:
-                    width_coords_bin = [width_coords_bin[i] for i in filtered]
-                    fps_bin = [fps_bin[i] for i in filtered]
-                    lps_bin = [lps_bin[i] for i in filtered]
-
-            feature_dict["x"] = x_coords
-            feature_dict["y"] = y_coords
-            feature_dict["has_stats"] = False  # stats don't aggregate meaningfully
-            feature_dict["has_sequences"] = has_sequences_bin
-            feature_dict["is_relative_scaled"] = is_relative_scaled
-            if is_bars and width_coords_bin:
-                feature_dict["width"] = width_coords_bin
-                feature_dict["first_pos"] = fps_bin
-                feature_dict["last_pos"] = lps_bin
-            if has_sequences_bin and x_coords:
-                feature_dict["sequence"] = seq_coords_bin
-                feature_dict["sequence_prevalence"] = prev_coords_bin
-            # Fetch codon annotation for binned mismatch bars
-            if has_codon_annotation and fps_bin and x_coords:
-                codon_cats = [""] * len(fps_bin)
-                codon_chgs = [""] * len(fps_bin)
-                aa_chgs = [""] * len(fps_bin)
-                try:
-                    pos_set = set(fps_bin)
-                    placeholders = ','.join(['?'] * len(pos_set))
-                    cur.execute(
-                        f"SELECT First_position, Codon_category, Codon_change, AA_change "
-                        f"FROM Feature_mismatches "
-                        f"WHERE Contig_id = ? AND Sample_id = ? AND First_position IN ({placeholders})",
-                        (contig_id, sample_id, *pos_set)
-                    )
-                    codon_lookup = {r[0]: (r[1] or "", r[2] or "", r[3] or "") for r in cur.fetchall()}
-                    for i, fp in enumerate(fps_bin):
-                        if fp in codon_lookup:
-                            codon_cats[i], codon_chgs[i], aa_chgs[i] = codon_lookup[fp]
-                except Exception:
-                    pass
-                feature_dict["codon_category"] = codon_cats
-                feature_dict["codon_change"] = codon_chgs
-                feature_dict["aa_change"] = aa_chgs
-            if x_coords:
-                list_feature_dict.append(feature_dict)
-
-        else:
-            # --- FULL RESOLUTION PATH: small windows or undefined range ---
-            # Check if this feature has statistics columns
-            has_stats = original_feature_table in [f"Feature_{f}" for f in _FEATURES_WITH_STATS]
-            has_sequences = original_feature_table in [f"Feature_{f}" for f in _FEATURES_WITH_SEQUENCES]
-
-            # Special handling for primary_reads: query VIEW directly (no Python-side merge)
-            if feature_table == "Feature_primary_reads":
-                position_filter = ""
-                params = [sample_id, contig_id]
-                if xstart is not None and xend is not None:
-                    position_filter = f" AND Last_position >= ? AND First_position <= ?"
-                    params.extend([xstart, xend])
+        # --- BLOB PATH: try Feature_blob table first ---
+        if feature_table == "Feature_blob" and not is_contig_table:
+            # Extract feature variable name from title→Variable_name mapping
+            # The title in Variable table corresponds to the feature name
+            from thebigbam.database.blob_decoder import feature_name_to_id
+            # Get the variable name from the Variable table
+            try:
                 cur.execute(
-                    f"SELECT First_position, Last_position, Value FROM Feature_primary_reads "
-                    f"WHERE Sample_id=? AND Contig_id=?{position_filter} ORDER BY First_position",
-                    tuple(params)
+                    "SELECT Variable_name FROM Variable WHERE Title=? AND Feature_table_name='Feature_blob'",
+                    (title,)
                 )
-                data_rows = cur.fetchall()
-            elif has_stats and has_sequences:
-                position_filter = ""
-                params = [sample_id, contig_id]
-                if xstart is not None and xend is not None:
-                    position_filter = f" AND {_LP} >= ? AND First_position <= ?"
-                    params.extend([xstart, xend])
-                cur.execute(
-                    f"SELECT First_position, {_LP}, Value, Mean, Median, Std, Sequence, Sequence_prevalence FROM {feature_table} "
-                    f"WHERE Sample_id=? AND Contig_id=?{position_filter} ORDER BY First_position",
-                    tuple(params)
-                )
-                data_rows = cur.fetchall()
-            elif has_stats:
-                position_filter = ""
-                params = [sample_id, contig_id]
-                if xstart is not None and xend is not None:
-                    position_filter = f" AND {_LP} >= ? AND First_position <= ?"
-                    params.extend([xstart, xend])
-                cur.execute(
-                    f"SELECT First_position, {_LP}, Value, Mean, Median, Std FROM {feature_table} "
-                    f"WHERE Sample_id=? AND Contig_id=?{position_filter} ORDER BY First_position",
-                    tuple(params)
-                )
-                data_rows = cur.fetchall()
-            elif has_sequences:
-                position_filter = ""
-                params = [sample_id, contig_id]
-                if xstart is not None and xend is not None:
-                    position_filter = f" AND {_LP} >= ? AND First_position <= ?"
-                    params.extend([xstart, xend])
-                codon_cols = ", Codon_category, Codon_change, AA_change" if has_codon_annotation else ""
-                cur.execute(
-                    f"SELECT First_position, {_LP}, Value, Sequence, Sequence_prevalence{codon_cols} FROM {feature_table} "
-                    f"WHERE Sample_id=? AND Contig_id=?{position_filter} ORDER BY First_position",
-                    tuple(params)
-                )
-                data_rows = cur.fetchall()
-            else:
-                position_filter = ""
-                if is_contig_table:
-                    params = [contig_id]
-                else:
-                    params = [sample_id, contig_id]
-                if xstart is not None and xend is not None:
-                    position_filter = f" AND {_LP} >= ? AND First_position <= ?"
-                    params.extend([xstart, xend])
-                if is_contig_table:
-                    cur.execute(
-                        f"SELECT First_position, {_LP}, Value FROM {feature_table} "
-                        f"WHERE Contig_id=?{position_filter} ORDER BY First_position",
-                        tuple(params)
-                    )
-                else:
-                    cur.execute(
-                        f"SELECT First_position, {_LP}, Value FROM {feature_table} "
-                        f"WHERE Sample_id=? AND Contig_id=?{position_filter} ORDER BY First_position",
-                        tuple(params)
-                    )
-                data_rows = cur.fetchall()
+                vname_row = cur.fetchone()
+                feature_var_name = vname_row[0] if vname_row else None
+            except Exception:
+                feature_var_name = None
 
-            # Clip feature positions to requested range
-            if xstart is not None and xend is not None:
-                clipped_rows = []
-                for row in data_rows:
-                    if has_stats and has_sequences:
-                        first_pos, last_pos, value, mean, median, std, seq, seq_prev = row
-                        clipped_first = max(first_pos, xstart)
-                        clipped_last = min(last_pos, xend)
-                        if clipped_first <= clipped_last:
-                            clipped_rows.append((clipped_first, clipped_last, value, mean, median, std, seq, seq_prev))
-                    elif has_stats:
-                        first_pos, last_pos, value, mean, median, std = row
-                        clipped_first = max(first_pos, xstart)
-                        clipped_last = min(last_pos, xend)
-                        if clipped_first <= clipped_last:
-                            clipped_rows.append((clipped_first, clipped_last, value, mean, median, std))
-                    elif has_sequences:
-                        if has_codon_annotation:
-                            first_pos, last_pos, value, seq, seq_prev, cc, cchg, achg = row
-                        else:
-                            first_pos, last_pos, value, seq, seq_prev = row
-                            cc = cchg = achg = None
-                        clipped_first = max(first_pos, xstart)
-                        clipped_last = min(last_pos, xend)
-                        if clipped_first <= clipped_last:
-                            clipped_rows.append((clipped_first, clipped_last, value, seq, seq_prev, cc, cchg, achg) if has_codon_annotation else (clipped_first, clipped_last, value, seq, seq_prev))
-                    else:
-                        first_pos, last_pos, value = row
-                        clipped_first = max(first_pos, xstart)
-                        clipped_last = min(last_pos, xend)
-                        if clipped_first <= clipped_last:
-                            clipped_rows.append((clipped_first, clipped_last, value))
-                data_rows = clipped_rows
+            if feature_var_name:
+                blob_bytes = _get_feature_blob(cur, contig_id, sample_id, feature_var_name)
+                if blob_bytes is not None:
+                    blob_dict = _blob_to_feature_dict(blob_bytes, type_picked, xstart, xend, downsample_threshold)
+                    if blob_dict is not None:
+                        feature_dict.update(blob_dict)
+                        feature_dict["is_relative_scaled"] = False  # BLOB values already descaled
+                        feature_dict["has_stats"] = "mean" in blob_dict
+                        feature_dict["has_sequences"] = "sequence" in blob_dict
+                        list_feature_dict.append(feature_dict)
+                    continue  # Skip legacy path for this feature
 
-            # Expand RLE runs into individual points for plotting
-            x_coords = []
-            y_coords = []
-            mean_coords = []
-            median_coords = []
-            std_coords = []
-            sequence_coords = []
-            prevalence_coords = []
-            width_coords = []
-            first_pos_coords = []
-            last_pos_coords = []
-            codon_cat_coords = []
-            codon_chg_coords = []
-            aa_chg_coords = []
-            for row in data_rows:
-                if has_stats and has_sequences:
-                    first_pos, last_pos, value, mean, median, std, seq, seq_prev = row
-                    cc = cchg = achg = None
-                elif has_stats:
-                    first_pos, last_pos, value, mean, median, std = row
-                    seq = seq_prev = None
-                    cc = cchg = achg = None
-                elif has_sequences:
-                    if has_codon_annotation:
-                        first_pos, last_pos, value, seq, seq_prev, cc, cchg, achg = row
-                    else:
-                        first_pos, last_pos, value, seq, seq_prev = row
-                        cc = cchg = achg = None
-                    mean = median = std = None
-                else:
-                    first_pos, last_pos, value = row
-                    mean = median = std = seq = seq_prev = None
-                    cc = cchg = achg = None
-                # Convert sequence prevalence from ×10 integer to percentage
-                if seq_prev is not None:
-                    seq_prev = seq_prev / 10.0
-                if seq is None:
-                    seq = ""
-                # Scale values based on storage format
-                if is_relative_scaled:
-                    # Relative-to-coverage features stored as INTEGER × 1000
-                    value = value / 1000.0 if value is not None else None
-                elif is_scaled:
-                    # Scaled features (mapq, gc_skew) stored as INTEGER × 100
-                    value = value / 100.0 if value is not None else None
-                if is_relative_scaled and min_relative_value > 0.0 and value is not None and value < min_relative_value:
-                    continue
-                # Normalize codon values to empty string for tooltip display
-                cc_val = cc if cc else ""
-                cchg_val = cchg if cchg else ""
-                achg_val = achg if achg else ""
-                if type_picked == "bars":
-                    midpoint = (first_pos + last_pos) / 2.0
-                    width = last_pos - first_pos + 1
-                    x_coords.append(midpoint)
-                    y_coords.append(value)
-                    width_coords.append(width)
-                    first_pos_coords.append(first_pos)
-                    last_pos_coords.append(last_pos)
-                    if has_stats:
-                        mean_coords.append(mean)
-                        median_coords.append(median)
-                        std_coords.append(std)
-                    if has_sequences:
-                        sequence_coords.append(seq)
-                        prevalence_coords.append(seq_prev)
-                    if has_codon_annotation:
-                        codon_cat_coords.append(cc_val)
-                        codon_chg_coords.append(cchg_val)
-                        aa_chg_coords.append(achg_val)
-                else:
-                    if first_pos == last_pos:
-                        x_coords.append(first_pos)
-                        y_coords.append(value)
-                        if has_stats:
-                            mean_coords.append(mean)
-                            median_coords.append(median)
-                            std_coords.append(std)
-                        if has_sequences:
-                            sequence_coords.append(seq)
-                            prevalence_coords.append(seq_prev)
-                        if has_codon_annotation:
-                            codon_cat_coords.append(cc_val)
-                            codon_chg_coords.append(cchg_val)
-                            aa_chg_coords.append(achg_val)
-                    else:
-                        x_coords.extend([first_pos, last_pos])
-                        y_coords.extend([value, value])
-                        if has_stats:
-                            mean_coords.extend([mean, mean])
-                            median_coords.extend([median, median])
-                            std_coords.extend([std, std])
-                        if has_sequences:
-                            sequence_coords.extend([seq, seq])
-                            prevalence_coords.extend([seq_prev, seq_prev])
-                        if has_codon_annotation:
-                            codon_cat_coords.extend([cc_val, cc_val])
-                            codon_chg_coords.extend([cchg_val, cchg_val])
-                            aa_chg_coords.extend([achg_val, achg_val])
-            feature_dict["x"] = x_coords
-            feature_dict["y"] = y_coords
-            feature_dict["has_stats"] = has_stats
-            feature_dict["has_sequences"] = has_sequences
-            feature_dict["is_relative_scaled"] = is_relative_scaled
-            if type_picked == "bars":
-                feature_dict["width"] = width_coords
-                feature_dict["first_pos"] = first_pos_coords
-                feature_dict["last_pos"] = last_pos_coords
-            if has_stats:
-                feature_dict["mean"] = mean_coords
-                feature_dict["median"] = median_coords
-                feature_dict["std"] = std_coords
-            if has_sequences:
-                feature_dict["sequence"] = sequence_coords
-                feature_dict["sequence_prevalence"] = prevalence_coords
-            if has_codon_annotation:
-                feature_dict["codon_category"] = codon_cat_coords
-                feature_dict["codon_change"] = codon_chg_coords
-                feature_dict["aa_change"] = aa_chg_coords
-            if x_coords:
-                list_feature_dict.append(feature_dict)
+            # BLOB feature not found or failed — skip (no legacy fallback)
+            continue
+
+        # --- CONTIG BLOB PATH: contig-level features (GC content, repeats) ---
+        # Map old RLE table names to new Contig_blob feature names
+        contig_blob_name_map = {
+            "Contig_GCContent": "gc_content",
+            "Contig_GCSkew": "gc_skew",
+            "Contig_direct_repeat_count": "direct_repeat_count",
+            "Contig_inverted_repeat_count": "inverted_repeat_count",
+            "Contig_direct_repeat_identity": "direct_repeat_identity",
+            "Contig_inverted_repeat_identity": "inverted_repeat_identity",
+        }
+
+        if feature_table in contig_blob_name_map and is_contig_table:
+            contig_feature_name = contig_blob_name_map[feature_table]
+            blob_bytes = _get_contig_blob(cur, contig_id, contig_feature_name)
+            if blob_bytes is not None:
+                # For contig-level window-based features (GC content, GC skew, repeats),
+                # skip binning since the data is already at window resolution
+                # Pass very large threshold to prevent zoom-level binning
+                blob_dict = _blob_to_feature_dict(blob_bytes, type_picked, xstart, xend, downsample_threshold=999999999)
+                if blob_dict is not None:
+                    feature_dict.update(blob_dict)
+                    feature_dict["is_relative_scaled"] = False  # BLOB values already descaled
+                    feature_dict["has_stats"] = False  # Contig-level features don't have stats
+                    feature_dict["has_sequences"] = False
+                    list_feature_dict.append(feature_dict)
+            # ALWAYS skip legacy RLE path for Contig_blob features (old tables don't exist)
+            continue
+
+        # All features should be handled by BLOB paths above.
+        # If we reach here, the feature is not supported or missing.
 
     return list_feature_dict
 
 
-### Function to get features for multiple samples in a single batch
-def _expand_rle_rows(data_rows, type_picked, has_stats, is_scaled, xstart, xend, is_relative_scaled=False, min_relative_value=0.0, has_sequences=False):
-    """Expand RLE rows into plot coordinates (shared logic for single and batch).
-
-    Args:
-        data_rows: List of tuples (First_position, Last_position, Value[, Mean, Median, Std][, Sequence, Sequence_prevalence])
-        type_picked: Plot type ('bars' or 'curve')
-        has_stats: Whether rows include statistics columns
-        is_scaled: Whether values need to be divided by 100
-        xstart: Optional start position for clipping
-        xend: Optional end position for clipping
-        is_relative_scaled: Whether values are relative-to-coverage (need to be divided by 1000)
-        has_sequences: Whether rows include Sequence and Sequence_prevalence columns
-
-    Returns:
-        Dict with x, y, and optional width/stats/sequence coordinate lists, or None if no data
-    """
-    # Clip feature positions to requested range
-    if xstart is not None and xend is not None:
-        clipped_rows = []
-        for row in data_rows:
-            # Determine the number of base columns (first, last, value)
-            # then stats (mean, median, std), then sequences (seq, seq_prev)
-            if has_stats and has_sequences:
-                first_pos, last_pos, value, mean, median, std, seq, seq_prev = row
-                clipped_first = max(first_pos, xstart)
-                clipped_last = min(last_pos, xend)
-                if clipped_first <= clipped_last:
-                    clipped_rows.append((clipped_first, clipped_last, value, mean, median, std, seq, seq_prev))
-            elif has_stats:
-                first_pos, last_pos, value, mean, median, std = row
-                clipped_first = max(first_pos, xstart)
-                clipped_last = min(last_pos, xend)
-                if clipped_first <= clipped_last:
-                    clipped_rows.append((clipped_first, clipped_last, value, mean, median, std))
-            elif has_sequences:
-                first_pos, last_pos, value, seq, seq_prev = row
-                clipped_first = max(first_pos, xstart)
-                clipped_last = min(last_pos, xend)
-                if clipped_first <= clipped_last:
-                    clipped_rows.append((clipped_first, clipped_last, value, seq, seq_prev))
-            else:
-                first_pos, last_pos, value = row
-                clipped_first = max(first_pos, xstart)
-                clipped_last = min(last_pos, xend)
-                if clipped_first <= clipped_last:
-                    clipped_rows.append((clipped_first, clipped_last, value))
-        data_rows = clipped_rows
-
-    x_coords = []
-    y_coords = []
-    mean_coords = []
-    median_coords = []
-    std_coords = []
-    sequence_coords = []
-    prevalence_coords = []
-    width_coords = []
-    first_pos_coords = []
-    last_pos_coords = []
-
-    for row in data_rows:
-        if has_stats and has_sequences:
-            first_pos, last_pos, value, mean, median, std, seq, seq_prev = row
-        elif has_stats:
-            first_pos, last_pos, value, mean, median, std = row
-            seq = seq_prev = None
-        elif has_sequences:
-            first_pos, last_pos, value, seq, seq_prev = row
-            mean = median = std = None
-        else:
-            first_pos, last_pos, value = row
-            mean = median = std = seq = seq_prev = None
-
-        # Convert sequence prevalence from ×10 integer to percentage
-        if seq_prev is not None:
-            seq_prev = seq_prev / 10.0
-        if seq is None:
-            seq = ""
-
-        # Scale values based on storage format
-        if is_relative_scaled:
-            # Relative-to-coverage features stored as INTEGER × 1000
-            value = value / 1000.0 if value is not None else None
-        elif is_scaled:
-            # Scaled features (mapq, gc_skew) stored as INTEGER × 100
-            value = value / 100.0 if value is not None else None
-
-        if is_relative_scaled and min_relative_value > 0.0 and value is not None and value < min_relative_value:
-            continue
-
-        if type_picked == "bars":
-            midpoint = (first_pos + last_pos) / 2.0
-            width = last_pos - first_pos + 1
-            x_coords.append(midpoint)
-            y_coords.append(value)
-            width_coords.append(width)
-            first_pos_coords.append(first_pos)
-            last_pos_coords.append(last_pos)
-            if has_stats:
-                mean_coords.append(mean)
-                median_coords.append(median)
-                std_coords.append(std)
-            if has_sequences:
-                sequence_coords.append(seq)
-                prevalence_coords.append(seq_prev)
-        else:
-            if first_pos == last_pos:
-                x_coords.append(first_pos)
-                y_coords.append(value)
-                if has_stats:
-                    mean_coords.append(mean)
-                    median_coords.append(median)
-                    std_coords.append(std)
-                if has_sequences:
-                    sequence_coords.append(seq)
-                    prevalence_coords.append(seq_prev)
-            else:
-                x_coords.extend([first_pos, last_pos])
-                y_coords.extend([value, value])
-                if has_stats:
-                    mean_coords.extend([mean, mean])
-                    median_coords.extend([median, median])
-                    std_coords.extend([std, std])
-                if has_sequences:
-                    sequence_coords.extend([seq, seq])
-                    prevalence_coords.extend([seq_prev, seq_prev])
-
-    if not x_coords:
-        return None
-
-    result = {"x": x_coords, "y": y_coords, "has_stats": has_stats, "has_sequences": has_sequences}
-    if type_picked == "bars":
-        result["width"] = width_coords
-        result["first_pos"] = first_pos_coords
-        result["last_pos"] = last_pos_coords
-    if has_stats:
-        result["mean"] = mean_coords
-        result["median"] = median_coords
-        result["std"] = std_coords
-    if has_sequences:
-        result["sequence"] = sequence_coords
-        result["sequence_prevalence"] = prevalence_coords
-    return result
-
-
-def _rle_weighted_bin_batch_sql(feature_table, xstart, xend, sample_ids, contig_id, cur, num_bins=_NUM_BINS, value_col="Value", has_sequences=False, type_picked="curve"):
-    """Run SQL-side binning for multiple samples at once using MAX aggregation to preserve spikes.
-    
-    Each RLE row is expanded to all bins it overlaps via generate_series.
-
-    For bar features (type_picked="bars"), the full run (First_position, Last_position) of the
-    max-value row is preserved and deduplicated across bins. No zero-fill for bars.
-
-    Args:
-        value_col: Column name to bin (default: "Value")
-        has_sequences: If True, also fetch Sequence and Sequence_prevalence of the max-value row.
-        type_picked: "bars" or "curve" — controls post-processing.
-    
-    Returns dict per sample:
-        curves: {sid: (x, y)} or {sid: (x, y, seq, prev)}
-        bars:   {sid: (x, y, width, first_pos, last_pos)} or {sid: (x, y, width, first_pos, last_pos, seq, prev)}
-    """
-    is_bars = type_picked == "bars"
-    window_size = xend - xstart + 1
-    bin_width = max(1, window_size // num_bins)
-    placeholders = ", ".join(["?"] * len(sample_ids))
-
-    seq_inner = ", f.Sequence AS seq, f.Sequence_prevalence AS seq_prev" if has_sequences else ""
-    seq_outer = (
-        f", ARG_MAX(seq, CAST(val AS DOUBLE)) AS max_seq"
-        f", ARG_MAX(seq_prev, CAST(val AS DOUBLE)) AS max_seq_prev"
-    ) if has_sequences else ""
-
-    # For bars: retrieve full run endpoints; mid_pos not needed (fp/lp give exact position).
-    # For curves: mid_pos (clamped to bin) prevents non-monotonic x from long RLE runs.
-    bars_inner = f", f.First_position AS fp, {_LP} AS lp" if is_bars else ""
-    bars_outer = (
-        f", ARG_MAX(fp, CAST(val AS DOUBLE)) AS max_fp"
-        f", ARG_MAX(lp, CAST(val AS DOUBLE)) AS max_lp"
-    ) if is_bars else ""
-    curve_mid_inner = "" if is_bars else f", (f.First_position + {_LP}) / 2 AS mid_pos"
-    curve_mid_outer = "" if is_bars else f", ARG_MAX(mid_pos, CAST(val AS DOUBLE)) AS max_pos"
-
-    sql = (
-        f"SELECT Sample_id, bin_idx AS bin, "
-        f"MAX(CAST(val AS DOUBLE)) AS max_value"
-        f"{curve_mid_outer}{bars_outer}{seq_outer} "
-        f"FROM ("
-        f"  SELECT f.Sample_id, f.{value_col} AS val{curve_mid_inner}{bars_inner}{seq_inner}, "
-        f"  UNNEST(generate_series("
-        f"    GREATEST(0, CAST((GREATEST(f.First_position, ?) - ?) / ? AS INTEGER)), "
-        f"    LEAST(? - 1, CAST((LEAST({_LP}, ?) - ?) / ? AS INTEGER))"
-        f"  )) AS bin_idx "
-        f"  FROM {feature_table} f "
-        f"  WHERE f.Sample_id IN ({placeholders}) AND f.Contig_id = ? AND {_LP} >= ? AND f.First_position <= ?"
-        f") sub "
-        f"GROUP BY Sample_id, bin_idx ORDER BY Sample_id, bin_idx"
-    )
-    params = (xstart, xstart, bin_width,
-              num_bins, xend, xstart, bin_width) + tuple(sample_ids) + (contig_id, xstart, xend)
-    cur.execute(sql, params)
-
-    if is_bars:
-        # --- BARS: dedup runs per sample ---
-        # Row layout: (sid, bin, max_value, max_fp, max_lp[, max_seq, max_seq_prev])
-        raw_by_sample = {sid: [] for sid in sample_ids}
-        for row in cur.fetchall():
-            if has_sequences:
-                sid, bin_idx, max_value, max_fp, max_lp, max_seq, max_seq_prev = row
-            else:
-                sid, bin_idx, max_value, max_fp, max_lp = row
-            if sid in raw_by_sample and max_value is not None and max_fp is not None and max_lp is not None:
-                if has_sequences:
-                    raw_by_sample[sid].append((int(max_fp), int(max_lp), float(max_value), max_seq, max_seq_prev))
-                else:
-                    raw_by_sample[sid].append((int(max_fp), int(max_lp), float(max_value)))
-
-        result = {}
-        for sid in sample_ids:
-            seen = set()
-            x_coords = []
-            y_coords = []
-            width_coords = []
-            first_pos_coords = []
-            last_pos_coords = []
-            seq_coords = [] if has_sequences else None
-            prev_coords = [] if has_sequences else None
-            for entry in raw_by_sample[sid]:
-                if has_sequences:
-                    fp, lp, val, seq, seq_prev = entry
-                else:
-                    fp, lp, val = entry
-                key = (fp, lp)
-                if key in seen:
-                    continue
-                seen.add(key)
-                midpoint = (fp + lp) / 2.0
-                width = lp - fp + 1
-                x_coords.append(midpoint)
-                y_coords.append(val)
-                width_coords.append(width)
-                first_pos_coords.append(fp)
-                last_pos_coords.append(lp)
-                if has_sequences:
-                    seq_coords.append(seq if seq is not None else "")
-                    prev_coords.append(seq_prev / 10.0 if seq_prev is not None else None)
-            if has_sequences:
-                result[sid] = (x_coords, y_coords, width_coords, first_pos_coords, last_pos_coords, seq_coords, prev_coords)
-            else:
-                result[sid] = (x_coords, y_coords, width_coords, first_pos_coords, last_pos_coords)
-        return result
-    else:
-        # --- CURVES: clamped position + zero-fill (unchanged) ---
-        by_sample = {sid: {} for sid in sample_ids}
-        for row in cur.fetchall():
-            if has_sequences:
-                sid, bin_idx, max_value, max_pos, max_seq, max_seq_prev = row
-            else:
-                sid, bin_idx, max_value, max_pos = row
-            if sid in by_sample and max_value is not None and bin_idx is not None:
-                bi = int(bin_idx)
-                bin_start = xstart + bi * bin_width
-                position = max(bin_start, min(bin_start + bin_width - 1, int(max_pos))) if max_pos is not None else int(bin_start + bin_width // 2)
-                if has_sequences:
-                    by_sample[sid][bi] = (position, float(max_value), max_seq, max_seq_prev)
-                else:
-                    by_sample[sid][bi] = (position, float(max_value))
-
-        result = {}
-        for sid in sample_ids:
-            bin_data = by_sample[sid]
-            if not bin_data:
-                result[sid] = ([], [], [], []) if has_sequences else ([], [])
-                continue
-            # Zero-fill all bins between min and max occupied bins
-            min_bin = min(bin_data)
-            max_bin = max(bin_data)
-            x_coords = []
-            y_coords = []
-            seq_coords = [] if has_sequences else None
-            prev_coords = [] if has_sequences else None
-            for bi in range(min_bin, max_bin + 1):
-                if bi in bin_data:
-                    if has_sequences:
-                        position, value, seq, seq_prev = bin_data[bi]
-                        seq_coords.append(seq if seq is not None else "")
-                        prev_coords.append(seq_prev / 10.0 if seq_prev is not None else None)
-                    else:
-                        position, value = bin_data[bi]
-                    x_coords.append(position)
-                    y_coords.append(value)
-                else:
-                    # Zero-filled bin: use bin center (bin_width matches SQL integer division)
-                    bin_center = int(xstart + (bi + 0.5) * bin_width)
-                    x_coords.append(bin_center)
-                    y_coords.append(0.0)
-                    if has_sequences:
-                        seq_coords.append("")
-                        prev_coords.append(None)
-            if has_sequences:
-                result[sid] = (x_coords, y_coords, seq_coords, prev_coords)
-            else:
-                result[sid] = (x_coords, y_coords)
-        return result
 
 
 def get_feature_data_batch(cur, feature, contig_id, sample_ids, xstart=None, xend=None, variable_metadata=None, downsample_threshold=None, min_relative_value=0.0):
     """Get feature data for multiple samples in a single batch query.
 
-    Uses SQL-side MAX binning for windows larger than the downsampling threshold
-    (default: _DOWNSAMPLE_THRESHOLD = 100kb). For small windows, uses full-resolution RLE expansion.
+    Decodes Feature_blob (sample-level) or Contig_blob (contig-level) entries.
+    Uses zoom levels for large windows, base resolution for small windows.
 
     Args:
         cur: DuckDB cursor
@@ -1714,337 +1057,80 @@ def get_feature_data_batch(cur, feature, contig_id, sample_ids, xstart=None, xen
         and (xend - xstart) > _threshold
     )
 
-    # Check once whether Feature_mismatches has codon columns (batch version)
-    has_codon_table_batch = False
-    try:
-        cur.execute("SELECT 1 FROM information_schema.columns WHERE table_name = 'Feature_mismatches' AND column_name = 'Codon_category'")
-        has_codon_table_batch = cur.fetchone() is not None
-    except Exception:
-        pass
+    # Check once whether we have BLOB storage available
+    _has_blobs = _has_feature_blob_table(cur)
 
     for row in rows:
         type_picked, color, alpha, fill_alpha, size, title, feature_table = row
 
-        # Check if this is a mismatches table with codon annotation
-        has_codon_annotation = False
-        original_feature_table = feature_table
-        if feature_table == "Feature_mismatches" and has_codon_table_batch:
-            has_codon_annotation = True
-
-        is_relative_scaled = original_feature_table in RELATIVE_SCALED_FEATURES
-
-        has_stats = original_feature_table in [f"Feature_{f}" for f in _FEATURES_WITH_STATS]
-        has_sequences = original_feature_table in [f"Feature_{f}" for f in _FEATURES_WITH_SEQUENCES]
-        is_scaled = original_feature_table in _SCALED_FEATURES
-
-        # Detect contig-level table (no Sample_id column)
-        is_contig_table = original_feature_table.startswith("Contig_")
-
-        if use_binning:
-            # --- DOWNSAMPLING PATH ---
-            if feature_table == "Feature_primary_reads":
-                # Query Feature_primary_reads VIEW via batch binning (strand merge done in SQL)
-                batch_results_bin = _rle_weighted_bin_batch_sql(
-                    "Feature_primary_reads", xstart, xend, sample_ids, contig_id, cur, type_picked="curve"
+        # --- BLOB path: try Feature_blob first if available ---
+        if _has_blobs and feature_table == "Feature_blob":
+            from thebigbam.database.blob_decoder import feature_name_to_id as _fid_lookup
+            try:
+                cur.execute(
+                    "SELECT Variable_name FROM Variable WHERE Title=? AND Feature_table_name='Feature_blob'",
+                    (title,)
                 )
-                for sid, bin_coords in batch_results_bin.items():
-                    x_coords, y_coords = bin_coords
-                    if x_coords:
-                        feature_dict = {
-                            "type": type_picked, "color": color, "alpha": alpha,
-                            "fill_alpha": fill_alpha, "size": size, "title": title,
-                            "x": x_coords, "y": y_coords, "has_stats": False,
-                            "has_sequences": False,
-                            "is_relative_scaled": is_relative_scaled,
-                        }
-                        result[sid].append(feature_dict)
+                vname_row = cur.fetchone()
+                feature_var_name = vname_row[0] if vname_row else None
+            except Exception:
+                feature_var_name = None
 
-            elif is_contig_table:
-                # Contig-level: bin once, share across all samples
-                # Contig tables are always curves (gc_content, gc_skew, repeats)
-                x_coords, y_coords = _rle_weighted_bin_sql(
-                    feature_table, True, xstart, xend, None, contig_id, cur,
-                    type_picked=type_picked
-                )
-                # Apply scaling
-                if is_relative_scaled and y_coords:
-                    y_coords = [v / 1000.0 for v in y_coords]
-                elif is_scaled and y_coords:
-                    y_coords = [v / 100.0 for v in y_coords]
-                if is_relative_scaled and min_relative_value > 0.0 and x_coords:
-                    filtered = [i for i, y in enumerate(y_coords) if y is None or y >= min_relative_value]
-                    x_coords = [x_coords[i] for i in filtered]
-                    y_coords = [y_coords[i] for i in filtered]
-                if x_coords:
+            if feature_var_name:
+                for sid in sample_ids:
+                    blob_bytes = _get_feature_blob(cur, contig_id, sid, feature_var_name)
+                    if blob_bytes is not None:
+                        blob_dict = _blob_to_feature_dict(blob_bytes, type_picked, xstart, xend, _threshold)
+                        if blob_dict is not None:
+                            feature_dict = {
+                                "type": type_picked, "color": color, "alpha": alpha,
+                                "fill_alpha": fill_alpha, "size": size, "title": title,
+                                "is_relative_scaled": False,
+                                "has_stats": "mean" in blob_dict,
+                                "has_sequences": "sequence" in blob_dict,
+                            }
+                            feature_dict.update(blob_dict)
+                            result[sid].append(feature_dict)
+                continue  # Skip legacy path for this feature
+
+            # BLOB feature not found or failed — skip (no legacy fallback)
+            continue
+
+        # --- CONTIG BLOB PATH: contig-level features (GC content, repeats) ---
+        # Map old RLE table names to new Contig_blob feature names
+        contig_blob_name_map = {
+            "Contig_GCContent": "gc_content",
+            "Contig_GCSkew": "gc_skew",
+            "Contig_direct_repeat_count": "direct_repeat_count",
+            "Contig_inverted_repeat_count": "inverted_repeat_count",
+            "Contig_direct_repeat_identity": "direct_repeat_identity",
+            "Contig_inverted_repeat_identity": "inverted_repeat_identity",
+        }
+
+        if feature_table in contig_blob_name_map:
+            contig_feature_name = contig_blob_name_map[feature_table]
+            blob_bytes = _get_contig_blob(cur, contig_id, contig_feature_name)
+            if blob_bytes is not None:
+                # For contig-level window-based features, skip binning (data is already window-binned)
+                # Pass very large threshold to prevent zoom-level binning
+                blob_dict = _blob_to_feature_dict(blob_bytes, type_picked, xstart, xend, downsample_threshold=999999999)
+                if blob_dict is not None:
+                    # Contig_blob data applies to all samples (contig-level feature)
                     for sid in sample_ids:
                         feature_dict = {
                             "type": type_picked, "color": color, "alpha": alpha,
                             "fill_alpha": fill_alpha, "size": size, "title": title,
-                            "x": list(x_coords), "y": list(y_coords), "has_stats": False,
+                            "is_relative_scaled": False,
+                            "has_stats": False,  # Contig-level features don't have stats
                             "has_sequences": False,
-                            "is_relative_scaled": is_relative_scaled,
                         }
+                        feature_dict.update(blob_dict)
                         result[sid].append(feature_dict)
+            # ALWAYS skip legacy RLE path for Contig_blob features (old tables don't exist)
+            continue
 
-            else:
-                # Sample-level table: batch bin all samples at once
-                is_bars = type_picked == "bars"
-                binned = _rle_weighted_bin_batch_sql(
-                    feature_table, xstart, xend, sample_ids, contig_id, cur,
-                    has_sequences=has_sequences, type_picked=type_picked
-                )
-                for sid in sample_ids:
-                    if is_bars:
-                        if has_sequences:
-                            x_coords, y_coords, width_coords_b, fps_b, lps_b, seq_coords_b, prev_coords_b = binned[sid]
-                        else:
-                            x_coords, y_coords, width_coords_b, fps_b, lps_b = binned[sid]
-                            seq_coords_b = []
-                            prev_coords_b = []
-                    elif has_sequences:
-                        x_coords, y_coords, seq_coords_b, prev_coords_b = binned[sid]
-                    else:
-                        x_coords, y_coords = binned[sid]
-                        seq_coords_b = []
-                        prev_coords_b = []
-                    # Apply scaling
-                    if is_relative_scaled and y_coords:
-                        y_coords = [v / 1000.0 for v in y_coords]
-                    elif is_scaled and y_coords:
-                        y_coords = [v / 100.0 for v in y_coords]
-                    # Filter by min_relative_value — keep all parallel arrays aligned
-                    if is_relative_scaled and min_relative_value > 0.0 and x_coords:
-                        filtered = [i for i, y in enumerate(y_coords) if y is None or y >= min_relative_value]
-                        x_coords = [x_coords[i] for i in filtered]
-                        y_coords = [y_coords[i] for i in filtered]
-                        if seq_coords_b:
-                            seq_coords_b = [seq_coords_b[i] for i in filtered]
-                        if prev_coords_b:
-                            prev_coords_b = [prev_coords_b[i] for i in filtered]
-                        if is_bars:
-                            width_coords_b = [width_coords_b[i] for i in filtered]
-                            fps_b = [fps_b[i] for i in filtered]
-                            lps_b = [lps_b[i] for i in filtered]
-                    if x_coords:
-                        feature_dict = {
-                            "type": type_picked, "color": color, "alpha": alpha,
-                            "fill_alpha": fill_alpha, "size": size, "title": title,
-                            "x": x_coords, "y": y_coords, "has_stats": False,
-                            "has_sequences": has_sequences,
-                            "is_relative_scaled": is_relative_scaled,
-                        }
-                        if is_bars:
-                            feature_dict["width"] = width_coords_b
-                            feature_dict["first_pos"] = fps_b
-                            feature_dict["last_pos"] = lps_b
-                        if has_sequences:
-                            feature_dict["sequence"] = seq_coords_b
-                            feature_dict["sequence_prevalence"] = prev_coords_b
-                        # Fetch codon annotation for binned mismatch bars
-                        if has_codon_annotation and is_bars and fps_b:
-                            codon_cats = [""] * len(fps_b)
-                            codon_chgs = [""] * len(fps_b)
-                            aa_chgs = [""] * len(fps_b)
-                            try:
-                                pos_set = set(fps_b)
-                                ph = ','.join(['?'] * len(pos_set))
-                                cur.execute(
-                                    f"SELECT First_position, Codon_category, Codon_change, AA_change "
-                                    f"FROM Feature_mismatches "
-                                    f"WHERE Contig_id = ? AND Sample_id = ? AND First_position IN ({ph})",
-                                    (contig_id, sid, *pos_set)
-                                )
-                                codon_lookup = {r[0]: (r[1] or "", r[2] or "", r[3] or "") for r in cur.fetchall()}
-                                for i, fp in enumerate(fps_b):
-                                    if fp in codon_lookup:
-                                        codon_cats[i], codon_chgs[i], aa_chgs[i] = codon_lookup[fp]
-                            except Exception:
-                                pass
-                            feature_dict["codon_category"] = codon_cats
-                            feature_dict["codon_change"] = codon_chgs
-                            feature_dict["aa_change"] = aa_chgs
-                        result[sid].append(feature_dict)
-
-        else:
-            # --- FULL RESOLUTION PATH ---
-            # Build position filter
-            position_filter = ""
-            extra_params = []
-            if xstart is not None and xend is not None:
-                position_filter = f" AND {_LP} >= ? AND First_position <= ?"
-                extra_params = [xstart, xend]
-
-            if feature_table == "Feature_primary_reads":
-                # Query Feature_primary_reads VIEW directly (strand merge done in SQL VIEW)
-                params = list(sample_ids) + [contig_id] + extra_params
-                cur.execute(
-                    f"SELECT Sample_id, First_position, Last_position, Value "
-                    f"FROM Feature_primary_reads "
-                    f"WHERE Sample_id IN ({placeholders}) AND Contig_id=?{position_filter} "
-                    f"ORDER BY Sample_id, First_position",
-                    tuple(params)
-                )
-                rows_by_sample: dict = {}
-                for sid, first, last, val in cur.fetchall():
-                    rows_by_sample.setdefault(sid, []).append((first, last, val))
-                for sid in sample_ids:
-                    data_rows = rows_by_sample.get(sid, [])
-                    expanded = _expand_rle_rows(data_rows, type_picked, has_stats, is_scaled, xstart, xend, False, min_relative_value)
-                    if expanded is not None:
-                        feature_dict = {
-                            "type": type_picked, "color": color, "alpha": alpha,
-                            "fill_alpha": fill_alpha, "size": size, "title": title,
-                        }
-                        feature_dict.update(expanded)
-                        feature_dict["is_relative_scaled"] = False  # primary_reads not relative
-                        result[sid].append(feature_dict)
-
-            elif has_stats and has_sequences:
-                params = list(sample_ids) + [contig_id] + extra_params
-                cur.execute(
-                    f"SELECT Sample_id, First_position, {_LP}, Value, Mean, Median, Std, Sequence, Sequence_prevalence "
-                    f"FROM {feature_table} "
-                    f"WHERE Sample_id IN ({placeholders}) AND Contig_id=?{position_filter} "
-                    f"ORDER BY Sample_id, First_position",
-                    tuple(params)
-                )
-                all_rows = cur.fetchall()
-
-                # Group by sample_id
-                rows_by_sample = {sid: [] for sid in sample_ids}
-                for sid, first, last, val, mean, median, std, seq, seq_prev in all_rows:
-                    if sid in rows_by_sample:
-                        rows_by_sample[sid].append((first, last, val, mean, median, std, seq, seq_prev))
-
-                for sid in sample_ids:
-                    expanded = _expand_rle_rows(rows_by_sample[sid], type_picked, has_stats, is_scaled, xstart, xend, is_relative_scaled, min_relative_value, has_sequences)
-                    if expanded is not None:
-                        feature_dict = {
-                            "type": type_picked, "color": color, "alpha": alpha,
-                            "fill_alpha": fill_alpha, "size": size, "title": title,
-                        }
-                        feature_dict.update(expanded)
-                        feature_dict["is_relative_scaled"] = is_relative_scaled
-                        result[sid].append(feature_dict)
-
-            elif has_stats:
-                params = list(sample_ids) + [contig_id] + extra_params
-                cur.execute(
-                    f"SELECT Sample_id, First_position, {_LP}, Value, Mean, Median, Std "
-                    f"FROM {feature_table} "
-                    f"WHERE Sample_id IN ({placeholders}) AND Contig_id=?{position_filter} "
-                    f"ORDER BY Sample_id, First_position",
-                    tuple(params)
-                )
-                all_rows = cur.fetchall()
-
-                # Group by sample_id
-                rows_by_sample = {sid: [] for sid in sample_ids}
-                for sid, first, last, val, mean, median, std in all_rows:
-                    if sid in rows_by_sample:
-                        rows_by_sample[sid].append((first, last, val, mean, median, std))
-
-                for sid in sample_ids:
-                    expanded = _expand_rle_rows(rows_by_sample[sid], type_picked, has_stats, is_scaled, xstart, xend, is_relative_scaled, min_relative_value)
-                    if expanded is not None:
-                        feature_dict = {
-                            "type": type_picked, "color": color, "alpha": alpha,
-                            "fill_alpha": fill_alpha, "size": size, "title": title,
-                        }
-                        feature_dict.update(expanded)
-                        feature_dict["is_relative_scaled"] = is_relative_scaled
-                        result[sid].append(feature_dict)
-
-            elif has_sequences:
-                params = list(sample_ids) + [contig_id] + extra_params
-                codon_cols_batch = ", Codon_category, Codon_change, AA_change" if has_codon_annotation else ""
-                cur.execute(
-                    f"SELECT Sample_id, First_position, {_LP}, Value, Sequence, Sequence_prevalence{codon_cols_batch} "
-                    f"FROM {feature_table} "
-                    f"WHERE Sample_id IN ({placeholders}) AND Contig_id=?{position_filter} "
-                    f"ORDER BY Sample_id, First_position",
-                    tuple(params)
-                )
-                all_rows = cur.fetchall()
-
-                # Group by sample_id
-                rows_by_sample = {sid: [] for sid in sample_ids}
-                codon_by_sample = {sid: [] for sid in sample_ids} if has_codon_annotation else None
-                for row in all_rows:
-                    if has_codon_annotation:
-                        sid, first, last, val, seq, seq_prev, cc, cchg, achg = row
-                    else:
-                        sid, first, last, val, seq, seq_prev = row
-                        cc = cchg = achg = None
-                    if sid in rows_by_sample:
-                        rows_by_sample[sid].append((first, last, val, seq, seq_prev))
-                        if has_codon_annotation:
-                            codon_by_sample[sid].append((cc or "", cchg or "", achg or ""))
-
-                for sid in sample_ids:
-                    expanded = _expand_rle_rows(rows_by_sample[sid], type_picked, has_stats, is_scaled, xstart, xend, is_relative_scaled, min_relative_value, has_sequences)
-                    if expanded is not None:
-                        feature_dict = {
-                            "type": type_picked, "color": color, "alpha": alpha,
-                            "fill_alpha": fill_alpha, "size": size, "title": title,
-                        }
-                        feature_dict.update(expanded)
-                        feature_dict["is_relative_scaled"] = is_relative_scaled
-                        if has_codon_annotation and codon_by_sample[sid]:
-                            # Mismatches are single-position bars so RLE expansion is 1:1
-                            feature_dict["codon_category"] = [c[0] for c in codon_by_sample[sid]]
-                            feature_dict["codon_change"] = [c[1] for c in codon_by_sample[sid]]
-                            feature_dict["aa_change"] = [c[2] for c in codon_by_sample[sid]]
-                        result[sid].append(feature_dict)
-
-            else:
-                if is_contig_table:
-                    # Contig-level table: query once (no Sample_id), duplicate for all samples
-                    params = [contig_id] + extra_params
-                    cur.execute(
-                        f"SELECT First_position, {_LP}, Value FROM {feature_table} "
-                        f"WHERE Contig_id=?{position_filter} ORDER BY First_position",
-                        tuple(params)
-                    )
-                    contig_rows = cur.fetchall()
-                    expanded = _expand_rle_rows(contig_rows, type_picked, has_stats, is_scaled, xstart, xend, is_relative_scaled, min_relative_value)
-                    if expanded is not None:
-                        for sid in sample_ids:
-                            feature_dict = {
-                                "type": type_picked, "color": color, "alpha": alpha,
-                                "fill_alpha": fill_alpha, "size": size, "title": title,
-                            }
-                            feature_dict.update(expanded)
-                            feature_dict["is_relative_scaled"] = is_relative_scaled
-                            result[sid].append(feature_dict)
-                else:
-                    # Sample-level table: batch query
-                    params = list(sample_ids) + [contig_id] + extra_params
-                    cur.execute(
-                        f"SELECT Sample_id, First_position, {_LP}, Value "
-                        f"FROM {feature_table} "
-                        f"WHERE Sample_id IN ({placeholders}) AND Contig_id=?{position_filter} "
-                        f"ORDER BY Sample_id, First_position",
-                        tuple(params)
-                    )
-                    all_rows = cur.fetchall()
-
-                    # Group by sample_id
-                    rows_by_sample = {sid: [] for sid in sample_ids}
-                    for sid, first, last, val in all_rows:
-                        if sid in rows_by_sample:
-                            rows_by_sample[sid].append((first, last, val))
-
-                    for sid in sample_ids:
-                        expanded = _expand_rle_rows(rows_by_sample[sid], type_picked, has_stats, is_scaled, xstart, xend, is_relative_scaled, min_relative_value)
-                        if expanded is not None:
-                            feature_dict = {
-                                "type": type_picked, "color": color, "alpha": alpha,
-                                "fill_alpha": fill_alpha, "size": size, "title": title,
-                            }
-                            feature_dict.update(expanded)
-                            feature_dict["is_relative_scaled"] = is_relative_scaled
-                            result[sid].append(feature_dict)
+        # All features should be handled by BLOB paths above.
+        # If we reach here, the feature is not supported or missing.
 
     return result
 

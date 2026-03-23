@@ -199,7 +199,7 @@ A more detailed explanation of the modules and the features it contains is avail
 
 ### Database compression
 
-**Parameters (optional):** --min_aligned_fraction, --min_coverage_depth, --variation_percentage, --contig_variation_percentage, --coverage_percentage,
+**Parameters (optional):** --min_aligned_fraction, --min_coverage_depth, --contig_variation_percentage, --coverage_percentage,
 
 Discarding the reads to only keep the main features of the mappings (like the coverage per position) already allows the DuckDB database to be way lighter than the original BAM file. The database itself is also structured to be as light as possible. 
 
@@ -211,7 +211,7 @@ First, the database is organised per contig per sample (qualified as a contig/sa
 
 To further reduce the size of the database, values per feature are compressed rather than saving all positions. The type of compression depends on the type of plots:
 
-- A **Run-Length Encoding approach (RLE)** is applied to the continuous plots (features from Coverage, Paired-reads and Long-reads module, "Coverage reduced" feature in Phage termini module). RLE stores consecutive genomic positions with similar values as a single entry, preserving the overall signal while substantially reducing storage size. The allowed percentage of variation can be adjusted using the **--variation_percentage** parameter (default 50% ie 0.5) for mapping-related features, and the **--contig_variation_percentage** parameter (default: 10% ie 0.1) for contig-related features
+- A **Run-Length Encoding approach (RLE)** is applied to the continuous plots (features from Coverage, Paired-reads and Long-reads module, "Coverage reduced" feature in Phage termini module). RLE stores consecutive genomic positions with similar values as a single entry, preserving the overall signal while substantially reducing storage size. The allowed percentage of variation can be adjusted using the **--contig_variation_percentage** parameter (default: 10% ie 0.1) for contig-related features
 
 - Only positions with values above a defined percentage of the local coverage are retained for Bar plots (Misalignment and Phage termini module except for "Coverage reduced" feature). For each position, values are compared to the local coverage and discarded if they fall below the **--coverage_percentage** threshold (default 10%), ensuring that only meaningful peaks are preserved
 

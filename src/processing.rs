@@ -23,17 +23,15 @@ use std::thread;
 
 use crate::bam_reader::{detect_sequencing_type, get_total_read_count, process_contig_streaming};
 use crate::compress::{
-    compress_signal_with_reference, Run,
-    add_compressed_feature, add_compressed_feature_with_reference,
-    add_compressed_feature_with_stats, add_compressed_feature_with_median,
-    merge_identical_runs,
+    Run,
+    add_compressed_feature_with_stats,
 };
 use crate::db::{DbWriter, MisassemblyData, MicrodiversityData, SideMisassemblyData, TopologyData, GCContentData, RepeatsData};
 use crate::gc_content::{compute_gc_content, compute_gc_skew, GCParams};
 use crate::features::{CdsIndex, FeatureArrays, ModuleFlags, compute_codon_changes_from_summaries};
 use crate::parser::{parse_annotations, compute_annotation_sequences};
 use crate::types::{
-    ContigInfo, FeatureAnnotation, FeaturePoint, PackagingData, PlotType, PresenceData, SequencingType
+    ContigInfo, FeatureAnnotation, PackagingData, PresenceData, SequencingType
 };
 
 use crate::processing_phage_packaging::{
@@ -59,6 +57,11 @@ pub struct ProcessConfig {
     pub phagetermini_config: PhageTerminiConfig,
     /// GC content and GC skew parameters
     pub gc_params: GCParams,
+    /// Minimum absolute event count for a sparse feature position to be kept.
+    /// Applied in addition to bar_ratio filtering: position kept only if
+    /// `value > coverage × bar_ratio AND value > min_occurrences`.
+    /// Default: 2.
+    pub min_occurrences: u32,
 }
 
 impl ProcessConfig {
@@ -495,7 +498,7 @@ fn compute_area_median_clippings(
     }
 }
 
-/// Add features from FeatureArrays to output (optimized path).
+/// Encode features from FeatureArrays into BLOB format and compute metrics.
 /// Returns a tuple of:
 /// - Optional packaging data for phagetermini module (includes all termini with filtering metadata)
 /// - Optional metric structs (misassembly, microdiversity, side_misassembly, topology)
@@ -510,8 +513,10 @@ fn add_features_from_arrays(
     primary_count: u64,
     repeats: &[RepeatsData],
     cds_index: Option<&CdsIndex>,
-    output: &mut Vec<FeaturePoint>,
+    blob_output: &mut Vec<(String, String, Vec<u8>)>,
 ) -> (Option<PackagingData>, Option<(MisassemblyData, MicrodiversityData, SideMisassemblyData, TopologyData)>) {
+    use crate::blob::{encode_dense_blob, encode_sparse_blob, EventMeta, MetadataFlags, ValueScale,
+                       codon_category_to_id, codon_to_id, aa_to_id};
     let pt_config = config.phagetermini_config;
 
     // Build DTR regions from repeats for this contig (used for both merging and classification)
@@ -559,28 +564,35 @@ fn add_features_from_arrays(
     // Coverage (always compress self-referentially)
     let primary_reads_f64: Vec<f64> = arrays.primary_reads.iter().map(|&x| x as f64).collect();
     if flags.coverage {
-        // Save total and strand-specific coverage
-        add_compressed_feature(&primary_reads_f64, "primary_reads", contig_name, config, output);
-        let primary_reads_plus_f64: Vec<f64> = arrays.primary_reads_plus_only.iter().map(|&x| x as f64).collect();
-        let primary_reads_minus_f64: Vec<f64> = arrays.primary_reads_minus_only.iter().map(|&x| x as f64).collect();
-        add_compressed_feature(&primary_reads_plus_f64, "primary_reads_plus_only", contig_name, config, output);
-        add_compressed_feature(&primary_reads_minus_f64, "primary_reads_minus_only", contig_name, config, output);
-        
-        // Secondary reads (self-referential curve)
-        // Ghost secondary alignments are filtered out during mapping (convert_circular_bam)
-        let secondary_reads_f64: Vec<f64> = arrays.secondary_reads.iter().map(|&x| x as f64).collect();
-        add_compressed_feature(&secondary_reads_f64, "secondary_reads", contig_name, config, output);
-        
-        // Supplementary reads (self-referential curve)
-        let supplementary_reads_f64: Vec<f64> = arrays.supplementary_reads.iter().map(|&x| x as f64).collect();
-        add_compressed_feature(&supplementary_reads_f64, "supplementary_reads", contig_name, config, output);
-
-        // MAPQ - average mapping quality per position (sum_mapq / primary_reads)
+        // MAPQ - average mapping quality per position (needed for blob encoding below)
         let mapq_f64: Vec<f64> = arrays.sum_mapq.iter()
             .zip(&arrays.primary_reads)
             .map(|(&sum, &count)| if count > 0 { sum as f64 / count as f64 } else { 0.0 })
             .collect();
-        add_compressed_feature(&mapq_f64, "mapq", contig_name, config, output);
+
+        // === BLOB encoding for dense coverage features ===
+        let clen = contig_length as u32;
+        let cn = contig_name.to_string();
+
+        // primary_reads: raw i32
+        let pr_i32: Vec<i32> = arrays.primary_reads.iter().map(|&x| x as i32).collect();
+        blob_output.push(("primary_reads".into(), cn.clone(), encode_dense_blob(&pr_i32, ValueScale::Raw, clen)));
+
+        // plus/minus strand
+        let pp_i32: Vec<i32> = arrays.primary_reads_plus_only.iter().map(|&x| x as i32).collect();
+        blob_output.push(("primary_reads_plus_only".into(), cn.clone(), encode_dense_blob(&pp_i32, ValueScale::Raw, clen)));
+        let pm_i32: Vec<i32> = arrays.primary_reads_minus_only.iter().map(|&x| x as i32).collect();
+        blob_output.push(("primary_reads_minus_only".into(), cn.clone(), encode_dense_blob(&pm_i32, ValueScale::Raw, clen)));
+
+        // secondary, supplementary
+        let sec_i32: Vec<i32> = arrays.secondary_reads.iter().map(|&x| x as i32).collect();
+        blob_output.push(("secondary_reads".into(), cn.clone(), encode_dense_blob(&sec_i32, ValueScale::Raw, clen)));
+        let sup_i32: Vec<i32> = arrays.supplementary_reads.iter().map(|&x| x as i32).collect();
+        blob_output.push(("supplementary_reads".into(), cn.clone(), encode_dense_blob(&sup_i32, ValueScale::Raw, clen)));
+
+        // MAPQ: stored as ×100 integer
+        let mapq_i32: Vec<i32> = mapq_f64.iter().map(|&x| (x * 100.0).round() as i32).collect();
+        blob_output.push(("mapq".into(), cn.clone(), encode_dense_blob(&mapq_i32, ValueScale::Times100, clen)));
     }
 
     // Assemblycheck features
@@ -603,7 +615,7 @@ fn add_features_from_arrays(
             }
         }).collect();
         left_clip_runs = add_compressed_feature_with_stats(&left_clip_counts, &left_clip_means, &left_clip_medians, &left_clip_stds,
-            Some(&primary_reads_f64), "left_clippings", contig_name, config, output);
+            Some(&primary_reads_f64), "left_clippings", config);
 
         let right_clip_counts: Vec<f64> = arrays.right_clipping_lengths.iter().map(|v| v.len() as f64).collect();
         let right_clip_means: Vec<f64> = arrays.right_clipping_lengths.iter().map(|v| {
@@ -620,10 +632,12 @@ fn add_features_from_arrays(
             }
         }).collect();
         right_clip_runs = add_compressed_feature_with_stats(&right_clip_counts, &right_clip_means, &right_clip_medians, &right_clip_stds,
-            Some(&primary_reads_f64), "right_clippings", contig_name, config, output);
+            Some(&primary_reads_f64), "right_clippings", config);
     }
             
     if flags.mapping_metrics {
+        let mismatches_f64: Vec<f64> = arrays.mismatches.iter().map(|&x| x as f64).collect();
+        let deletions_f64: Vec<f64> = arrays.deletions.iter().map(|&x| x as f64).collect();
         let insertion_counts: Vec<f64> = arrays.insertion_lengths.iter().map(|v| v.len() as f64).collect();
         let insertion_means: Vec<f64> = arrays.insertion_lengths.iter().map(|v| {
             if v.is_empty() { 0.0 } else { v.iter().map(|&x| x as f64).sum::<f64>() / v.len() as f64 }
@@ -638,34 +652,8 @@ fn add_features_from_arrays(
                 var.sqrt()
             }
         }).collect();
-        let _ = add_compressed_feature_with_stats(&insertion_counts, &insertion_means, &insertion_medians, &insertion_stds,
-            Some(&primary_reads_f64), "insertions", contig_name, config, output);
 
-        // Other mapping metrics features (no statistics)
-        // Apply two-stage compression: first with coverage reference, then merge identical runs
-        let deletions_f64: Vec<f64> = arrays.deletions.iter().map(|&x| x as f64).collect();
-        let deletion_runs = compress_signal_with_reference(&deletions_f64, Some(&primary_reads_f64), PlotType::Bars, config.curve_ratio, config.bar_ratio);
-        let deletions_runs_merged = merge_identical_runs(deletion_runs);
-        output.extend(deletions_runs_merged.into_iter().map(|run| FeaturePoint {
-            contig_name: contig_name.to_string(),
-            feature: "deletions".to_string(),
-            start_pos: run.start_pos,
-            end_pos: run.end_pos,
-            value: run.value_relative.unwrap_or(run.value),
-            mean: None,
-            median: None,
-            std: None,
-            sequence: None,
-            sequence_prevalence: None,
-            codon_category: None,
-            codon_change: None,
-            aa_change: None,
-        }));
-
-        let mismatches_f64: Vec<f64> = arrays.mismatches.iter().map(|&x| x as f64).collect();
-        let _ = add_compressed_feature_with_reference(&mismatches_f64, Some(&primary_reads_f64), "mismatches", contig_name, config, output);
-
-        // --- Compute dominant bases/sequences and attach to compressed runs ---
+        // --- Compute dominant bases/sequences (used by blob encoding below) ---
         let threshold = config.bar_ratio * 0.01; // Convert percentage to fraction
         let dominant_mismatches = arrays.compute_dominant_mismatch_bases(&arrays.primary_reads, threshold);
         let dominant_insertions = FeatureArrays::compute_dominant_sequences(&arrays.insertion_sequences, &arrays.primary_reads, threshold);
@@ -678,121 +666,208 @@ fn add_features_from_arrays(
             cds_index, contig_length, threshold,
         );
 
-        // Attach dominant values to FeaturePoints by scanning the output
-        // (features were just appended above, so they're at the end of the output vec)
-        for fp in output.iter_mut().rev() {
-            // Stop when we hit features from a different contig or non-mapping features
-            if fp.contig_name != contig_name {
-                break;
+        // === BLOB encoding for mapping metrics (sparse features) ===
+        let clen = contig_length as u32;
+        let cn = contig_name.to_string();
+        let bar_threshold = config.bar_ratio * 0.01;
+        let min_occ = config.min_occurrences;
+
+        // Helper: filter positions by coverage threshold AND min_occurrences, produce (positions, values)
+        let filter_sparse = |counts: &[f64], coverage: &[f64]| -> (Vec<u32>, Vec<i32>) {
+            let mut positions = Vec::new();
+            let mut values = Vec::new();
+            let n = counts.len().min(coverage.len());
+            for i in 0..n {
+                let val = counts[i];
+                let cov = coverage[i];
+                if val > cov * bar_threshold && val > min_occ as f64 {
+                    positions.push(i as u32);
+                    values.push(val.round() as i32);
+                }
             }
-            let pos_idx = (fp.start_pos - 1) as usize; // 1-indexed → 0-indexed
-            match fp.feature.as_str() {
-                "mismatches" => {
-                    if pos_idx < dominant_mismatches.len() {
-                        let (base, pct) = dominant_mismatches[pos_idx];
-                        if base != 0 {
-                            fp.sequence = Some(String::from(base as char));
-                            fp.sequence_prevalence = Some(pct);
-                        }
-                    }
-                    // Attach codon change info
-                    if let Some((cat, codon, aa)) = dominant_codons.get(&pos_idx) {
-                        fp.codon_category = Some(cat.clone());
-                        if !codon.is_empty() {
-                            fp.codon_change = Some(codon.clone());
-                        }
-                        if !aa.is_empty() {
-                            fp.aa_change = Some(aa.clone());
-                        }
+            (positions, values)
+        };
+
+        // mismatches (with sequence + codons)
+        {
+            let (pos, vals) = filter_sparse(&mismatches_f64, &primary_reads_f64);
+            let meta: Vec<EventMeta> = pos.iter().map(|&p| {
+                let idx = p as usize;
+                let mut em = EventMeta::default();
+                if idx < dominant_mismatches.len() {
+                    let (base, pct) = dominant_mismatches[idx];
+                    if base != 0 {
+                        em.sequence = Some(vec![base]);
+                        em.prevalence = Some(pct as i16);
                     }
                 }
-                "insertions" => {
-                    if let Some((seq_str, pct)) = dominant_insertions.get(&pos_idx) {
-                        fp.sequence = Some(seq_str.clone());
-                        fp.sequence_prevalence = Some(*pct);
-                    }
+                if let Some((cat, codon, aa)) = dominant_codons.get(&idx) {
+                    em.codon_category = Some(codon_category_to_id(cat));
+                    em.codon_id = Some(codon_to_id(codon));
+                    em.aa_id = Some(aa_to_id(aa));
                 }
-                "left_clippings" => {
-                    if let Some((seq_str, pct)) = dominant_left_clips.get(&pos_idx) {
-                        fp.sequence = Some(seq_str.clone());
-                        fp.sequence_prevalence = Some(*pct);
-                    }
+                em
+            }).collect();
+            let flags = MetadataFlags { sparse: true, has_stats: false, has_sequence: true, has_codons: true };
+            blob_output.push(("mismatches".into(), cn.clone(),
+                encode_sparse_blob(&pos, &vals, Some(&meta), flags, ValueScale::Times1000, clen)));
+        }
+
+        // deletions (value only)
+        {
+            let (pos, vals) = filter_sparse(&deletions_f64, &primary_reads_f64);
+            let flags = MetadataFlags { sparse: true, ..Default::default() };
+            blob_output.push(("deletions".into(), cn.clone(),
+                encode_sparse_blob(&pos, &vals, None, flags, ValueScale::Times1000, clen)));
+        }
+
+        // insertions (with stats + sequence)
+        {
+            let (pos, vals) = filter_sparse(&insertion_counts, &primary_reads_f64);
+            let meta: Vec<EventMeta> = pos.iter().map(|&p| {
+                let idx = p as usize;
+                let mut em = EventMeta {
+                    mean: Some((insertion_means.get(idx).copied().unwrap_or(0.0) * 100.0).round() as i32),
+                    median: Some((insertion_medians.get(idx).copied().unwrap_or(0.0) * 100.0).round() as i32),
+                    std: Some((insertion_stds.get(idx).copied().unwrap_or(0.0) * 100.0).round() as i32),
+                    ..Default::default()
+                };
+                if let Some((seq_str, pct)) = dominant_insertions.get(&idx) {
+                    em.sequence = Some(seq_str.as_bytes().to_vec());
+                    em.prevalence = Some(*pct as i16);
                 }
-                "right_clippings" => {
-                    if let Some((seq_str, pct)) = dominant_right_clips.get(&pos_idx) {
-                        fp.sequence = Some(seq_str.clone());
-                        fp.sequence_prevalence = Some(*pct);
-                    }
+                em
+            }).collect();
+            let flags = MetadataFlags { sparse: true, has_stats: true, has_sequence: true, has_codons: false };
+            blob_output.push(("insertions".into(), cn.clone(),
+                encode_sparse_blob(&pos, &vals, Some(&meta), flags, ValueScale::Times1000, clen)));
+        }
+
+        // left_clippings (with stats + sequence)
+        {
+            let lc_counts: Vec<f64> = arrays.left_clipping_lengths.iter().map(|v| v.len() as f64).collect();
+            let lc_means: Vec<f64> = arrays.left_clipping_lengths.iter().map(|v| {
+                if v.is_empty() { 0.0 } else { v.iter().map(|&x| x as f64).sum::<f64>() / v.len() as f64 }
+            }).collect();
+            let lc_medians: Vec<f64> = arrays.left_clipping_lengths.iter().map(|v| {
+                if v.is_empty() { 0.0 } else { let mut s = v.clone(); s.sort_unstable(); s[s.len()/2] as f64 }
+            }).collect();
+            let lc_stds: Vec<f64> = arrays.left_clipping_lengths.iter().map(|v| {
+                if v.len() <= 1 { 0.0 } else {
+                    let mean = v.iter().map(|&x| x as f64).sum::<f64>() / v.len() as f64;
+                    let var = v.iter().map(|&x| { let d = x as f64 - mean; d*d }).sum::<f64>() / v.len() as f64;
+                    var.sqrt()
                 }
-                _ => {}
-            }
+            }).collect();
+            let (pos, vals) = filter_sparse(&lc_counts, &primary_reads_f64);
+            let meta: Vec<EventMeta> = pos.iter().map(|&p| {
+                let idx = p as usize;
+                let mut em = EventMeta {
+                    mean: Some((lc_means.get(idx).copied().unwrap_or(0.0) * 100.0).round() as i32),
+                    median: Some((lc_medians.get(idx).copied().unwrap_or(0.0) * 100.0).round() as i32),
+                    std: Some((lc_stds.get(idx).copied().unwrap_or(0.0) * 100.0).round() as i32),
+                    ..Default::default()
+                };
+                if let Some((seq_str, pct)) = dominant_left_clips.get(&idx) {
+                    em.sequence = Some(seq_str.as_bytes().to_vec());
+                    em.prevalence = Some(*pct as i16);
+                }
+                em
+            }).collect();
+            let flags = MetadataFlags { sparse: true, has_stats: true, has_sequence: true, has_codons: false };
+            blob_output.push(("left_clippings".into(), cn.clone(),
+                encode_sparse_blob(&pos, &vals, Some(&meta), flags, ValueScale::Times1000, clen)));
+        }
+
+        // right_clippings (with stats + sequence)
+        {
+            let rc_counts: Vec<f64> = arrays.right_clipping_lengths.iter().map(|v| v.len() as f64).collect();
+            let rc_means: Vec<f64> = arrays.right_clipping_lengths.iter().map(|v| {
+                if v.is_empty() { 0.0 } else { v.iter().map(|&x| x as f64).sum::<f64>() / v.len() as f64 }
+            }).collect();
+            let rc_medians: Vec<f64> = arrays.right_clipping_lengths.iter().map(|v| {
+                if v.is_empty() { 0.0 } else { let mut s = v.clone(); s.sort_unstable(); s[s.len()/2] as f64 }
+            }).collect();
+            let rc_stds: Vec<f64> = arrays.right_clipping_lengths.iter().map(|v| {
+                if v.len() <= 1 { 0.0 } else {
+                    let mean = v.iter().map(|&x| x as f64).sum::<f64>() / v.len() as f64;
+                    let var = v.iter().map(|&x| { let d = x as f64 - mean; d*d }).sum::<f64>() / v.len() as f64;
+                    var.sqrt()
+                }
+            }).collect();
+            let (pos, vals) = filter_sparse(&rc_counts, &primary_reads_f64);
+            let meta: Vec<EventMeta> = pos.iter().map(|&p| {
+                let idx = p as usize;
+                let mut em = EventMeta {
+                    mean: Some((rc_means.get(idx).copied().unwrap_or(0.0) * 100.0).round() as i32),
+                    median: Some((rc_medians.get(idx).copied().unwrap_or(0.0) * 100.0).round() as i32),
+                    std: Some((rc_stds.get(idx).copied().unwrap_or(0.0) * 100.0).round() as i32),
+                    ..Default::default()
+                };
+                if let Some((seq_str, pct)) = dominant_right_clips.get(&idx) {
+                    em.sequence = Some(seq_str.as_bytes().to_vec());
+                    em.prevalence = Some(*pct as i16);
+                }
+                em
+            }).collect();
+            let flags = MetadataFlags { sparse: true, has_stats: true, has_sequence: true, has_codons: false };
+            blob_output.push(("right_clippings".into(), cn.clone(),
+                encode_sparse_blob(&pos, &vals, Some(&meta), flags, ValueScale::Times1000, clen)));
         }
     }
 
     // Paired-reads module
     if flags.paired_read_metrics && seq_type.is_short_paired() {
         let non_inward_f64: Vec<f64> = arrays.non_inward_pairs.iter().map(|&x| x as f64).collect();
-        let non_inward_runs = compress_signal_with_reference(&non_inward_f64, Some(&primary_reads_f64), PlotType::Curve, config.curve_ratio, config.bar_ratio);
-        output.extend(non_inward_runs.into_iter().map(|run| FeaturePoint {
-            contig_name: contig_name.to_string(),
-            feature: "non_inward_pairs".to_string(),
-            start_pos: run.start_pos,
-            end_pos: run.end_pos,
-            value: run.value_relative.unwrap_or(run.value),
-            mean: None,
-            median: None,
-            std: None,
-            sequence: None,
-            sequence_prevalence: None,
-            codon_category: None,
-            codon_change: None,
-            aa_change: None,
-        }));
-
         let mate_unmapped_f64: Vec<f64> = arrays.mate_not_mapped.iter().map(|&x| x as f64).collect();
-        let mate_unmapped_runs = compress_signal_with_reference(&mate_unmapped_f64, Some(&primary_reads_f64), PlotType::Curve, config.curve_ratio, config.bar_ratio);
-        output.extend(mate_unmapped_runs.into_iter().map(|run| FeaturePoint {
-            contig_name: contig_name.to_string(),
-            feature: "mate_not_mapped".to_string(),
-            start_pos: run.start_pos,
-            end_pos: run.end_pos,
-            value: run.value_relative.unwrap_or(run.value),
-            mean: None,
-            median: None,
-            std: None,
-            sequence: None,
-            sequence_prevalence: None,
-            codon_category: None,
-            codon_change: None,
-            aa_change: None,
-        }));
-
         let mate_other_contig_f64: Vec<f64> = arrays.mate_on_another_contig.iter().map(|&x| x as f64).collect();
-        let mate_other_contig_runs = compress_signal_with_reference(&mate_other_contig_f64, Some(&primary_reads_f64), PlotType::Curve, config.curve_ratio, config.bar_ratio);
-        output.extend(mate_other_contig_runs.into_iter().map(|run| FeaturePoint {
-            contig_name: contig_name.to_string(),
-            feature: "mate_on_another_contig".to_string(),
-            start_pos: run.start_pos,
-            end_pos: run.end_pos,
-            value: run.value_relative.unwrap_or(run.value),
-            mean: None,
-            median: None,
-            std: None,
-            sequence: None,
-            sequence_prevalence: None,
-            codon_category: None,
-            codon_change: None,
-            aa_change: None,
-        }));
 
-        // Insert sizes (curve for paired reads, self-referential)
+        // Insert sizes (curve for paired reads)
         let values: Vec<f64> = arrays
             .sum_insert_sizes
             .iter()
             .zip(&arrays.count_insert_sizes)
             .map(|(&s, &c)| if c > 0 { s as f64 / c as f64 } else { 0.0 })
             .collect();
-        add_compressed_feature(&values, "insert_sizes", contig_name, config, output);
+
+        // === BLOB encoding for paired-reads features ===
+        let clen = contig_length as u32;
+        let cn = contig_name.to_string();
+        let bar_threshold = config.bar_ratio * 0.01;
+        let min_occ = config.min_occurrences;
+
+        // non_inward_pairs, mate_not_mapped, mate_on_another_contig: sparse, value only
+        let filter_sparse_pr = |counts: &[f64], coverage: &[f64]| -> (Vec<u32>, Vec<i32>) {
+            let mut positions = Vec::new();
+            let mut vals = Vec::new();
+            let n = counts.len().min(coverage.len());
+            for i in 0..n {
+                let val = counts[i];
+                let cov = coverage[i];
+                if val > cov * bar_threshold && val > min_occ as f64 {
+                    positions.push(i as u32);
+                    vals.push(val.round() as i32);
+                }
+            }
+            (positions, vals)
+        };
+
+        let (pos, vals) = filter_sparse_pr(&non_inward_f64, &primary_reads_f64);
+        let sp_flags = MetadataFlags { sparse: true, ..Default::default() };
+        blob_output.push(("non_inward_pairs".into(), cn.clone(),
+            encode_sparse_blob(&pos, &vals, None, sp_flags, ValueScale::Times1000, clen)));
+
+        let (pos, vals) = filter_sparse_pr(&mate_unmapped_f64, &primary_reads_f64);
+        blob_output.push(("mate_not_mapped".into(), cn.clone(),
+            encode_sparse_blob(&pos, &vals, None, sp_flags, ValueScale::Times1000, clen)));
+
+        let (pos, vals) = filter_sparse_pr(&mate_other_contig_f64, &primary_reads_f64);
+        blob_output.push(("mate_on_another_contig".into(), cn.clone(),
+            encode_sparse_blob(&pos, &vals, None, sp_flags, ValueScale::Times1000, clen)));
+
+        // insert_sizes: dense curve
+        let is_i32: Vec<i32> = values.iter().map(|&x| (x * 10.0).round() as i32).collect();
+        blob_output.push(("insert_sizes".into(), cn.clone(), encode_dense_blob(&is_i32, ValueScale::Times10, clen)));
     }
 
     // Long-reads module
@@ -803,59 +878,95 @@ fn add_features_from_arrays(
             .zip(&arrays.count_read_lengths)
             .map(|(&s, &c)| if c > 0 { s as f64 / c as f64 } else { 0.0 })
             .collect();
-        add_compressed_feature(&values, "read_lengths", contig_name, config, output);
+
+        // === BLOB encoding for long-reads features ===
+        let clen = contig_length as u32;
+        let cn = contig_name.to_string();
+        let rl_i32: Vec<i32> = values.iter().map(|&x| (x * 10.0).round() as i32).collect();
+        blob_output.push(("read_lengths".into(), cn, encode_dense_blob(&rl_i32, ValueScale::Times10, clen)));
     }
 
     // Phagetermini features
     let packaging_result = if flags.phagetermini {
         // === STEP 1: Save ORIGINAL data to database (before any DTR merging) ===
-        // coverage_reduced (self-referential curve)
-        let coverage_reduced_f64: Vec<f64> = arrays.coverage_reduced.iter().map(|&x| x as f64).collect();
-        add_compressed_feature(&coverage_reduced_f64, "coverage_reduced", contig_name, config, output);
-
-        // reads_starts and reads_ends (bars) with median event length only
         let reads_starts_original: Vec<f64> = arrays.reads_starts.iter().map(|&x| x as f64).collect();
+        let reads_ends_original: Vec<f64> = arrays.reads_ends.iter().map(|&x| x as f64).collect();
         let start_evt_medians: Vec<f64> = arrays.start_event_lengths.iter().map(|v| {
             if v.is_empty() { 0.0 } else { let mut s = v.clone(); s.sort_unstable(); s[s.len()/2] as f64 }
         }).collect();
-        add_compressed_feature_with_median(
-            &reads_starts_original, &start_evt_medians,
-            Some(&coverage_reduced_f64), "reads_starts", contig_name, config, output,
-        );
-
-        let reads_ends_original: Vec<f64> = arrays.reads_ends.iter().map(|&x| x as f64).collect();
         let end_evt_medians: Vec<f64> = arrays.end_event_lengths.iter().map(|v| {
             if v.is_empty() { 0.0 } else { let mut s = v.clone(); s.sort_unstable(); s[s.len()/2] as f64 }
         }).collect();
-        add_compressed_feature_with_median(
-            &reads_ends_original, &end_evt_medians,
-            Some(&coverage_reduced_f64), "reads_ends", contig_name, config, output,
-        );
 
-        // Attach dominant clip sequences to reads_starts/reads_ends FeaturePoints
-        let threshold = config.bar_ratio * 0.01; // Convert percentage to fraction
+        // Compute dominant clip sequences (used by blob encoding below)
+        let threshold = config.bar_ratio * 0.01;
         let dominant_start_clips = FeatureArrays::compute_dominant_sequences(&arrays.start_clip_sequences, &arrays.coverage_reduced, threshold);
         let dominant_end_clips = FeatureArrays::compute_dominant_sequences(&arrays.end_clip_sequences, &arrays.coverage_reduced, threshold);
-        for fp in output.iter_mut().rev() {
-            if fp.contig_name != contig_name {
-                break;
-            }
-            let pos_idx = (fp.start_pos - 1) as usize;
-            match fp.feature.as_str() {
-                "reads_starts" => {
-                    if let Some((seq_str, pct)) = dominant_start_clips.get(&pos_idx) {
-                        fp.sequence = Some(seq_str.clone());
-                        fp.sequence_prevalence = Some(*pct);
-                    }
+
+        // === BLOB encoding for phagetermini features ===
+        {
+            let clen = contig_length as u32;
+            let cn = contig_name.to_string();
+            let bar_threshold = config.bar_ratio * 0.01;
+            let min_occ = config.min_occurrences;
+
+            // coverage_reduced: dense curve
+            let cr_i32: Vec<i32> = arrays.coverage_reduced.iter().map(|&x| x as i32).collect();
+            blob_output.push(("coverage_reduced".into(), cn.clone(), encode_dense_blob(&cr_i32, ValueScale::Raw, clen)));
+
+            // reads_starts: sparse with median + sequence
+            let cov_reduced_f64: Vec<f64> = arrays.coverage_reduced.iter().map(|&x| x as f64).collect();
+            let mut rs_pos = Vec::new();
+            let mut rs_vals = Vec::new();
+            for i in 0..reads_starts_original.len().min(cov_reduced_f64.len()) {
+                let val = reads_starts_original[i];
+                let cov = cov_reduced_f64[i];
+                if val > cov * bar_threshold && val > min_occ as f64 {
+                    rs_pos.push(i as u32);
+                    rs_vals.push(val.round() as i32);
                 }
-                "reads_ends" => {
-                    if let Some((seq_str, pct)) = dominant_end_clips.get(&pos_idx) {
-                        fp.sequence = Some(seq_str.clone());
-                        fp.sequence_prevalence = Some(*pct);
-                    }
-                }
-                _ => {}
             }
+            let rs_meta: Vec<EventMeta> = rs_pos.iter().map(|&p| {
+                let idx = p as usize;
+                let mut em = EventMeta {
+                    median: Some((start_evt_medians.get(idx).copied().unwrap_or(0.0) * 100.0).round() as i32),
+                    ..Default::default()
+                };
+                if let Some((seq_str, pct)) = dominant_start_clips.get(&idx) {
+                    em.sequence = Some(seq_str.as_bytes().to_vec());
+                    em.prevalence = Some(*pct as i16);
+                }
+                em
+            }).collect();
+            let pt_flags = MetadataFlags { sparse: true, has_stats: false, has_sequence: true, has_codons: false };
+            blob_output.push(("reads_starts".into(), cn.clone(),
+                encode_sparse_blob(&rs_pos, &rs_vals, Some(&rs_meta), pt_flags, ValueScale::Times1000, clen)));
+
+            // reads_ends: sparse with median + sequence
+            let mut re_pos = Vec::new();
+            let mut re_vals = Vec::new();
+            for i in 0..reads_ends_original.len().min(cov_reduced_f64.len()) {
+                let val = reads_ends_original[i];
+                let cov = cov_reduced_f64[i];
+                if val > cov * bar_threshold && val > min_occ as f64 {
+                    re_pos.push(i as u32);
+                    re_vals.push(val.round() as i32);
+                }
+            }
+            let re_meta: Vec<EventMeta> = re_pos.iter().map(|&p| {
+                let idx = p as usize;
+                let mut em = EventMeta {
+                    median: Some((end_evt_medians.get(idx).copied().unwrap_or(0.0) * 100.0).round() as i32),
+                    ..Default::default()
+                };
+                if let Some((seq_str, pct)) = dominant_end_clips.get(&idx) {
+                    em.sequence = Some(seq_str.as_bytes().to_vec());
+                    em.prevalence = Some(*pct as i16);
+                }
+                em
+            }).collect();
+            blob_output.push(("reads_ends".into(), cn.clone(),
+                encode_sparse_blob(&re_pos, &re_vals, Some(&re_meta), pt_flags, ValueScale::Times1000, clen)));
         }
 
         // === STEP 2: Calculate aligned fraction and global metrics ===
@@ -980,7 +1091,7 @@ fn add_features_from_arrays(
 
 /// Process one BAM file using streaming (single-pass, optimized).
 /// Parallelizes at the contig level for samples with many contigs.
-/// Returns (features, presences, packaging, misassembly, microdiversity, side_misassembly, topology, sample_name, seq_type, total_reads, mapped_reads)
+/// Returns (feature_blobs, presences, packaging, misassembly, microdiversity, side_misassembly, topology, sample_name, seq_type, total_reads, mapped_reads)
 pub fn process_sample(
     bam_path: &Path,
     contigs: &[ContigInfo],
@@ -989,7 +1100,7 @@ pub fn process_sample(
     is_circular: bool,
     repeats: &[RepeatsData],
     annotations: &[crate::types::FeatureAnnotation],
-) -> Result<(Vec<FeaturePoint>, Vec<PresenceData>, Vec<PackagingData>, Vec<MisassemblyData>, Vec<MicrodiversityData>, Vec<SideMisassemblyData>, Vec<TopologyData>, String, SequencingType, u64, u64, bool)> {
+) -> Result<(Vec<(String, String, Vec<u8>)>, Vec<PresenceData>, Vec<PackagingData>, Vec<MisassemblyData>, Vec<MicrodiversityData>, Vec<SideMisassemblyData>, Vec<TopologyData>, String, SequencingType, u64, u64, bool)> {
     let sample_name = bam_path
         .file_stem()
         .unwrap_or_default()
@@ -1067,8 +1178,8 @@ pub fn process_sample(
             }
 
             // Calculate features for this contig
-            let mut features = Vec::new();
-            let (packaging_info, metrics_info) = add_features_from_arrays(&mut arrays, &ref_name, ref_length, config, is_circular, seq_type, flags, primary_count, repeats, cds_index.as_ref(), &mut features);
+            let mut feature_blobs: Vec<(String, String, Vec<u8>)> = Vec::new();
+            let (packaging_info, metrics_info) = add_features_from_arrays(&mut arrays, &ref_name, ref_length, config, is_circular, seq_type, flags, primary_count, repeats, cds_index.as_ref(), &mut feature_blobs);
             let coverage_median = arrays.coverage_median() as f32;
             let coverage_trimmed_mean = arrays.coverage_trimmed_mean(0.05) as f32;
 
@@ -1121,12 +1232,12 @@ pub fn process_sample(
                 coverage_trimmed_mean,
             };
 
-            Some((features, presence, packaging_info, metrics_info, primary_count))
+            Some((feature_blobs, presence, packaging_info, metrics_info, primary_count))
         })
         .collect();
 
     // Merge results from all contigs
-    let mut all_features = Vec::new();
+    let mut all_feature_blobs: Vec<(String, String, Vec<u8>)> = Vec::new();
     let mut all_presences = Vec::new();
     let mut all_packaging = Vec::new();
     let mut all_misassembly = Vec::new();
@@ -1135,8 +1246,8 @@ pub fn process_sample(
     let mut all_topology = Vec::new();
     let mut mapped_reads: u64 = 0;
 
-    for (features, presence, packaging, metrics, primary_count) in results {
-        all_features.extend(features);
+    for (blobs, presence, packaging, metrics, primary_count) in results {
+        all_feature_blobs.extend(blobs);
         all_presences.push(presence);
         mapped_reads += primary_count;
         if let Some(pkg) = packaging {
@@ -1150,7 +1261,7 @@ pub fn process_sample(
         }
     }
 
-    Ok((all_features, all_presences, all_packaging, all_misassembly, all_microdiversity, all_side_misassembly, all_topology, sample_name, seq_type, total_reads, mapped_reads, is_circular))
+    Ok((all_feature_blobs, all_presences, all_packaging, all_misassembly, all_microdiversity, all_side_misassembly, all_topology, sample_name, seq_type, total_reads, mapped_reads, is_circular))
 }
 
 /// Extract contig information from BAM file headers.
@@ -1412,12 +1523,12 @@ pub fn run_all_samples(
         .iter()
         .filter_map(|contig| {
             contig.sequence.as_ref().map(|seq| {
-                let (runs, stats) = compute_gc_content(seq, config.gc_params.gc_content_window_size, config.contig_variation_percentage);
-                let (skew_runs, skew_stats) = compute_gc_skew(seq, config.gc_params.gc_skew_window_size, config.contig_variation_percentage);
+                let (gc_values, stats) = compute_gc_content(seq, config.gc_params.gc_content_window_size, config.contig_variation_percentage);
+                let (skew_values, skew_stats) = compute_gc_skew(seq, config.gc_params.gc_skew_window_size, config.contig_variation_percentage);
                 GCContentData {
                     contig_name: contig.name.clone(),
-                    runs,
-                    skew_runs,
+                    gc_values,
+                    skew_values,
                     stats,
                     skew_stats,
                 }
@@ -1466,7 +1577,8 @@ struct SampleResult {
     total_reads: u64,
     mapped_reads: u64,
     is_circular: bool,
-    features: Vec<FeaturePoint>,
+    /// Compressed BLOB data: Vec<(feature_name, contig_name, blob_bytes)>
+    feature_blobs: Vec<(String, String, Vec<u8>)>,
     presences: Vec<PresenceData>,
     packaging: Vec<PackagingData>,
     misassembly: Vec<MisassemblyData>,
@@ -1583,7 +1695,7 @@ fn process_samples_parallel(
                 &result.microdiversity,
                 &result.side_misassembly,
                 &result.topology,
-                &result.features,
+                &result.feature_blobs,
                 result.is_circular,
             ) {
                 eprintln!("\nError writing data for {}: {}", result.sample_name, e);
@@ -1615,7 +1727,7 @@ fn process_samples_parallel(
 
         let sample_circular = circularity_map.get(bam_path).copied().unwrap_or(false);
         match process_sample(bam_path, contigs, modules, config, sample_circular, repeats, annotations) {
-            Ok((features, presences, packaging, misassembly, microdiversity, side_misassembly, topology, sample_name, sequencing_type, total_reads, mapped_reads, is_circular)) => {
+            Ok((feature_blobs, presences, packaging, misassembly, microdiversity, side_misassembly, topology, sample_name, sequencing_type, total_reads, mapped_reads, is_circular)) => {
                 let sample_time = sample_start.elapsed().as_secs_f64();
                 completed_count.fetch_add(1, Ordering::SeqCst);
                 let msg = format!("{} ({:.2}s)", sample_name, sample_time);
@@ -1632,7 +1744,7 @@ fn process_samples_parallel(
                     total_reads,
                     mapped_reads,
                     is_circular,
-                    features,
+                    feature_blobs,
                     presences,
                     packaging,
                     misassembly,
@@ -1723,7 +1835,7 @@ fn process_samples_sequential(
 
         let sample_circular = circularity_map.get(bam_path).copied().unwrap_or(false);
         match process_sample(bam_path, contigs, modules, config, sample_circular, repeats, annotations) {
-            Ok((features, presences, packaging, misassembly, microdiversity, side_misassembly, topology, sample_name, sequencing_type, total_reads, mapped_reads, is_circular)) => {
+            Ok((feature_blobs, presences, packaging, misassembly, microdiversity, side_misassembly, topology, sample_name, sequencing_type, total_reads, mapped_reads, is_circular)) => {
                 let process_elapsed = sample_start.elapsed();
                 processing_time_total += process_elapsed;
 
@@ -1746,7 +1858,7 @@ fn process_samples_sequential(
                     &microdiversity,
                     &side_misassembly,
                     &topology,
-                    &features,
+                    &feature_blobs,
                     is_circular,
                 ) {
                     eprintln!("\nError writing data for {}: {}", sample_name, e);

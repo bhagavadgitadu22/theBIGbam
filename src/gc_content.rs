@@ -21,17 +21,6 @@ impl Default for GCParams {
     }
 }
 
-/// A run of consecutive positions with similar GC percentage.
-#[derive(Debug, Clone)]
-pub struct GCContentRun {
-    /// First position in the run (1-indexed for database compatibility)
-    pub start_pos: i32,
-    /// Last position in the run (1-indexed, inclusive)
-    pub end_pos: i32,
-    /// GC percentage for this run (0-100)
-    pub gc_percentage: u8,
-}
-
 /// Statistics for GC content across a contig.
 #[derive(Debug, Clone)]
 pub struct GCStats {
@@ -51,35 +40,22 @@ pub struct GCSkewStats {
     pub percent_positive: f32,
 }
 
-/// Run-length encoded GC skew data for storage.
-/// GC skew ranges from -1.0 to +1.0, stored as i16 (-100 to +100).
-#[derive(Debug, Clone)]
-pub struct GCSkewRun {
-    /// First position in the run (1-indexed for database compatibility)
-    pub start_pos: i32,
-    /// Last position in the run (1-indexed, inclusive)
-    pub end_pos: i32,
-    /// GC skew × 100 (range: -100 to +100)
-    pub gc_skew: i16,
-}
-
-/// Compute GC content using non-overlapping windows with RLE compression.
+/// Compute GC content using non-overlapping windows.
 ///
 /// # Parameters
 /// - `sequence`: The DNA sequence as bytes (A, T, G, C, N)
 /// - `window_size`: Size of each non-overlapping window in base pairs (typically 500)
-/// - `_contig_variation_percentage`: RLE compression tolerance for contig-level features (default 0.1%)
+/// - `_contig_variation_percentage`: Deprecated - no longer used (RLE compression removed)
 ///
 /// # Algorithm
 /// 1. Divide the sequence into non-overlapping windows of window_size
 /// 2. For each window, compute GC% (excluding N bases)
-/// 3. Apply RLE compression: merge consecutive windows with similar GC%
 ///
 /// # Returns
-/// Tuple of (runs, stats) where:
-/// - runs: Vector of GC content runs with (start_pos, end_pos, gc_percentage)
+/// Tuple of (values, stats) where:
+/// - values: Vector of GC percentages (0-100), one per window
 /// - stats: GCStats with average and sd GC percentages
-pub fn compute_gc_content(sequence: &[u8], window_size: usize, contig_variation_percentage: f64) -> (Vec<GCContentRun>, GCStats) {
+pub fn compute_gc_content(sequence: &[u8], window_size: usize, _contig_variation_percentage: f64) -> (Vec<u8>, GCStats) {
     let n = sequence.len();
     if n == 0 {
         return (Vec::new(), GCStats { average: 0.0, sd: 0.0 });
@@ -108,10 +84,7 @@ pub fn compute_gc_content(sequence: &[u8], window_size: usize, contig_variation_
     // Compute statistics from raw values before compression
     let stats = compute_gc_stats(&gc_values);
 
-    // Build runs with RLE compression applied to consecutive windows with similar values
-    let runs = build_gc_runs(&gc_values, window_size, n, contig_variation_percentage);
-
-    (runs, stats)
+    (gc_values, stats)
 }
 
 /// Compute GC statistics (average, sd) from raw GC values.
@@ -141,7 +114,7 @@ fn compute_gc_stats(gc_values: &[u8]) -> GCStats {
     }
 }
 
-/// Compute GC skew using non-overlapping windows with RLE compression.
+/// Compute GC skew using non-overlapping windows.
 ///
 /// GC skew = (G - C) / (G + C) at each position
 /// - Range: -1 to +1
@@ -151,13 +124,13 @@ fn compute_gc_stats(gc_values: &[u8]) -> GCStats {
 /// # Parameters
 /// - `sequence`: The DNA sequence as bytes (A, T, G, C, N)
 /// - `window_size`: Size of each non-overlapping window in base pairs (typically 1000)
-/// - `_contig_variation_percentage`: RLE compression tolerance (default 0.1%)
+/// - `_contig_variation_percentage`: Deprecated - no longer used (RLE compression removed)
 ///
 /// # Returns
-/// Tuple of (runs, stats) where:
-/// - runs: Vector of GC skew runs with (start_pos, end_pos, gc_skew × 100)
+/// Tuple of (values, stats) where:
+/// - values: Vector of GC skew × 100 (range: -100 to +100), one per window
 /// - stats: GCSkewStats with amplitude and percent_positive
-pub fn compute_gc_skew(sequence: &[u8], window_size: usize, contig_variation_percentage: f64) -> (Vec<GCSkewRun>, GCSkewStats) {
+pub fn compute_gc_skew(sequence: &[u8], window_size: usize, _contig_variation_percentage: f64) -> (Vec<i16>, GCSkewStats) {
     let n = sequence.len();
     if n == 0 {
         return (Vec::new(), GCSkewStats { amplitude: 0.0, percent_positive: 0.0 });
@@ -201,10 +174,7 @@ pub fn compute_gc_skew(sequence: &[u8], window_size: usize, contig_variation_per
         percent_positive,
     };
 
-    // Build runs with RLE compression applied to consecutive windows with similar values
-    let runs = build_gc_skew_runs(&skew_values, window_size, n, contig_variation_percentage);
-
-    (runs, stats)
+    (skew_values, stats)
 }
 
 /// Count G and C bases in a window, excluding N bases.
@@ -247,124 +217,6 @@ fn count_g_c_in_window(window: &[u8]) -> (usize, usize) {
     (g_count, c_count)
 }
 
-/// Build GC content runs from non-overlapping window values with RLE compression.
-/// Applies compression to consecutive windows with similar GC percentages.
-fn build_gc_runs(gc_values: &[u8], window_size: usize, total_length: usize, variation_percentage: f64) -> Vec<GCContentRun> {
-    if gc_values.is_empty() {
-        return Vec::new();
-    }
-
-    // Apply RLE compression to consecutive windows with similar values
-    let ratio = variation_percentage * 0.01; // Convert percentage to fraction
-    let mut runs = Vec::new();
-
-    let mut run_start_idx = 0;
-    let mut run_value = gc_values[0] as f64;
-    let mut run_sum = gc_values[0] as f64;
-    let mut run_count = 1;
-
-    for (idx, &gc_pct) in gc_values.iter().enumerate().skip(1) {
-        let val = gc_pct as f64;
-
-        // RLE formula: |x[i] - x[i-1]| <= ratio × min(x[i], x[i-1])
-        let min_val = val.min(run_value);
-        let threshold = ratio * min_val.max(1.0); // Use at least 1.0 to handle zero values
-
-        if (val - run_value).abs() <= threshold {
-            // Extend current run
-            run_sum += val;
-            run_count += 1;
-            run_value = run_sum / run_count as f64;
-        } else {
-            // Close current run and save it
-            let window_start = run_start_idx * window_size;
-            let window_end = ((run_start_idx + run_count) * window_size).min(total_length);
-
-            runs.push(GCContentRun {
-                start_pos: (window_start + 1) as i32,           // Convert to 1-indexed
-                end_pos: window_end as i32,
-                gc_percentage: run_value.round() as u8,
-            });
-
-            // Start new run
-            run_start_idx = idx;
-            run_value = val;
-            run_sum = val;
-            run_count = 1;
-        }
-    }
-
-    // Save the last run
-    let window_start = run_start_idx * window_size;
-    let window_end = ((run_start_idx + run_count) * window_size).min(total_length);
-    runs.push(GCContentRun {
-        start_pos: (window_start + 1) as i32,           // Convert to 1-indexed
-        end_pos: window_end as i32,
-        gc_percentage: run_value.round() as u8,
-    });
-
-    runs
-}
-
-/// Build GC skew runs from non-overlapping window values with RLE compression.
-/// Applies compression to consecutive windows with similar GC skew values.
-fn build_gc_skew_runs(skew_values: &[i16], window_size: usize, total_length: usize, variation_percentage: f64) -> Vec<GCSkewRun> {
-    if skew_values.is_empty() {
-        return Vec::new();
-    }
-
-    // Apply RLE compression to consecutive windows with similar values
-    let ratio = variation_percentage * 0.01; // Convert percentage to fraction
-    let mut runs = Vec::new();
-
-    let mut run_start_idx = 0;
-    let mut run_value = skew_values[0] as f64;
-    let mut run_sum = skew_values[0] as f64;
-    let mut run_count = 1;
-
-    for (idx, &skew) in skew_values.iter().enumerate().skip(1) {
-        let val = skew as f64;
-
-        // RLE formula: |x[i] - x[i-1]| <= ratio × |min(|x[i]|, |x[i-1]|)|
-        // Use absolute values since skew can be negative
-        let min_abs = val.abs().min(run_value.abs());
-        let threshold = ratio * min_abs.max(1.0); // Use at least 1.0 to handle zero values
-
-        if (val - run_value).abs() <= threshold {
-            // Extend current run
-            run_sum += val;
-            run_count += 1;
-            run_value = run_sum / run_count as f64;
-        } else {
-            // Close current run and save it
-            let window_start = run_start_idx * window_size;
-            let window_end = ((run_start_idx + run_count) * window_size).min(total_length);
-
-            runs.push(GCSkewRun {
-                start_pos: (window_start + 1) as i32,           // Convert to 1-indexed
-                end_pos: window_end as i32,
-                gc_skew: run_value.round() as i16,
-            });
-
-            // Start new run
-            run_start_idx = idx;
-            run_value = val;
-            run_sum = val;
-            run_count = 1;
-        }
-    }
-
-    // Save the last run
-    let window_start = run_start_idx * window_size;
-    let window_end = ((run_start_idx + run_count) * window_size).min(total_length);
-    runs.push(GCSkewRun {
-        start_pos: (window_start + 1) as i32,           // Convert to 1-indexed
-        end_pos: window_end as i32,
-        gc_skew: run_value.round() as i16,
-    });
-
-    runs
-}
 
 #[cfg(test)]
 mod tests {
@@ -372,29 +224,32 @@ mod tests {
 
     #[test]
     fn test_gc_content_simple() {
-        // ATGC sequence - 50% GC
+        // ATGC sequence - 50% GC per window
         let sequence = b"ATGCATGCATGC";
-        let (runs, stats) = compute_gc_content(sequence, 4, 10.0);
+        let (values, stats) = compute_gc_content(sequence, 4, 10.0);
 
-        // Should produce runs with ~50% GC
-        assert!(!runs.is_empty());
-        for run in &runs {
-            assert!(run.gc_percentage >= 40 && run.gc_percentage <= 60);
+        // Should produce 3 values (window size 4, 12bp sequence)
+        assert_eq!(values.len(), 3);
+        // Each window (ATGC, ATGC, ATGC) should be 50% GC
+        for value in &values {
+            assert_eq!(*value, 50);
         }
         // Stats should also be around 50%
-        assert!(stats.average >= 40.0 && stats.average <= 60.0);
+        assert_eq!(stats.average, 50.0);
+        assert_eq!(stats.sd, 0.0);
     }
 
     #[test]
     fn test_gc_content_high_gc() {
         // All GC
         let sequence = b"GGGGCCCCGGGGCCCC";
-        let (runs, stats) = compute_gc_content(sequence, 4, 10.0);
+        let (values, stats) = compute_gc_content(sequence, 4, 10.0);
 
-        // Should produce runs with 100% GC
-        assert!(!runs.is_empty());
-        for run in &runs {
-            assert_eq!(run.gc_percentage, 100);
+        // Should produce 4 values (window size 4, 16bp sequence)
+        assert_eq!(values.len(), 4);
+        // Each window should be 100% GC
+        for value in &values {
+            assert_eq!(*value, 100);
         }
         // Stats should be 100% with 0 sd
         assert_eq!(stats.average, 100.0);
@@ -405,12 +260,13 @@ mod tests {
     fn test_gc_content_low_gc() {
         // All AT
         let sequence = b"AAAATTTTAAAATTTT";
-        let (runs, stats) = compute_gc_content(sequence, 4, 10.0);
+        let (values, stats) = compute_gc_content(sequence, 4, 10.0);
 
-        // Should produce runs with 0% GC
-        assert!(!runs.is_empty());
-        for run in &runs {
-            assert_eq!(run.gc_percentage, 0);
+        // Should produce 4 values (window size 4, 16bp sequence)
+        assert_eq!(values.len(), 4);
+        // Each window should be 0% GC
+        for value in &values {
+            assert_eq!(*value, 0);
         }
         // Stats should be 0% with 0 sd
         assert_eq!(stats.average, 0.0);
@@ -421,50 +277,50 @@ mod tests {
     fn test_gc_content_with_n() {
         // Sequence with N bases - N should be excluded
         let sequence = b"ATGCNNNNATGC";
-        let (runs, _stats) = compute_gc_content(sequence, 4, 10.0);
+        let (values, _stats) = compute_gc_content(sequence, 4, 10.0);
 
-        // Should still compute ~50% GC from valid bases
-        assert!(!runs.is_empty());
+        // Should produce 3 values (window size 4, 12bp sequence)
+        assert_eq!(values.len(), 3);
     }
 
     #[test]
     fn test_gc_content_empty() {
         let sequence: &[u8] = b"";
-        let (runs, stats) = compute_gc_content(sequence, 4, 10.0);
-        assert!(runs.is_empty());
+        let (values, stats) = compute_gc_content(sequence, 4, 10.0);
+        assert!(values.is_empty());
         assert_eq!(stats.average, 0.0);
         assert_eq!(stats.sd, 0.0);
     }
 
     #[test]
-    fn test_full_coverage() {
-        // Verify that the runs cover the entire sequence
-        let sequence = b"ATGCATGCATGCATGCATGC"; // 20 bases
-        let (runs, _stats) = compute_gc_content(sequence, 4, 10.0);
+    fn test_individual_windows() {
+        // Verify that each window value is computed correctly
+        let sequence = b"ATGCATGCATGCATGCATGC"; // 20 bases, 5 windows of 4bp
+        let (values, _stats) = compute_gc_content(sequence, 4, 10.0);
 
-        // First run should start at position 1
-        assert_eq!(runs.first().unwrap().start_pos, 1);
-        // Last run should end at position 20
-        assert_eq!(runs.last().unwrap().end_pos, 20);
-
-        // Verify continuous coverage (no gaps)
-        for i in 1..runs.len() {
-            assert_eq!(runs[i].start_pos, runs[i - 1].end_pos + 1);
+        // Should have 5 windows
+        assert_eq!(values.len(), 5);
+        // Each window (ATGC) should be 50% GC
+        for value in &values {
+            assert_eq!(*value, 50);
         }
     }
 
     #[test]
-    fn test_compression() {
-        // Long sequence with uniform GC should compress well
-        let sequence: Vec<u8> = b"ATGC".repeat(1000);
-        let (runs, stats) = compute_gc_content(&sequence, 100, 10.0);
+    fn test_varying_gc() {
+        // Long sequence with uniform GC should give consistent values
+        let sequence: Vec<u8> = b"ATGC".repeat(100);
+        let (values, stats) = compute_gc_content(&sequence, 100, 10.0);
 
-        // Should compress but still cover full length
-        assert!(!runs.is_empty());
-        assert_eq!(runs.first().unwrap().start_pos, 1);
-        assert_eq!(runs.last().unwrap().end_pos, 4000);
+        // Should produce 4 windows (400bp sequence, 100bp windows)
+        assert_eq!(values.len(), 4);
+        // All values should be 50% GC
+        for value in &values {
+            assert_eq!(*value, 50);
+        }
         // Stats should be around 50%
-        assert!(stats.average >= 45.0 && stats.average <= 55.0);
+        assert_eq!(stats.average, 50.0);
+        assert_eq!(stats.sd, 0.0);
     }
 
     #[test]

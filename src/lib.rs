@@ -19,6 +19,7 @@
 //! ```
 
 pub mod bam_reader;
+pub mod blob;
 pub mod cigar;
 pub mod circular;
 pub mod compress;
@@ -41,7 +42,7 @@ pub use parser::{parse_annotations, parse_fasta, parse_genbank, parse_gff3};
 pub use processing::{run_all_samples, ProcessConfig};
 pub use processing_phage_packaging::PhageTerminiConfig;
 pub use types::{
-    mean_std, ContigInfo, FeaturePoint, PlotType, PresenceData, SequencingType,
+    mean_std, ContigInfo, PlotType, PresenceData, SequencingType,
     ASSEMBLYCHECK_FEATURES, PHAGETERMINI_FEATURES, VARIABLES,
 };
 
@@ -78,7 +79,7 @@ mod python {
     ///         - "samples_failed": int
     ///         - "total_time": float (seconds)
     #[pyfunction]
-    #[pyo3(signature = (genbank_path, bam_files, output_db, modules, threads, sequencing_type=None, min_aligned_fraction=50.0, min_coverage_depth=0.0, curve_ratio=10.0, bar_ratio=10.0, contig_variation_percentage=10.0, create_indexes=true, assembly_path="", extend_db=""))]
+    #[pyo3(signature = (genbank_path, bam_files, output_db, modules, threads, sequencing_type=None, min_aligned_fraction=50.0, min_coverage_depth=0.0, curve_ratio=10.0, bar_ratio=10.0, contig_variation_percentage=10.0, create_indexes=true, assembly_path="", extend_db="", min_occurrences=2))]
     fn process_all_samples<'py>(
         py: Python<'py>,
         genbank_path: &str,
@@ -95,6 +96,7 @@ mod python {
         create_indexes: bool,
         assembly_path: &str,
         extend_db: &str,
+        min_occurrences: u32,
     ) -> PyResult<Bound<'py, PyDict>> {
         use crate::gc_content::GCParams;
         use crate::processing::{run_all_samples, ProcessConfig};
@@ -114,6 +116,7 @@ mod python {
             sequencing_type: seq_type,
             phagetermini_config: PhageTerminiConfig::default(),
             gc_params: GCParams::default(),
+            min_occurrences,
         };
 
         // Convert string paths to PathBuf

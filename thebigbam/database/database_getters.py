@@ -388,17 +388,17 @@ def remove_sample(db_path, sample_name):
         return
     sample_id = row[0]
 
-    # Delete PhageTermini via PhageMechanisms packaging IDs
-    if _table_exists(conn, 'PhageMechanisms') and _table_exists(conn, 'PhageTermini'):
+    # Delete Phage_termini via Phage_mechanisms packaging IDs
+    if _table_exists(conn, 'Phage_mechanisms') and _table_exists(conn, 'Phage_termini'):
         conn.execute(
-            "DELETE FROM PhageTermini WHERE Packaging_id IN "
-            "(SELECT Packaging_id FROM PhageMechanisms WHERE Sample_id = ?)",
+            "DELETE FROM Phage_termini WHERE Packaging_id IN "
+            "(SELECT Packaging_id FROM Phage_mechanisms WHERE Sample_id = ?)",
             [sample_id],
         )
 
     # Delete from all fixed tables that reference Sample_id
     for table in [
-        'PhageMechanisms', 'Coverage', 'Misassembly', 'Microdiversity',
+        'Phage_mechanisms', 'Coverage', 'Misassembly', 'Microdiversity',
         'Side_misassembly', 'Topology',
     ]:
         _delete_from(conn, table, 'Sample_id', sample_id)
@@ -428,17 +428,17 @@ def remove_contig(db_path, contig_name):
         return
     contig_id = row[0]
 
-    # Delete PhageTermini via PhageMechanisms packaging IDs
-    if _table_exists(conn, 'PhageMechanisms') and _table_exists(conn, 'PhageTermini'):
+    # Delete Phage_termini via Phage_mechanisms packaging IDs
+    if _table_exists(conn, 'Phage_mechanisms') and _table_exists(conn, 'Phage_termini'):
         conn.execute(
-            "DELETE FROM PhageTermini WHERE Packaging_id IN "
-            "(SELECT Packaging_id FROM PhageMechanisms WHERE Contig_id = ?)",
+            "DELETE FROM Phage_termini WHERE Packaging_id IN "
+            "(SELECT Packaging_id FROM Phage_mechanisms WHERE Contig_id = ?)",
             [contig_id],
         )
 
     # Delete from all fixed tables that reference Contig_id
     for table in [
-        'PhageMechanisms', 'Coverage', 'Misassembly', 'Microdiversity',
+        'Phage_mechanisms', 'Coverage', 'Misassembly', 'Microdiversity',
         'Side_misassembly', 'Topology',
         'Contig_sequence', 'Contig_annotation',
         'Contig_directRepeats', 'Contig_invertedRepeats',

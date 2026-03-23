@@ -123,7 +123,6 @@ def linear_db(tests_dir, test_bams):
         "-o", db_path,
         "-t", "4",
         "--coverage_percentage", "0",
-        "--variation_percentage", "0",
     ]
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
@@ -145,7 +144,6 @@ def circular_db(tests_dir, test_bams):
         "-o", db_path,
         "-t", "4",
         "--coverage_percentage", "0",
-        "--variation_percentage", "0",
     ]
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:

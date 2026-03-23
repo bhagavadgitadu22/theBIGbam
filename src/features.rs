@@ -615,7 +615,7 @@ impl CdsIndex {
 type CodonInfo = (String, String, String);
 
 /// Standard genetic code lookup for codon translation.
-fn translate_codon(codon: &[u8; 3]) -> Option<(char, &'static str)> {
+pub(crate) fn translate_codon(codon: &[u8; 3]) -> Option<(char, &'static str)> {
     let c = [codon[0].to_ascii_uppercase(), codon[1].to_ascii_uppercase(), codon[2].to_ascii_uppercase()];
     Some(match &c {
         b"TTT" | b"TTC" => ('F', "Phenylalanine"),

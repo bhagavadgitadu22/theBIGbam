@@ -21,8 +21,9 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Mutex;
 
-use crate::gc_content::{GCContentRun, GCSkewRun, GCSkewStats, GCStats};
-use crate::types::{feature_table_name, ContigInfo, FeatureAnnotation, FeaturePoint, PackagingData, PresenceData, VARIABLES};
+use crate::features::translate_codon;
+use crate::gc_content::{GCSkewStats, GCStats};
+use crate::types::{feature_name_to_id, ContigInfo, FeatureAnnotation, PackagingData, PresenceData, VARIABLES};
 // Re-export new metric data structs (defined below in this file)
 
 /// Thread-safe database connection wrapper for sequential writes.
@@ -32,8 +33,6 @@ pub struct DbWriter {
     contig_name_to_id: HashMap<String, i64>,
     sample_name_to_id: Mutex<HashMap<String, i64>>,
     next_sample_id: Mutex<i64>,
-    /// Tracks which feature tables have been created (lazy creation)
-    created_tables: Mutex<HashSet<String>>,
 }
 
 impl DbWriter {
@@ -82,7 +81,6 @@ impl DbWriter {
             contig_name_to_id,
             sample_name_to_id: Mutex::new(HashMap::new()),
             next_sample_id: Mutex::new(1),
-            created_tables: Mutex::new(HashSet::new()),
         })
     }
 
@@ -174,18 +172,6 @@ impl DbWriter {
             }
         }
 
-        // Detect existing feature tables
-        let mut created_tables: HashSet<String> = HashSet::new();
-        {
-            let mut stmt = conn.prepare(
-                "SELECT table_name FROM information_schema.tables WHERE table_name LIKE 'Feature_%'"
-            )?;
-            let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
-            for row in rows {
-                created_tables.insert(row?);
-            }
-        }
-
         // Drop existing materialized tables and views (will be recreated in finalize)
         for table in &[
             "Contig_direct_repeat_count", "Contig_inverted_repeat_count",
@@ -207,7 +193,6 @@ impl DbWriter {
             contig_name_to_id,
             sample_name_to_id: Mutex::new(sample_name_to_id),
             next_sample_id: Mutex::new(max_sample_id + 1),
-            created_tables: Mutex::new(created_tables),
         })
     }
 
@@ -234,7 +219,7 @@ impl DbWriter {
         Ok(sample_id)
     }
 
-    /// Write all data for a sample (coverage, packaging, misassembly/microdiversity/side_misassembly/topology, features).
+    /// Write all data for a sample (coverage, packaging, misassembly/microdiversity/side_misassembly/topology, feature blobs).
     pub fn write_sample_data(
         &self,
         sample_name: &str,
@@ -244,7 +229,7 @@ impl DbWriter {
         microdiversity: &[MicrodiversityData],
         side_misassembly: &[SideMisassemblyData],
         topology: &[TopologyData],
-        features: &[FeaturePoint],
+        feature_blobs: &[(String, String, Vec<u8>)],
         circular: bool,
     ) -> Result<()> {
         let sample_id = {
@@ -273,8 +258,8 @@ impl DbWriter {
         // Insert topology data
         self.write_topology(&conn, sample_id, topology)?;
 
-        // Insert features
-        self.write_features(&conn, sample_id, features)?;
+        // Insert feature BLOBs (compressed format)
+        self.write_feature_blobs(&conn, sample_id, feature_blobs)?;
 
         Ok(())
     }
@@ -305,21 +290,21 @@ impl DbWriter {
         // Track next packaging_id and terminus_id
         // Query current max to ensure unique IDs
         let mut packaging_id: i64 = conn.query_row(
-            "SELECT COALESCE(MAX(Packaging_id), 0) FROM PhageMechanisms",
+            "SELECT COALESCE(MAX(Packaging_id), 0) FROM Phage_mechanisms",
             [],
             |row| row.get(0),
         ).unwrap_or(0) + 1;
 
         let mut terminus_id: i64 = conn.query_row(
-            "SELECT COALESCE(MAX(Terminus_id), 0) FROM PhageTermini",
+            "SELECT COALESCE(MAX(Terminus_id), 0) FROM Phage_termini",
             [],
             |row| row.get(0),
         ).unwrap_or(0) + 1;
 
-        let mut mechanism_appender = conn.appender("PhageMechanisms")
-            .context("Failed to create PhageMechanisms appender")?;
-        let mut termini_appender = conn.appender("PhageTermini")
-            .context("Failed to create PhageTermini appender")?;
+        let mut mechanism_appender = conn.appender("Phage_mechanisms")
+            .context("Failed to create Phage_mechanisms appender")?;
+        let mut termini_appender = conn.appender("Phage_termini")
+            .context("Failed to create Phage_termini appender")?;
 
         for pkg in packaging {
             if let Some(&contig_id) = self.contig_name_to_id.get(&pkg.contig_name) {
@@ -353,7 +338,7 @@ impl DbWriter {
                     .collect::<Vec<_>>()
                     .join(",");
 
-                // Insert into PhageMechanisms
+                // Insert into Phage_mechanisms
                 mechanism_appender.append_row(params![
                     packaging_id,
                     contig_id,
@@ -433,8 +418,8 @@ impl DbWriter {
             }
         }
 
-        mechanism_appender.flush().context("Failed to flush PhageMechanisms appender")?;
-        termini_appender.flush().context("Failed to flush PhageTermini appender")?;
+        mechanism_appender.flush().context("Failed to flush Phage_mechanisms appender")?;
+        termini_appender.flush().context("Failed to flush Phage_termini appender")?;
         Ok(())
     }
 
@@ -518,106 +503,28 @@ impl DbWriter {
         Ok(())
     }
 
-    fn write_features(&self, conn: &Connection, sample_id: i64, features: &[FeaturePoint]) -> Result<()> {
-        // Features that have statistics columns
-        let features_with_stats = ["left_clippings", "right_clippings", "insertions", "reads_starts", "reads_ends"];
-
-        // Group features by variable name for efficient batch inserts
-        let mut by_variable: HashMap<&str, Vec<&FeaturePoint>> = HashMap::new();
-        for f in features {
-            by_variable.entry(&f.feature).or_default().push(f);
+    /// Write feature BLOBs to the Feature_blob table.
+    ///
+    /// Each tuple is (feature_name, contig_name, blob_bytes).
+    /// Feature names are mapped to feature_ids via VARIABLES index.
+    pub fn write_feature_blobs(&self, conn: &Connection, sample_id: i64, blobs: &[(String, String, Vec<u8>)]) -> Result<()> {
+        if blobs.is_empty() {
+            return Ok(());
         }
 
-        // Lock created_tables for lazy table creation
-        let mut created_tables = self.created_tables.lock().unwrap();
+        let mut appender = conn.appender("Feature_blob")
+            .context("Failed to create Feature_blob appender")?;
 
-        for v in VARIABLES {
-            // Skip contig-level variables stored in Contig_* tables (not per-sample)
-            if v.name == "direct_repeat_count" || v.name == "inverted_repeat_count" || v.name == "direct_repeat_identity" || v.name == "inverted_repeat_identity" || v.name == "gc_content" {
-                continue;
+        for (feature_name, contig_name, blob_bytes) in blobs {
+            if let (Some(&contig_id), Some(fid)) = (
+                self.contig_name_to_id.get(contig_name),
+                feature_name_to_id(feature_name),
+            ) {
+                appender.append_row(params![contig_id, sample_id, fid as i32, blob_bytes.as_slice()])?;
             }
-
-            let Some(feature_points) = by_variable.get(v.name) else {
-                continue;
-            };
-
-            let table_name = feature_table_name(v.name);
-            let has_stats = features_with_stats.contains(&v.name);
-
-            // Create table lazily if it doesn't exist yet
-            create_feature_table_if_needed(conn, &table_name, has_stats, &mut created_tables)?;
-
-            // Determine if this variable stores scaled integers (now only mapq, since tau is removed)
-            let is_scaled = v.name == "mapq";
-
-
-
-            // Use Appender for bulk loading
-            let mut appender = conn.appender(&table_name)
-                .with_context(|| format!("Failed to create appender for {}", table_name))?;
-
-            let has_sequences = FEATURES_WITH_SEQUENCES.contains(&table_name.as_str());
-            let has_codons = FEATURES_WITH_CODONS.contains(&table_name.as_str());
-            let is_single_pos = SINGLE_POSITION_FEATURES.contains(&table_name.as_str());
-
-            if has_stats && has_sequences {
-                for f in feature_points {
-                    if let Some(&contig_id) = self.contig_name_to_id.get(&f.contig_name) {
-                        let value = if is_scaled { (f.value * 100.0).round() as i32 } else { f.value.round() as i32 };
-                        let mean = f.mean.map(|v| if is_scaled { (v * 100.0).round() as i32 } else { v.round() as i32 });
-                        let median = f.median.map(|v| if is_scaled { (v * 100.0).round() as i32 } else { v.round() as i32 });
-                        let std = f.std.map(|v| if is_scaled { (v * 100.0).round() as i32 } else { v.round() as i32 });
-                        let last_pos: Option<i32> = if is_single_pos { None } else { Some(f.end_pos) };
-                        appender.append_row(params![contig_id, sample_id, f.start_pos, last_pos, value, mean, median, std, &f.sequence, f.sequence_prevalence])?;
-
-                    }
-                }
-            } else if has_stats {
-                for f in feature_points {
-                    if let Some(&contig_id) = self.contig_name_to_id.get(&f.contig_name) {
-                        let value = if is_scaled { (f.value * 100.0).round() as i32 } else { f.value.round() as i32 };
-                        let mean = f.mean.map(|v| if is_scaled { (v * 100.0).round() as i32 } else { v.round() as i32 });
-                        let median = f.median.map(|v| if is_scaled { (v * 100.0).round() as i32 } else { v.round() as i32 });
-                        let std = f.std.map(|v| if is_scaled { (v * 100.0).round() as i32 } else { v.round() as i32 });
-                        let last_pos: Option<i32> = if is_single_pos { None } else { Some(f.end_pos) };
-                        appender.append_row(params![contig_id, sample_id, f.start_pos, last_pos, value, mean, median, std])?;
-
-                    }
-                }
-            } else if has_sequences && has_codons {
-                for f in feature_points {
-                    if let Some(&contig_id) = self.contig_name_to_id.get(&f.contig_name) {
-                        let value = if is_scaled { (f.value * 100.0).round() as i32 } else { f.value.round() as i32 };
-                        let last_pos: Option<i32> = if is_single_pos { None } else { Some(f.end_pos) };
-                        appender.append_row(params![contig_id, sample_id, f.start_pos, last_pos, value, &f.sequence, f.sequence_prevalence, &f.codon_category, &f.codon_change, &f.aa_change])?;
-
-                    }
-                }
-            } else if has_sequences {
-                for f in feature_points {
-                    if let Some(&contig_id) = self.contig_name_to_id.get(&f.contig_name) {
-                        let value = if is_scaled { (f.value * 100.0).round() as i32 } else { f.value.round() as i32 };
-                        let last_pos: Option<i32> = if is_single_pos { None } else { Some(f.end_pos) };
-                        appender.append_row(params![contig_id, sample_id, f.start_pos, last_pos, value, &f.sequence, f.sequence_prevalence])?;
-
-                    }
-                }
-            } else {
-                for f in feature_points {
-                    if let Some(&contig_id) = self.contig_name_to_id.get(&f.contig_name) {
-                        let value = if is_scaled { (f.value * 100.0).round() as i32 } else { f.value.round() as i32 };
-                        let last_pos: Option<i32> = if is_single_pos { None } else { Some(f.end_pos) };
-                        appender.append_row(params![contig_id, sample_id, f.start_pos, last_pos, value])?;
-
-                    }
-                }
-            }
-
-            appender.flush()
-                .with_context(|| format!("Failed to flush appender for {}", table_name))?;
-
         }
 
+        appender.flush().context("Failed to flush Feature_blob appender")?;
         Ok(())
     }
 
@@ -764,69 +671,220 @@ impl DbWriter {
         Ok(())
     }
 
-    /// Write GC content data to the database.
+    /// Write GC content data to Contig_blob table.
+    /// Stores raw window-level GC percentages as dense BLOBs (one value per 500bp window).
     /// This is called once during database creation (not per-sample).
     pub fn write_gc_content(&self, gc_data: &[GCContentData]) -> Result<()> {
+        use crate::blob::{encode_contig_dense_blob, ValueScale};
+
         if gc_data.is_empty() {
             return Ok(());
         }
 
         let conn = self.conn.lock().unwrap();
-        let mut appender = conn.appender("Contig_GCContent")
-            .context("Failed to create Contig_GCContent appender")?;
+        let mut appender = conn.appender("Contig_blob")
+            .context("Failed to create Contig_blob appender")?;
 
-        let mut total_runs = 0;
+        const GC_CONTENT_FEATURE_ID: i16 = 1;
+        const GC_WINDOW_SIZE: u32 = 500; // Standard GC content window size
 
         for data in gc_data {
             if let Some(&contig_id) = self.contig_name_to_id.get(&data.contig_name) {
-                for run in &data.runs {
-                    appender.append_row(params![
-                        contig_id,
-                        run.start_pos,
-                        run.end_pos,
-                        run.gc_percentage as i32
-                    ])?;
-                    total_runs += 1;
+                if data.gc_values.is_empty() {
+                    continue;
                 }
+
+                // Convert u8 values to i32 for BLOB encoding
+                let values: Vec<i32> = data.gc_values.iter().map(|&v| v as i32).collect();
+
+                // Estimate contig length from number of windows
+                let contig_length = (values.len() as u32) * GC_WINDOW_SIZE;
+
+                // Encode as dense BLOB (array index is window number)
+                let blob_data = encode_contig_dense_blob(
+                    &values,
+                    ValueScale::Raw,
+                    contig_length,
+                );
+
+                appender.append_row(params![
+                    contig_id,
+                    GC_CONTENT_FEATURE_ID,
+                    blob_data
+                ])?;
             }
         }
 
-        appender.flush().context("Failed to flush Contig_GCContent appender")?;
-        eprintln!("Wrote {} GC content runs to database", total_runs);
+        appender.flush().context("Failed to flush Contig_blob appender")?;
+        eprintln!("Wrote {} GC content BLOBs to Contig_blob table", gc_data.len());
 
         Ok(())
     }
 
-    /// Write GC skew data to the database.
+    /// Write GC skew data to Contig_blob table.
+    /// Stores raw window-level GC skew values as dense BLOBs (one value per 1000bp window).
     /// This is called once during database creation (not per-sample).
     pub fn write_gc_skew(&self, gc_data: &[GCContentData]) -> Result<()> {
+        use crate::blob::{encode_contig_dense_blob, ValueScale};
+
         if gc_data.is_empty() {
             return Ok(());
         }
 
         let conn = self.conn.lock().unwrap();
-        let mut appender = conn.appender("Contig_GCSkew")
-            .context("Failed to create Contig_GCSkew appender")?;
+        let mut appender = conn.appender("Contig_blob")
+            .context("Failed to create Contig_blob appender")?;
 
-        let mut total_runs = 0;
+        const GC_SKEW_FEATURE_ID: i16 = 2;
+        const GC_SKEW_WINDOW_SIZE: u32 = 1000; // Standard GC skew window size
 
         for data in gc_data {
             if let Some(&contig_id) = self.contig_name_to_id.get(&data.contig_name) {
-                for run in &data.skew_runs {
-                    appender.append_row(params![
-                        contig_id,
-                        run.start_pos,
-                        run.end_pos,
-                        run.gc_skew as i32
-                    ])?;
-                    total_runs += 1;
+                if data.skew_values.is_empty() {
+                    continue;
                 }
+
+                // Convert i16 values to i32 for BLOB encoding
+                let values: Vec<i32> = data.skew_values.iter().map(|&v| v as i32).collect();
+
+                // Estimate contig length from number of windows
+                let contig_length = (values.len() as u32) * GC_SKEW_WINDOW_SIZE;
+
+                // Encode as dense BLOB (array index is window number)
+                let blob_data = encode_contig_dense_blob(
+                    &values,
+                    ValueScale::Raw,
+                    contig_length,
+                );
+
+                appender.append_row(params![
+                    contig_id,
+                    GC_SKEW_FEATURE_ID,
+                    blob_data
+                ])?;
             }
         }
 
-        appender.flush().context("Failed to flush Contig_GCSkew appender")?;
-        eprintln!("Wrote {} GC skew runs to database", total_runs);
+        appender.flush().context("Failed to flush Contig_blob appender")?;
+        eprintln!("Wrote {} GC skew BLOBs to Contig_blob table", gc_data.len());
 
+        Ok(())
+    }
+
+    /// Write repeat count and identity features to Contig_blob table from materialized tables.
+    /// Converts from position/value pairs into sparse BLOBs with 10kbp zoom level.
+    /// Note: The materialized tables are temporary and will be dropped after conversion.
+    fn write_repeat_features_to_blob_static(conn: &Connection) -> Result<()> {
+        use crate::blob::{encode_contig_sparse_blob, ValueScale};
+
+        // Feature IDs for repeat features
+        const DIRECT_REPEAT_COUNT_ID: i16 = 3;
+        const INVERTED_REPEAT_COUNT_ID: i16 = 4;
+        const DIRECT_REPEAT_IDENTITY_ID: i16 = 5;
+        const INVERTED_REPEAT_IDENTITY_ID: i16 = 6;
+
+        // List of (table_name, feature_id) to process
+        let tables = vec![
+            ("Contig_direct_repeat_count", DIRECT_REPEAT_COUNT_ID),
+            ("Contig_inverted_repeat_count", INVERTED_REPEAT_COUNT_ID),
+            ("Contig_direct_repeat_identity", DIRECT_REPEAT_IDENTITY_ID),
+            ("Contig_inverted_repeat_identity", INVERTED_REPEAT_IDENTITY_ID),
+        ];
+
+        let mut appender = conn.appender("Contig_blob")
+            .context("Failed to create Contig_blob appender")?;
+
+        for (table_name, feature_id) in tables {
+            // Check if table exists (it might not if there are no repeats)
+            let table_exists: bool = conn.query_row(
+                "SELECT COUNT(*) > 0 FROM information_schema.tables WHERE table_name = ?",
+                params![table_name],
+                |row| row.get(0),
+            ).unwrap_or(false);
+
+            if !table_exists {
+                eprintln!("Skipping {} (table not found)", table_name);
+                continue;
+            }
+
+            // Get contig length map for this table
+            let mut contig_lengths: HashMap<i64, u32> = HashMap::new();
+            {
+                let mut stmt = conn.prepare("SELECT Contig_id, Contig_length FROM Contig")?;
+                let rows = stmt.query_map([], |row| {
+                    Ok((row.get::<_, i64>(0)?, row.get::<_, i32>(1)?))
+                })?;
+                for row in rows {
+                    let (contig_id, length) = row?;
+                    contig_lengths.insert(contig_id, length as u32);
+                }
+            }
+
+            // Read RLE data from the materialized table
+            let query = format!("SELECT Contig_id, First_position, Last_position, Value FROM {} ORDER BY Contig_id, First_position", table_name);
+            let mut stmt = conn.prepare(&query)?;
+            let rows = stmt.query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,    // Contig_id
+                    row.get::<_, i32>(1)?,    // First_position
+                    row.get::<_, i32>(2)?,    // Last_position
+                    row.get::<_, f64>(3)?,    // Value
+                ))
+            })?;
+
+            // Group by contig and convert RLE to position/value pairs
+            let mut current_contig: Option<i64> = None;
+            let mut positions: Vec<u32> = Vec::new();
+            let mut values: Vec<i32> = Vec::new();
+
+            for row in rows {
+                let (contig_id, first_pos, last_pos, value) = row?;
+
+                // If we switched to a new contig, write the previous one
+                if current_contig.is_some() && current_contig != Some(contig_id) {
+                    let prev_contig_id = current_contig.unwrap();
+                    if !positions.is_empty() {
+                        let contig_length = *contig_lengths.get(&prev_contig_id).unwrap_or(&0);
+                        let blob_data = encode_contig_sparse_blob(
+                            &positions,
+                            &values,
+                            ValueScale::Raw,
+                            contig_length,
+                        );
+                        appender.append_row(params![prev_contig_id, feature_id, blob_data])?;
+                    }
+                    positions.clear();
+                    values.clear();
+                }
+
+                current_contig = Some(contig_id);
+
+                // Convert RLE run to individual positions
+                // For sparse storage, we store each position in the run
+                for pos in first_pos..=last_pos {
+                    positions.push(pos as u32);
+                    values.push((value * 100.0) as i32); // Scale for integer storage
+                }
+            }
+
+            // Write the last contig
+            if let Some(contig_id) = current_contig {
+                if !positions.is_empty() {
+                    let contig_length = *contig_lengths.get(&contig_id).unwrap_or(&0);
+                    let blob_data = encode_contig_sparse_blob(
+                        &positions,
+                        &values,
+                        ValueScale::Raw,
+                        contig_length,
+                    );
+                    appender.append_row(params![contig_id, feature_id, blob_data])?;
+                }
+            }
+
+            eprintln!("Wrote {} features to Contig_blob from {}", feature_id, table_name);
+        }
+
+        appender.flush().context("Failed to flush Contig_blob appender")?;
         Ok(())
     }
 
@@ -936,13 +994,12 @@ impl DbWriter {
 
     pub fn finalize(self) -> Result<()> {
         let conn = self.conn.into_inner().unwrap();
-        let created_tables = self.created_tables.into_inner().unwrap();
 
         // Create derived views (in extend mode, views were dropped in open())
         create_views(&conn, self.has_bam)?;
 
-        // Delete Variable entries for features without tables
-        cleanup_unused_variables(&conn, &created_tables)?;
+        // Delete Variable entries for features without data
+        cleanup_unused_variables(&conn)?;
 
         // Drop empty module tables and their views (prevents empty UI sections)
         if self.has_bam {
@@ -1089,8 +1146,8 @@ fn create_core_tables(conn: &Connection, has_bam: bool) -> Result<()> {
     // Coverage table
     conn.execute(
         "CREATE TABLE Coverage (
-            Contig_id INTEGER,
-            Sample_id INTEGER,
+            Contig_id INTEGER REFERENCES Contig(Contig_id),
+            Sample_id INTEGER REFERENCES Sample(Sample_id),
             Aligned_fraction_percentage INTEGER,
             Above_expected_aligned_fraction BOOLEAN,
             Read_count INTEGER,
@@ -1106,10 +1163,10 @@ fn create_core_tables(conn: &Connection, has_bam: bool) -> Result<()> {
     .context("Failed to create Coverage table")?;
 
     conn.execute(
-        "CREATE TABLE PhageMechanisms (
+        "CREATE TABLE Phage_mechanisms (
             Packaging_id INTEGER PRIMARY KEY,
-            Contig_id INTEGER NOT NULL,
-            Sample_id INTEGER NOT NULL,
+            Contig_id INTEGER NOT NULL REFERENCES Contig(Contig_id),
+            Sample_id INTEGER NOT NULL REFERENCES Sample(Sample_id),
             Packaging_mechanism TEXT NOT NULL,
             Duplication BOOLEAN,
             Repeat_length INTEGER,
@@ -1119,15 +1176,15 @@ fn create_core_tables(conn: &Connection, has_bam: bool) -> Result<()> {
         )",
         [],
     )
-    .context("Failed to create PhageMechanisms table")?;
+    .context("Failed to create Phage_mechanisms table")?;
 
-    // PhageTermini table - stores individual terminus areas with full metadata
-    // One row per terminus area, linked to PhageMechanisms via Packaging_id
+    // Phage_termini table - stores individual terminus areas with full metadata
+    // One row per terminus area, linked to Phage_mechanisms via Packaging_id
     // Includes filtering diagnostics for both Poisson and clipping tests
     conn.execute(
-        "CREATE TABLE PhageTermini (
+        "CREATE TABLE Phage_termini (
             Terminus_id INTEGER PRIMARY KEY,
-            Packaging_id INTEGER NOT NULL,
+            Packaging_id INTEGER NOT NULL REFERENCES Phage_mechanisms(Packaging_id),
             \"Start\" INTEGER NOT NULL,
             \"End\" INTEGER NOT NULL,
             \"Size\" INTEGER NOT NULL,
@@ -1149,8 +1206,93 @@ fn create_core_tables(conn: &Connection, has_bam: bool) -> Result<()> {
         )",
         [],
     )
-    .context("Failed to create PhageTermini table")?;
-    } // end if has_bam (Sample, Coverage, PhageMechanisms, PhageTermini)
+    .context("Failed to create Phage_termini table")?;
+    // Feature_blob table - compressed BLOB storage for per-position feature data
+    // Replaces the ~20 separate Feature_* tables with a single table.
+    // Each row stores one feature for one contig/sample as a compressed BLOB.
+    conn.execute(
+        "CREATE TABLE Feature_blob (
+            Contig_id  INTEGER NOT NULL REFERENCES Contig(Contig_id),
+            Sample_id  INTEGER NOT NULL REFERENCES Sample(Sample_id),
+            Feature_id SMALLINT NOT NULL,
+            Data       BLOB NOT NULL,
+            PRIMARY KEY (Contig_id, Sample_id, Feature_id)
+        )",
+        [],
+    )
+    .context("Failed to create Feature_blob table")?;
+
+    // Contig_blob table - stores contig-level features (GC content, GC skew) as compressed BLOBs
+    // Contig-level features have no sample dimension, unlike Feature_blob
+    conn.execute(
+        "CREATE TABLE Contig_blob (
+            Contig_id   INTEGER NOT NULL REFERENCES Contig,
+            Feature_id  SMALLINT NOT NULL,
+            Data        BLOB NOT NULL,
+            PRIMARY KEY (Contig_id, Feature_id)
+        )",
+        [],
+    )
+    .context("Failed to create Contig_blob table")?;
+
+    // Column_scales table - documents scaling factors for all features/columns
+    // Both Rust (encoding) and Python (decoding) can read from here instead of hardcoding
+    conn.execute(
+        "CREATE TABLE Column_scales (
+            Feature_name TEXT NOT NULL,
+            Column_name TEXT NOT NULL,
+            Scale INTEGER NOT NULL,
+            PRIMARY KEY (Feature_name, Column_name)
+        )",
+        [],
+    )
+    .context("Failed to create Column_scales table")?;
+
+    // Populate default scaling factors
+    let scale_entries: &[(&str, &str, i32)] = &[
+        // Coverage table columns (×100 for integer storage)
+        ("Coverage", "Coverage_mean", 100),
+        ("Coverage", "Coverage_median", 100),
+        ("Coverage", "Coverage_trimmed_mean", 100),
+        ("Coverage", "Coverage_coefficient_of_variation", 1_000_000),
+        ("Coverage", "Coverage_relative_coverage_roughness", 1_000_000),
+        ("Coverage", "Aligned_fraction_percentage", 100),
+        // MapQ (×100 for decimal precision)
+        ("mapq", "Value", 100),
+        // Coverage-relative features (×1000 for per-mille)
+        ("mismatches", "Value_relative", 1000),
+        ("deletions", "Value_relative", 1000),
+        ("insertions", "Value_relative", 1000),
+        ("left_clippings", "Value_relative", 1000),
+        ("right_clippings", "Value_relative", 1000),
+        ("non_inward_pairs", "Value_relative", 1000),
+        ("mate_not_mapped", "Value_relative", 1000),
+        ("mate_on_another_contig", "Value_relative", 1000),
+        ("reads_starts", "Value_relative", 1000),
+        ("reads_ends", "Value_relative", 1000),
+        // GC content/skew (×1000 for 3 decimal places)
+        ("gc_content", "Value", 1000),
+        ("gc_skew", "Value", 1000),
+        // Contig-level GC stats (×100)
+        ("Contig", "GC_mean", 100),
+        ("Contig", "GC_sd", 100),
+        ("Contig", "GC_skew_amplitude", 100),
+        // Repeat identity (×100)
+        ("Contig_directRepeats", "Pident", 100),
+        ("Contig_invertedRepeats", "Pident", 100),
+    ];
+
+    {
+        let mut appender = conn.appender("Column_scales")
+            .context("Failed to create Column_scales appender")?;
+        for (feature, column, scale) in scale_entries {
+            appender.append_row(params![*feature, *column, *scale])
+                .context("Failed to append Column_scales row")?;
+        }
+        appender.flush().context("Failed to flush Column_scales appender")?;
+    }
+
+    } // end if has_bam (Sample, Coverage, Phage_mechanisms, Phage_termini, Feature_blob)
 
     // Contig_directRepeats table - stores direct repeats (same orientation)
     // Pident stored as INTEGER (×100)
@@ -1182,31 +1324,8 @@ fn create_core_tables(conn: &Connection, has_bam: bool) -> Result<()> {
     )
     .context("Failed to create Contig_invertedRepeats table")?;
 
-    // Contig_GCContent table - stores GC content (contig-level, sample-independent)
-    // Value stored as INTEGER (0-100 percentage)
-    conn.execute(
-        "CREATE TABLE Contig_GCContent (
-            Contig_id INTEGER,
-            First_position INTEGER,
-            Last_position INTEGER,
-            Value INTEGER
-        )",
-        [],
-    )
-    .context("Failed to create Contig_GCContent table")?;
-
-    // Contig_GCSkew table - stores GC skew (contig-level, sample-independent)
-    // Value stored as INTEGER × 100 (range: -100 to +100)
-    conn.execute(
-        "CREATE TABLE Contig_GCSkew (
-            Contig_id INTEGER,
-            First_position INTEGER,
-            Last_position INTEGER,
-            Value INTEGER
-        )",
-        [],
-    )
-    .context("Failed to create Contig_GCSkew table")?;
+    // Note: Contig_GCContent and Contig_GCSkew tables have been removed.
+    // GC content and GC skew are now stored in Contig_blob table.
 
     if has_bam {
     // Misassembly table - counts at ≥50% prevalence threshold
@@ -1278,8 +1397,9 @@ fn create_core_tables(conn: &Connection, has_bam: bool) -> Result<()> {
 
     // No auto-increment ID needed
     conn.execute(
-        "CREATE TABLE Contig_annotation (
-            Contig_id INTEGER,
+        "CREATE TABLE Contig_annotation_core (
+            Annotation_id INTEGER PRIMARY KEY,
+            Contig_id INTEGER REFERENCES Contig(Contig_id),
             \"Start\" INTEGER,
             \"End\" INTEGER,
             Strand INTEGER,
@@ -1288,13 +1408,34 @@ fn create_core_tables(conn: &Connection, has_bam: bool) -> Result<()> {
             \"Function\" TEXT,
             Phrog INTEGER,
             Locus_tag TEXT,
-            Longest_isoform BOOLEAN,
-            Nucleotide_sequence TEXT,
-            Protein_sequence TEXT
+            Longest_isoform BOOLEAN
         )",
         [],
     )
-    .context("Failed to create Contig_annotation table")?;
+    .context("Failed to create Contig_annotation_core table")?;
+
+    // Heavy sequence data stored separately — only queried for codon analysis and export
+    conn.execute(
+        "CREATE TABLE Annotation_sequence (
+            Annotation_id INTEGER PRIMARY KEY REFERENCES Contig_annotation_core(Annotation_id),
+            Nucleotide_sequence TEXT,
+            Protein_sequence TEXT,
+            S_sites INTEGER,
+            N_sites INTEGER
+        )",
+        [],
+    )
+    .context("Failed to create Annotation_sequence table")?;
+
+    // Backward-compatible view named "Contig_annotation" so all existing Python queries work unchanged
+    conn.execute(
+        "CREATE VIEW Contig_annotation AS
+         SELECT ca.*, aseq.Nucleotide_sequence, aseq.Protein_sequence, aseq.S_sites, aseq.N_sites
+         FROM Contig_annotation_core ca
+         LEFT JOIN Annotation_sequence aseq ON ca.Annotation_id = aseq.Annotation_id",
+        [],
+    )
+    .context("Failed to create Contig_annotation view")?;
 
     conn.execute(
         "CREATE TABLE Variable (
@@ -1493,6 +1634,61 @@ fn insert_codon_table(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Compute synonymous and nonsynonymous site counts for a nucleotide sequence.
+///
+/// For each codon, enumerates all 9 possible single-nucleotide changes and classifies
+/// each as synonymous (same amino acid) or nonsynonymous (different amino acid).
+/// Codons with non-ACGT bases or stop codons are skipped.
+/// Returns (S_sites, N_sites) as integers.
+fn compute_sn_sites(nuc_seq: &str) -> (i64, i64) {
+    const BASES: [u8; 4] = [b'A', b'C', b'G', b'T'];
+    let seq = nuc_seq.as_bytes();
+    let mut syn: i64 = 0;
+    let mut nonsyn: i64 = 0;
+
+    for chunk in seq.chunks_exact(3) {
+        let codon: [u8; 3] = [
+            chunk[0].to_ascii_uppercase(),
+            chunk[1].to_ascii_uppercase(),
+            chunk[2].to_ascii_uppercase(),
+        ];
+
+        // Skip codons with non-ACGT bases
+        if !codon.iter().all(|&b| matches!(b, b'A' | b'C' | b'G' | b'T')) {
+            continue;
+        }
+
+        // Translate the original codon; skip stop codons
+        let (orig_aa, _) = match translate_codon(&codon) {
+            Some(v) => v,
+            None => continue,
+        };
+        if orig_aa == '*' {
+            continue;
+        }
+
+        // Enumerate all 9 single-nucleotide changes
+        for pos in 0..3 {
+            for &alt in &BASES {
+                if alt == codon[pos] {
+                    continue;
+                }
+                let mut mutant = codon;
+                mutant[pos] = alt;
+                if let Some((mut_aa, _)) = translate_codon(&mutant) {
+                    if mut_aa == orig_aa {
+                        syn += 1;
+                    } else {
+                        nonsyn += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    (syn, nonsyn)
+}
+
 /// Insert annotations into the database using Appender for bulk loading.
 fn insert_annotations(conn: &Connection, annotations: &[FeatureAnnotation]) -> Result<()> {
     // PHAROKKA function categories (must match plotting_data_per_sample.py)
@@ -1542,16 +1738,20 @@ fn insert_annotations(conn: &Connection, annotations: &[FeatureAnnotation]) -> R
         }
     }
 
-    let mut appender = conn.appender("Contig_annotation")
-        .context("Failed to create Contig_annotation appender")?;
+    let mut ann_appender = conn.appender("Contig_annotation_core")
+        .context("Failed to create Contig_annotation_core appender")?;
+    let mut seq_appender = conn.appender("Annotation_sequence")
+        .context("Failed to create Annotation_sequence appender")?;
 
     // Track which (locus_tag, Type) groups have already had their longest assigned
     // This ensures only the FIRST occurrence gets TRUE when multiple isoforms have equal max length
     let mut longest_assigned: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
 
+    let mut annotation_id: i64 = 1;
+
     for ann in annotations {
         let length = (ann.end - ann.start + 1) as usize;
-        
+
         // Determine Longest_isoform value:
         // - NULL if no locus_tag (always displayed)
         // - TRUE if this is the longest in its (locus_tag, Type) group AND is the first to be marked
@@ -1559,7 +1759,7 @@ fn insert_annotations(conn: &Connection, annotations: &[FeatureAnnotation]) -> R
         let longest_isoform: Option<bool> = if let Some(ref locus_tag) = ann.locus_tag {
             let key = (locus_tag.clone(), ann.feature_type.clone());
             let max_length = *group_max_length.get(&key).unwrap_or(&0);
-            
+
             // Only mark as longest if:
             // 1. Length matches the max for this group
             // 2. This group hasn't been assigned a longest yet (tie-breaking: first wins)
@@ -1573,8 +1773,18 @@ fn insert_annotations(conn: &Connection, annotations: &[FeatureAnnotation]) -> R
         } else {
             None  // NULL for features without locus_tag
         };
-        
-        appender.append_row(params![
+
+        let (s_sites, n_sites): (Option<i64>, Option<i64>) = match &ann.nucleotide_sequence {
+            Some(seq) if !seq.is_empty() => {
+                let (s, n) = compute_sn_sites(seq);
+                (Some(s), Some(n))
+            }
+            _ => (None, None),
+        };
+
+        // Lightweight annotation row
+        ann_appender.append_row(params![
+            annotation_id,
             ann.contig_id,
             ann.start,
             ann.end,
@@ -1585,16 +1795,30 @@ fn insert_annotations(conn: &Connection, annotations: &[FeatureAnnotation]) -> R
             &ann.phrog,
             &ann.locus_tag,
             longest_isoform,
-            &ann.nucleotide_sequence,
-            &ann.protein_sequence,
         ])
         .with_context(|| format!(
             "Failed to append annotation: contig_id={}, start={}, end={}, type={}",
             ann.contig_id, ann.start, ann.end, ann.feature_type
         ))?;
+
+        // Heavy sequence row (only if there's sequence data)
+        seq_appender.append_row(params![
+            annotation_id,
+            &ann.nucleotide_sequence,
+            &ann.protein_sequence,
+            s_sites,
+            n_sites,
+        ])
+        .with_context(|| format!(
+            "Failed to append annotation sequence: annotation_id={}",
+            annotation_id
+        ))?;
+
+        annotation_id += 1;
     }
 
-    appender.flush().context("Failed to flush Contig_annotation appender")?;
+    ann_appender.flush().context("Failed to flush Contig_annotation_core appender")?;
+    seq_appender.flush().context("Failed to flush Annotation_sequence appender")?;
     
     // Check if any locus_tag appears more than once (isoforms present)
     let mut locus_tag_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
@@ -1635,15 +1859,16 @@ fn populate_annotated_types(conn: &Connection) -> Result<()> {
 /// Create Variable metadata entries only. Feature tables are created lazily.
 fn create_variable_tables(conn: &Connection) -> Result<()> {
     for (i, v) in VARIABLES.iter().enumerate() {
-        // Special case: contig-level data is stored in separate Contig_* tables/views
+        // Special case: contig-level data is now stored in Contig_blob table
+        // Per-sample features use Feature_blob table with Feature_id
         let table_name = match v.name {
-            "direct_repeat_count" => "Contig_direct_repeat_count".to_string(),
-            "direct_repeat_identity" => "Contig_direct_repeat_identity".to_string(),
-            "inverted_repeat_count" => "Contig_inverted_repeat_count".to_string(),
-            "inverted_repeat_identity" => "Contig_inverted_repeat_identity".to_string(),
-            "gc_content" => "Contig_GCContent".to_string(),
-            "gc_skew" => "Contig_GCSkew".to_string(),
-            _ => feature_table_name(v.name),
+            "direct_repeat_count" => "Contig_blob".to_string(),
+            "direct_repeat_identity" => "Contig_blob".to_string(),
+            "inverted_repeat_count" => "Contig_blob".to_string(),
+            "inverted_repeat_identity" => "Contig_blob".to_string(),
+            "gc_content" => "Contig_blob".to_string(),
+            "gc_skew" => "Contig_blob".to_string(),
+            _ => "Feature_blob".to_string(),
         };
 
         conn.execute(
@@ -1671,185 +1896,65 @@ fn create_variable_tables(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// Feature tables that have Sequence and Sequence_prevalence columns.
-const FEATURES_WITH_SEQUENCES: &[&str] = &[
-    "Feature_mismatches",
-    "Feature_insertions",
-    "Feature_left_clippings",
-    "Feature_right_clippings",
-    "Feature_reads_starts",
-    "Feature_reads_ends",
-];
-
-/// Feature tables that have Codon_category, Codon_change, AA_change columns.
-const FEATURES_WITH_CODONS: &[&str] = &[
-    "Feature_mismatches",
-];
-
-/// Feature tables where Last_position is always equal to First_position (single-position bar spikes).
-/// For these tables, Last_position is stored as NULL to save storage space.
-/// At read time, COALESCE(Last_position, First_position) recovers the value.
-const SINGLE_POSITION_FEATURES: &[&str] = &[
-    "Feature_insertions",
-    "Feature_mismatches",
-    "Feature_left_clippings",
-    "Feature_right_clippings",
-    "Feature_reads_starts",
-    "Feature_reads_ends",
-];
-
-/// Create a feature table if it doesn't exist yet.
-fn create_feature_table_if_needed(
-    conn: &Connection,
-    table_name: &str,
-    has_stats: bool,
-    created_tables: &mut HashSet<String>,
-) -> Result<()> {
-    if created_tables.contains(table_name) {
-        return Ok(());
-    }
-
-    let has_sequences = FEATURES_WITH_SEQUENCES.contains(&table_name);
-    let has_codons = FEATURES_WITH_CODONS.contains(&table_name);
-
-    let table_sql = if has_stats && has_sequences {
-        format!(
-            "CREATE TABLE IF NOT EXISTS {} (
-                Contig_id INTEGER,
-                Sample_id INTEGER,
-                First_position INTEGER,
-                Last_position INTEGER,
-                Value INTEGER,
-                Mean INTEGER,
-                Median INTEGER,
-                Std INTEGER,
-                Sequence TEXT,
-                Sequence_prevalence INTEGER
-            )",
-            table_name
-        )
-    } else if has_stats {
-        format!(
-            "CREATE TABLE IF NOT EXISTS {} (
-                Contig_id INTEGER,
-                Sample_id INTEGER,
-                First_position INTEGER,
-                Last_position INTEGER,
-                Value INTEGER,
-                Mean INTEGER,
-                Median INTEGER,
-                Std INTEGER
-            )",
-            table_name
-        )
-    } else if has_sequences && has_codons {
-        format!(
-            "CREATE TABLE IF NOT EXISTS {} (
-                Contig_id INTEGER,
-                Sample_id INTEGER,
-                First_position INTEGER,
-                Last_position INTEGER,
-                Value INTEGER,
-                Sequence TEXT,
-                Sequence_prevalence INTEGER,
-                Codon_category TEXT,
-                Codon_change TEXT,
-                AA_change TEXT
-            )",
-            table_name
-        )
-    } else if has_sequences {
-        format!(
-            "CREATE TABLE IF NOT EXISTS {} (
-                Contig_id INTEGER,
-                Sample_id INTEGER,
-                First_position INTEGER,
-                Last_position INTEGER,
-                Value INTEGER,
-                Sequence TEXT,
-                Sequence_prevalence INTEGER
-            )",
-            table_name
-        )
-    } else {
-        format!(
-            "CREATE TABLE IF NOT EXISTS {} (
-                Contig_id INTEGER,
-                Sample_id INTEGER,
-                First_position INTEGER,
-                Last_position INTEGER,
-                Value INTEGER
-            )",
-            table_name
-        )
-    };
-
-    conn.execute(&table_sql, [])
-        .with_context(|| format!("Failed to create table: {}", table_name))?;
-
-    created_tables.insert(table_name.to_string());
-    Ok(())
-}
-
 /// Create materialized tables and views after all data is inserted.
 fn create_views(conn: &Connection, has_bam: bool) -> Result<()> {
-    // Feature_primary_reads is now written directly as a table from Rust processing data
-    // (no longer reconstructed from plus+minus strands via SQL boundary sweep).
+    // All per-sample features (including primary_reads) are now stored in Feature_blob.
+    // Previously, some features were stored in separate Feature_* tables.
 
     // Materialized repeat tables (sweep-line algorithm, computed once after all repeat data is inserted).
     // These produce (Contig_id, First_position, Last_position, Value) like other Contig_* tables,
     // allowing the standard binning logic in get_feature_data() to work with repeats.
 
+    // Optimized repeat count tables using event-based running sum (O(n log n) instead of O(segments × repeats))
     conn.execute(
         "CREATE TABLE Contig_direct_repeat_count AS
-        WITH boundaries AS (
-            SELECT Contig_id, LEAST(Position1, Position2) AS pos FROM Contig_directRepeats
-            UNION
-            SELECT Contig_id, GREATEST(Position1, Position2) + 1 AS pos FROM Contig_directRepeats
+        WITH events AS (
+            SELECT Contig_id, LEAST(Position1, Position2) AS pos, 1 AS delta
+            FROM Contig_directRepeats
+            UNION ALL
+            SELECT Contig_id, GREATEST(Position1, Position2) + 1 AS pos, -1 AS delta
+            FROM Contig_directRepeats
         ),
-        segments AS (
-            SELECT Contig_id, pos AS seg_start,
-                   LEAD(pos) OVER (PARTITION BY Contig_id ORDER BY pos) - 1 AS seg_end
-            FROM boundaries
+        grouped AS (
+            SELECT Contig_id, pos, SUM(delta) AS net FROM events GROUP BY Contig_id, pos
+        ),
+        running AS (
+            SELECT Contig_id, pos,
+                   SUM(net) OVER (PARTITION BY Contig_id ORDER BY pos) AS count,
+                   LEAD(pos) OVER (PARTITION BY Contig_id ORDER BY pos) AS next_pos
+            FROM grouped
         )
-        SELECT s.Contig_id,
-               s.seg_start AS First_position,
-               s.seg_end AS Last_position,
-               (SELECT COUNT(*) FROM Contig_directRepeats r
-                WHERE r.Contig_id = s.Contig_id
-                  AND LEAST(r.Position1, r.Position2) <= s.seg_end
-                  AND GREATEST(r.Position1, r.Position2) >= s.seg_start) AS Value
-        FROM segments s
-        WHERE s.seg_end IS NOT NULL",
+        SELECT Contig_id, pos AS First_position, next_pos - 1 AS Last_position, count AS Value
+        FROM running WHERE next_pos IS NOT NULL AND count > 0",
         [],
     )
     .context("Failed to create Contig_direct_repeat_count table")?;
 
     conn.execute(
         "CREATE TABLE Contig_inverted_repeat_count AS
-        WITH boundaries AS (
-            SELECT Contig_id, LEAST(Position1, Position2) AS pos FROM Contig_invertedRepeats
-            UNION
-            SELECT Contig_id, GREATEST(Position1, Position2) + 1 AS pos FROM Contig_invertedRepeats
+        WITH events AS (
+            SELECT Contig_id, LEAST(Position1, Position2) AS pos, 1 AS delta
+            FROM Contig_invertedRepeats
+            UNION ALL
+            SELECT Contig_id, GREATEST(Position1, Position2) + 1 AS pos, -1 AS delta
+            FROM Contig_invertedRepeats
         ),
-        segments AS (
-            SELECT Contig_id, pos AS seg_start,
-                   LEAD(pos) OVER (PARTITION BY Contig_id ORDER BY pos) - 1 AS seg_end
-            FROM boundaries
+        grouped AS (
+            SELECT Contig_id, pos, SUM(delta) AS net FROM events GROUP BY Contig_id, pos
+        ),
+        running AS (
+            SELECT Contig_id, pos,
+                   SUM(net) OVER (PARTITION BY Contig_id ORDER BY pos) AS count,
+                   LEAD(pos) OVER (PARTITION BY Contig_id ORDER BY pos) AS next_pos
+            FROM grouped
         )
-        SELECT s.Contig_id,
-               s.seg_start AS First_position,
-               s.seg_end AS Last_position,
-               (SELECT COUNT(*) FROM Contig_invertedRepeats r
-                WHERE r.Contig_id = s.Contig_id
-                  AND LEAST(r.Position1, r.Position2) <= s.seg_end
-                  AND GREATEST(r.Position1, r.Position2) >= s.seg_start) AS Value
-        FROM segments s
-        WHERE s.seg_end IS NOT NULL",
+        SELECT Contig_id, pos AS First_position, next_pos - 1 AS Last_position, count AS Value
+        FROM running WHERE next_pos IS NOT NULL AND count > 0",
         [],
     )
     .context("Failed to create Contig_inverted_repeat_count table")?;
 
+    // Optimized repeat identity tables using explicit JOIN instead of correlated subquery
     conn.execute(
         "CREATE TABLE Contig_direct_repeat_identity AS
         WITH boundaries AS (
@@ -1862,15 +1967,14 @@ fn create_views(conn: &Connection, has_bam: bool) -> Result<()> {
                    LEAD(pos) OVER (PARTITION BY Contig_id ORDER BY pos) - 1 AS seg_end
             FROM boundaries
         )
-        SELECT s.Contig_id,
-               s.seg_start AS First_position,
-               s.seg_end AS Last_position,
-               COALESCE((SELECT MAX(r.Pident) / 100.0 FROM Contig_directRepeats r
-                WHERE r.Contig_id = s.Contig_id
-                  AND LEAST(r.Position1, r.Position2) <= s.seg_end
-                  AND GREATEST(r.Position1, r.Position2) >= s.seg_start), 0) AS Value
+        SELECT s.Contig_id, s.seg_start AS First_position, s.seg_end AS Last_position,
+               MAX(r.Pident) / 100.0 AS Value
         FROM segments s
-        WHERE s.seg_end IS NOT NULL",
+        JOIN Contig_directRepeats r ON r.Contig_id = s.Contig_id
+          AND LEAST(r.Position1, r.Position2) <= s.seg_end
+          AND GREATEST(r.Position1, r.Position2) >= s.seg_start
+        WHERE s.seg_end IS NOT NULL
+        GROUP BY s.Contig_id, s.seg_start, s.seg_end",
         [],
     )
     .context("Failed to create Contig_direct_repeat_identity table")?;
@@ -1887,15 +1991,14 @@ fn create_views(conn: &Connection, has_bam: bool) -> Result<()> {
                    LEAD(pos) OVER (PARTITION BY Contig_id ORDER BY pos) - 1 AS seg_end
             FROM boundaries
         )
-        SELECT s.Contig_id,
-               s.seg_start AS First_position,
-               s.seg_end AS Last_position,
-               COALESCE((SELECT MAX(r.Pident) / 100.0 FROM Contig_invertedRepeats r
-                WHERE r.Contig_id = s.Contig_id
-                  AND LEAST(r.Position1, r.Position2) <= s.seg_end
-                  AND GREATEST(r.Position1, r.Position2) >= s.seg_start), 0) AS Value
+        SELECT s.Contig_id, s.seg_start AS First_position, s.seg_end AS Last_position,
+               MAX(r.Pident) / 100.0 AS Value
         FROM segments s
-        WHERE s.seg_end IS NOT NULL",
+        JOIN Contig_invertedRepeats r ON r.Contig_id = s.Contig_id
+          AND LEAST(r.Position1, r.Position2) <= s.seg_end
+          AND GREATEST(r.Position1, r.Position2) >= s.seg_start
+        WHERE s.seg_end IS NOT NULL
+        GROUP BY s.Contig_id, s.seg_start, s.seg_end",
         [],
     )
     .context("Failed to create Contig_inverted_repeat_identity table")?;
@@ -2027,7 +2130,7 @@ fn create_views(conn: &Connection, has_bam: bool) -> Result<()> {
     .context("Failed to create Explicit_topology VIEW")?;
 
     // Explicit_phage_mechanisms VIEW - backwards compatible with comma-separated termini
-    // Includes aggregated diagnostics columns from PhageTermini
+    // Includes aggregated diagnostics columns from Phage_termini
     conn.execute(
         "CREATE VIEW Explicit_phage_mechanisms AS
          SELECT
@@ -2036,14 +2139,14 @@ fn create_views(conn: &Connection, has_bam: bool) -> Result<()> {
              m.Packaging_mechanism,
              COALESCE(
                  (SELECT STRING_AGG(CAST(pt.Center AS VARCHAR), ',' ORDER BY pt.Center)
-                  FROM PhageTermini pt
+                  FROM Phage_termini pt
                   WHERE pt.Packaging_id = m.Packaging_id AND pt.Status = 'start' AND pt.Passed_PoissonTest = 'yes' AND pt.Passed_ClippingTest = 'yes'),
                  ''
              ) AS Left_termini,
              m.Median_left_termini_clippings,
              COALESCE(
                  (SELECT STRING_AGG(CAST(pt.Center AS VARCHAR), ',' ORDER BY pt.Center)
-                  FROM PhageTermini pt
+                  FROM Phage_termini pt
                   WHERE pt.Packaging_id = m.Packaging_id AND pt.Status = 'end' AND pt.Passed_PoissonTest = 'yes' AND pt.Passed_ClippingTest = 'yes'),
                  ''
              ) AS Right_termini,
@@ -2053,7 +2156,7 @@ fn create_views(conn: &Connection, has_bam: bool) -> Result<()> {
                   ELSE NULL END AS Duplication,
              COALESCE(
                  (SELECT COUNT(*)
-                  FROM PhageTermini pt
+                  FROM Phage_termini pt
                   WHERE pt.Packaging_id = m.Packaging_id AND pt.Passed_PoissonTest = 'yes' AND pt.Passed_ClippingTest = 'yes'),
                  0
              ) AS Total_peaks,
@@ -2065,7 +2168,7 @@ fn create_views(conn: &Connection, has_bam: bool) -> Result<()> {
          FROM Coverage p
          JOIN Contig c ON p.Contig_id = c.Contig_id
          JOIN Sample s ON p.Sample_id = s.Sample_id
-         LEFT JOIN PhageMechanisms m ON p.Contig_id = m.Contig_id AND p.Sample_id = m.Sample_id",
+         LEFT JOIN Phage_mechanisms m ON p.Contig_id = m.Contig_id AND p.Sample_id = m.Sample_id",
         [],
     )
     .context("Failed to create Explicit_phage_mechanisms VIEW")?;
@@ -2103,19 +2206,33 @@ fn create_views(conn: &Connection, has_bam: bool) -> Result<()> {
              t.Clippings,
              t.Clipping_excess,
              t.Expected_clippings
-         FROM PhageTermini t
-         JOIN PhageMechanisms m ON t.Packaging_id = m.Packaging_id
+         FROM Phage_termini t
+         JOIN Phage_mechanisms m ON t.Packaging_id = m.Packaging_id
          JOIN Contig c ON m.Contig_id = c.Contig_id
          JOIN Sample s ON m.Sample_id = s.Sample_id",
     )
     .context("Failed to create Explicit_phage_termini VIEW")?;
     } // end if has_bam (Explicit_* views)
 
+    // Convert materialized repeat tables to Contig_blob
+    DbWriter::write_repeat_features_to_blob_static(conn)?;
+
+    // Drop intermediate materialized tables after conversion to Contig_blob
+    // Keep base tables (Contig_directRepeats, Contig_invertedRepeats) for reference
+    for table in &[
+        "Contig_direct_repeat_count", "Contig_inverted_repeat_count",
+        "Contig_direct_repeat_identity", "Contig_inverted_repeat_identity",
+    ] {
+        conn.execute(&format!("DROP TABLE IF EXISTS {}", table), [])
+            .context(format!("Failed to drop intermediate table {}", table))?;
+    }
+    eprintln!("Dropped intermediate materialized tables (data now in Contig_blob)");
+
     Ok(())
 }
 
-/// Delete Variable entries for features that don't have data (no table created).
-fn cleanup_unused_variables(conn: &Connection, created_tables: &HashSet<String>) -> Result<()> {
+/// Delete Variable entries for features that don't have data in Feature_blob.
+fn cleanup_unused_variables(conn: &Connection) -> Result<()> {
     // Get all variable names and their table names
     let mut stmt = conn.prepare("SELECT Variable_name, Feature_table_name FROM Variable")?;
     let rows: Vec<(String, String)> = stmt
@@ -2125,17 +2242,19 @@ fn cleanup_unused_variables(conn: &Connection, created_tables: &HashSet<String>)
 
     let mut deleted_count = 0;
     for (var_name, table_name) in rows {
-        // Skip special cases:
-        // - direct_repeats/inverted_repeats/gc_content/gc_skew: data stored in Contig_* tables (always exist)
+        // Skip contig-level variables stored in Contig_* tables (always exist)
         if var_name == "direct_repeat_count" || var_name == "inverted_repeat_count" || var_name == "direct_repeat_identity" || var_name == "inverted_repeat_identity" || var_name == "gc_content" || var_name == "gc_skew" {
             continue;
         }
 
-        // For regular features, check if the table was created
-        if !created_tables.contains(&table_name) {
-            conn.execute("DELETE FROM Variable WHERE Variable_name = ?1", params![var_name])?;
-            deleted_count += 1;
+        // Skip Feature_blob variables — these are the active storage path
+        if table_name == "Feature_blob" {
+            continue;
         }
+
+        // Any remaining Variable entries with non-Feature_blob table names are stale
+        conn.execute("DELETE FROM Variable WHERE Variable_name = ?1", params![var_name])?;
+        deleted_count += 1;
     }
 
     if deleted_count > 0 {
@@ -2153,8 +2272,8 @@ fn drop_empty_tables(conn: &Connection) -> Result<()> {
         ("Microdiversity", &["Explicit_microdiversity"]),
         ("Side_misassembly", &["Explicit_side_misassembly"]),
         ("Topology", &["Explicit_topology"]),
-        ("PhageTermini", &["Explicit_phage_termini"]),
-        ("PhageMechanisms", &["Explicit_phage_mechanisms"]),
+        ("Phage_termini", &["Explicit_phage_termini"]),
+        ("Phage_mechanisms", &["Explicit_phage_mechanisms"]),
     ];
 
     for (table, views) in table_view_map {
@@ -2221,12 +2340,12 @@ pub struct RepeatsData {
 }
 
 /// GC content data for a contig.
-/// Contains pre-computed GC content runs with RLE compression and statistics.
+/// Contains per-window GC content and GC skew values with statistics.
 #[derive(Clone, Debug)]
 pub struct GCContentData {
     pub contig_name: String,
-    pub runs: Vec<GCContentRun>,
-    pub skew_runs: Vec<GCSkewRun>,
+    pub gc_values: Vec<u8>,    // raw GC percentages, one per window
+    pub skew_values: Vec<i16>, // raw GC skew × 100, one per window
     pub stats: GCStats,
     pub skew_stats: GCSkewStats,
 }
