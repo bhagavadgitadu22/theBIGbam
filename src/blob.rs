@@ -574,7 +574,10 @@ fn encode_sparse_metadata(metadata: &[EventMeta], flags: &MetadataFlags) -> Vec<
 
 /// Encode a dense contig feature (GC content, GC skew) as a compressed BLOB.
 /// Uses only 10kbp zoom level for contigs > 1 Mbp.
-pub fn encode_contig_dense_blob(values: &[i32], scale: ValueScale, contig_length: u32) -> Vec<u8> {
+///
+/// `window_size` is the genomic window each value represents (e.g. 500 for GC content).
+/// Zoom bins are computed in window-index space so indices align with the values array.
+pub fn encode_contig_dense_blob(values: &[i32], scale: ValueScale, contig_length: u32, window_size: u32) -> Vec<u8> {
     let mut blob = Vec::with_capacity(32 + values.len() * 2);
 
     // === Header (32 bytes) ===
@@ -625,7 +628,11 @@ pub fn encode_contig_dense_blob(values: &[i32], scale: ValueScale, contig_length
     let zoom_offset = blob.len() as u32;
     patch_u32(&mut blob, zoom_index_offset_pos, zoom_offset);
 
-    let zoom_levels = compute_zoom_levels_dense(values, contig_length, CONTIG_ZOOM_BIN_SIZES);
+    // Scale bin sizes from bp to window indices so zoom computation indexes correctly
+    let scaled_bins: Vec<u32> = CONTIG_ZOOM_BIN_SIZES.iter()
+        .map(|&bs| (bs / window_size).max(1))
+        .collect();
+    let zoom_levels = compute_zoom_levels_dense(values, values.len() as u32, &scaled_bins);
     let zoom_bytes = encode_zoom_levels_dense(&zoom_levels);
     blob.extend_from_slice(&zoom_bytes);
 

@@ -723,8 +723,8 @@ def get_variable_metadata_batch(cur, subplot_list):
     return result
 
 
-### Downsampling threshold: windows larger than this use zoom-level binning
-_DOWNSAMPLE_THRESHOLD = 100_000  # 100 kb
+### Default threshold: windows larger than this use zoom-level binning instead of base resolution
+_DEFAULT_MAX_BASE_RESOLUTION = 10_000  # 10 kb
 
 
 # Legacy RLE constant removed - not needed for BLOB-based architecture
@@ -786,81 +786,90 @@ def _get_contig_blob(cur, contig_id, feature_name):
         return None
 
 
-def _blob_to_feature_dict(blob_bytes, type_picked, xstart=None, xend=None, downsample_threshold=None):
+def _blob_to_feature_dict(blob_bytes, type_picked, xstart=None, xend=None, max_base_resolution=None):
     """Decode a BLOB and format for Bokeh plotting.
+
+    Args:
+        max_base_resolution: Window size (bp) below which base resolution is used.
+            Above this, zoom levels are tried. Default: 10_000.
 
     Returns dict with x, y, and optional metadata arrays, or None if empty.
     """
     from thebigbam.database.blob_decoder import decode_blob, decode_zoom_by_bin_size
 
-    _threshold = downsample_threshold if downsample_threshold is not None else _DOWNSAMPLE_THRESHOLD
-
-    # Choose resolution based on window size
+    threshold = max_base_resolution if max_base_resolution is not None else _DEFAULT_MAX_BASE_RESOLUTION
     window = (xend - xstart) if (xstart is not None and xend is not None) else 0
 
-    if window > 100_000:
-        data = decode_zoom_by_bin_size(blob_bytes, 1000)  # 1000bp bins
-        return _format_zoom_for_bokeh(data, type_picked, xstart, xend)
-    elif window > 10_000:
-        data = decode_zoom_by_bin_size(blob_bytes, 100)  # 100bp bins
-        return _format_zoom_for_bokeh(data, type_picked, xstart, xend)
-    else:
-        data = decode_blob(blob_bytes)
-        if len(data.get("x", [])) == 0:
-            return None
+    # Try zoom levels for windows larger than threshold
+    # Pick smallest bin size that keeps points under ~10,000
+    if window > threshold:
+        for bin_size in [100, 1000, 10000]:
+            if window // bin_size <= 10_000:
+                data = decode_zoom_by_bin_size(blob_bytes, bin_size)
+                if data is not None:
+                    return _format_zoom_for_bokeh(data, type_picked, xstart, xend)
+        # Fallback to coarsest zoom
+        data = decode_zoom_by_bin_size(blob_bytes, 10000)
+        if data is not None:
+            return _format_zoom_for_bokeh(data, type_picked, xstart, xend)
 
-        x = data["x"]
-        y = data["y"]
+    # Base resolution — window is small enough for per-position data
+    data = decode_blob(blob_bytes)
+    if len(data.get("x", [])) == 0:
+        return None
 
-        # Slice to window if specified
-        if xstart is not None and xend is not None:
-            # x is 0-indexed in BLOB, positions are 1-indexed in display
-            mask = (x >= (xstart - 1)) & (x <= (xend - 1))
-            x = x[mask]
-            y = y[mask]
-            # Also slice metadata arrays
-            for key in list(data.keys()):
-                if key not in ("x", "y") and hasattr(data[key], '__len__') and len(data[key]) == len(mask):
-                    import numpy as np
-                    if isinstance(data[key], np.ndarray):
-                        data[key] = data[key][mask]
-                    elif isinstance(data[key], list):
-                        indices = [i for i, m in enumerate(mask) if m]
-                        data[key] = [data[key][i] for i in indices]
+    x = data["x"]
+    y = data["y"]
 
-        if len(x) == 0:
-            return None
+    # Slice to window if specified
+    if xstart is not None and xend is not None:
+        # x is 0-indexed in BLOB, positions are 1-indexed in display
+        mask = (x >= (xstart - 1)) & (x <= (xend - 1))
+        x = x[mask]
+        y = y[mask]
+        # Also slice metadata arrays
+        for key in list(data.keys()):
+            if key not in ("x", "y") and hasattr(data[key], '__len__') and len(data[key]) == len(mask):
+                import numpy as np
+                if isinstance(data[key], np.ndarray):
+                    data[key] = data[key][mask]
+                elif isinstance(data[key], list):
+                    indices = [i for i, m in enumerate(mask) if m]
+                    data[key] = [data[key][i] for i in indices]
 
-        # Convert 0-indexed to 1-indexed for display
-        result = {
-            "x": (x + 1).tolist(),
-            "y": y.tolist(),
-        }
+    if len(x) == 0:
+        return None
 
-        # Width for bars
-        if type_picked == "bars":
-            result["width"] = [1] * len(x)
-            result["first_pos"] = result["x"]
-            result["last_pos"] = result["x"]
+    # Convert 0-indexed to 1-indexed for display
+    result = {
+        "x": (x + 1).tolist(),
+        "y": y.tolist(),
+    }
 
-        # Stats
-        if "mean" in data:
-            result["mean"] = data["mean"].tolist()
-            result["median"] = data["median"].tolist()
-            result["std"] = data["std"].tolist()
+    # Width for bars
+    if type_picked == "bars":
+        result["width"] = [1] * len(x)
+        result["first_pos"] = result["x"]
+        result["last_pos"] = result["x"]
 
-        # Sequences
-        if "sequence" in data:
-            result["sequence"] = data["sequence"]
-            result["sequence_prevalence"] = data["sequence_prevalence"].tolist() if hasattr(data["sequence_prevalence"], 'tolist') else data["sequence_prevalence"]
+    # Stats
+    if "mean" in data:
+        result["mean"] = data["mean"].tolist()
+        result["median"] = data["median"].tolist()
+        result["std"] = data["std"].tolist()
 
-        # Codons
-        if "codon_category" in data:
-            result["codon_category"] = data["codon_category"]
-            result["codon_change"] = data["codon_change"]
-            result["aa_change"] = data["aa_change"]
+    # Sequences
+    if "sequence" in data:
+        result["sequence"] = data["sequence"]
+        result["sequence_prevalence"] = data["sequence_prevalence"].tolist() if hasattr(data["sequence_prevalence"], 'tolist') else data["sequence_prevalence"]
 
-        return result
+    # Codons
+    if "codon_category" in data:
+        result["codon_category"] = data["codon_category"]
+        result["codon_change"] = data["codon_change"]
+        result["aa_change"] = data["aa_change"]
+
+    return result
 
 
 def _format_zoom_for_bokeh(zoom_data, type_picked, xstart=None, xend=None):
@@ -906,7 +915,7 @@ def _format_zoom_for_bokeh(zoom_data, type_picked, xstart=None, xend=None):
 
 
 ### Function to get features of one variable
-def get_feature_data(cur, feature, contig_id, sample_id, xstart=None, xend=None, variable_metadata=None, downsample_threshold=None, min_relative_value=0.0):
+def get_feature_data(cur, feature, contig_id, sample_id, xstart=None, xend=None, variable_metadata=None, max_base_resolution=None, min_relative_value=0.0):
     """Get feature data for plotting from BLOB storage.
 
     Decodes Feature_blob (sample-level) or Contig_blob (contig-level) entries.
@@ -920,7 +929,7 @@ def get_feature_data(cur, feature, contig_id, sample_id, xstart=None, xend=None,
         xstart: Optional start position for filtering
         xend: Optional end position for filtering
         variable_metadata: Optional cached result from get_variable_metadata()
-        downsample_threshold: Override the module-level _DOWNSAMPLE_THRESHOLD for this call
+        max_base_resolution: Window size (bp) below which base resolution is used
     """
     # Get rendering info from Variable table (Type and Size are quoted - reserved words in DuckDB)
     if variable_metadata is not None:
@@ -969,7 +978,8 @@ def get_feature_data(cur, feature, contig_id, sample_id, xstart=None, xend=None,
             if feature_var_name:
                 blob_bytes = _get_feature_blob(cur, contig_id, sample_id, feature_var_name)
                 if blob_bytes is not None:
-                    blob_dict = _blob_to_feature_dict(blob_bytes, type_picked, xstart, xend, downsample_threshold)
+                    blob_dict = _blob_to_feature_dict(blob_bytes, type_picked, xstart, xend, max_base_resolution)
+
                     if blob_dict is not None:
                         feature_dict.update(blob_dict)
                         feature_dict["is_relative_scaled"] = False  # BLOB values already descaled
@@ -981,32 +991,31 @@ def get_feature_data(cur, feature, contig_id, sample_id, xstart=None, xend=None,
             # BLOB feature not found or failed — skip (no legacy fallback)
             continue
 
-        # --- CONTIG BLOB PATH: contig-level features (GC content, repeats) ---
-        # Map old RLE table names to new Contig_blob feature names
-        contig_blob_name_map = {
-            "Contig_GCContent": "gc_content",
-            "Contig_GCSkew": "gc_skew",
-            "Contig_direct_repeat_count": "direct_repeat_count",
-            "Contig_inverted_repeat_count": "inverted_repeat_count",
-            "Contig_direct_repeat_identity": "direct_repeat_identity",
-            "Contig_inverted_repeat_identity": "inverted_repeat_identity",
-        }
+        # --- CONTIG BLOB PATH: contig-level features (GC content, GC skew, repeats) ---
+        if feature_table == "Contig_blob":
+            try:
+                cur.execute(
+                    "SELECT Variable_name FROM Variable WHERE Title=? AND Feature_table_name='Contig_blob'",
+                    (title,)
+                )
+                vname_row = cur.fetchone()
+                contig_feature_name = vname_row[0] if vname_row else None
+            except Exception:
+                contig_feature_name = None
 
-        if feature_table in contig_blob_name_map and is_contig_table:
-            contig_feature_name = contig_blob_name_map[feature_table]
-            blob_bytes = _get_contig_blob(cur, contig_id, contig_feature_name)
-            if blob_bytes is not None:
-                # For contig-level window-based features (GC content, GC skew, repeats),
-                # skip binning since the data is already at window resolution
-                # Pass very large threshold to prevent zoom-level binning
-                blob_dict = _blob_to_feature_dict(blob_bytes, type_picked, xstart, xend, downsample_threshold=999999999)
-                if blob_dict is not None:
-                    feature_dict.update(blob_dict)
-                    feature_dict["is_relative_scaled"] = False  # BLOB values already descaled
-                    feature_dict["has_stats"] = False  # Contig-level features don't have stats
-                    feature_dict["has_sequences"] = False
-                    list_feature_dict.append(feature_dict)
-            # ALWAYS skip legacy RLE path for Contig_blob features (old tables don't exist)
+            if contig_feature_name:
+                blob_bytes = _get_contig_blob(cur, contig_id, contig_feature_name)
+                if blob_bytes is not None:
+                    # GC content/skew base resolution is already windowed (500/1000 bp),
+                    # so use base resolution up to 10 Mbp window
+                    res_threshold = 10_000_000 if contig_feature_name in ("gc_content", "gc_skew") else max_base_resolution
+                    blob_dict = _blob_to_feature_dict(blob_bytes, type_picked, xstart, xend, res_threshold)
+                    if blob_dict is not None:
+                        feature_dict.update(blob_dict)
+                        feature_dict["is_relative_scaled"] = False
+                        feature_dict["has_stats"] = False
+                        feature_dict["has_sequences"] = False
+                        list_feature_dict.append(feature_dict)
             continue
 
         # All features should be handled by BLOB paths above.
@@ -1017,7 +1026,7 @@ def get_feature_data(cur, feature, contig_id, sample_id, xstart=None, xend=None,
 
 
 
-def get_feature_data_batch(cur, feature, contig_id, sample_ids, xstart=None, xend=None, variable_metadata=None, downsample_threshold=None, min_relative_value=0.0):
+def get_feature_data_batch(cur, feature, contig_id, sample_ids, xstart=None, xend=None, variable_metadata=None, max_base_resolution=None, min_relative_value=0.0):
     """Get feature data for multiple samples in a single batch query.
 
     Decodes Feature_blob (sample-level) or Contig_blob (contig-level) entries.
@@ -1031,7 +1040,7 @@ def get_feature_data_batch(cur, feature, contig_id, sample_ids, xstart=None, xen
         xstart: Optional start position for filtering
         xend: Optional end position for filtering
         variable_metadata: Optional cached result from get_variable_metadata()
-        downsample_threshold: Override the module-level _DOWNSAMPLE_THRESHOLD for this call
+        max_base_resolution: Window size (bp) below which base resolution is used
 
     Returns:
         Dict mapping sample_id to list_feature_dict (same format as get_feature_data returns)
@@ -1049,13 +1058,6 @@ def get_feature_data_batch(cur, feature, contig_id, sample_ids, xstart=None, xen
 
     # Build the IN clause placeholders
     placeholders = ", ".join(["?"] * len(sample_ids))
-
-    # Determine if we should use binning
-    _threshold = downsample_threshold if downsample_threshold is not None else _DOWNSAMPLE_THRESHOLD
-    use_binning = (
-        xstart is not None and xend is not None
-        and (xend - xstart) > _threshold
-    )
 
     # Check once whether we have BLOB storage available
     _has_blobs = _has_feature_blob_table(cur)
@@ -1080,7 +1082,7 @@ def get_feature_data_batch(cur, feature, contig_id, sample_ids, xstart=None, xen
                 for sid in sample_ids:
                     blob_bytes = _get_feature_blob(cur, contig_id, sid, feature_var_name)
                     if blob_bytes is not None:
-                        blob_dict = _blob_to_feature_dict(blob_bytes, type_picked, xstart, xend, _threshold)
+                        blob_dict = _blob_to_feature_dict(blob_bytes, type_picked, xstart, xend, max_base_resolution)
                         if blob_dict is not None:
                             feature_dict = {
                                 "type": type_picked, "color": color, "alpha": alpha,
@@ -1096,37 +1098,36 @@ def get_feature_data_batch(cur, feature, contig_id, sample_ids, xstart=None, xen
             # BLOB feature not found or failed — skip (no legacy fallback)
             continue
 
-        # --- CONTIG BLOB PATH: contig-level features (GC content, repeats) ---
-        # Map old RLE table names to new Contig_blob feature names
-        contig_blob_name_map = {
-            "Contig_GCContent": "gc_content",
-            "Contig_GCSkew": "gc_skew",
-            "Contig_direct_repeat_count": "direct_repeat_count",
-            "Contig_inverted_repeat_count": "inverted_repeat_count",
-            "Contig_direct_repeat_identity": "direct_repeat_identity",
-            "Contig_inverted_repeat_identity": "inverted_repeat_identity",
-        }
+        # --- CONTIG BLOB PATH: contig-level features (GC content, GC skew, repeats) ---
+        if feature_table == "Contig_blob":
+            try:
+                cur.execute(
+                    "SELECT Variable_name FROM Variable WHERE Title=? AND Feature_table_name='Contig_blob'",
+                    (title,)
+                )
+                vname_row = cur.fetchone()
+                contig_feature_name = vname_row[0] if vname_row else None
+            except Exception:
+                contig_feature_name = None
 
-        if feature_table in contig_blob_name_map:
-            contig_feature_name = contig_blob_name_map[feature_table]
-            blob_bytes = _get_contig_blob(cur, contig_id, contig_feature_name)
-            if blob_bytes is not None:
-                # For contig-level window-based features, skip binning (data is already window-binned)
-                # Pass very large threshold to prevent zoom-level binning
-                blob_dict = _blob_to_feature_dict(blob_bytes, type_picked, xstart, xend, downsample_threshold=999999999)
-                if blob_dict is not None:
-                    # Contig_blob data applies to all samples (contig-level feature)
-                    for sid in sample_ids:
-                        feature_dict = {
-                            "type": type_picked, "color": color, "alpha": alpha,
-                            "fill_alpha": fill_alpha, "size": size, "title": title,
-                            "is_relative_scaled": False,
-                            "has_stats": False,  # Contig-level features don't have stats
-                            "has_sequences": False,
-                        }
-                        feature_dict.update(blob_dict)
-                        result[sid].append(feature_dict)
-            # ALWAYS skip legacy RLE path for Contig_blob features (old tables don't exist)
+            if contig_feature_name:
+                blob_bytes = _get_contig_blob(cur, contig_id, contig_feature_name)
+                if blob_bytes is not None:
+                    # GC content/skew base resolution is already windowed (500/1000 bp),
+                    # so use base resolution up to 10 Mbp window
+                    res_threshold = 10_000_000 if contig_feature_name in ("gc_content", "gc_skew") else max_base_resolution
+                    blob_dict = _blob_to_feature_dict(blob_bytes, type_picked, xstart, xend, res_threshold)
+                    if blob_dict is not None:
+                        for sid in sample_ids:
+                            feature_dict = {
+                                "type": type_picked, "color": color, "alpha": alpha,
+                                "fill_alpha": fill_alpha, "size": size, "title": title,
+                                "is_relative_scaled": False,
+                                "has_stats": False,
+                                "has_sequences": False,
+                            }
+                            feature_dict.update(blob_dict)
+                            result[sid].append(feature_dict)
             continue
 
         # All features should be handled by BLOB paths above.
@@ -1191,7 +1192,7 @@ def parse_requested_features(list_features):
 
 
 ### Function to generate the bokeh plot
-def generate_bokeh_plot_per_sample(conn, list_features, contig_name, sample_name, xstart=None, xend=None, subplot_size=100, genbank_path=None, feature_types=None, use_phage_colors=False, plot_isoforms=True, plot_sequence=False, plot_translated_sequence=False, same_y_scale=False, genemap_size=None, sequence_size=None, translated_sequence_size=None, downsample_threshold=None, max_genemap_window=None, max_sequence_window=None, min_relative_value=0.0):
+def generate_bokeh_plot_per_sample(conn, list_features, contig_name, sample_name, xstart=None, xend=None, subplot_size=100, genbank_path=None, feature_types=None, use_phage_colors=False, plot_isoforms=True, plot_sequence=False, plot_translated_sequence=False, same_y_scale=False, genemap_size=None, sequence_size=None, translated_sequence_size=None, max_base_resolution=None, max_genemap_window=None, max_sequence_window=None, min_relative_value=0.0):
     """Generate a Bokeh plot for a single sample."""
     cur = conn.cursor()
 
@@ -1266,7 +1267,7 @@ def generate_bokeh_plot_per_sample(conn, list_features, contig_name, sample_name
                 list_feature_dict = get_feature_data(
                     cur, feature, contig_id, None, xstart, xend,
                     variable_metadata=metadata_cache.get(feature),
-                    downsample_threshold=downsample_threshold,
+                    max_base_resolution=max_base_resolution,
                     min_relative_value=min_relative_value
                 )
                 subplot_feature = make_bokeh_subplot(list_feature_dict, subplot_size, shared_xrange, show_tooltips=True)
@@ -1294,7 +1295,7 @@ def generate_bokeh_plot_per_sample(conn, list_features, contig_name, sample_name
                 list_feature_dict = get_feature_data(
                     cur, feature, contig_id, sample_id, xstart, xend,
                     variable_metadata=metadata_cache.get(feature),
-                    downsample_threshold=downsample_threshold,
+                    max_base_resolution=max_base_resolution,
                     min_relative_value=min_relative_value
                 )
                 subplot_feature = make_bokeh_subplot(list_feature_dict, subplot_size, shared_xrange, show_tooltips=True)

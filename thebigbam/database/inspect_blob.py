@@ -1,7 +1,7 @@
 """
 CLI command: thebigbam inspect
 
-Decode and display Feature_blob contents as TSV for debugging and exploration.
+Decode and display Feature_blob or Contig_blob contents as TSV for debugging and exploration.
 """
 
 import sys
@@ -9,16 +9,17 @@ import sys
 import duckdb
 
 from thebigbam.database.blob_decoder import (
-    decode_blob, decode_zoom_level, get_blob_header, feature_name_to_id,
+    decode_blob, decode_zoom_level, get_blob_header,
+    feature_name_to_id, contig_blob_name_to_id,
     CODON_CATEGORIES,
 )
 
 
 def add_inspect_args(parser):
     parser.add_argument('-d', '--db', required=True, help='Path to DuckDB database')
-    parser.add_argument('--feature', required=True, help='Feature name (e.g. mismatches, primary_reads)')
+    parser.add_argument('--feature', required=True, help='Feature name (e.g. mismatches, primary_reads, gc_content)')
     parser.add_argument('--contig', required=True, help='Contig name')
-    parser.add_argument('--sample', required=True, help='Sample name')
+    parser.add_argument('--sample', default=None, help='Sample name (required for sample-level features, omit for contig-level)')
     parser.add_argument('--region', default=None, help='Genomic region to display (e.g. 1000-2000)')
     parser.add_argument('--zoom', type=int, default=None, choices=[0, 1, 2],
                         help='Show zoom level instead of base resolution (0=100bp, 1=1000bp, 2=10000bp)')
@@ -37,29 +38,53 @@ def run_inspect(args):
         sys.exit(f"ERROR: Contig '{args.contig}' not found in database.")
     contig_id = row[0]
 
-    # Resolve sample_id
-    row = conn.execute("SELECT Sample_id FROM Sample WHERE Sample_name = ?", [args.sample]).fetchone()
-    if row is None:
-        sys.exit(f"ERROR: Sample '{args.sample}' not found in database.")
-    sample_id = row[0]
+    # Detect contig-level vs sample-level feature
+    contig_feature_id = contig_blob_name_to_id(args.feature)
+    sample_feature_id = feature_name_to_id(args.feature)
 
-    # Resolve feature_id
-    feature_id = feature_name_to_id(args.feature)
-    if feature_id is None:
+    if contig_feature_id is not None:
+        # Contig-level feature (Contig_blob)
+        if args.sample is not None:
+            sys.exit(f"ERROR: '{args.feature}' is a contig-level feature — --sample is not applicable.")
+
+        row = conn.execute(
+            "SELECT Data FROM Contig_blob WHERE Contig_id = ? AND Feature_id = ?",
+            [contig_id, contig_feature_id],
+        ).fetchone()
+        conn.close()
+
+        if row is None:
+            sys.exit(f"ERROR: No Contig_blob found for contig='{args.contig}', feature='{args.feature}'.")
+
+        blob_bytes = bytes(row[0])
+        header = get_blob_header(blob_bytes)
+        sample_id = None
+
+    elif sample_feature_id is not None:
+        # Sample-level feature (Feature_blob)
+        if args.sample is None:
+            sys.exit(f"ERROR: '{args.feature}' is a sample-level feature — --sample is required.")
+
+        row = conn.execute("SELECT Sample_id FROM Sample WHERE Sample_name = ?", [args.sample]).fetchone()
+        if row is None:
+            sys.exit(f"ERROR: Sample '{args.sample}' not found in database.")
+        sample_id = row[0]
+
+        row = conn.execute(
+            "SELECT Data FROM Feature_blob WHERE Contig_id = ? AND Sample_id = ? AND Feature_id = ?",
+            [contig_id, sample_id, sample_feature_id],
+        ).fetchone()
+        conn.close()
+
+        if row is None:
+            sys.exit(f"ERROR: No BLOB found for contig='{args.contig}', sample='{args.sample}', feature='{args.feature}'.")
+
+        blob_bytes = bytes(row[0])
+        header = get_blob_header(blob_bytes)
+
+    else:
+        conn.close()
         sys.exit(f"ERROR: Unknown feature '{args.feature}'.")
-
-    # Fetch BLOB
-    row = conn.execute(
-        "SELECT Data FROM Feature_blob WHERE Contig_id = ? AND Sample_id = ? AND Feature_id = ?",
-        [contig_id, sample_id, feature_id],
-    ).fetchone()
-    conn.close()
-
-    if row is None:
-        sys.exit(f"ERROR: No BLOB found for contig='{args.contig}', sample='{args.sample}', feature='{args.feature}'.")
-
-    blob_bytes = bytes(row[0])
-    header = get_blob_header(blob_bytes)
 
     if args.header_only:
         _print_header(args, blob_bytes, header, contig_id, sample_id)
@@ -84,7 +109,10 @@ def run_inspect(args):
 def _print_header(args, blob_bytes, header, contig_id, sample_id):
     """Print BLOB header info."""
     print(f"Feature: {args.feature}")
-    print(f"Contig: {args.contig} (id={contig_id}), Sample: {args.sample} (id={sample_id})")
+    if sample_id is not None:
+        print(f"Contig: {args.contig} (id={contig_id}), Sample: {args.sample} (id={sample_id})")
+    else:
+        print(f"Contig: {args.contig} (id={contig_id})")
     print(f"BLOB size: {len(blob_bytes):,} bytes")
     print(f"Contig length: {header['contig_length']:,}")
     print(f"Sparse: {header['sparse']}, Scale: {header['scale_code']}")
@@ -103,7 +131,7 @@ def _print_zoom(blob_bytes, header, level, region_start, region_end):
 
     # Apply region filter
     if region_start is not None:
-        mask = (bin_starts >= region_start) & (bin_starts <= region_end)
+        mask = (bin_starts >= (region_start - 1)) & (bin_starts <= (region_end - 1))
         bin_starts = bin_starts[mask]
         bin_ends = bin_ends[mask]
         data = {k: v[mask] if hasattr(v, '__len__') and len(v) == len(mask) else v for k, v in data.items()}
@@ -116,11 +144,11 @@ def _print_zoom(blob_bytes, header, level, region_start, region_end):
     if is_sparse:
         print("bin_start\tbin_end\tmax\tmean")
         for i in range(n):
-            print(f"{int(bin_starts[i])}\t{int(bin_ends[i])}\t{data['max'][i]:.4f}\t{data['mean'][i]:.4f}")
+            print(f"{int(bin_starts[i]) + 1}\t{int(bin_ends[i]) + 1}\t{data['max'][i]:.4f}\t{data['mean'][i]:.4f}")
     else:
         print("bin_start\tbin_end\tmean")
         for i in range(n):
-            print(f"{int(bin_starts[i])}\t{int(bin_ends[i])}\t{data['mean'][i]:.4f}")
+            print(f"{int(bin_starts[i]) + 1}\t{int(bin_ends[i]) + 1}\t{data['mean'][i]:.4f}")
 
 
 def _print_base_resolution(blob_bytes, header, region_start, region_end):
@@ -135,7 +163,7 @@ def _print_base_resolution(blob_bytes, header, region_start, region_end):
 
     # Apply region filter
     if region_start is not None:
-        mask = (x >= region_start) & (x <= region_end)
+        mask = (x >= (region_start - 1)) & (x <= (region_end - 1))
         orig_len = len(x)
         x = x[mask]
         y = y[mask]
@@ -164,7 +192,7 @@ def _print_base_resolution(blob_bytes, header, region_start, region_end):
     print("\t".join(cols))
 
     for i in range(n):
-        parts = [str(int(x[i])), f"{y[i]:.4f}"]
+        parts = [str(int(x[i]) + 1), f"{y[i]:.4f}"]
         if has_stats:
             parts.extend([
                 f"{data['mean'][i]:.2f}",

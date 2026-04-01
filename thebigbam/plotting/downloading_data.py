@@ -285,22 +285,15 @@ def download_feature_data_csv(db_path, contig_name, sample_names, xstart=None, x
         # Tables with a different column schema (Position1/Position2 instead of First_position/Last_position)
         non_standard_schema_tables = {"Contig_directRepeats", "Contig_invertedRepeats"}
 
-        # Tables that are now stored in Contig_blob (no longer RLE tables)
-        contig_blob_tables = {
-            "Contig_GCContent", "Contig_GCSkew",
-            "Contig_direct_repeat_count", "Contig_inverted_repeat_count",
-            "Contig_direct_repeat_identity", "Contig_inverted_repeat_identity",
-        }
-
         # Build UNION ALL query for any remaining Contig_* RLE tables
+        # (Feature_blob and Contig_blob are handled below via Python decoding)
         union_parts = []
         for table_name, var_name, subplot_name in variable_rows:
-            # Skip Feature_blob and Contig_blob — handled below via Python decoding
+            if table_name in ("Feature_blob", "Contig_blob"):
+                continue
             if not table_name.startswith("Contig_"):
                 continue
             if table_name in non_standard_schema_tables:
-                continue
-            if table_name in contig_blob_tables:
                 continue
 
             scale_expr = " / 100.0" if table_name in scaled_tables else ""
@@ -363,22 +356,11 @@ def download_feature_data_csv(db_path, contig_name, sample_names, xstart=None, x
                         pass
 
         # === Contig_blob export: decode contig-level features ===
-        contig_blob_features = [(tn, vn, sn) for tn, vn, sn in variable_rows if tn in contig_blob_tables]
-        contig_blob_name_map = {
-            "Contig_GCContent": "gc_content",
-            "Contig_GCSkew": "gc_skew",
-            "Contig_direct_repeat_count": "direct_repeat_count",
-            "Contig_inverted_repeat_count": "inverted_repeat_count",
-            "Contig_direct_repeat_identity": "direct_repeat_identity",
-            "Contig_inverted_repeat_identity": "inverted_repeat_identity",
-        }
+        contig_blob_features = [(tn, vn, sn) for tn, vn, sn in variable_rows if tn == "Contig_blob"]
         if contig_blob_features:
             from thebigbam.database.blob_decoder import contig_blob_name_to_id, decode_blob
-            for table_name, var_name_b, _ in contig_blob_features:
-                contig_feature_name = contig_blob_name_map.get(table_name)
-                if not contig_feature_name:
-                    continue
-                fid = contig_blob_name_to_id(contig_feature_name)
+            for _, var_name_b, _ in contig_blob_features:
+                fid = contig_blob_name_to_id(var_name_b)
                 if fid is None:
                     continue
                 try:

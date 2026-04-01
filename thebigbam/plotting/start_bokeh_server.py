@@ -1,5 +1,4 @@
 import argparse
-import base64
 import os
 import duckdb
 import traceback
@@ -576,7 +575,7 @@ def create_layout(db_path):
             
             # Parse position inputs
             try:
-                xstart = int(from_position_input.value) if from_position_input.value.strip() else 0
+                xstart = max(1, int(from_position_input.value)) if from_position_input.value.strip() else 1
                 xend = int(to_position_input.value) if to_position_input.value.strip() else contig_length
             except ValueError:
                 peruse_button.visible = False
@@ -588,6 +587,13 @@ def create_layout(db_path):
                 peruse_button.visible = False
                 main_placeholder.objects = [pn.pane.HTML(f"<pre>Error: Invalid position range - start must be less than end.</pre>")]
                 return
+
+            # Only plot genome map if window is <= threshold from spinner
+            plot_genemap = True
+            max_genemap_window = int(max_genemap_window_input.value)
+            if (xend - xstart) > max_genemap_window:
+                plot_genemap = False
+                print(f"Warning: Genome map will not be plotted for regions larger than {max_genemap_window} bp.", flush=True)
 
             # Only plot sequence if window is <= threshold from spinner
             plot_sequence = False
@@ -606,13 +612,6 @@ def create_layout(db_path):
                     plot_translated_sequence = True
                 else:
                     print(f"Warning: Translated sequence will not be plotted for regions larger than {max_seq_window} bp.", flush=True)
-
-            # Only plot genome map if window is <= threshold from spinner
-            plot_genemap = True
-            max_genemap_window = int(max_genemap_window_input.value)
-            if (xend - xstart) > max_genemap_window:
-                plot_genemap = False
-                print(f"Warning: Genome map will not be plotted for regions larger than {max_genemap_window} bp.", flush=True)
 
             # Check whether to use same y scale for all subplots
             same_y_scale = (0 in same_y_scale_cbg.active)
@@ -682,7 +681,7 @@ def create_layout(db_path):
                     genome_features=genome_features if genome_features else None, allowed_samples=set(filtered_samples),
                     feature_types=selected_feature_types, use_phage_colors=use_phage_colors, plot_sequence=plot_sequence,
                     plot_translated_sequence=plot_translated_sequence, same_y_scale=same_y_scale, subplot_size=subplot_size, genemap_size=genemap_size,
-                    sequence_size=sequence_size, translated_sequence_size=translated_sequence_size, order_by_column=order_by, downsample_threshold=max_binning,
+                    sequence_size=sequence_size, translated_sequence_size=translated_sequence_size, order_by_column=order_by, max_base_resolution=max_binning,
                     max_genemap_window=max_genemap_window, min_relative_value=min_coverage_freq
                 )
             else:
@@ -708,7 +707,7 @@ def create_layout(db_path):
                     feature_types=selected_feature_types, use_phage_colors=use_phage_colors, plot_isoforms=plot_isoforms,
                     plot_sequence=plot_sequence, plot_translated_sequence=plot_translated_sequence,
                     same_y_scale=False, subplot_size=subplot_size, genemap_size=genemap_size,
-                    sequence_size=sequence_size, translated_sequence_size=translated_sequence_size, downsample_threshold=max_binning,
+                    sequence_size=sequence_size, translated_sequence_size=translated_sequence_size, max_base_resolution=max_binning,
                     max_genemap_window=int(max_genemap_window_input.value),
                     max_sequence_window=int(max_sequence_window_input.value),
                     min_relative_value=min_coverage_freq
@@ -919,10 +918,10 @@ def create_layout(db_path):
         # Parse current position range
         contig_length = widgets['contig_lengths'].get(contig, 0)
         try:
-            xstart = int(from_position_input.value) if from_position_input.value.strip() else 0
+            xstart = max(1, int(from_position_input.value)) if from_position_input.value.strip() else 1
             xend = int(to_position_input.value) if to_position_input.value.strip() else contig_length
         except ValueError:
-            xstart = 0
+            xstart = 1
             xend = contig_length
 
         if is_all:
@@ -983,14 +982,10 @@ def create_layout(db_path):
         toggle_css_text = f.read()
     toggle_stylesheet = InlineStyleSheet(css=toggle_css_text)
 
-    # Load logo as base64 to avoid static file serving issues
-    logo_path = os.path.join(static_path, "LOGO.png")
-    with open(logo_path, "rb") as f:
-        logo_b64 = base64.b64encode(f.read()).decode("utf-8")
-
     # Create main elements
     ## Views section
-    logo = Div(text=f"""<img src="data:image/png;base64,{logo_b64}" style="width:100%; max-width:800px; padding: 0 25%;">""")
+    logo_url = "https://raw.githubusercontent.com/bhagavadgitadu22/theBIGbam/master/thebigbam/static/LOGO.png"
+    logo = Div(text=f"""<img src="{logo_url}" style="width:100%; max-width:800px; padding: 0 25%;">""")
     views = RadioButtonGroup(labels=["ONE SAMPLE", "ALL SAMPLES"], active=0, sizing_mode="stretch_width", stylesheets=[stylesheet])
 
     # Global lock for toggles when enforcing "All samples" view (single-variable mode)
@@ -1425,10 +1420,10 @@ def create_layout(db_path):
         update_section_titles()
         # Update position inputs when contig changes
         if new and new in widgets['contig_lengths']:
-            from_position_input.value = "0"
+            from_position_input.value = "1"
             to_position_input.value = str(widgets['contig_lengths'][new])
         else:
-            from_position_input.value = "0"
+            from_position_input.value = "1"
             to_position_input.value = ""
     
     widgets['contig_select'].param.watch(on_contig_change, 'value')
@@ -1611,7 +1606,7 @@ def create_layout(db_path):
     position_reset_button = Button(label="Reset", stylesheets=[stylesheet], margin=(0, 5, 0, 5))
     
     def reset_position_inputs():
-        from_position_input.value = "0"
+        from_position_input.value = "1"
         if widgets['contig_select'].value and widgets['contig_select'].value in widgets['contig_lengths']:
             to_position_input.value = str(widgets['contig_lengths'][widgets['contig_select'].value])
         else:
@@ -1776,7 +1771,7 @@ def create_layout(db_path):
     max_sequence_window_label = Div(text="Sequence plots (bp)", margin=(5, 0, 5, 5))
     max_sequence_window_row = row(max_sequence_window_input, max_sequence_window_label, sizing_mode="stretch_width", margin=(0, 0, 5, 0))
 
-    max_binning_window_input = Spinner(value=100000, low=10, high=1000000, step=1000, width=100, margin=(0, 2, 0, 0))
+    max_binning_window_input = Spinner(value=10000, low=10, high=1000000, step=1000, width=100, margin=(0, 2, 0, 0))
     max_binning_window_label = Div(text="Feature plots without binning (bp)", margin=(5, 0, 5, 5))
     max_binning_window_row = row(max_binning_window_input, max_binning_window_label, sizing_mode="stretch_width", margin=(0, 0, 5, 0))
 

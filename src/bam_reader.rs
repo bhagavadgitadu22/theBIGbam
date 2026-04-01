@@ -97,21 +97,10 @@ pub fn process_contig_streaming(
         return Ok(None);
     }
 
-    // SAM-spec circular BAMs have real LN; all reads have POS < LN
-    // For circular genomes stored with duplication (2x length in BAM header),
-    // we need to use the actual circular length for array allocation and modulo operations
-    let actual_length = if circular {
-        // Detect actual circular length: if contig is duplicated, use half the length
-        // This is conservative - use the length until we see reads, then adjust if needed
-        ref_length / 2
-    } else {
-        ref_length
-    };
-
     bam.fetch((contig_name, 0, ref_length as i64))
         .with_context(|| format!("Failed to fetch reads for contig: {}", contig_name))?;
 
-    let mut arrays = FeatureArrays::new(actual_length);
+    let mut arrays = FeatureArrays::new(ref_length);
     let need_md = flags.needs_md();
     let mut has_reads = false;
     let mut primary_count: u64 = 0;
@@ -169,10 +158,10 @@ pub fn process_contig_streaming(
 
             let (corrected_tlen, corrected_proper) = if circular {
                 // Circular: shortest path around the genome using actual (non-duplicated) length
-                let p1 = pos1 % actual_length;
-                let p2 = pos2 % actual_length;
+                let p1 = pos1 % ref_length;
+                let p2 = pos2 % ref_length;
                 let direct = (p1 as i32 - p2 as i32).abs();
-                let wrapped = actual_length as i32 - direct;
+                let wrapped = ref_length as i32 - direct;
                 let tlen = direct.min(wrapped);
 
                 let same_ref = record.tid() == record.mtid();
@@ -198,17 +187,16 @@ pub fn process_contig_streaming(
         };
 
         // Track circularising reads (primary alignments only, circular mode only)
-        // In SAM-spec circular BAMs with duplicated contigs, origin-crossing reads
-        // are detected by comparing alignment end to the actual circular length
+        // Origin-crossing reads: alignment end exceeds contig length
         let _is_circularising_read = if circular && !record.is_secondary() && !record.is_supplementary() {
             let raw_start = record.pos() as usize;
             let raw_end = cigar_view.end_pos() as usize;
 
-            if raw_end > actual_length {
+            if raw_end > ref_length {
                 arrays.circularising_reads_count += 1;
                 // Gate: confirm circularity if ≥20bp mapped on both sides
-                let left_overlap = actual_length - raw_start;
-                let right_overlap = raw_end - actual_length;
+                let left_overlap = ref_length - raw_start;
+                let right_overlap = raw_end - ref_length;
                 if left_overlap >= 20 && right_overlap >= 20 {
                     arrays.circularising_confirmed = true;
                 }
@@ -224,10 +212,10 @@ pub fn process_contig_streaming(
         // Track circularising inserts & contig-end anomalies (primary paired-end only)
         // Skip reads already counted as circularising reads to avoid double-counting
         if seq_type.is_short_paired() && !record.is_secondary() && !record.is_supplementary() {
-            // In SAM-spec circular BAMs, use actual (non-duplicated) length for end detection
+            // Detect reads near contig ends for circularisation analysis
             let pos = record.pos() as usize;
             let near_left = pos < 1000;
-            let near_right = pos >= actual_length.saturating_sub(1000);
+            let near_right = pos >= ref_length.saturating_sub(1000);
 
             if near_left || near_right {
                 // Circularising inserts: read1 near one end, mate near opposite end
@@ -237,7 +225,7 @@ pub fn process_contig_streaming(
                         // Junction-spanning pairs have one mate near each end.
                         let mpos = record.mpos() as usize;
                         let mate_near_left = mpos < 1000;
-                        let mate_near_right = mpos >= actual_length.saturating_sub(1000);
+                        let mate_near_right = mpos >= ref_length.saturating_sub(1000);
                         if (near_left && mate_near_right) || (near_right && mate_near_left) {
                             let bam_proper = record.is_proper_pair();
                             let bam_non_inward = !record.is_proper_pair()
@@ -252,12 +240,12 @@ pub fn process_contig_streaming(
                         // Linear mode: non-inward pairs with mate on opposite end
                         let mpos = record.mpos() as usize;
                         let mate_near_left = mpos < 1000;
-                        let mate_near_right = mpos >= actual_length.saturating_sub(1000);
+                        let mate_near_right = mpos >= ref_length.saturating_sub(1000);
                         if (near_left && mate_near_right) || (near_right && mate_near_left) {
                             arrays.circularising_inserts_count += 1;
                             // Use wrapped distance: these pairs span the contig boundary,
-                            // so the true insert size is actual_length - raw_tlen
-                            let wrapped_tlen = actual_length as i32 - template_length;
+                            // so the true insert size is ref_length - raw_tlen
+                            let wrapped_tlen = ref_length as i32 - template_length;
                             arrays.circularising_insert_sizes.push(wrapped_tlen.abs());
                         }
                     }

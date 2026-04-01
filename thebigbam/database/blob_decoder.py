@@ -304,7 +304,11 @@ def _decode_zoom_levels(blob, header):
         level_data = _zstd_decompress(blob[offset:offset + compressed_size])
         offset += compressed_size
 
-        bin_size = ZOOM_BIN_SIZES[level_idx] if level_idx < len(ZOOM_BIN_SIZES) else 1000
+        if header["num_zoom_levels"] == 1:
+            zoom_bin_sizes = [10000]
+        else:
+            zoom_bin_sizes = ZOOM_BIN_SIZES
+        bin_size = zoom_bin_sizes[level_idx] if level_idx < len(zoom_bin_sizes) else 10000
         contig_length = header["contig_length"]
         num_bins = (contig_length + bin_size - 1) // bin_size
 
@@ -381,7 +385,15 @@ def decode_blob(blob_bytes):
         return result
     else:
         values = _decode_dense_base(blob_bytes, header)
-        x = np.arange(len(values), dtype=np.uint32)
+        n = len(values)
+        contig_length = header["contig_length"]
+        if n > 0 and n < contig_length:
+            # Windowed data (e.g. GC content 500bp, GC skew 1000bp): convert indices to window midpoints
+            window_size = contig_length // n
+            x = np.arange(n, dtype=np.uint32) * window_size + window_size // 2
+        else:
+            # Base-pair resolution: index = position
+            x = np.arange(n, dtype=np.uint32)
         return {
             "x": x,
             "y": values.astype(np.float64) / scale if scale != 1 else values.astype(np.float64),
@@ -472,12 +484,14 @@ def decode_zoom_by_bin_size(blob_bytes, target_bin_size):
     levels = _decode_zoom_levels(blob_bytes, header)
 
     # Try exact match first, then next larger bin size
-    bin_sizes_to_try = [target_bin_size]
-    if header["num_zoom_levels"] > 1:
+    if header["num_zoom_levels"] == 1:
+        available_bins = [10000]
+    else:
         available_bins = [100, 1000, 10000]
-        fallback = [b for b in available_bins if b > target_bin_size]
-        if fallback:
-            bin_sizes_to_try.append(min(fallback))
+    bin_sizes_to_try = [target_bin_size]
+    fallback = [b for b in available_bins if b > target_bin_size]
+    if fallback:
+        bin_sizes_to_try.append(min(fallback))
 
     for try_size in bin_sizes_to_try:
         for zoom in levels:

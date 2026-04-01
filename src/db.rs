@@ -705,6 +705,7 @@ impl DbWriter {
                     &values,
                     ValueScale::Raw,
                     contig_length,
+                    GC_WINDOW_SIZE,
                 );
 
                 appender.append_row(params![
@@ -755,6 +756,7 @@ impl DbWriter {
                     &values,
                     ValueScale::Raw,
                     contig_length,
+                    GC_SKEW_WINDOW_SIZE,
                 );
 
                 appender.append_row(params![
@@ -772,10 +774,10 @@ impl DbWriter {
     }
 
     /// Write repeat count and identity features to Contig_blob table from materialized tables.
-    /// Converts from position/value pairs into sparse BLOBs with 10kbp zoom level.
-    /// Note: The materialized tables are temporary and will be dropped after conversion.
+    /// Converts RLE segments into dense per-bp arrays, then encodes as dense contig BLOBs.
+    /// Delta+zstd compression handles constant-value runs very efficiently.
     fn write_repeat_features_to_blob_static(conn: &Connection) -> Result<()> {
-        use crate::blob::{encode_contig_sparse_blob, ValueScale};
+        use crate::blob::{encode_contig_dense_blob, ValueScale};
 
         // Feature IDs for repeat features
         const DIRECT_REPEAT_COUNT_ID: i16 = 3;
@@ -807,7 +809,12 @@ impl DbWriter {
                 continue;
             }
 
-            // Get contig length map for this table
+            // Identity features store 0.0-1.0 values → scale ×100 for integer storage
+            let is_identity = feature_id == DIRECT_REPEAT_IDENTITY_ID
+                           || feature_id == INVERTED_REPEAT_IDENTITY_ID;
+            let scale = if is_identity { ValueScale::Times100 } else { ValueScale::Raw };
+
+            // Get contig length map
             let mut contig_lengths: HashMap<i64, u32> = HashMap::new();
             {
                 let mut stmt = conn.prepare("SELECT Contig_id, Contig_length FROM Contig")?;
@@ -820,7 +827,7 @@ impl DbWriter {
                 }
             }
 
-            // Read RLE data from the materialized table
+            // Read RLE segments from the materialized table
             let query = format!("SELECT Contig_id, First_position, Last_position, Value FROM {} ORDER BY Contig_id, First_position", table_name);
             let mut stmt = conn.prepare(&query)?;
             let rows = stmt.query_map([], |row| {
@@ -832,53 +839,31 @@ impl DbWriter {
                 ))
             })?;
 
-            // Group by contig and convert RLE to position/value pairs
-            let mut current_contig: Option<i64> = None;
-            let mut positions: Vec<u32> = Vec::new();
-            let mut values: Vec<i32> = Vec::new();
+            // Collect all segments grouped by contig, then encode each as dense blob
+            let mut contig_segments: HashMap<i64, Vec<(i32, i32, f64)>> = HashMap::new();
 
             for row in rows {
                 let (contig_id, first_pos, last_pos, value) = row?;
-
-                // If we switched to a new contig, write the previous one
-                if current_contig.is_some() && current_contig != Some(contig_id) {
-                    let prev_contig_id = current_contig.unwrap();
-                    if !positions.is_empty() {
-                        let contig_length = *contig_lengths.get(&prev_contig_id).unwrap_or(&0);
-                        let blob_data = encode_contig_sparse_blob(
-                            &positions,
-                            &values,
-                            ValueScale::Raw,
-                            contig_length,
-                        );
-                        appender.append_row(params![prev_contig_id, feature_id, blob_data])?;
-                    }
-                    positions.clear();
-                    values.clear();
-                }
-
-                current_contig = Some(contig_id);
-
-                // Convert RLE run to individual positions
-                // For sparse storage, we store each position in the run
-                for pos in first_pos..=last_pos {
-                    positions.push(pos as u32);
-                    values.push((value * 100.0) as i32); // Scale for integer storage
-                }
+                contig_segments.entry(contig_id).or_default().push((first_pos, last_pos, value));
             }
 
-            // Write the last contig
-            if let Some(contig_id) = current_contig {
-                if !positions.is_empty() {
-                    let contig_length = *contig_lengths.get(&contig_id).unwrap_or(&0);
-                    let blob_data = encode_contig_sparse_blob(
-                        &positions,
-                        &values,
-                        ValueScale::Raw,
-                        contig_length,
-                    );
-                    appender.append_row(params![contig_id, feature_id, blob_data])?;
+            for (contig_id, segments) in &contig_segments {
+                let contig_length = *contig_lengths.get(contig_id).unwrap_or(&0);
+                if contig_length == 0 || segments.is_empty() {
+                    continue;
                 }
+                // Build dense per-bp array (zeros, then fill RLE runs)
+                let mut dense = vec![0i32; contig_length as usize];
+                for &(first_pos, last_pos, value) in segments {
+                    let v = if is_identity { (value * 100.0) as i32 } else { value as i32 };
+                    let start = (first_pos as usize).min(dense.len());
+                    let end = ((last_pos + 1) as usize).min(dense.len());
+                    for pos in start..end {
+                        dense[pos] = v;
+                    }
+                }
+                let blob_data = encode_contig_dense_blob(&dense, scale, contig_length, 1);
+                appender.append_row(params![*contig_id, feature_id, blob_data])?;
             }
 
             eprintln!("Wrote {} features to Contig_blob from {}", feature_id, table_name);
@@ -1222,6 +1207,8 @@ fn create_core_tables(conn: &Connection, has_bam: bool) -> Result<()> {
     )
     .context("Failed to create Feature_blob table")?;
 
+    } // end if has_bam (Sample, Coverage, Phage_mechanisms, Phage_termini, Feature_blob)
+
     // Contig_blob table - stores contig-level features (GC content, GC skew) as compressed BLOBs
     // Contig-level features have no sample dimension, unlike Feature_blob
     conn.execute(
@@ -1291,8 +1278,6 @@ fn create_core_tables(conn: &Connection, has_bam: bool) -> Result<()> {
         }
         appender.flush().context("Failed to flush Column_scales appender")?;
     }
-
-    } // end if has_bam (Sample, Coverage, Phage_mechanisms, Phage_termini, Feature_blob)
 
     // Contig_directRepeats table - stores direct repeats (same orientation)
     // Pident stored as INTEGER (×100)
