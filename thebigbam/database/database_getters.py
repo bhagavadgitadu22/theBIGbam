@@ -16,15 +16,12 @@ def update_database_metadata(conn):
                           capture_output=True, text=True).stdout.strip()
         if h:
             tool_version = f"{tool_version}+{h}"
-    except Exception:
+    except (subprocess.CalledProcessError, OSError):
         pass
 
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    try:
-        conn.execute("UPDATE Database_metadata SET Value = ? WHERE Key = 'Date_of_last_modification'", [now])
-        conn.execute("UPDATE Database_metadata SET Value = ? WHERE Key = 'Tool_version_used_for_last_modification'", [tool_version])
-    except Exception:
-        pass  # Older databases without Database_metadata table
+    conn.execute("UPDATE Database_metadata SET Value = ? WHERE Key = 'Date_of_last_modification'", [now])
+    conn.execute("UPDATE Database_metadata SET Value = ? WHERE Key = 'Tool_version_used_for_last_modification'", [tool_version])
 
 
 def get_filtering_metadata(db_path: str) -> dict:
@@ -94,7 +91,7 @@ def get_filtering_metadata(db_path: str) -> dict:
         # Check if table/view exists
         try:
             cols_info = conn.execute(f"DESCRIBE {source}").fetchall()
-        except Exception:
+        except duckdb.Error:
             # Table/view doesn't exist, skip this category
             continue
 
@@ -119,9 +116,9 @@ def get_filtering_metadata(db_path: str) -> dict:
                         f"SELECT DISTINCT \"{col_name}\" FROM {source} WHERE \"{col_name}\" IS NOT NULL ORDER BY \"{col_name}\""
                     ).fetchall()
                     col_data['distinct_values'] = [row[0] for row in distinct]
-                except Exception:
+                except duckdb.Error:
                     col_data['distinct_values'] = []
-                
+
                 # Skip columns with only NULL values (no distinct non-NULL values)
                 if not col_data['distinct_values']:
                     continue
@@ -133,7 +130,7 @@ def get_filtering_metadata(db_path: str) -> dict:
                     ).fetchone()
                     if not has_values:
                         continue  # Skip columns with only NULL values
-                except Exception:
+                except duckdb.Error:
                     continue
 
             columns[col_name] = col_data
@@ -148,43 +145,44 @@ def get_filtering_metadata(db_path: str) -> dict:
     if 'Contig' in result:
         try:
             ann_cols_info = conn.execute("DESCRIBE Contig_annotation").fetchall()
-            for col_name, col_type, *_ in ann_cols_info:
-                if col_name in ANNOTATION_EXCLUDED_COLUMNS:
+        except duckdb.Error:
+            ann_cols_info = []
+
+        for col_name, col_type, *_ in ann_cols_info:
+            if col_name in ANNOTATION_EXCLUDED_COLUMNS:
+                continue
+
+            is_text = any(t in col_type.upper() for t in text_types)
+            col_data = {
+                'type': 'text' if is_text else 'numeric',
+                'source': 'Contig_annotation'  # Mark as annotation column
+            }
+
+            # For text columns, get distinct values
+            if is_text:
+                try:
+                    distinct = conn.execute(
+                        f'SELECT DISTINCT "{col_name}" FROM Contig_annotation WHERE "{col_name}" IS NOT NULL ORDER BY "{col_name}"'
+                    ).fetchall()
+                    col_data['distinct_values'] = [row[0] for row in distinct]
+                except duckdb.Error:
+                    col_data['distinct_values'] = []
+
+                # Skip columns with only NULL values
+                if not col_data['distinct_values']:
+                    continue
+            else:
+                # For numeric columns, check if there are any non-NULL values
+                try:
+                    has_values = conn.execute(
+                        f'SELECT 1 FROM Contig_annotation WHERE "{col_name}" IS NOT NULL LIMIT 1'
+                    ).fetchone()
+                    if not has_values:
+                        continue  # Skip columns with only NULL values
+                except duckdb.Error:
                     continue
 
-                is_text = any(t in col_type.upper() for t in text_types)
-                col_data = {
-                    'type': 'text' if is_text else 'numeric',
-                    'source': 'Contig_annotation'  # Mark as annotation column
-                }
-
-                # For text columns, get distinct values
-                if is_text:
-                    try:
-                        distinct = conn.execute(
-                            f'SELECT DISTINCT "{col_name}" FROM Contig_annotation WHERE "{col_name}" IS NOT NULL ORDER BY "{col_name}"'
-                        ).fetchall()
-                        col_data['distinct_values'] = [row[0] for row in distinct]
-                    except Exception:
-                        col_data['distinct_values'] = []
-                    
-                    # Skip columns with only NULL values
-                    if not col_data['distinct_values']:
-                        continue
-                else:
-                    # For numeric columns, check if there are any non-NULL values
-                    try:
-                        has_values = conn.execute(
-                            f'SELECT 1 FROM Contig_annotation WHERE "{col_name}" IS NOT NULL LIMIT 1'
-                        ).fetchone()
-                        if not has_values:
-                            continue  # Skip columns with only NULL values
-                    except Exception:
-                        continue
-
-                result['Contig']['columns'][col_name] = col_data
-        except Exception:
-            pass  # Contig_annotation table doesn't exist
+            result['Contig']['columns'][col_name] = col_data
 
     conn.close()
     return result

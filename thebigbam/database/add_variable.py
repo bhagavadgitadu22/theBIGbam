@@ -1,6 +1,7 @@
 import duckdb
 import csv
 import re
+import traceback
 
 from thebigbam.database.database_getters import update_database_metadata
 
@@ -231,7 +232,7 @@ def run_add_variable(args):
         print(f"Variable '{var_name}' added and {len(rows_to_insert)} records inserted into '{feature_table}'")
 
     except Exception as e:
-        print(str(e))
+        traceback.print_exc()
         return 1
 
     finally:
@@ -280,7 +281,7 @@ def run_remove_variable(args):
         print(f"Variable '{var_name}' removed from the database.")
 
     except Exception as e:
-        print(str(e))
+        traceback.print_exc()
         return 1
 
     finally:

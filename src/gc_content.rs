@@ -45,7 +45,6 @@ pub struct GCSkewStats {
 /// # Parameters
 /// - `sequence`: The DNA sequence as bytes (A, T, G, C, N)
 /// - `window_size`: Size of each non-overlapping window in base pairs (typically 500)
-/// - `_contig_variation_percentage`: Deprecated - no longer used (RLE compression removed)
 ///
 /// # Algorithm
 /// 1. Divide the sequence into non-overlapping windows of window_size
@@ -55,7 +54,7 @@ pub struct GCSkewStats {
 /// Tuple of (values, stats) where:
 /// - values: Vector of GC percentages (0-100), one per window
 /// - stats: GCStats with average and sd GC percentages
-pub fn compute_gc_content(sequence: &[u8], window_size: usize, _contig_variation_percentage: f64) -> (Vec<u8>, GCStats) {
+pub fn compute_gc_content(sequence: &[u8], window_size: usize) -> (Vec<u8>, GCStats) {
     let n = sequence.len();
     if n == 0 {
         return (Vec::new(), GCStats { average: 0.0, sd: 0.0 });
@@ -124,13 +123,12 @@ fn compute_gc_stats(gc_values: &[u8]) -> GCStats {
 /// # Parameters
 /// - `sequence`: The DNA sequence as bytes (A, T, G, C, N)
 /// - `window_size`: Size of each non-overlapping window in base pairs (typically 1000)
-/// - `_contig_variation_percentage`: Deprecated - no longer used (RLE compression removed)
 ///
 /// # Returns
 /// Tuple of (values, stats) where:
 /// - values: Vector of GC skew × 100 (range: -100 to +100), one per window
 /// - stats: GCSkewStats with amplitude and percent_positive
-pub fn compute_gc_skew(sequence: &[u8], window_size: usize, _contig_variation_percentage: f64) -> (Vec<i16>, GCSkewStats) {
+pub fn compute_gc_skew(sequence: &[u8], window_size: usize) -> (Vec<i16>, GCSkewStats) {
     let n = sequence.len();
     if n == 0 {
         return (Vec::new(), GCSkewStats { amplitude: 0.0, percent_positive: 0.0 });
@@ -226,7 +224,7 @@ mod tests {
     fn test_gc_content_simple() {
         // ATGC sequence - 50% GC per window
         let sequence = b"ATGCATGCATGC";
-        let (values, stats) = compute_gc_content(sequence, 4, 10.0);
+        let (values, stats) = compute_gc_content(sequence, 4);
 
         // Should produce 3 values (window size 4, 12bp sequence)
         assert_eq!(values.len(), 3);
@@ -243,7 +241,7 @@ mod tests {
     fn test_gc_content_high_gc() {
         // All GC
         let sequence = b"GGGGCCCCGGGGCCCC";
-        let (values, stats) = compute_gc_content(sequence, 4, 10.0);
+        let (values, stats) = compute_gc_content(sequence, 4);
 
         // Should produce 4 values (window size 4, 16bp sequence)
         assert_eq!(values.len(), 4);
@@ -260,7 +258,7 @@ mod tests {
     fn test_gc_content_low_gc() {
         // All AT
         let sequence = b"AAAATTTTAAAATTTT";
-        let (values, stats) = compute_gc_content(sequence, 4, 10.0);
+        let (values, stats) = compute_gc_content(sequence, 4);
 
         // Should produce 4 values (window size 4, 16bp sequence)
         assert_eq!(values.len(), 4);
@@ -277,7 +275,7 @@ mod tests {
     fn test_gc_content_with_n() {
         // Sequence with N bases - N should be excluded
         let sequence = b"ATGCNNNNATGC";
-        let (values, _stats) = compute_gc_content(sequence, 4, 10.0);
+        let (values, _stats) = compute_gc_content(sequence, 4);
 
         // Should produce 3 values (window size 4, 12bp sequence)
         assert_eq!(values.len(), 3);
@@ -286,7 +284,7 @@ mod tests {
     #[test]
     fn test_gc_content_empty() {
         let sequence: &[u8] = b"";
-        let (values, stats) = compute_gc_content(sequence, 4, 10.0);
+        let (values, stats) = compute_gc_content(sequence, 4);
         assert!(values.is_empty());
         assert_eq!(stats.average, 0.0);
         assert_eq!(stats.sd, 0.0);
@@ -296,7 +294,7 @@ mod tests {
     fn test_individual_windows() {
         // Verify that each window value is computed correctly
         let sequence = b"ATGCATGCATGCATGCATGC"; // 20 bases, 5 windows of 4bp
-        let (values, _stats) = compute_gc_content(sequence, 4, 10.0);
+        let (values, _stats) = compute_gc_content(sequence, 4);
 
         // Should have 5 windows
         assert_eq!(values.len(), 5);
@@ -310,7 +308,7 @@ mod tests {
     fn test_varying_gc() {
         // Long sequence with uniform GC should give consistent values
         let sequence: Vec<u8> = b"ATGC".repeat(100);
-        let (values, stats) = compute_gc_content(&sequence, 100, 10.0);
+        let (values, stats) = compute_gc_content(&sequence, 100);
 
         // Should produce 4 windows (400bp sequence, 100bp windows)
         assert_eq!(values.len(), 4);
@@ -339,7 +337,7 @@ mod tests {
     fn test_gc_skew_balanced() {
         // Equal G and C - skew should be 0 everywhere
         let sequence = b"GCGCGCGCGCGCGCGC";
-        let (_runs, skew) = compute_gc_skew(sequence, 4, 10.0);
+        let (_runs, skew) = compute_gc_skew(sequence, 4);
 
         // Amplitude should be 0 (or very close)
         assert!(skew.amplitude < 0.1);
@@ -351,7 +349,7 @@ mod tests {
     fn test_gc_skew_g_rich() {
         // All G - skew should be +1 everywhere
         let sequence = b"GGGGGGGGGGGGGGGG";
-        let (_runs, skew) = compute_gc_skew(sequence, 4, 10.0);
+        let (_runs, skew) = compute_gc_skew(sequence, 4);
 
         // Amplitude should be 0 (constant +1)
         assert_eq!(skew.amplitude, 0.0);
@@ -363,7 +361,7 @@ mod tests {
     fn test_gc_skew_c_rich() {
         // All C - skew should be -1 everywhere
         let sequence = b"CCCCCCCCCCCCCCCC";
-        let (_runs, skew) = compute_gc_skew(sequence, 4, 10.0);
+        let (_runs, skew) = compute_gc_skew(sequence, 4);
 
         // Amplitude should be 0 (constant -1)
         assert_eq!(skew.amplitude, 0.0);
@@ -374,7 +372,7 @@ mod tests {
     #[test]
     fn test_gc_skew_empty() {
         let sequence: &[u8] = b"";
-        let (runs, skew) = compute_gc_skew(sequence, 4, 10.0);
+        let (runs, skew) = compute_gc_skew(sequence, 4);
         assert!(runs.is_empty());
         assert_eq!(skew.amplitude, 0.0);
         assert_eq!(skew.percent_positive, 0.0);

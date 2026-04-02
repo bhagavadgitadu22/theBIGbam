@@ -502,48 +502,6 @@ def decode_zoom_by_bin_size(blob_bytes, target_bin_size):
     return None
 
 
-def decode_dense_chunk(blob_bytes, chunk_idx):
-    """
-    Decode a single 64K chunk for random access on large genomes.
-
-    Args:
-        blob_bytes: Raw BLOB bytes
-        chunk_idx: 0-based chunk index
-
-    Returns: numpy array of i32 values for this chunk
-    """
-    if isinstance(blob_bytes, memoryview):
-        blob_bytes = bytes(blob_bytes)
-
-    header = _parse_header(blob_bytes)
-    if header["sparse"]:
-        raise ValueError("Cannot decode chunks from sparse BLOB")
-
-    offset = header["base_block_offset"]
-    num_chunks = struct.unpack_from("<H", blob_bytes, offset)[0]
-    offset += 6  # skip num_chunks(2) + chunk_size(4)
-
-    if chunk_idx >= num_chunks:
-        raise ValueError(f"Chunk {chunk_idx} out of range (have {num_chunks} chunks)")
-
-    # Skip to the requested chunk
-    for i in range(chunk_idx):
-        compressed_size = struct.unpack_from("<I", blob_bytes, offset)[0]
-        offset += 4 + compressed_size
-
-    # Decode the target chunk
-    compressed_size = struct.unpack_from("<I", blob_bytes, offset)[0]
-    offset += 4
-    compressed_data = blob_bytes[offset:offset + compressed_size]
-
-    decompressed = _zstd_decompress(compressed_data)
-    unsigned_vals = _varint_decode(decompressed)
-    signed_deltas = _zigzag_decode(unsigned_vals)
-    values = _delta_decode(signed_deltas)
-
-    return np.array(values, dtype=np.int32)
-
-
 def get_blob_header(blob_bytes):
     """Parse and return the BLOB header as a dict (for inspection/debugging)."""
     if isinstance(blob_bytes, memoryview):
@@ -570,7 +528,6 @@ _FEATURE_NAMES = [
 ]
 
 _NAME_TO_ID = {name: i + 1 for i, name in enumerate(_FEATURE_NAMES)}
-_ID_TO_NAME = {i + 1: name for i, name in enumerate(_FEATURE_NAMES)}
 
 # Contig_blob feature IDs (stored in Feature_id column)
 _CONTIG_BLOB_IDS = {
@@ -589,16 +546,8 @@ def feature_name_to_id(name):
     return _NAME_TO_ID.get(name)
 
 
-def feature_id_to_name(feature_id):
-    """Convert feature_id (1-based) to feature name for Feature_blob."""
-    return _ID_TO_NAME.get(feature_id)
-
-
 def contig_blob_name_to_id(name):
     """Convert contig feature name to Contig_blob feature_id."""
     return _CONTIG_BLOB_NAMES.get(name)
 
 
-def contig_blob_id_to_name(feature_id):
-    """Convert Contig_blob feature_id to feature name."""
-    return _CONTIG_BLOB_IDS.get(feature_id)

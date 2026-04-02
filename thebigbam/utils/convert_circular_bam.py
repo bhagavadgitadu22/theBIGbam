@@ -269,7 +269,7 @@ def convert_circular_bam(
         # Clean up name-sorted temp
         try:
             Path(namesorted).unlink()
-        except Exception:
+        except OSError:
             pass
 
     # Step 4: Position-sort and index

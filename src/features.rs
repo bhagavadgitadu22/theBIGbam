@@ -7,7 +7,7 @@
 
 use crate::cigar::{raw_cigar_consumes_ref, raw_cigar_is_clipping, raw_boundary_event_length};
 use crate::circular::{increment_circular, increment_circular_long, increment_range};
-use crate::types::{FeatureAnnotation, FeatureMap, SequencingType};
+use crate::types::{FeatureAnnotation, SequencingType};
 use std::collections::HashMap;
 
 /// Maximum number of unique sequence variants tracked per position.
@@ -323,67 +323,6 @@ impl FeatureArrays {
         }
     }
 
-    /// Convert to FeatureMap for phagetermini features.
-    ///
-    /// # Rust Concept - `.clone()`:
-    /// Creates a deep copy of the Vec. This is necessary because we're
-    /// moving data out of the struct into a HashMap.
-    pub fn to_phagetermini_map(&self) -> FeatureMap {
-        let mut results = FeatureMap::with_capacity(3);
-        results.insert("coverage_reduced".to_string(), self.coverage_reduced.clone());
-        results.insert("reads_starts".to_string(), self.reads_starts.clone());
-        results.insert("reads_ends".to_string(), self.reads_ends.clone());
-        results
-    }
-
-    /// Compute count of clipping/insertion events at each position.
-    fn compute_counts(lengths: &[Vec<u32>]) -> Vec<u64> {
-        lengths.iter().map(|v| v.len() as u64).collect()
-    }
-
-    /// Compute mean length at each position (0 if no events).
-    fn compute_means(lengths: &[Vec<u32>]) -> Vec<u64> {
-        lengths.iter().map(|v| {
-            if v.is_empty() {
-                0
-            } else {
-                let sum: u64 = v.iter().map(|&x| x as u64).sum();
-                sum / v.len() as u64
-            }
-        }).collect()
-    }
-
-    /// Compute median length at each position (0 if no events).
-    fn compute_medians(lengths: &[Vec<u32>]) -> Vec<u64> {
-        lengths.iter().map(|v| {
-            if v.is_empty() {
-                0
-            } else {
-                let mut sorted = v.clone();
-                sorted.sort_unstable();
-                sorted[sorted.len() / 2] as u64
-            }
-        }).collect()
-    }
-
-    /// Compute standard deviation at each position (0 if no events).
-    fn compute_std_devs(lengths: &[Vec<u32>]) -> Vec<u64> {
-        lengths.iter().map(|v| {
-            if v.len() <= 1 {
-                0
-            } else {
-                let mean = v.iter().map(|&x| x as f64).sum::<f64>() / v.len() as f64;
-                let variance = v.iter()
-                    .map(|&x| {
-                        let diff = x as f64 - mean;
-                        diff * diff
-                    })
-                    .sum::<f64>() / v.len() as f64;
-                variance.sqrt() as u64
-            }
-        }).collect()
-    }
-
     /// Compute mean coverage across all positions.
     /// Returns the average of primary_reads as f64.
     pub fn coverage_mean(&self) -> f64 {
@@ -483,62 +422,6 @@ impl FeatureArrays {
         }).collect()
     }
 
-    /// Convert to FeatureMap for assemblycheck features.
-    ///
-    /// Only includes features relevant to the sequencing type:
-    /// - Long reads: includes read_lengths
-    /// - Paired reads: includes insert_sizes, mate orientation data
-    /// 
-    /// Returns a tuple: (FeatureMap with counts, statistics for clippings/insertions)
-    pub fn to_assemblycheck_data(&self, seq_type: SequencingType) -> (
-        FeatureMap,
-        HashMap<String, (Vec<u64>, Vec<u64>, Vec<u64>)> // mean, median, std
-    ) {
-        let mut results = FeatureMap::with_capacity(10);
-        let mut stats = HashMap::new();
-        
-        // Clipping and insertion with statistics
-        results.insert("left_clippings".to_string(), Self::compute_counts(&self.left_clipping_lengths));
-        stats.insert("left_clippings".to_string(), (
-            Self::compute_means(&self.left_clipping_lengths),
-            Self::compute_medians(&self.left_clipping_lengths),
-            Self::compute_std_devs(&self.left_clipping_lengths),
-        ));
-        
-        results.insert("right_clippings".to_string(), Self::compute_counts(&self.right_clipping_lengths));
-        stats.insert("right_clippings".to_string(), (
-            Self::compute_means(&self.right_clipping_lengths),
-            Self::compute_medians(&self.right_clipping_lengths),
-            Self::compute_std_devs(&self.right_clipping_lengths),
-        ));
-        
-        results.insert("insertions".to_string(), Self::compute_counts(&self.insertion_lengths));
-        stats.insert("insertions".to_string(), (
-            Self::compute_means(&self.insertion_lengths),
-            Self::compute_medians(&self.insertion_lengths),
-            Self::compute_std_devs(&self.insertion_lengths),
-        ));
-        
-        results.insert("deletions".to_string(), self.deletions.clone());
-        results.insert("mismatches".to_string(), self.mismatches.clone());
-
-        // Long reads: include read length data
-        if seq_type.is_long() {
-            results.insert("sum_read_lengths".to_string(), self.sum_read_lengths.clone());
-            results.insert("count_read_lengths".to_string(), self.count_read_lengths.clone());
-        }
-
-        // Paired reads: include insert size and orientation data
-        if seq_type.is_short_paired() {
-            results.insert("sum_insert_sizes".to_string(), self.sum_insert_sizes.clone());
-            results.insert("count_insert_sizes".to_string(), self.count_insert_sizes.clone());
-            results.insert("non_inward_pairs".to_string(), self.non_inward_pairs.clone());
-            results.insert("mate_not_mapped".to_string(), self.mate_not_mapped.clone());
-            results.insert("mate_on_another_contig".to_string(), self.mate_on_another_contig.clone());
-        }
-
-        (results, stats)
-    }
 }
 
 // ============================================================================
@@ -711,8 +594,10 @@ pub fn compute_codon_changes_from_summaries(
             let nuc_bytes = cds.nucleotide_sequence.as_bytes();
 
             let offset = if cds.strand == -1 {
+                if pos_1based > cds.end { continue; }
                 (cds.end - pos_1based) as usize
             } else {
+                if pos_1based < cds.start { continue; }
                 (pos_1based - cds.start) as usize
             };
 
@@ -833,49 +718,403 @@ impl ModuleFlags {
 }
 
 // ============================================================================
-// Core Processing Function
+// Core Processing — Helpers
 // ============================================================================
 
-/// Process a single read and update all feature arrays in one pass.
+/// Context for a single read, bundling all parameters needed by sub-functions.
+pub struct ReadContext<'a> {
+    pub raw_start: usize,
+    pub raw_end: usize,
+    /// raw_start % ref_length — safe array index for the start position
+    pub start: usize,
+    /// raw_end (not wrapped — used by increment_circular to detect wrapping)
+    pub end: usize,
+    pub ref_length: usize,
+    pub query_length: i32,
+    pub template_length: i32,
+    pub is_read1: bool,
+    pub is_proper_pair: bool,
+    pub is_reverse: bool,
+    pub is_secondary: bool,
+    pub is_supplementary: bool,
+    pub mate_unmapped: bool,
+    pub mate_other_contig: bool,
+    pub cigar_raw: &'a [(u32, u32)],
+    pub md_tag: Option<&'a [u8]>,
+    pub seq: &'a [u8],
+    pub mapq: u8,
+    pub seq_type: SequencingType,
+    pub circular: bool,
+    pub min_clipping_length: u32,
+}
+
+/// Increment an array over a range, handling circular/linear and long/short reads.
+#[inline]
+fn inc(arr: &mut [u64], ctx: &ReadContext, raw_s: usize, raw_e: usize, delta: u64) {
+    if ctx.circular {
+        if ctx.seq_type.is_long() {
+            increment_circular_long(arr, raw_s, raw_e, delta);
+        } else {
+            increment_circular(arr, raw_s % ctx.ref_length, raw_e, delta);
+        }
+    } else {
+        increment_range(arr, raw_s % ctx.ref_length, raw_e, delta);
+    }
+}
+
+/// Compute the last-aligned-position index (end - 1, wrapped for circular).
+#[inline]
+fn end_pos(end: usize, ref_length: usize, circular: bool) -> usize {
+    if end > 0 {
+        let pos = end - 1;
+        if circular { pos % ref_length } else { pos }
+    } else {
+        0
+    }
+}
+
+/// Track a left (start) clip sequence from the read, truncated to 20 bp.
+#[inline]
+fn track_left_clip(arrays: &mut FeatureArrays, pos: usize, seq: &[u8], cigar_raw: &[(u32, u32)], evt_len: u32) {
+    if evt_len > 0 {
+        if let Some(&(op, _)) = cigar_raw.first() {
+            if op as u8 as char == 'S' && !seq.is_empty() {
+                let clip_len = (evt_len as usize).min(20).min(seq.len());
+                track_sequence(&mut arrays.start_clip_sequences, pos, &seq[..clip_len]);
+            }
+        }
+    }
+}
+
+/// Track a right (end) clip sequence from the read, truncated to 20 bp.
+#[inline]
+fn track_right_clip(arrays: &mut FeatureArrays, pos: usize, seq: &[u8], cigar_raw: &[(u32, u32)], evt_len: u32) {
+    if evt_len > 0 {
+        if let Some(&(op, _)) = cigar_raw.last() {
+            if op as u8 as char == 'S' && !seq.is_empty() {
+                let clip_start = seq.len().saturating_sub(evt_len as usize);
+                let clip_len = (evt_len as usize).min(20);
+                let clip_end = (clip_start + clip_len).min(seq.len());
+                track_sequence(&mut arrays.end_clip_sequences, pos, &seq[clip_start..clip_end]);
+            }
+        }
+    }
+}
+
+// ============================================================================
+// Core Processing — Module Functions
+// ============================================================================
+
+/// Coverage module: count primary, secondary, and supplementary reads.
+#[inline]
+fn process_coverage(arrays: &mut FeatureArrays, ctx: &ReadContext) {
+    if ctx.is_secondary {
+        inc(&mut arrays.secondary_reads, ctx, ctx.raw_start, ctx.raw_end, 1);
+    } else if ctx.is_supplementary {
+        inc(&mut arrays.supplementary_reads, ctx, ctx.raw_start, ctx.raw_end, 1);
+    } else {
+        // Primary mappings: coverage, MAPQ, strand-specific
+        inc(&mut arrays.primary_reads, ctx, ctx.raw_start, ctx.raw_end, 1);
+        inc(&mut arrays.sum_mapq, ctx, ctx.raw_start, ctx.raw_end, ctx.mapq as u64);
+        if ctx.is_reverse {
+            inc(&mut arrays.primary_reads_minus_only, ctx, ctx.raw_start, ctx.raw_end, 1);
+        } else {
+            inc(&mut arrays.primary_reads_plus_only, ctx, ctx.raw_start, ctx.raw_end, 1);
+        }
+    }
+}
+
+/// Long-reads module: track read length sum and count per position.
+#[inline]
+fn process_long_read_metrics(arrays: &mut FeatureArrays, ctx: &ReadContext) {
+    let ql = ctx.query_length as u64;
+    // Non-wrapping fast path avoids modulo in tight loop
+    if ctx.raw_end <= ctx.ref_length {
+        for p in ctx.raw_start..ctx.raw_end {
+            arrays.sum_read_lengths[p] += ql;
+            arrays.count_read_lengths[p] += 1;
+        }
+    } else {
+        for pos in ctx.raw_start..ctx.raw_end {
+            let p = pos % ctx.ref_length;
+            arrays.sum_read_lengths[p] += ql;
+            arrays.count_read_lengths[p] += 1;
+        }
+    }
+}
+
+/// Paired-reads module: insert sizes and mate orientation issues.
+#[inline]
+fn process_paired_read_metrics(arrays: &mut FeatureArrays, ctx: &ReadContext) {
+    let track_insert = ctx.is_read1 && ctx.template_length > 0;
+    let tl = ctx.template_length as u64;
+    let non_inward = !ctx.is_proper_pair && !ctx.mate_unmapped && !ctx.mate_other_contig;
+
+    // Non-wrapping fast path avoids modulo in tight loop
+    if ctx.raw_end <= ctx.ref_length {
+        for p in ctx.raw_start..ctx.raw_end {
+            if track_insert {
+                arrays.sum_insert_sizes[p] += tl;
+                arrays.count_insert_sizes[p] += 1;
+            }
+            if non_inward { arrays.non_inward_pairs[p] += 1; }
+            if ctx.mate_unmapped { arrays.mate_not_mapped[p] += 1; }
+            if ctx.mate_other_contig { arrays.mate_on_another_contig[p] += 1; }
+        }
+    } else {
+        for pos in ctx.raw_start..ctx.raw_end {
+            let p = pos % ctx.ref_length;
+            if track_insert {
+                arrays.sum_insert_sizes[p] += tl;
+                arrays.count_insert_sizes[p] += 1;
+            }
+            if non_inward { arrays.non_inward_pairs[p] += 1; }
+            if ctx.mate_unmapped { arrays.mate_not_mapped[p] += 1; }
+            if ctx.mate_other_contig { arrays.mate_on_another_contig[p] += 1; }
+        }
+    }
+}
+
+/// Clippings from CIGAR — shared by mapping_metrics and phagetermini.
+#[inline]
+fn process_clippings(arrays: &mut FeatureArrays, ctx: &ReadContext, flags: ModuleFlags) {
+    if ctx.cigar_raw.is_empty() { return; }
+
+    // Left clipping at first aligned position
+    if let Some(&(op, len)) = ctx.cigar_raw.first() {
+        if raw_cigar_is_clipping(op) {
+            arrays.left_clipping_lengths[ctx.start].push(len);
+            if flags.mapping_metrics && op as u8 as char == 'S' && !ctx.seq.is_empty() {
+                let clip_len = (len as usize).min(20).min(ctx.seq.len());
+                track_sequence(&mut arrays.left_clip_sequences, ctx.start, &ctx.seq[..clip_len]);
+            }
+        }
+    }
+
+    // Right clipping at last aligned position
+    if let Some(&(op, len)) = ctx.cigar_raw.last() {
+        if raw_cigar_is_clipping(op) {
+            let clip_pos = if ctx.end > 0 {
+                let pos = ctx.end - 1;
+                if ctx.circular { pos % ctx.ref_length } else { pos }
+            } else {
+                ctx.ref_length - 1
+            };
+            arrays.right_clipping_lengths[clip_pos].push(len);
+            if flags.mapping_metrics && op as u8 as char == 'S' && !ctx.seq.is_empty() {
+                let len_usize = len as usize;
+                let clip_start = ctx.seq.len().saturating_sub(len_usize);
+                let clip_len = len_usize.min(20);
+                let clip_end = (clip_start + clip_len).min(ctx.seq.len());
+                track_sequence(&mut arrays.right_clip_sequences, clip_pos, &ctx.seq[clip_start..clip_end]);
+            }
+        }
+    }
+}
+
+/// Unified CIGAR + MD + SEQ walk: indels, mismatches, and sequence extraction.
+#[inline]
+fn process_cigar_walk(arrays: &mut FeatureArrays, ctx: &ReadContext) {
+    let mut ref_pos = ctx.raw_start;
+    let mut query_pos: usize = 0;
+
+    let md_bytes = ctx.md_tag.unwrap_or(&[]);
+    let mut md_pos: usize = 0;
+    let mut md_match_remaining: usize = 0;
+    let has_md = !md_bytes.is_empty();
+    let has_seq = !ctx.seq.is_empty();
+
+    for &(op, len) in ctx.cigar_raw {
+        let c = op as u8 as char;
+        let len_usize = len as usize;
+
+        match c {
+            'M' | '=' | 'X' => {
+                if has_md {
+                    let mut remaining = len_usize;
+                    while remaining > 0 {
+                        if md_match_remaining > 0 {
+                            let consume = md_match_remaining.min(remaining);
+                            ref_pos += consume;
+                            query_pos += consume;
+                            remaining -= consume;
+                            md_match_remaining -= consume;
+                        } else if md_pos < md_bytes.len() {
+                            let b = md_bytes[md_pos];
+                            if b.is_ascii_digit() {
+                                let mut num = 0usize;
+                                while md_pos < md_bytes.len() && md_bytes[md_pos].is_ascii_digit() {
+                                    num = num * 10 + (md_bytes[md_pos] - b'0') as usize;
+                                    md_pos += 1;
+                                }
+                                md_match_remaining = num;
+                            } else if b.is_ascii_uppercase() {
+                                let normalized_pos = ref_pos % ctx.ref_length;
+                                arrays.mismatches[normalized_pos] += 1;
+                                if has_seq && query_pos < ctx.seq.len() {
+                                    let base_idx = match ctx.seq[query_pos] {
+                                        b'A' | b'a' => 0usize,
+                                        b'C' | b'c' => 1,
+                                        b'G' | b'g' => 2,
+                                        b'T' | b't' => 3,
+                                        _ => 4,
+                                    };
+                                    if base_idx < 4 {
+                                        arrays.mismatch_base_counts[normalized_pos][base_idx] += 1;
+                                    }
+                                }
+                                ref_pos += 1;
+                                query_pos += 1;
+                                remaining -= 1;
+                                md_pos += 1;
+                            } else if b == b'^' {
+                                break;
+                            } else {
+                                md_pos += 1;
+                            }
+                        } else {
+                            ref_pos += remaining;
+                            query_pos += remaining;
+                            remaining = 0;
+                        }
+                    }
+                } else {
+                    ref_pos += len_usize;
+                    query_pos += len_usize;
+                }
+            }
+            'I' => {
+                let normalized_pos = ref_pos % ctx.ref_length;
+                arrays.insertion_lengths[normalized_pos].push(len);
+                if has_seq && query_pos + len_usize <= ctx.seq.len() {
+                    if len_usize <= 40 {
+                        track_sequence(&mut arrays.insertion_sequences, normalized_pos, &ctx.seq[query_pos..query_pos + len_usize]);
+                    } else {
+                        let mut v = ctx.seq[query_pos..query_pos + 20].to_vec();
+                        v.extend_from_slice(b"...");
+                        v.extend_from_slice(&ctx.seq[query_pos + len_usize - 20..query_pos + len_usize]);
+                        track_sequence(&mut arrays.insertion_sequences, normalized_pos, &v);
+                    }
+                }
+                query_pos += len_usize;
+            }
+            'D' => {
+                let normalized_pos = ref_pos % ctx.ref_length;
+                arrays.deletion_lengths[normalized_pos].push(len);
+                for j in 0..len_usize {
+                    arrays.deletions[(ref_pos + j) % ctx.ref_length] += 1;
+                }
+                ref_pos += len_usize;
+                if md_pos < md_bytes.len() && md_bytes[md_pos] == b'^' {
+                    md_pos += 1;
+                    while md_pos < md_bytes.len() && md_bytes[md_pos].is_ascii_uppercase() {
+                        md_pos += 1;
+                    }
+                }
+            }
+            'S' => { query_pos += len_usize; }
+            'N' => { ref_pos += len_usize; }
+            'H' => {}
+            _ => {
+                if raw_cigar_consumes_ref(op) { ref_pos += len_usize; }
+            }
+        }
+    }
+}
+
+/// Phagetermini module: boundary events, coverage_reduced, clip sequences.
+#[inline]
+fn process_phagetermini(arrays: &mut FeatureArrays, ctx: &ReadContext) {
+    let start_event = raw_boundary_event_length(ctx.cigar_raw, ctx.md_tag, !ctx.is_reverse, ctx.min_clipping_length);
+    let start_matches = start_event.is_some();
+
+    if ctx.seq_type.is_long() {
+        process_phagetermini_long(arrays, ctx, start_event, start_matches);
+    } else {
+        process_phagetermini_short(arrays, ctx, start_event, start_matches);
+    }
+}
+
+/// Phagetermini for long reads: split read in half and check each terminus independently.
+fn process_phagetermini_long(arrays: &mut FeatureArrays, ctx: &ReadContext, start_event: Option<u32>, start_matches: bool) {
+    let end_event = raw_boundary_event_length(ctx.cigar_raw, ctx.md_tag, ctx.is_reverse, ctx.min_clipping_length);
+    let end_matches = end_event.is_some();
+    let midpoint = (ctx.raw_start + ctx.raw_end) / 2;
+
+    // Count clean termini for clipped_ratio
+    if start_matches { arrays.clean_reads_count += 1; }
+    if end_matches { arrays.clean_reads_count += 1; }
+
+    // Coverage: split based on which termini match
+    match (start_matches, end_matches) {
+        (true, true) => {
+            inc(&mut arrays.coverage_reduced, ctx, ctx.raw_start, ctx.raw_end, 1);
+        }
+        (true, false) => {
+            inc(&mut arrays.coverage_reduced, ctx, ctx.raw_start, midpoint, 1);
+        }
+        (false, true) => {
+            inc(&mut arrays.coverage_reduced, ctx, midpoint, ctx.raw_end, 1);
+        }
+        (false, false) => {}
+    }
+
+    // Start position event
+    if let Some(evt_len) = start_event {
+        arrays.start_event_lengths[ctx.start].push(evt_len);
+        if ctx.is_reverse { arrays.start_minus[ctx.start] += 1; }
+        else { arrays.start_plus[ctx.start] += 1; }
+        track_left_clip(arrays, ctx.start, ctx.seq, ctx.cigar_raw, evt_len);
+    }
+
+    // End position event
+    if let Some(evt_len) = end_event {
+        let epos = end_pos(ctx.end, ctx.ref_length, ctx.circular);
+        arrays.end_event_lengths[epos].push(evt_len);
+        if ctx.is_reverse { arrays.end_minus[epos] += 1; }
+        else { arrays.end_plus[epos] += 1; }
+        track_right_clip(arrays, epos, ctx.seq, ctx.cigar_raw, evt_len);
+    }
+}
+
+/// Phagetermini for short reads: only check start, count both positions if valid.
+fn process_phagetermini_short(arrays: &mut FeatureArrays, ctx: &ReadContext, start_event: Option<u32>, start_matches: bool) {
+    if !start_matches { return; }
+
+    arrays.clean_reads_count += 1;
+    inc(&mut arrays.coverage_reduced, ctx, ctx.raw_start, ctx.raw_end, 1);
+
+    let epos = end_pos(ctx.end, ctx.ref_length, ctx.circular);
+    let start_evt_len = start_event.unwrap();
+
+    // Start event
+    arrays.start_event_lengths[ctx.start].push(start_evt_len);
+    track_left_clip(arrays, ctx.start, ctx.seq, ctx.cigar_raw, start_evt_len);
+
+    // End event
+    let end_event = raw_boundary_event_length(ctx.cigar_raw, ctx.md_tag, ctx.is_reverse, ctx.min_clipping_length);
+    let end_evt_len = end_event.unwrap_or(0);
+    arrays.end_event_lengths[epos].push(end_evt_len);
+    track_right_clip(arrays, epos, ctx.seq, ctx.cigar_raw, end_evt_len);
+
+    // Strand counts
+    if ctx.is_reverse {
+        arrays.start_minus[ctx.start] += 1;
+        arrays.end_minus[epos] += 1;
+    } else {
+        arrays.start_plus[ctx.start] += 1;
+        arrays.end_plus[epos] += 1;
+    }
+}
+
+// ============================================================================
+// Core Processing — Entry Point
+// ============================================================================
+
+/// Process a single read and update all feature arrays.
 ///
-/// This is the **heart of the feature calculation**. It's called once for each
-/// read in the BAM file and updates all relevant arrays based on the read's
-/// properties (position, CIGAR, MD tag, flags).
-///
-/// # Arguments
-///
-/// * `arrays` - Mutable reference to the feature arrays to update
-/// * `ref_start` - Start position on reference (0-based)
-/// * `ref_end` - End position on reference (0-based, exclusive)
-/// * `query_length` - Length of the read sequence
-/// * `template_length` - Insert size for paired reads (distance between mates)
-/// * `is_read1` - True if this is read1 of a pair
-/// * `is_proper_pair` - True if mates are properly oriented
-/// * `is_reverse` - True if read is on reverse strand
-/// * `is_secondary` - True if this is a secondary alignment
-/// * `is_supplementary` - True if this is a supplementary alignment
-/// * `mate_unmapped` - True if the mate is not mapped
-/// * `mate_other_contig` - True if the mate is mapped to a different contig
-/// * `cigar_raw` - CIGAR operations as (operation_char, length) tuples
-/// * `md_tag` - Optional MD tag bytes for mismatch detection
-/// * `mapq` - Mapping quality (0-255)
-/// * `seq_type` - Sequencing type (affects which features to calculate)
-/// * `flags` - Which modules are enabled
-/// * `circular` - True if genome is circular (affects position calculations)
-///
-/// # Performance Optimizations
-///
-/// 1. **Branch hoisting**: Conditions like `if flags.coverage` are checked once,
-///    not inside tight loops.
-///
-/// 2. **Non-wrapping fast path**: Most reads don't wrap around circular genomes,
-///    so we have optimized code paths that skip modulo operations.
-///
-/// 3. **Combined loops**: When updating multiple arrays over the same range,
-///    we combine them into one loop to improve cache locality.
-///
-/// 4. **Zero-allocation**: We work directly with raw CIGAR slices instead of
-///    allocating new data structures.
+/// Dispatches to module-specific functions based on enabled flags.
+/// Called once per read in the BAM file.
 #[inline]
 pub fn process_read(
     arrays: &mut FeatureArrays,
@@ -899,503 +1138,52 @@ pub fn process_read(
     circular: bool,
     min_clipping_length: u32,
 ) {
-    // -------------------------------------------------------------------------
-    // Calculate positions
-    // -------------------------------------------------------------------------
     let ref_length = arrays.ref_length();
     let raw_start = ref_start as usize;
     let raw_end = ref_end as usize;
 
-    // For circular genomes (SAM-spec), apply modulo for array bounds.
-    // Keep raw_end for increment_circular to detect wrapping correctly.
-    let start = raw_start % ref_length;
-    let end = raw_end;
+    let ctx = ReadContext {
+        raw_start,
+        raw_end,
+        start: raw_start % ref_length,
+        end: raw_end,
+        ref_length,
+        query_length,
+        template_length,
+        is_read1,
+        is_proper_pair,
+        is_reverse,
+        is_secondary,
+        is_supplementary,
+        mate_unmapped,
+        mate_other_contig,
+        cigar_raw,
+        md_tag,
+        seq,
+        mapq,
+        seq_type,
+        circular,
+        min_clipping_length,
+    };
 
-    // -------------------------------------------------------------------------
-    // Coverage module: primary mappings only
-    // -------------------------------------------------------------------------
+    let is_primary = !is_secondary && !is_supplementary;
+
     if flags.coverage {
-        // Track secondary and supplementary reads separately
-        if is_secondary {
-            if circular {
-                if seq_type.is_long() {
-                    increment_circular_long(&mut arrays.secondary_reads, raw_start, raw_end, 1);
-                } else {
-                    increment_circular(&mut arrays.secondary_reads, start, end, 1);
-                }
-            } else {
-                increment_range(&mut arrays.secondary_reads, start, end, 1);
-            }
-        } else if is_supplementary {
-            if circular {
-                if seq_type.is_long() {
-                    increment_circular_long(&mut arrays.supplementary_reads, raw_start, raw_end, 1);
-                } else {
-                    increment_circular(&mut arrays.supplementary_reads, start, end, 1);
-                }
-            } else {
-                increment_range(&mut arrays.supplementary_reads, start, end, 1);
-            }
-        } else {
-            // Only count primary mappings in main coverage
-            let mapq_val = mapq as u64;
-            if circular {
-                if seq_type.is_long() {
-                    increment_circular_long(&mut arrays.primary_reads, raw_start, raw_end, 1);
-                    increment_circular_long(&mut arrays.sum_mapq, raw_start, raw_end, mapq_val);
-                    // Also track strand-specific coverage
-                    if is_reverse {
-                        increment_circular_long(&mut arrays.primary_reads_minus_only, raw_start, raw_end, 1);
-                    } else {
-                        increment_circular_long(&mut arrays.primary_reads_plus_only, raw_start, raw_end, 1);
-                    }
-                } else {
-                    increment_circular(&mut arrays.primary_reads, start, end, 1);
-                    increment_circular(&mut arrays.sum_mapq, start, end, mapq_val);
-                    // Also track strand-specific coverage
-                    if is_reverse {
-                        increment_circular(&mut arrays.primary_reads_minus_only, start, end, 1);
-                    } else {
-                        increment_circular(&mut arrays.primary_reads_plus_only, start, end, 1);
-                    }
-                }
-            } else {
-                increment_range(&mut arrays.primary_reads, start, end, 1);
-                increment_range(&mut arrays.sum_mapq, start, end, mapq_val);
-                // Also track strand-specific coverage
-                if is_reverse {
-                    increment_range(&mut arrays.primary_reads_minus_only, start, end, 1);
-                } else {
-                    increment_range(&mut arrays.primary_reads_plus_only, start, end, 1);
-                }
-            }
-        }
+        process_coverage(arrays, &ctx);
     }
-
-    // -------------------------------------------------------------------------
-    // Long-reads module - primary mappings only
-    // -------------------------------------------------------------------------
-    if flags.long_read_metrics && seq_type.is_long() && !is_secondary && !is_supplementary {
-        // --- Read lengths ---
-        // Track sum and count to compute average read length at each position
-        let ql = query_length as u64;
-
-        // OPTIMIZATION: Non-wrapping case (most common)
-        // Avoids modulo operation in tight loop
-        if raw_end <= ref_length {
-            for p in raw_start..raw_end {
-                arrays.sum_read_lengths[p] += ql;
-                arrays.count_read_lengths[p] += 1;
-            }
-        } else {
-            // Wrapping case (read spans the origin of circular genome)
-            for pos in raw_start..raw_end {
-                let p = pos % ref_length;
-                arrays.sum_read_lengths[p] += ql;
-                arrays.count_read_lengths[p] += 1;
-            }
-        }
+    if flags.long_read_metrics && seq_type.is_long() && is_primary {
+        process_long_read_metrics(arrays, &ctx);
     }
-
-    // -------------------------------------------------------------------------
-    // Paired-reads module - primary mappings only
-    // -------------------------------------------------------------------------
-    if flags.paired_read_metrics && seq_type.is_short_paired() && !is_secondary && !is_supplementary {
-        // --- Insert sizes and mate orientation issues ---
-        // Only track insert size for read1 with valid template length
-        // (read2 would double-count the same fragment)
-        let track_insert = is_read1 && template_length > 0;
-        let tl = template_length as u64;
-
-        // Classify mate issues
-        let non_inward = !is_proper_pair && !mate_unmapped && !mate_other_contig;
-        let mate_unmapped_flag = mate_unmapped;
-        let mate_other_contig_flag = mate_other_contig;
-
-        // OPTIMIZATION: Separate non-wrapping and wrapping paths
-        if raw_end <= ref_length {
-            // Non-wrapping fast path
-            for p in raw_start..raw_end {
-                if track_insert {
-                    arrays.sum_insert_sizes[p] += tl;
-                    arrays.count_insert_sizes[p] += 1;
-                }
-                if non_inward {
-                    arrays.non_inward_pairs[p] += 1;
-                }
-                if mate_unmapped_flag {
-                    arrays.mate_not_mapped[p] += 1;
-                }
-                if mate_other_contig_flag {
-                    arrays.mate_on_another_contig[p] += 1;
-                }
-            }
-        } else {
-            // Wrapping case
-            for pos in raw_start..raw_end {
-                let p = pos % ref_length;
-                if track_insert {
-                    arrays.sum_insert_sizes[p] += tl;
-                    arrays.count_insert_sizes[p] += 1;
-                }
-                if non_inward {
-                    arrays.non_inward_pairs[p] += 1;
-                }
-                if mate_unmapped_flag {
-                    arrays.mate_not_mapped[p] += 1;
-                }
-                if mate_other_contig_flag {
-                    arrays.mate_on_another_contig[p] += 1;
-                }
-            }
-        }
+    if flags.paired_read_metrics && seq_type.is_short_paired() && is_primary {
+        process_paired_read_metrics(arrays, &ctx);
     }
-
-    // -------------------------------------------------------------------------
-    // Mapping metrics module - clippings, indels, mismatches (primary only)
-    // Also needed for phagetermini (clippings used for completeness detection)
-    // -------------------------------------------------------------------------
-    if (flags.mapping_metrics || flags.phagetermini) && !is_secondary && !is_supplementary {
-        // --- Clippings from CIGAR ---
-        // Check first and last CIGAR operations for soft/hard clips
-        // Left clippings recorded at first aligned position (start)
-        // Right clippings recorded at last aligned position (end - 1)
-        if !cigar_raw.is_empty() {
-            // Check first operation for left clipping
-            if let Some(&(op, len)) = cigar_raw.first() {
-                if raw_cigar_is_clipping(op) {
-                    // Record at first aligned position
-                    arrays.left_clipping_lengths[start].push(len);
-                    // Extract clip sequence (truncated to 20bp) for soft clips
-                    if flags.mapping_metrics && op as u8 as char == 'S' && !seq.is_empty() {
-                        let clip_len = (len as usize).min(20).min(seq.len());
-                        track_sequence(&mut arrays.left_clip_sequences, start, &seq[..clip_len]);
-                    }
-                }
-            }
-            // Check last operation for right clipping
-            if let Some(&(op, len)) = cigar_raw.last() {
-                if raw_cigar_is_clipping(op) {
-                    // Record at last aligned position
-                    let clip_pos = if end > 0 {
-                        let pos = end - 1;
-                        if circular { pos % ref_length } else { pos }
-                    } else {
-                        ref_length - 1
-                    };
-                    arrays.right_clipping_lengths[clip_pos].push(len);
-                    // Extract clip sequence (truncated to 20bp) for soft clips
-                    if flags.mapping_metrics && op as u8 as char == 'S' && !seq.is_empty() {
-                        let len_usize = len as usize;
-                        let clip_start = seq.len().saturating_sub(len_usize);
-                        let clip_len = len_usize.min(20);
-                        let clip_end = (clip_start + clip_len).min(seq.len());
-                        track_sequence(&mut arrays.right_clip_sequences, clip_pos, &seq[clip_start..clip_end]);
-                    }
-                }
-            }
-        }
+    if (flags.mapping_metrics || flags.phagetermini) && is_primary {
+        process_clippings(arrays, &ctx, flags);
     }
-
-    // --- Unified CIGAR + MD + SEQ walk (mapping_metrics only) ---
-    // Single walk handles indels, mismatches, and sequence extraction
-    if flags.mapping_metrics && !is_secondary && !is_supplementary {
-        let mut ref_pos = raw_start;
-        let mut query_pos: usize = 0;
-
-        // MD tag parsing state
-        let md_bytes = md_tag.unwrap_or(&[]);
-        let mut md_pos: usize = 0;
-        let mut md_match_remaining: usize = 0;
-        let has_md = !md_bytes.is_empty();
-        let has_seq = !seq.is_empty();
-
-        for &(op, len) in cigar_raw {
-            let c = op as u8 as char;
-            let len_usize = len as usize;
-
-            match c {
-                'M' | '=' | 'X' => {
-                    // Match/mismatch region - walk MD tag in parallel
-                    if has_md {
-                        let mut remaining = len_usize;
-                        while remaining > 0 {
-                            if md_match_remaining > 0 {
-                                // Consume matching bases
-                                let consume = md_match_remaining.min(remaining);
-                                ref_pos += consume;
-                                query_pos += consume;
-                                remaining -= consume;
-                                md_match_remaining -= consume;
-                            } else if md_pos < md_bytes.len() {
-                                let b = md_bytes[md_pos];
-                                if b.is_ascii_digit() {
-                                    // Parse match count
-                                    let mut num = 0usize;
-                                    while md_pos < md_bytes.len() && md_bytes[md_pos].is_ascii_digit() {
-                                        num = num * 10 + (md_bytes[md_pos] - b'0') as usize;
-                                        md_pos += 1;
-                                    }
-                                    md_match_remaining = num;
-                                } else if b.is_ascii_uppercase() {
-                                    // Mismatch: record count and read base
-                                    let normalized_pos = ref_pos % ref_length;
-                                    arrays.mismatches[normalized_pos] += 1;
-
-                                    if has_seq && query_pos < seq.len() {
-                                        let read_base = seq[query_pos];
-                                        let base_idx = match read_base {
-                                            b'A' | b'a' => 0usize,
-                                            b'C' | b'c' => 1,
-                                            b'G' | b'g' => 2,
-                                            b'T' | b't' => 3,
-                                            _ => 4, // N or other - skip
-                                        };
-                                        if base_idx < 4 {
-                                            arrays.mismatch_base_counts[normalized_pos][base_idx] += 1;
-                                        }
-                                    }
-
-                                    ref_pos += 1;
-                                    query_pos += 1;
-                                    remaining -= 1;
-                                    md_pos += 1;
-                                } else if b == b'^' {
-                                    // Deletion marker in MD - shouldn't happen inside M block
-                                    // but handle gracefully
-                                    break;
-                                } else {
-                                    md_pos += 1;
-                                }
-                            } else {
-                                // MD exhausted, just advance
-                                ref_pos += remaining;
-                                query_pos += remaining;
-                                remaining = 0;
-                            }
-                        }
-                    } else {
-                        // No MD tag, just advance positions
-                        ref_pos += len_usize;
-                        query_pos += len_usize;
-                    }
-                }
-                'I' => {
-                    // Insertion: extra sequence in read, not in reference
-                    let normalized_pos = ref_pos % ref_length;
-                    arrays.insertion_lengths[normalized_pos].push(len);
-
-                    // Extract insertion sequence (capped to 40bp: first 20 + "..." + last 20)
-                    if has_seq && query_pos + len_usize <= seq.len() {
-                        if len_usize <= 40 {
-                            track_sequence(&mut arrays.insertion_sequences, normalized_pos, &seq[query_pos..query_pos + len_usize]);
-                        } else {
-                            let mut v = seq[query_pos..query_pos + 20].to_vec();
-                            v.extend_from_slice(b"...");
-                            v.extend_from_slice(&seq[query_pos + len_usize - 20..query_pos + len_usize]);
-                            track_sequence(&mut arrays.insertion_sequences, normalized_pos, &v);
-                        }
-                    }
-
-                    query_pos += len_usize;
-                }
-                'D' => {
-                    // Deletion: sequence in reference, not in read
-                    let normalized_pos = ref_pos % ref_length;
-                    arrays.deletion_lengths[normalized_pos].push(len);
-                    for j in 0..len_usize {
-                        arrays.deletions[(ref_pos + j) % ref_length] += 1;
-                    }
-                    ref_pos += len_usize;
-
-                    // Skip deletion bases in MD tag (^ACGT...)
-                    if md_pos < md_bytes.len() && md_bytes[md_pos] == b'^' {
-                        md_pos += 1;
-                        while md_pos < md_bytes.len() && md_bytes[md_pos].is_ascii_uppercase() {
-                            md_pos += 1;
-                        }
-                    }
-                }
-                'S' => {
-                    // Soft clip - only advances query position
-                    query_pos += len_usize;
-                }
-                'N' => {
-                    // Reference skip
-                    ref_pos += len_usize;
-                }
-                'H' => {
-                    // Hard clip - no sequence in BAM, skip
-                }
-                _ => {
-                    // Other ops
-                    if raw_cigar_consumes_ref(op) {
-                        ref_pos += len_usize;
-                    }
-                }
-            }
-        }
-
+    if flags.mapping_metrics && is_primary {
+        process_cigar_walk(arrays, &ctx);
     }
-
-
-    // -------------------------------------------------------------------------
-    // Phagetermini module - primary mappings only
-    // -------------------------------------------------------------------------
-    if flags.phagetermini && !is_secondary && !is_supplementary {
-        // Compute boundary event lengths: Some(0) for exact match, Some(len) for near-match, None if neither
-        let start_event = raw_boundary_event_length(cigar_raw, md_tag, !is_reverse, min_clipping_length);
-        let start_matches = start_event.is_some();
-
-        if seq_type.is_long() {
-            // Long reads: split read in half and check each terminus independently
-            // This avoids losing ~80% of reads that have clipping at one end
-            let end_event = raw_boundary_event_length(cigar_raw, md_tag, is_reverse, min_clipping_length);
-            let end_matches = end_event.is_some();
-            let midpoint = (raw_start as usize + raw_end as usize) / 2;
-
-            // Count clean termini for clipped_ratio calculation
-            // Each clean terminus counts as 1 (a read with both clean = 2)
-            if start_matches { arrays.clean_reads_count += 1; }
-            if end_matches { arrays.clean_reads_count += 1; }
-
-            // Coverage: split based on which termini match
-            // - Both match: full read coverage
-            // - Only start: coverage from start to midpoint
-            // - Only end: coverage from midpoint to end
-            match (start_matches, end_matches) {
-                (true, true) => {
-                    // Both termini match: count full read coverage
-                    if circular {
-                        increment_circular_long(&mut arrays.coverage_reduced, raw_start, raw_end, 1);
-                    } else {
-                        increment_range(&mut arrays.coverage_reduced, start, end, 1);
-                    }
-                }
-                (true, false) => {
-                    // Only start matches: count first half coverage
-                    if circular {
-                        increment_circular_long(&mut arrays.coverage_reduced, raw_start, midpoint, 1);
-                    } else {
-                        increment_range(&mut arrays.coverage_reduced, start, midpoint, 1);
-                    }
-                }
-                (false, true) => {
-                    // Only end matches: count second half coverage
-                    if circular {
-                        increment_circular_long(&mut arrays.coverage_reduced, midpoint, raw_end, 1);
-                    } else {
-                        increment_range(&mut arrays.coverage_reduced, midpoint % ref_length, end, 1);
-                    }
-                }
-                (false, false) => {
-                    // Neither matches: no coverage counted
-                }
-            }
-
-            // Count start position and collect event length only if start matches
-            if let Some(evt_len) = start_event {
-                arrays.start_event_lengths[start].push(evt_len);
-                if is_reverse {
-                    arrays.start_minus[start] += 1;
-                } else {
-                    arrays.start_plus[start] += 1;
-                }
-                // Collect short clip sequence for reads_starts tooltip
-                if evt_len > 0 {
-                    if let Some(&(op, _)) = cigar_raw.first() {
-                        if op as u8 as char == 'S' && !seq.is_empty() {
-                            let clip_len = (evt_len as usize).min(20).min(seq.len());
-                            track_sequence(&mut arrays.start_clip_sequences, start, &seq[..clip_len]);
-                        }
-                    }
-                }
-            }
-
-            // Count end position and collect event length only if end matches
-            if let Some(evt_len) = end_event {
-                let end_pos = if end > 0 {
-                    let pos = end - 1;
-                    if circular { pos % ref_length } else { pos }
-                } else {
-                    0
-                };
-
-                arrays.end_event_lengths[end_pos].push(evt_len);
-                if is_reverse {
-                    arrays.end_minus[end_pos] += 1;
-                } else {
-                    arrays.end_plus[end_pos] += 1;
-                }
-                // Collect short clip sequence for reads_ends tooltip
-                if evt_len > 0 {
-                    if let Some(&(op, _)) = cigar_raw.last() {
-                        if op as u8 as char == 'S' && !seq.is_empty() {
-                            let clip_start = seq.len().saturating_sub(evt_len as usize);
-                            let clip_len = (evt_len as usize).min(20);
-                            let clip_end = (clip_start + clip_len).min(seq.len());
-                            track_sequence(&mut arrays.end_clip_sequences, end_pos, &seq[clip_start..clip_end]);
-                        }
-                    }
-                }
-            }
-        } else {
-            // Short reads: only check start, count both positions if valid
-            if start_matches {
-                arrays.clean_reads_count += 1;
-
-                if circular {
-                    increment_circular(&mut arrays.coverage_reduced, start, end, 1);
-                } else {
-                    increment_range(&mut arrays.coverage_reduced, start, end, 1);
-                }
-
-                let end_pos = if end > 0 {
-                    let pos = end - 1;
-                    if circular { pos % ref_length } else { pos }
-                } else {
-                    0
-                };
-
-                // Collect start event length
-                let start_evt_len = start_event.unwrap();
-                arrays.start_event_lengths[start].push(start_evt_len);
-
-                // Collect short clip sequence for reads_starts tooltip
-                if start_evt_len > 0 {
-                    if let Some(&(op, _)) = cigar_raw.first() {
-                        if op as u8 as char == 'S' && !seq.is_empty() {
-                            let clip_len = (start_evt_len as usize).min(20).min(seq.len());
-                            track_sequence(&mut arrays.start_clip_sequences, start, &seq[..clip_len]);
-                        }
-                    }
-                }
-
-                // Compute and collect end event length separately
-                let end_event = raw_boundary_event_length(cigar_raw, md_tag, is_reverse, min_clipping_length);
-                let end_evt_len = end_event.unwrap_or(0);
-                arrays.end_event_lengths[end_pos].push(end_evt_len);
-
-                // Collect short clip sequence for reads_ends tooltip
-                if end_evt_len > 0 {
-                    if let Some(&(op, _)) = cigar_raw.last() {
-                        if op as u8 as char == 'S' && !seq.is_empty() {
-                            let clip_start = seq.len().saturating_sub(end_evt_len as usize);
-                            let clip_len = (end_evt_len as usize).min(20);
-                            let clip_end = (clip_start + clip_len).min(seq.len());
-                            track_sequence(&mut arrays.end_clip_sequences, end_pos, &seq[clip_start..clip_end]);
-                        }
-                    }
-                }
-
-                if is_reverse {
-                    arrays.start_minus[start] += 1;
-                    arrays.end_minus[end_pos] += 1;
-                } else {
-                    arrays.start_plus[start] += 1;
-                    arrays.end_plus[end_pos] += 1;
-                }
-            }
-        }
+    if flags.phagetermini && is_primary {
+        process_phagetermini(arrays, &ctx);
     }
 }

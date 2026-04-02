@@ -78,9 +78,9 @@ def run_mapping_per_sample(args):
 def _get_version() -> str:
     """Get theBIGbam version from pyproject.toml or fallback."""
     try:
-        from importlib.metadata import version
+        from importlib.metadata import version, PackageNotFoundError
         return version("thebigbam")
-    except Exception:
+    except PackageNotFoundError:
         return "unknown"
 
 
@@ -119,7 +119,7 @@ def _inject_bam_headers(bam_path: Path, circular: bool, threads: int, command_li
         for f in (header_file, reheadered_bam):
             try:
                 f.unlink()
-            except Exception:
+            except OSError:
                 pass
 
 
@@ -260,12 +260,12 @@ def map_with_mapper(threads: int, assembly_file: Path, mapper: str, read1: Optio
         for f in temp_files:
             try:
                 Path(f).unlink()
-            except Exception:
+            except OSError:
                 pass
         for f in bwa_index_sidecars:
             try:
                 f.unlink()
-            except Exception:
+            except OSError:
                 pass
 
 if __name__ == "__main__":

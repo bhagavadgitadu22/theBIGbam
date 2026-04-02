@@ -185,12 +185,6 @@ fn varint_encode(values: &[u32]) -> Vec<u8> {
     buf
 }
 
-/// Encode u32 values as variable-length bytes (LEB128) — for positions.
-#[allow(dead_code)]
-fn varint_encode_u32(values: &[u32]) -> Vec<u8> {
-    varint_encode(values)
-}
-
 /// Compress bytes with zstd.
 fn zstd_compress(data: &[u8]) -> Vec<u8> {
     zstd::encode_all(data.as_ref(), ZSTD_LEVEL).unwrap_or_else(|_| data.to_vec())

@@ -1,4 +1,6 @@
 import os
+import duckdb
+import numpy as np
 from Bio.Seq import Seq
 from Bio.SeqRecord import SeqRecord
 from Bio.SeqFeature import SeqFeature, FeatureLocation
@@ -727,21 +729,9 @@ def get_variable_metadata_batch(cur, subplot_list):
 _DEFAULT_MAX_BASE_RESOLUTION = 10_000  # 10 kb
 
 
-# Legacy RLE constant removed - not needed for BLOB-based architecture
-
-
 # ============================================================================
 # BLOB-based feature data retrieval
 # ============================================================================
-
-def _has_feature_blob_table(cur):
-    """Check if the Feature_blob table exists in this database."""
-    try:
-        cur.execute("SELECT 1 FROM information_schema.tables WHERE table_name = 'Feature_blob'")
-        return cur.fetchone() is not None
-    except Exception:
-        return False
-
 
 def _get_feature_blob(cur, contig_id, sample_id, feature_name):
     """Fetch a single feature BLOB from the Feature_blob table.
@@ -752,15 +742,29 @@ def _get_feature_blob(cur, contig_id, sample_id, feature_name):
     fid = feature_name_to_id(feature_name)
     if fid is None:
         return None
-    try:
-        cur.execute(
-            "SELECT Data FROM Feature_blob WHERE Contig_id=? AND Sample_id=? AND Feature_id=?",
-            (contig_id, sample_id, fid)
-        )
-        row = cur.fetchone()
-        return row[0] if row else None
-    except Exception:
-        return None
+    cur.execute(
+        "SELECT Data FROM Feature_blob WHERE Contig_id=? AND Sample_id=? AND Feature_id=?",
+        (contig_id, sample_id, fid)
+    )
+    row = cur.fetchone()
+    return row[0] if row else None
+
+
+def _get_feature_blobs_batch(cur, contig_id, sample_ids, feature_name):
+    """Fetch feature BLOBs for multiple samples in one query.
+
+    Returns dict mapping sample_id -> raw bytes. Missing samples are omitted.
+    """
+    from thebigbam.database.blob_decoder import feature_name_to_id
+    fid = feature_name_to_id(feature_name)
+    if fid is None:
+        return {}
+    placeholders = ", ".join(["?"] * len(sample_ids))
+    cur.execute(
+        f"SELECT Sample_id, Data FROM Feature_blob WHERE Contig_id=? AND Feature_id=? AND Sample_id IN ({placeholders})",
+        [contig_id, fid] + list(sample_ids)
+    )
+    return {row[0]: row[1] for row in cur.fetchall()}
 
 
 def _get_contig_blob(cur, contig_id, feature_name):
@@ -775,15 +779,12 @@ def _get_contig_blob(cur, contig_id, feature_name):
     fid = contig_blob_name_to_id(feature_name)
     if fid is None:
         return None
-    try:
-        cur.execute(
-            "SELECT Data FROM Contig_blob WHERE Contig_id=? AND Feature_id=?",
-            (contig_id, fid)
-        )
-        row = cur.fetchone()
-        return row[0] if row else None
-    except Exception:
-        return None
+    cur.execute(
+        "SELECT Data FROM Contig_blob WHERE Contig_id=? AND Feature_id=?",
+        (contig_id, fid)
+    )
+    row = cur.fetchone()
+    return row[0] if row else None
 
 
 def _blob_to_feature_dict(blob_bytes, type_picked, xstart=None, xend=None, max_base_resolution=None):
@@ -824,13 +825,12 @@ def _blob_to_feature_dict(blob_bytes, type_picked, xstart=None, xend=None, max_b
     # Slice to window if specified
     if xstart is not None and xend is not None:
         # x is 0-indexed in BLOB, positions are 1-indexed in display
-        mask = (x >= (xstart - 1)) & (x <= (xend - 1))
+        mask = (x >= max(0, xstart - 1)) & (x <= (xend - 1))
         x = x[mask]
         y = y[mask]
         # Also slice metadata arrays
         for key in list(data.keys()):
             if key not in ("x", "y") and hasattr(data[key], '__len__') and len(data[key]) == len(mask):
-                import numpy as np
                 if isinstance(data[key], np.ndarray):
                     data[key] = data[key][mask]
                 elif isinstance(data[key], list):
@@ -879,12 +879,11 @@ def _format_zoom_for_bokeh(zoom_data, type_picked, xstart=None, xend=None):
 
     # Filter to window
     if xstart is not None and xend is not None:
-        mask = (bin_ends >= (xstart - 1)) & (bin_starts <= (xend - 1))
+        mask = (bin_ends >= max(0, xstart - 1)) & (bin_starts <= (xend - 1))
         bin_starts = bin_starts[mask]
         bin_ends = bin_ends[mask]
         for key in zoom_data:
             if key not in ("bin_start", "bin_end"):
-                import numpy as np
                 if isinstance(zoom_data[key], np.ndarray):
                     zoom_data[key] = zoom_data[key][mask]
 
@@ -962,18 +961,12 @@ def get_feature_data(cur, feature, contig_id, sample_id, xstart=None, xend=None,
         # --- BLOB PATH: try Feature_blob table first ---
         if feature_table == "Feature_blob" and not is_contig_table:
             # Extract feature variable name from title→Variable_name mapping
-            # The title in Variable table corresponds to the feature name
-            from thebigbam.database.blob_decoder import feature_name_to_id
-            # Get the variable name from the Variable table
-            try:
-                cur.execute(
-                    "SELECT Variable_name FROM Variable WHERE Title=? AND Feature_table_name='Feature_blob'",
-                    (title,)
-                )
-                vname_row = cur.fetchone()
-                feature_var_name = vname_row[0] if vname_row else None
-            except Exception:
-                feature_var_name = None
+            cur.execute(
+                "SELECT Variable_name FROM Variable WHERE Title=? AND Feature_table_name='Feature_blob'",
+                (title,)
+            )
+            vname_row = cur.fetchone()
+            feature_var_name = vname_row[0] if vname_row else None
 
             if feature_var_name:
                 blob_bytes = _get_feature_blob(cur, contig_id, sample_id, feature_var_name)
@@ -993,15 +986,12 @@ def get_feature_data(cur, feature, contig_id, sample_id, xstart=None, xend=None,
 
         # --- CONTIG BLOB PATH: contig-level features (GC content, GC skew, repeats) ---
         if feature_table == "Contig_blob":
-            try:
-                cur.execute(
-                    "SELECT Variable_name FROM Variable WHERE Title=? AND Feature_table_name='Contig_blob'",
-                    (title,)
-                )
-                vname_row = cur.fetchone()
-                contig_feature_name = vname_row[0] if vname_row else None
-            except Exception:
-                contig_feature_name = None
+            cur.execute(
+                "SELECT Variable_name FROM Variable WHERE Title=? AND Feature_table_name='Contig_blob'",
+                (title,)
+            )
+            vname_row = cur.fetchone()
+            contig_feature_name = vname_row[0] if vname_row else None
 
             if contig_feature_name:
                 blob_bytes = _get_contig_blob(cur, contig_id, contig_feature_name)
@@ -1056,59 +1046,43 @@ def get_feature_data_batch(cur, feature, contig_id, sample_ids, xstart=None, xen
     if not sample_ids:
         return result
 
-    # Build the IN clause placeholders
-    placeholders = ", ".join(["?"] * len(sample_ids))
-
-    # Check once whether we have BLOB storage available
-    _has_blobs = _has_feature_blob_table(cur)
-
     for row in rows:
         type_picked, color, alpha, fill_alpha, size, title, feature_table = row
 
-        # --- BLOB path: try Feature_blob first if available ---
-        if _has_blobs and feature_table == "Feature_blob":
-            from thebigbam.database.blob_decoder import feature_name_to_id as _fid_lookup
-            try:
-                cur.execute(
-                    "SELECT Variable_name FROM Variable WHERE Title=? AND Feature_table_name='Feature_blob'",
-                    (title,)
-                )
-                vname_row = cur.fetchone()
-                feature_var_name = vname_row[0] if vname_row else None
-            except Exception:
-                feature_var_name = None
+        # --- BLOB path: fetch all samples in one query ---
+        if feature_table == "Feature_blob":
+            cur.execute(
+                "SELECT Variable_name FROM Variable WHERE Title=? AND Feature_table_name='Feature_blob'",
+                (title,)
+            )
+            vname_row = cur.fetchone()
+            feature_var_name = vname_row[0] if vname_row else None
 
             if feature_var_name:
-                for sid in sample_ids:
-                    blob_bytes = _get_feature_blob(cur, contig_id, sid, feature_var_name)
-                    if blob_bytes is not None:
-                        blob_dict = _blob_to_feature_dict(blob_bytes, type_picked, xstart, xend, max_base_resolution)
-                        if blob_dict is not None:
-                            feature_dict = {
-                                "type": type_picked, "color": color, "alpha": alpha,
-                                "fill_alpha": fill_alpha, "size": size, "title": title,
-                                "is_relative_scaled": False,
-                                "has_stats": "mean" in blob_dict,
-                                "has_sequences": "sequence" in blob_dict,
-                            }
-                            feature_dict.update(blob_dict)
-                            result[sid].append(feature_dict)
-                continue  # Skip legacy path for this feature
-
-            # BLOB feature not found or failed — skip (no legacy fallback)
+                # Single query for all samples instead of N individual queries
+                blobs_by_sample = _get_feature_blobs_batch(cur, contig_id, sample_ids, feature_var_name)
+                for sid, blob_bytes in blobs_by_sample.items():
+                    blob_dict = _blob_to_feature_dict(blob_bytes, type_picked, xstart, xend, max_base_resolution)
+                    if blob_dict is not None:
+                        feature_dict = {
+                            "type": type_picked, "color": color, "alpha": alpha,
+                            "fill_alpha": fill_alpha, "size": size, "title": title,
+                            "is_relative_scaled": False,
+                            "has_stats": "mean" in blob_dict,
+                            "has_sequences": "sequence" in blob_dict,
+                        }
+                        feature_dict.update(blob_dict)
+                        result[sid].append(feature_dict)
             continue
 
         # --- CONTIG BLOB PATH: contig-level features (GC content, GC skew, repeats) ---
         if feature_table == "Contig_blob":
-            try:
-                cur.execute(
-                    "SELECT Variable_name FROM Variable WHERE Title=? AND Feature_table_name='Contig_blob'",
-                    (title,)
-                )
-                vname_row = cur.fetchone()
-                contig_feature_name = vname_row[0] if vname_row else None
-            except Exception:
-                contig_feature_name = None
+            cur.execute(
+                "SELECT Variable_name FROM Variable WHERE Title=? AND Feature_table_name='Contig_blob'",
+                (title,)
+            )
+            vname_row = cur.fetchone()
+            contig_feature_name = vname_row[0] if vname_row else None
 
             if contig_feature_name:
                 blob_bytes = _get_contig_blob(cur, contig_id, contig_feature_name)

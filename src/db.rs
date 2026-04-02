@@ -5,8 +5,9 @@
 //! - `Sample`: Sample names from BAM files
 //! - `Coverage`: Coverage metrics per contig per sample
 //! - `Contig_annotation`: Gene annotations from GenBank
-//! - `Variable`: Feature metadata (name, type, table name)
-//! - Feature tables: One table per feature type (coverage, tau, etc.)
+//! - `Variable`: Feature metadata (name, type, plot configuration)
+//! - `Feature_blob`: Per-sample feature data as compressed binary blobs
+//! - `Contig_blob`: Contig-level feature data as compressed binary blobs
 //!
 //! DuckDB advantages over SQLite:
 //! - Columnar storage with automatic compression
@@ -200,20 +201,20 @@ impl DbWriter {
     pub fn insert_sample(&self, sample_name: &str, sequencing_type: &str, total_reads: u64, mapped_reads: u64, circular_mapping: bool) -> Result<i64> {
         // Get next sample ID
         let sample_id = {
-            let mut next_id = self.next_sample_id.lock().unwrap();
+            let mut next_id = self.next_sample_id.lock().map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
             let id = *next_id;
             *next_id += 1;
             id
         };
 
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
         conn.execute(
             "INSERT INTO Sample (Sample_id, Sample_name, Sequencing_type, Number_of_reads, Number_of_mapped_reads, Circular_mapping) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![sample_id, sample_name, sequencing_type, total_reads as i64, mapped_reads as i64, circular_mapping],
         )?;
         drop(conn);
 
-        let mut sample_map = self.sample_name_to_id.lock().unwrap();
+        let mut sample_map = self.sample_name_to_id.lock().map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
         sample_map.insert(sample_name.to_string(), sample_id);
 
         Ok(sample_id)
@@ -233,11 +234,11 @@ impl DbWriter {
         circular: bool,
     ) -> Result<()> {
         let sample_id = {
-            let sample_map = self.sample_name_to_id.lock().unwrap();
+            let sample_map = self.sample_name_to_id.lock().map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
             *sample_map.get(sample_name).context("Sample not found")?
         };
 
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
 
         // Appenders handle their own transactions - no explicit BEGIN/COMMIT needed
         // Insert coverage data
@@ -535,7 +536,7 @@ impl DbWriter {
             return Ok(());
         }
 
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
         let mut direct_appender = conn.appender("Contig_directRepeats")
             .context("Failed to create Contig_directRepeats appender")?;
         let mut inverted_appender = conn.appender("Contig_invertedRepeats")
@@ -681,7 +682,7 @@ impl DbWriter {
             return Ok(());
         }
 
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
         let mut appender = conn.appender("Contig_blob")
             .context("Failed to create Contig_blob appender")?;
 
@@ -717,7 +718,6 @@ impl DbWriter {
         }
 
         appender.flush().context("Failed to flush Contig_blob appender")?;
-        eprintln!("Wrote {} GC content BLOBs to Contig_blob table", gc_data.len());
 
         Ok(())
     }
@@ -732,7 +732,7 @@ impl DbWriter {
             return Ok(());
         }
 
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
         let mut appender = conn.appender("Contig_blob")
             .context("Failed to create Contig_blob appender")?;
 
@@ -768,7 +768,6 @@ impl DbWriter {
         }
 
         appender.flush().context("Failed to flush Contig_blob appender")?;
-        eprintln!("Wrote {} GC skew BLOBs to Contig_blob table", gc_data.len());
 
         Ok(())
     }
@@ -865,8 +864,6 @@ impl DbWriter {
                 let blob_data = encode_contig_dense_blob(&dense, scale, contig_length, 1);
                 appender.append_row(params![*contig_id, feature_id, blob_data])?;
             }
-
-            eprintln!("Wrote {} features to Contig_blob from {}", feature_id, table_name);
         }
 
         appender.flush().context("Failed to flush Contig_blob appender")?;
@@ -876,7 +873,7 @@ impl DbWriter {
     /// Update Contig table with GC statistics (average, sd) and GC skew stats.
     /// Called after computing GC content and GC skew for all contigs.
     pub fn update_contig_gc_stats(&self, gc_data: &[GCContentData]) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
         let mut stmt = conn.prepare(
             "UPDATE Contig SET GC_mean = ?, GC_sd = ?, GC_skew_amplitude = ?, Positive_GC_skew_windows_percentage = ? WHERE Contig_name = ?"
         )?;
@@ -903,9 +900,8 @@ impl DbWriter {
         min_coverage_depth: f64,
         curve_ratio: f64,
         bar_ratio: f64,
-        contig_variation_percentage: f64,
     ) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
         let now = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
 
         // Build version string with optional git short hash
@@ -932,7 +928,6 @@ impl DbWriter {
             ("Min_coverage_depth", min_coverage_depth.to_string()),
             ("Variation_percentage", curve_ratio.to_string()),
             ("Coverage_percentage", bar_ratio.to_string()),
-            ("Contig_variation_percentage", contig_variation_percentage.to_string()),
         ];
 
         for (key, value) in &rows {
@@ -948,7 +943,7 @@ impl DbWriter {
 
     /// Update modification-related metadata (for extend mode).
     pub fn update_metadata_modification(&self) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
         let now = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
 
         let mut version = env!("CARGO_PKG_VERSION").to_string();

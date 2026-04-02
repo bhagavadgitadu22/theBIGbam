@@ -265,48 +265,6 @@ pub fn merge_identical_runs(runs: Vec<Run>) -> Vec<Run> {
 }
 
 
-/// Compress a feature signal using adaptive RLE.
-///
-/// Convenience wrapper around `add_compressed_feature_with_reference` with no reference signal.
-#[inline]
-pub fn add_compressed_feature(
-    values: &[f64],
-    feature: &str,
-    _contig_name: &str,
-    config: &ProcessConfig,
-) {
-    add_compressed_feature_with_reference(values, None, feature, config);
-}
-
-/// Compress a feature signal with optional coverage reference.
-///
-/// Returns the compressed runs (used downstream for metrics like clipping runs).
-#[inline]
-pub fn add_compressed_feature_with_reference(
-    values: &[f64],
-    reference: Option<&[f64]>,
-    feature: &str,
-    config: &ProcessConfig,
-) -> Vec<Run> {
-    let plot_type = get_plot_type(feature);
-    compress_signal_with_reference(values, reference, plot_type, config.curve_ratio, config.bar_ratio)
-}
-
-/// Compress a feature signal with median statistics (for reads_starts/reads_ends).
-///
-/// Returns the compressed runs.
-#[inline]
-pub fn add_compressed_feature_with_median(
-    counts: &[f64],
-    _medians: &[f64],
-    reference: Option<&[f64]>,
-    feature: &str,
-    config: &ProcessConfig,
-) -> Vec<Run> {
-    let plot_type = get_plot_type(feature);
-    compress_signal_with_reference(counts, reference, plot_type, config.curve_ratio, config.bar_ratio)
-}
-
 /// Compress a feature signal with statistics (for clippings/insertions).
 ///
 /// Returns the compressed runs (used for clipping run metrics).

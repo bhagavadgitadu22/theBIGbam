@@ -11,7 +11,7 @@ except ImportError:
     _rust = None
 
 
-def calculating_all_features_parallel(list_modules, bam_files, output_db, min_aligned_fraction, min_coverage_depth, curve_ratio, bar_ratio, contig_variation_percentage=0.1, n_sample_cores=None, sequencing_type=None, genbank_path=None, assembly_path=None, extend_db=None, min_occurrences=2):
+def calculating_all_features_parallel(list_modules, bam_files, output_db, min_aligned_fraction, min_coverage_depth, curve_ratio, bar_ratio, n_sample_cores=None, sequencing_type=None, genbank_path=None, assembly_path=None, extend_db=None, min_occurrences=2):
     """Process all BAM files in parallel using Rust bindings."""
     if not HAS_RUST:
         sys.exit("ERROR: Rust bindings (thebigbam_rs) are required but not available. Please install them first.")
@@ -33,7 +33,6 @@ def calculating_all_features_parallel(list_modules, bam_files, output_db, min_al
             min_coverage_depth=float(min_coverage_depth),
             curve_ratio=float(curve_ratio),
             bar_ratio=float(bar_ratio),
-            contig_variation_percentage=float(contig_variation_percentage),
             create_indexes=True,
             assembly_path=assembly_path if assembly_path else "",
             extend_db=extend_db if extend_db else "",
@@ -60,7 +59,6 @@ def add_calculate_args(parser):
     parser.add_argument("--min_aligned_fraction", type=int, default=50, help="Minimum alignment-length coverage proportion for contig inclusion (default: 50%%)")
     parser.add_argument("--min_coverage_depth", type=int, default=0, help="Minimum mean coverage depth for contig inclusion (disabled by default, e.g. 5 to filter low-depth contigs)")
     parser.add_argument('--coverage_percentage', type=float, default=10, help='Compressing ratio for features depending on coverage: only values above this %% of the local coverage are kept (default: 10%%)')
-    parser.add_argument('--contig_variation_percentage', type=float, default=10, help='Run-length encoding ratio for contig-level features like GC content (default: 10%%)')
     parser.add_argument('--min_occurrences', type=int, default=2, help='Minimum absolute event count for sparse features (default: 2). Position kept only if value > coverage × coverage_percentage AND value > min_occurrences.')
     parser.add_argument('--extend', action='store_true', help='Extend an existing database with new samples (and optionally new contigs)')
 
@@ -173,7 +171,6 @@ def run_calculate_args(args):
     min_aligned_fraction = args.min_aligned_fraction
     min_coverage_depth = args.min_coverage_depth
     coverage_percentage = args.coverage_percentage
-    contig_variation_percentage = args.contig_variation_percentage
     n_cores = int(args.threads)
 
     if genbank_path and not os.path.exists(genbank_path):
@@ -191,7 +188,7 @@ def run_calculate_args(args):
     print("\nCalculating values for all requested features from mapping files...", flush=True)
     calculating_all_features_parallel(
         requested_modules, bam_files, output_db, min_aligned_fraction, min_coverage_depth, coverage_percentage, coverage_percentage,
-        contig_variation_percentage=contig_variation_percentage, n_sample_cores=n_cores,
+        n_sample_cores=n_cores,
         sequencing_type=args.sequencing_type, genbank_path=genbank_path,
         assembly_path=assembly_path,
         extend_db=output_db if is_extending else None,

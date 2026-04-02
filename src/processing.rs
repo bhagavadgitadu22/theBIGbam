@@ -49,8 +49,6 @@ pub struct ProcessConfig {
     /// Relative tolerance for RLE compression (e.g., 0.1 = 10% change threshold)
     pub curve_ratio: f64,
     pub bar_ratio: f64,
-    /// RLE compression tolerance for contig-level features like GC content (default 0.1%)
-    pub contig_variation_percentage: f64,
     /// Sequencing type: if None, auto-detect per sample; if Some, use for all samples
     pub sequencing_type: Option<SequencingType>,
     /// Phage termini detection configuration
@@ -1149,7 +1147,7 @@ pub fn process_sample(
             }
 
             // Build CDS index for this contig (for codon analysis)
-            let contig_idx = contigs.iter().position(|c| c.name == ref_name).unwrap();
+            let contig_idx = contigs.iter().position(|c| c.name == ref_name)?;
             let contig_id = (contig_idx + 1) as i64;
             let cds_index = if flags.mapping_metrics && !annotations.is_empty() {
                 let idx = CdsIndex::from_annotations(annotations, contig_id);
@@ -1493,7 +1491,6 @@ pub fn run_all_samples(
             config.min_coverage_depth,
             config.curve_ratio,
             config.bar_ratio,
-            config.contig_variation_percentage,
         )?;
         (writer, new_contigs_for_blast)
     };
@@ -1523,8 +1520,8 @@ pub fn run_all_samples(
         .iter()
         .filter_map(|contig| {
             contig.sequence.as_ref().map(|seq| {
-                let (gc_values, stats) = compute_gc_content(seq, config.gc_params.gc_content_window_size, config.contig_variation_percentage);
-                let (skew_values, skew_stats) = compute_gc_skew(seq, config.gc_params.gc_skew_window_size, config.contig_variation_percentage);
+                let (gc_values, stats) = compute_gc_content(seq, config.gc_params.gc_content_window_size);
+                let (skew_values, skew_stats) = compute_gc_skew(seq, config.gc_params.gc_skew_window_size);
                 GCContentData {
                     contig_name: contig.name.clone(),
                     gc_values,

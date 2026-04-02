@@ -132,7 +132,7 @@ def run_export(args):
         # Check the view exists
         try:
             conn.execute(f"SELECT 1 FROM {view_name} LIMIT 0")
-        except Exception:
+        except duckdb.Error:
             print(
                 f"Error: view '{view_name}' not found in database. "
                 f"Was the corresponding module calculated?",

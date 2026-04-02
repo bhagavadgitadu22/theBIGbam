@@ -20,12 +20,8 @@ def build_controls(conn):
     cur = conn.cursor()
 
     # Get annotation feature types from Annotated_types table
-    annotation_types = []
-    try:
-        cur.execute("SELECT Type_name FROM Annotated_types ORDER BY Frequency DESC")
-        annotation_types = [r[0] for r in cur.fetchall()]
-    except Exception:
-        pass
+    cur.execute("SELECT Type_name FROM Annotated_types ORDER BY Frequency DESC")
+    annotation_types = [r[0] for r in cur.fetchall()]
 
     # Widget Selector for Contigs (autocomplete with max 20 suggestions)
     cur.execute("SELECT Contig_name, Contig_length FROM Contig ORDER BY Contig_name")
@@ -330,7 +326,7 @@ def create_layout(db_path):
             try:
                 cur.execute(query, [value])
                 return {(row[0], row[1]) for row in cur.fetchall()}
-            except Exception as e:
+            except duckdb.Error as e:
                 print(f"[get_filtering_filtered_pairs] Query error: {e}")
                 return set()
 
@@ -500,15 +496,17 @@ def create_layout(db_path):
 
             # Enforce single selection across all modules in Variables section
             global_toggle_lock['locked'] = True
-            for other in widgets['variables_widgets_all']:
-                if other is cbg:
-                    if sel_index is None:
-                        other.active = []
+            try:
+                for other in widgets['variables_widgets_all']:
+                    if other is cbg:
+                        if sel_index is None:
+                            other.active = []
+                        else:
+                            other.active = [sel_index]
                     else:
-                        other.active = [sel_index]
-                else:
-                    other.active = []
-            global_toggle_lock['locked'] = False
+                        other.active = []
+            finally:
+                global_toggle_lock['locked'] = False
         return callback
 
     # Views (One sample / All samples) callback: show/hide sample-related controls
@@ -517,27 +515,26 @@ def create_layout(db_path):
 
         # Lock callbacks during view change to prevent cascading updates
         global_toggle_lock['locked'] = True
+        try:
+            # Toggle Sample section - hide entirely in All Samples view
+            separator_samples.visible = not is_all
+            sample_title.visible = not is_all
+            above_sample_content.visible = not is_all
+            widgets['sample_select'].visible = not is_all
 
-        # Toggle Sample section - hide entirely in All Samples view
-        separator_samples.visible = not is_all
-        sample_title.visible = not is_all
-        above_sample_content.visible = not is_all
-        widgets['sample_select'].visible = not is_all
+            # Toggle visibility between the two variables sections
+            # Each section maintains its own state independently
+            variables_section_one.visible = not is_all
+            variables_section_all.visible = is_all
+            sample_params_header.visible = is_all
 
-        # Toggle visibility between the two variables sections
-        # Each section maintains its own state independently
-        variables_section_one.visible = not is_all
-        variables_section_all.visible = is_all
-        sample_params_header.visible = is_all
-
-        # Refresh options while still locked (suppresses cascading callbacks)
-        # Don't invalidate filtering cache - filtering is shared between views and hasn't changed
-        refresh_contig_options_unlocked()
-        if not is_all:
-            refresh_sample_options_unlocked()
-
-        # Unlock AFTER refreshes complete
-        global_toggle_lock['locked'] = False
+            # Refresh options while still locked (suppresses cascading callbacks)
+            # Don't invalidate filtering cache - filtering is shared between views and hasn't changed
+            refresh_contig_options_unlocked()
+            if not is_all:
+                refresh_sample_options_unlocked()
+        finally:
+            global_toggle_lock['locked'] = False
         update_section_titles()
 
     ## Apply button function
@@ -575,7 +572,7 @@ def create_layout(db_path):
             
             # Parse position inputs
             try:
-                xstart = max(1, int(from_position_input.value)) if from_position_input.value.strip() else 1
+                xstart = int(from_position_input.value) if from_position_input.value.strip() else 1
                 xend = int(to_position_input.value) if to_position_input.value.strip() else contig_length
             except ValueError:
                 peruse_button.visible = False
@@ -903,7 +900,7 @@ def create_layout(db_path):
     def make_data_download_callback():
         """Create callback for feature data download.
 
-        Queries DuckDB directly for raw RLE feature data within the
+        Queries DuckDB directly for feature data within the
         current contig/sample/position range.
         """
         from .downloading_data import download_feature_data_csv, make_safe_filename
@@ -918,7 +915,7 @@ def create_layout(db_path):
         # Parse current position range
         contig_length = widgets['contig_lengths'].get(contig, 0)
         try:
-            xstart = max(1, int(from_position_input.value)) if from_position_input.value.strip() else 1
+            xstart = int(from_position_input.value) if from_position_input.value.strip() else 1
             xend = int(to_position_input.value) if to_position_input.value.strip() else contig_length
         except ValueError:
             xstart = 1
@@ -1029,9 +1026,11 @@ def create_layout(db_path):
         """Refresh contig and sample options when Filtering2 values change."""
         _filtering_cache['valid'] = False
         global_toggle_lock['locked'] = True
-        refresh_contig_options_unlocked()
-        refresh_sample_options_unlocked()
-        global_toggle_lock['locked'] = False
+        try:
+            refresh_contig_options_unlocked()
+            refresh_sample_options_unlocked()
+        finally:
+            global_toggle_lock['locked'] = False
         update_section_titles()
 
     def create_query_row(section_data):
@@ -1237,24 +1236,20 @@ def create_layout(db_path):
         section_children = []
 
         for i, row_data in enumerate(section_data['rows']):
-            # Add AND div before each row except the first
+            # Add AND/OR div before each row except the first
             if i > 0:
-                select_widget = Select(
-                    options=["AND", "OR"],
-                    value="AND",
-                    margin=(5, 0, 5, 0)
-                )
-                # Add callback to refresh when AND/OR changes
-                def _on_and_or_change(attr, old, new):
-                    _filtering_cache['valid'] = False
-                    global_toggle_lock['locked'] = True
-                    refresh_contig_options_unlocked()
-                    refresh_sample_options_unlocked()
-                    global_toggle_lock['locked'] = False
-                    update_section_titles()
-                select_widget.on_change('value', _on_and_or_change)
+                # Reuse existing widget to preserve user's AND/OR selection
+                if row_data['and_div'] is not None:
+                    select_widget = row_data['and_div']
+                else:
+                    select_widget = Select(
+                        options=["AND", "OR"],
+                        value="AND",
+                        margin=(5, 0, 5, 0)
+                    )
+                    select_widget.on_change('value', lambda attr, old, new: refresh_on_filter_change())
+                    row_data['and_div'] = select_widget
                 section_children.append(select_widget)
-                row_data['and_div'] = select_widget
             else:
                 row_data['and_div'] = None
 
@@ -1318,25 +1313,20 @@ def create_layout(db_path):
     def rebuild_filtering_content():
         """Rebuild the entire Filtering content with all OR sections."""
         content_children = []
+        # Preserve existing inter-section AND/OR values before clearing
+        old_values = [s.value for s in inter_section_selects]
         inter_section_selects.clear()
 
         for i, section_data in enumerate(or_sections):
-            # Add OR div before each section except the first
+            # Add AND/OR div before each section except the first
             if i > 0:
+                old_val = old_values[i - 1] if i - 1 < len(old_values) else "AND"
                 select_widget = Select(
                     options=["AND", "OR"],
-                    value="AND",
+                    value=old_val,
                     margin=(5, 0, 5, 0)
                 )
-                # Add callback to refresh when AND/OR changes
-                def _on_and_or_change(attr, old, new):
-                    _filtering_cache['valid'] = False
-                    global_toggle_lock['locked'] = True
-                    refresh_contig_options_unlocked()
-                    refresh_sample_options_unlocked()
-                    global_toggle_lock['locked'] = False
-                    update_section_titles()
-                select_widget.on_change('value', _on_and_or_change)
+                select_widget.on_change('value', lambda attr, old, new: refresh_on_filter_change())
                 inter_section_selects.append(select_widget)
                 content_children.append(select_widget)
 
@@ -1386,8 +1376,10 @@ def create_layout(db_path):
         if global_toggle_lock['locked']:
             return
         global_toggle_lock['locked'] = True
-        refresh_contig_options_unlocked()
-        global_toggle_lock['locked'] = False
+        try:
+            refresh_contig_options_unlocked()
+        finally:
+            global_toggle_lock['locked'] = False
         update_section_titles()
     widgets['sample_select'].param.watch(_on_sample_change, 'value')
 
@@ -1415,8 +1407,10 @@ def create_layout(db_path):
             return
         new = event.new
         global_toggle_lock['locked'] = True
-        refresh_sample_options_unlocked()
-        global_toggle_lock['locked'] = False
+        try:
+            refresh_sample_options_unlocked()
+        finally:
+            global_toggle_lock['locked'] = False
         update_section_titles()
         # Update position inputs when contig changes
         if new and new in widgets['contig_lengths']:
@@ -1547,37 +1541,31 @@ def create_layout(db_path):
 
     # Phage color scheme checkbox - only show if database has CDS features with PHAROKKA functions
     phage_colors_cbg = None
-    try:
-        cur = conn.cursor()
-        result = cur.execute(
-            "SELECT Status FROM Constants_for_plotting WHERE Constant = 'pharokka'"
-        ).fetchone()
-        has_pharokka_functions = result[0] if result else False
+    cur = conn.cursor()
+    result = cur.execute(
+        "SELECT Status FROM Constants_for_plotting WHERE Constant = 'pharokka'"
+    ).fetchone()
+    has_pharokka_functions = result[0] if result else False
 
-        if has_pharokka_functions:
-            phage_colors_cbg = CheckboxGroup(
-                labels=["Use phage color scheme for CDS"],
-                active=[]
-            )
-    except Exception:
-        pass  # Constants_for_plotting table might not exist in older databases
+    if has_pharokka_functions:
+        phage_colors_cbg = CheckboxGroup(
+            labels=["Use phage color scheme for CDS"],
+            active=[]
+        )
 
     # Plot isoforms checkbox - only show if at least one locus_tag appears more than once
     plot_isoforms_cbg = None
-    try:
-        cur = conn.cursor()
-        result = cur.execute(
-            "SELECT Status FROM Constants_for_plotting WHERE Constant = 'isoforms'"
-        ).fetchone()
-        has_isoforms = result[0] if result else False
+    cur = conn.cursor()
+    result = cur.execute(
+        "SELECT Status FROM Constants_for_plotting WHERE Constant = 'isoforms'"
+    ).fetchone()
+    has_isoforms = result[0] if result else False
 
-        if has_isoforms:
-            plot_isoforms_cbg = CheckboxGroup(
-                labels=["Plot isoforms"],
-                active=[]  # Unchecked by default
-            )
-    except Exception:
-        pass  # Constants_for_plotting table or isoforms constant might not exist in older databases
+    if has_isoforms:
+        plot_isoforms_cbg = CheckboxGroup(
+            labels=["Plot isoforms"],
+            active=[]  # Unchecked by default
+        )
 
     # Build combined labels: Genome features (without Gene map) + Custom contig features
     combined_labels = []
@@ -1596,7 +1584,7 @@ def create_layout(db_path):
     below_contig_children = []
     
     # Create position range inputs
-    from_position_input = TextInput(value="0", placeholder="Start position", sizing_mode="stretch_width", margin=(0, 0, 0, 0))
+    from_position_input = TextInput(value="1", placeholder="Start position", sizing_mode="stretch_width", margin=(0, 0, 0, 0))
     to_position_input = TextInput(value="", placeholder="End position", sizing_mode="stretch_width", margin=(0, 0, 0, 0))
     
     position_label_from = Div(text="From", width=40, margin=(5, 0, 5, 5))
@@ -1625,13 +1613,9 @@ def create_layout(db_path):
     below_contig_children.append(position_row)
 
     # Check if sequence data is available in the database
-    has_sequence_data = False
-    try:
-        cur = conn.cursor()
-        cur.execute("SELECT 1 FROM information_schema.tables WHERE table_name = 'Contig_sequence'")
-        has_sequence_data = cur.fetchone() is not None
-    except Exception:
-        pass
+    cur = conn.cursor()
+    cur.execute("SELECT 1 FROM information_schema.tables WHERE table_name = 'Contig_sequence'")
+    has_sequence_data = cur.fetchone() is not None
 
     sequence_cbg = None
     sequence_row = None
@@ -1640,13 +1624,9 @@ def create_layout(db_path):
         sequence_row = row(sequence_cbg, sizing_mode="stretch_width")
 
     # Check if translated annotation data is available
-    has_translated_data = False
-    try:
-        cur = conn.cursor()
-        cur.execute("SELECT 1 FROM information_schema.columns WHERE table_name = 'Contig_annotation' AND column_name = 'Protein_sequence'")
-        has_translated_data = cur.fetchone() is not None
-    except Exception:
-        pass
+    cur = conn.cursor()
+    cur.execute("SELECT 1 FROM information_schema.columns WHERE table_name = 'Contig_annotation' AND column_name = 'Protein_sequence'")
+    has_translated_data = cur.fetchone() is not None
 
     translated_sequence_cbg = None
     translated_sequence_row = None
@@ -1947,7 +1927,7 @@ def run_serve(args):
         db_name = os.path.basename(args.db)
         params = []
         for key in ['Modules', 'Min_aligned_fraction', 'Min_coverage_depth',
-                     'Coverage_percentage', 'Contig_variation_percentage']:
+                     'Coverage_percentage']:
             if key in meta:
                 params.append(f"{key}={meta[key]}")
         print(f"Database '{db_name}': "
@@ -1958,8 +1938,6 @@ def run_serve(args):
         if params:
             params_str = '\n '.join(params)
             print(f"Calculate parameters used:\n {params_str}")
-    except Exception:
-        pass  # Older databases without metadata
     finally:
         _conn.close()
 

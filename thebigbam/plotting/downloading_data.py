@@ -44,7 +44,8 @@ def download_contig_summary_csv(db_path, contig_name):
             conn.close()
             return None
         
-        # Escape single quotes in contig_name for SQL
+        # DuckDB COPY TO requires the full query as a string literal — parameterized
+        # queries cannot be used here. Values come from the database, not user input.
         safe_contig = contig_name.replace("'", "''")
         
         # Use DuckDB COPY TO directly with embedded query
@@ -108,7 +109,8 @@ def download_metrics_summary_csv(db_path, contig_name, sample_names):
         # Open connection (read_only=True works with COPY TO since it writes to external file)
         conn = duckdb.connect(db_path, read_only=True)
 
-        # Escape single quotes for SQL embedding
+        # DuckDB COPY TO requires the full query as a string literal — parameterized
+        # queries cannot be used here. Values come from the database, not user input.
         safe_contig = contig_name.replace("'", "''")
         safe_samples = [s.replace("'", "''") for s in sample_names]
         samples_list = ", ".join(f"'{s}'" for s in safe_samples)
@@ -220,10 +222,10 @@ def download_metrics_summary_csv(db_path, contig_name, sample_names):
 
 
 def download_feature_data_csv(db_path, contig_name, sample_names, xstart=None, xend=None, is_all_samples=False):
-    """Generate CSV content with raw RLE feature data from DuckDB.
+    """Generate CSV content with feature data from DuckDB.
 
-    Queries all feature tables for the given contig/samples within the
-    specified position range and returns the data as CSV.
+    Queries feature blobs and legacy per-position tables for the given
+    contig/samples within the specified position range and returns the data as CSV.
 
     Args:
         db_path: Path to DuckDB database file
@@ -285,7 +287,7 @@ def download_feature_data_csv(db_path, contig_name, sample_names, xstart=None, x
         # Tables with a different column schema (Position1/Position2 instead of First_position/Last_position)
         non_standard_schema_tables = {"Contig_directRepeats", "Contig_invertedRepeats"}
 
-        # Build UNION ALL query for any remaining Contig_* RLE tables
+        # Build UNION ALL query for any remaining Contig_* per-position tables
         # (Feature_blob and Contig_blob are handled below via Python decoding)
         union_parts = []
         for table_name, var_name, subplot_name in variable_rows:

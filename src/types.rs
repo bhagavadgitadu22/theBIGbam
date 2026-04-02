@@ -15,8 +15,6 @@
 //! - **`&'static str`**: A string that lives for the entire program (like string literals).
 //! - **`Option<T>`**: Rust's way of handling "maybe there's a value" - like Python's `Optional[T]` or `None`.
 
-use std::collections::HashMap;
-
 // ============================================================================
 // Sequencing Types
 // ============================================================================
@@ -480,20 +478,6 @@ pub struct PackagingData {
 
 /// Type alias for feature calculation results.
 ///
-/// Maps feature names to their per-position values.
-///
-/// # Rust concept - `type` alias:
-/// This creates a shorthand name for a complex type. Instead of writing
-/// `HashMap<String, Vec<u64>>` everywhere, we can write `FeatureMap`.
-///
-/// # Example:
-/// ```rust
-/// let mut results: FeatureMap = HashMap::new();
-/// results.insert("coverage".to_string(), vec![10, 15, 20, 18, ...]);
-/// results.insert("reads_starts".to_string(), vec![0, 1, 0, 0, 5, ...]);
-/// ```
-pub type FeatureMap = HashMap<String, Vec<u64>>;
-
 // ============================================================================
 // Statistics Helpers
 // ============================================================================
