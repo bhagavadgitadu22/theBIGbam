@@ -42,6 +42,7 @@ impl DbWriter {
         db_path: &Path,
         contigs: &[ContigInfo],
         annotations: &[FeatureAnnotation],
+        contig_qualifiers: &[(i64, HashMap<String, String>)],
         has_bam: bool,
     ) -> Result<Self> {
         // Remove existing database if present
@@ -63,8 +64,11 @@ impl DbWriter {
         // Insert codon table (standard genetic code)
         insert_codon_table(&conn)?;
 
-        // Insert annotations
+        // Insert annotations and their qualifiers
         insert_annotations(&conn, annotations)?;
+
+        // Insert contig-level qualifiers from source features
+        insert_contig_qualifiers(&conn, contig_qualifiers)?;
 
         // Populate Annotated_types table with distinct Type values from Contig_annotation
         populate_annotated_types(&conn)?;
@@ -90,6 +94,7 @@ impl DbWriter {
         db_path: &Path,
         new_contigs: &[ContigInfo],
         new_annotations: &[FeatureAnnotation],
+        new_contig_qualifiers: &[(i64, HashMap<String, String>)],
         has_bam: bool,
     ) -> Result<Self> {
         let conn = Connection::open(db_path)
@@ -131,6 +136,15 @@ impl DbWriter {
 
             // Insert new contig sequences
             insert_contig_sequences_with_offset(&conn, new_contigs, max_contig_id)?;
+
+            // Insert contig-level qualifiers (remapped to new contig IDs)
+            if !new_contig_qualifiers.is_empty() {
+                let remapped_quals: Vec<(i64, HashMap<String, String>)> = new_contig_qualifiers
+                    .iter()
+                    .map(|(cid, quals)| (cid + max_contig_id, quals.clone()))
+                    .collect();
+                insert_contig_qualifiers(&conn, &remapped_quals)?;
+            }
 
             // Insert new annotations (remap contig_ids: parser uses 1-based, we offset by max_contig_id)
             if !new_annotations.is_empty() {
@@ -1375,7 +1389,7 @@ fn create_core_tables(conn: &Connection, has_bam: bool) -> Result<()> {
     .context("Failed to create Topology table")?;
     } // end if has_bam (Misassembly, Microdiversity, Side_misassembly, Topology)
 
-    // No auto-increment ID needed
+    // Structural annotation data only — qualifiers go in Annotation_qualifier
     conn.execute(
         "CREATE TABLE Contig_annotation_core (
             Annotation_id INTEGER PRIMARY KEY,
@@ -1384,15 +1398,35 @@ fn create_core_tables(conn: &Connection, has_bam: bool) -> Result<()> {
             \"End\" INTEGER,
             Strand INTEGER,
             \"Type\" TEXT,
-            Product TEXT,
-            \"Function\" TEXT,
-            Phrog INTEGER,
-            Locus_tag TEXT,
             Longest_isoform BOOLEAN
         )",
         [],
     )
     .context("Failed to create Contig_annotation_core table")?;
+
+    // Key-value store for all annotation qualifiers (product, function, locus_tag, phrog, gene, note, db_xref, ...)
+    conn.execute(
+        "CREATE TABLE Annotation_qualifier (
+            Annotation_id INTEGER REFERENCES Contig_annotation_core(Annotation_id),
+            \"Key\" TEXT,
+            \"Value\" TEXT,
+            PRIMARY KEY (Annotation_id, \"Key\")
+        )",
+        [],
+    )
+    .context("Failed to create Annotation_qualifier table")?;
+
+    // Key-value store for contig-level qualifiers from GenBank "source" features (organism, host, strain, ...)
+    conn.execute(
+        "CREATE TABLE Contig_qualifier (
+            Contig_id INTEGER REFERENCES Contig(Contig_id),
+            \"Key\" TEXT,
+            \"Value\" TEXT,
+            PRIMARY KEY (Contig_id, \"Key\")
+        )",
+        [],
+    )
+    .context("Failed to create Contig_qualifier table")?;
 
     // Heavy sequence data stored separately — only queried for codon analysis and export
     conn.execute(
@@ -1407,12 +1441,24 @@ fn create_core_tables(conn: &Connection, has_bam: bool) -> Result<()> {
     )
     .context("Failed to create Annotation_sequence table")?;
 
-    // Backward-compatible view named "Contig_annotation" so all existing Python queries work unchanged
+    // Convenience view that pivots common qualifiers into columns for backward compatibility.
+    // All existing Python queries use this view.
     conn.execute(
         "CREATE VIEW Contig_annotation AS
-         SELECT ca.*, aseq.Nucleotide_sequence, aseq.Protein_sequence, aseq.S_sites, aseq.N_sites
+         SELECT ca.Annotation_id, ca.Contig_id, ca.\"Start\", ca.\"End\", ca.Strand, ca.\"Type\", ca.Longest_isoform,
+            MAX(CASE WHEN aq.\"Key\" = 'product' THEN aq.\"Value\" END) AS Product,
+            MAX(CASE WHEN aq.\"Key\" = 'function' THEN aq.\"Value\" END) AS \"Function\",
+            MAX(CASE WHEN aq.\"Key\" = 'locus_tag' THEN aq.\"Value\" END) AS Locus_tag,
+            MAX(CASE WHEN aq.\"Key\" = 'phrog' THEN TRY_CAST(aq.\"Value\" AS INTEGER) END) AS Phrog,
+            MAX(CASE WHEN aq.\"Key\" = 'gene' THEN aq.\"Value\" END) AS Gene,
+            MAX(aseq.Nucleotide_sequence) AS Nucleotide_sequence,
+            MAX(aseq.Protein_sequence) AS Protein_sequence,
+            MAX(aseq.S_sites) AS S_sites,
+            MAX(aseq.N_sites) AS N_sites
          FROM Contig_annotation_core ca
-         LEFT JOIN Annotation_sequence aseq ON ca.Annotation_id = aseq.Annotation_id",
+         LEFT JOIN Annotation_qualifier aq ON ca.Annotation_id = aq.Annotation_id
+         LEFT JOIN Annotation_sequence aseq ON ca.Annotation_id = aseq.Annotation_id
+         GROUP BY ca.Annotation_id, ca.Contig_id, ca.\"Start\", ca.\"End\", ca.Strand, ca.\"Type\", ca.Longest_isoform",
         [],
     )
     .context("Failed to create Contig_annotation view")?;
@@ -1687,31 +1733,26 @@ fn insert_annotations(conn: &Connection, annotations: &[FeatureAnnotation]) -> R
     ];
 
     // First pass: group annotations by (locus_tag, feature_type) to find longest per group
-    // Only group features that HAVE a locus_tag (features without locus_tag are always shown)
     let mut group_max_length: std::collections::HashMap<(String, String), usize> = std::collections::HashMap::new();
-    
-    // Also check if any CDS feature Function contains PHAROKKA keys
     let mut has_pharokka_function = false;
-    
+
     for ann in annotations {
         let length = (ann.end - ann.start + 1) as usize;
-        
-        // Only group annotations that have a locus_tag
-        if let Some(ref locus_tag) = ann.locus_tag {
+
+        if let Some(locus_tag) = ann.qualifiers.get("locus_tag") {
             let key = (locus_tag.clone(), ann.feature_type.clone());
             group_max_length.entry(key)
                 .and_modify(|max| { if length > *max { *max = length; } })
                 .or_insert(length);
         }
-        
-        // Check if this is a CDS with a PHAROKKA function
+
         if !has_pharokka_function && ann.feature_type == "CDS" {
-            if let Some(function) = &ann.function {
+            if let Some(function) = ann.qualifiers.get("function") {
                 let func_lower = function.to_lowercase();
                 for pharokka_key in &pharokka_keys {
                     if func_lower.contains(pharokka_key) {
                         has_pharokka_function = true;
-                        break;  // Exit inner pharokka_key loop only
+                        break;
                     }
                 }
             }
@@ -1722,27 +1763,19 @@ fn insert_annotations(conn: &Connection, annotations: &[FeatureAnnotation]) -> R
         .context("Failed to create Contig_annotation_core appender")?;
     let mut seq_appender = conn.appender("Annotation_sequence")
         .context("Failed to create Annotation_sequence appender")?;
+    let mut qual_appender = conn.appender("Annotation_qualifier")
+        .context("Failed to create Annotation_qualifier appender")?;
 
-    // Track which (locus_tag, Type) groups have already had their longest assigned
-    // This ensures only the FIRST occurrence gets TRUE when multiple isoforms have equal max length
     let mut longest_assigned: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
-
     let mut annotation_id: i64 = 1;
 
     for ann in annotations {
         let length = (ann.end - ann.start + 1) as usize;
 
-        // Determine Longest_isoform value:
-        // - NULL if no locus_tag (always displayed)
-        // - TRUE if this is the longest in its (locus_tag, Type) group AND is the first to be marked
-        // - FALSE if it's not the longest in its (locus_tag, Type) group OR already marked
-        let longest_isoform: Option<bool> = if let Some(ref locus_tag) = ann.locus_tag {
+        // Determine Longest_isoform: NULL if no locus_tag, TRUE/FALSE otherwise
+        let longest_isoform: Option<bool> = if let Some(locus_tag) = ann.qualifiers.get("locus_tag") {
             let key = (locus_tag.clone(), ann.feature_type.clone());
             let max_length = *group_max_length.get(&key).unwrap_or(&0);
-
-            // Only mark as longest if:
-            // 1. Length matches the max for this group
-            // 2. This group hasn't been assigned a longest yet (tie-breaking: first wins)
             let is_longest = if length == max_length && !longest_assigned.contains(&key) {
                 longest_assigned.insert(key);
                 true
@@ -1751,7 +1784,7 @@ fn insert_annotations(conn: &Connection, annotations: &[FeatureAnnotation]) -> R
             };
             Some(is_longest)
         } else {
-            None  // NULL for features without locus_tag
+            None
         };
 
         let (s_sites, n_sites): (Option<i64>, Option<i64>) = match &ann.nucleotide_sequence {
@@ -1762,7 +1795,7 @@ fn insert_annotations(conn: &Connection, annotations: &[FeatureAnnotation]) -> R
             _ => (None, None),
         };
 
-        // Lightweight annotation row
+        // Structural annotation row
         ann_appender.append_row(params![
             annotation_id,
             ann.contig_id,
@@ -1770,10 +1803,6 @@ fn insert_annotations(conn: &Connection, annotations: &[FeatureAnnotation]) -> R
             ann.end,
             ann.strand,
             &ann.feature_type,
-            &ann.product,
-            &ann.function,
-            &ann.phrog,
-            &ann.locus_tag,
             longest_isoform,
         ])
         .with_context(|| format!(
@@ -1781,7 +1810,20 @@ fn insert_annotations(conn: &Connection, annotations: &[FeatureAnnotation]) -> R
             ann.contig_id, ann.start, ann.end, ann.feature_type
         ))?;
 
-        // Heavy sequence row (only if there's sequence data)
+        // All qualifiers → KV table
+        for (key, value) in &ann.qualifiers {
+            qual_appender.append_row(params![
+                annotation_id,
+                key,
+                value,
+            ])
+            .with_context(|| format!(
+                "Failed to append qualifier: annotation_id={}, key={}",
+                annotation_id, key
+            ))?;
+        }
+
+        // Heavy sequence row
         seq_appender.append_row(params![
             annotation_id,
             &ann.nucleotide_sequence,
@@ -1798,24 +1840,45 @@ fn insert_annotations(conn: &Connection, annotations: &[FeatureAnnotation]) -> R
     }
 
     ann_appender.flush().context("Failed to flush Contig_annotation_core appender")?;
+    qual_appender.flush().context("Failed to flush Annotation_qualifier appender")?;
     seq_appender.flush().context("Failed to flush Annotation_sequence appender")?;
-    
+
     // Check if any locus_tag appears more than once (isoforms present)
     let mut locus_tag_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     for ann in annotations {
-        if let Some(ref locus_tag) = ann.locus_tag {
+        if let Some(locus_tag) = ann.qualifiers.get("locus_tag") {
             *locus_tag_counts.entry(locus_tag.clone()).or_insert(0) += 1;
         }
     }
     let has_isoforms = locus_tag_counts.values().any(|&count| count > 1);
-    
+
     // Insert constants into Constants_for_plotting table
     conn.execute(
         "INSERT INTO Constants_for_plotting (Constant, Status) VALUES ('pharokka', ?), ('isoforms', ?)",
         params![has_pharokka_function, has_isoforms],
     )
     .context("Failed to insert constants")?;
-    
+
+    Ok(())
+}
+
+/// Insert contig-level qualifiers (from GenBank "source" features) into the Contig_qualifier table.
+fn insert_contig_qualifiers(conn: &Connection, contig_qualifiers: &[(i64, HashMap<String, String>)]) -> Result<()> {
+    if contig_qualifiers.is_empty() {
+        return Ok(());
+    }
+    let mut appender = conn.appender("Contig_qualifier")
+        .context("Failed to create Contig_qualifier appender")?;
+    for (contig_id, quals) in contig_qualifiers {
+        for (key, value) in quals {
+            appender.append_row(params![contig_id, key, value])
+                .with_context(|| format!(
+                    "Failed to append contig qualifier: contig_id={}, key={}",
+                    contig_id, key
+                ))?;
+        }
+    }
+    appender.flush().context("Failed to flush Contig_qualifier appender")?;
     Ok(())
 }
 
@@ -1827,7 +1890,7 @@ fn populate_annotated_types(conn: &Connection) -> Result<()> {
              ROW_NUMBER() OVER (ORDER BY COUNT(*) DESC) AS Type_id,
              \"Type\" AS Type_name,
              COUNT(*) AS Frequency
-         FROM Contig_annotation
+         FROM Contig_annotation_core
          GROUP BY \"Type\"
          ORDER BY COUNT(*) DESC",
         [],

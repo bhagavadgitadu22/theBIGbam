@@ -553,6 +553,7 @@ def create_layout(db_path):
             genbank_path = db_path if (selected_feature_types and len(selected_feature_types) > 0) else None
             use_phage_colors = (0 in phage_colors_cbg.active) if (phage_colors_cbg is not None and genbank_path) else False
             plot_isoforms = (0 in plot_isoforms_cbg.active) if (plot_isoforms_cbg is not None and genbank_path) else True
+            feature_label_key = feature_label_select.value if feature_label_select is not None else None
 
             # Select the correct widget set based on current view
             active_variables_widgets = widgets['variables_widgets_all'] if is_all else widgets['variables_widgets_one']
@@ -679,7 +680,8 @@ def create_layout(db_path):
                     feature_types=selected_feature_types, use_phage_colors=use_phage_colors, plot_sequence=plot_sequence,
                     plot_translated_sequence=plot_translated_sequence, same_y_scale=same_y_scale, subplot_size=subplot_size, genemap_size=genemap_size,
                     sequence_size=sequence_size, translated_sequence_size=translated_sequence_size, order_by_column=order_by, max_base_resolution=max_binning,
-                    max_genemap_window=max_genemap_window, min_relative_value=min_coverage_freq
+                    max_genemap_window=max_genemap_window, min_relative_value=min_coverage_freq,
+                    feature_label_key=feature_label_key
                 )
             else:
                 # One-sample view: collect possibly-many requested features and call per-sample plot
@@ -707,7 +709,8 @@ def create_layout(db_path):
                     sequence_size=sequence_size, translated_sequence_size=translated_sequence_size, max_base_resolution=max_binning,
                     max_genemap_window=int(max_genemap_window_input.value),
                     max_sequence_window=int(max_sequence_window_input.value),
-                    min_relative_value=min_coverage_freq
+                    min_relative_value=min_coverage_freq,
+                    feature_label_key=feature_label_key
                 )
 
             # Restore preserved x-range and update state
@@ -1553,6 +1556,23 @@ def create_layout(db_path):
             active=[]
         )
 
+    # Feature label dropdown - populated with distinct qualifier keys from Annotation_qualifier
+    feature_label_select = None
+    try:
+        label_keys = [row[0] for row in conn.execute(
+            'SELECT DISTINCT "Key" FROM Annotation_qualifier ORDER BY "Key"'
+        ).fetchall()]
+    except Exception:
+        label_keys = []
+
+    if label_keys:
+        feature_label_select = Select(
+            title="Label features with:",
+            value="product" if "product" in label_keys else label_keys[0],
+            options=label_keys,
+            sizing_mode="stretch_width"
+        )
+
     # Plot isoforms checkbox - only show if at least one locus_tag appears more than once
     plot_isoforms_cbg = None
     cur = conn.cursor()
@@ -1650,6 +1670,8 @@ def create_layout(db_path):
         genome_children = []
         if feature_type_multichoice is not None:
             genome_children.append(feature_type_multichoice)
+        if feature_label_select is not None:
+            genome_children.append(feature_label_select)
         if sequence_row is not None:
             genome_children.append(sequence_row)
         if translated_sequence_row is not None:

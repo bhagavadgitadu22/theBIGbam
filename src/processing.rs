@@ -1346,11 +1346,11 @@ pub fn run_all_samples(
         HashMap::new()
     };
 
-    let (mut contigs, mut annotations) = if !has_genbank {
+    let (mut contigs, mut annotations, contig_qualifiers) = if !has_genbank {
         eprintln!("No GenBank file provided - extracting contigs from BAM headers");
         let contigs = extract_contigs_from_bams(bam_files, &preliminary_map)?;
         eprintln!("Found {} contigs from BAM files", contigs.len());
-        (contigs, Vec::new())
+        (contigs, Vec::new(), Vec::new())
     } else {
         parse_annotations(genbank_path)?
     };
@@ -1414,6 +1414,7 @@ pub fn run_all_samples(
         // Determine new contigs based on DB origin mode
         let new_contigs: Vec<ContigInfo>;
         let mut new_annotations: Vec<FeatureAnnotation>;
+        let new_contig_qualifiers: Vec<(i64, HashMap<String, String>)>;
 
         if has_genbank {
             // GenBank provided: filter to only NEW contig names
@@ -1452,6 +1453,14 @@ pub fn run_all_samples(
                     }
                 }
             }
+            // Filter and remap contig qualifiers to new contigs only
+            new_contig_qualifiers = contig_qualifiers.into_iter()
+                .filter_map(|(cid, quals)| {
+                    parser_id_to_name.get(&cid)
+                        .and_then(|name| new_contig_name_to_pos.get(name))
+                        .map(|&pos| ((pos + 1) as i64, quals))
+                })
+                .collect();
             if !new_contigs.is_empty() {
                 eprintln!("Found {} new contigs to add (filtered from {} total)", new_contigs.len(), new_contigs.len() + existing_contig_names.len());
             }
@@ -1461,6 +1470,7 @@ pub fn run_all_samples(
                 .filter(|c| !existing_contig_names.contains(&c.name))
                 .collect();
             new_annotations = Vec::new();
+            new_contig_qualifiers = Vec::new();
             if !new_contigs.is_empty() {
                 eprintln!("Found {} new contigs from BAM headers", new_contigs.len());
             }
@@ -1468,6 +1478,7 @@ pub fn run_all_samples(
             // BAM-only extend on genbank DB: no new contigs, process against existing only
             new_contigs = Vec::new();
             new_annotations = Vec::new();
+            new_contig_qualifiers = Vec::new();
             eprintln!("No new contigs (genbank-mode database, no -g/-a provided)");
         }
 
@@ -1479,12 +1490,12 @@ pub fn run_all_samples(
         }
         annotations = new_annotations.clone();
 
-        let writer = DbWriter::open(extend_db, &new_contigs, &new_annotations, !bam_files.is_empty())?;
+        let writer = DbWriter::open(extend_db, &new_contigs, &new_annotations, &new_contig_qualifiers, !bam_files.is_empty())?;
         writer.update_metadata_modification()?;
         (writer, new_contigs)
     } else {
         let new_contigs_for_blast = contigs.clone();
-        let writer = DbWriter::create(output_db, &contigs, &annotations, !bam_files.is_empty())?;
+        let writer = DbWriter::create(output_db, &contigs, &annotations, &contig_qualifiers, !bam_files.is_empty())?;
         writer.write_metadata(
             modules,
             config.min_aligned_fraction,

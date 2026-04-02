@@ -35,7 +35,7 @@ def generate_and_open_peruse_html(conn, contig_name, sample_names):
 
         # Build contig features table HTML
         contig_table_html = f"""
-        <table style="border-collapse: collapse; margin-bottom: 20px; background-color: white; border-radius: 5px;">
+        <table style="border-collapse: collapse; margin-bottom: 20px; background-color: white; border-radius: 5px; width: 100%;">
             <thead>
                 <tr style="background-color: #f0f0f0;">
                     <th style="border: 1px solid #ddd; padding: 8px; text-align: left;">Contig</th>

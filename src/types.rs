@@ -15,6 +15,8 @@
 //! - **`&'static str`**: A string that lives for the entire program (like string literals).
 //! - **`Option<T>`**: Rust's way of handling "maybe there's a value" - like Python's `Optional[T]` or `None`.
 
+use std::collections::HashMap;
+
 // ============================================================================
 // Sequencing Types
 // ============================================================================
@@ -353,11 +355,13 @@ pub struct ContigInfo {
     pub sequence: Option<Vec<u8>>,
 }
 
-/// A gene/feature annotation from the GenBank file.
+/// A gene/feature annotation from a GenBank or GFF3 file.
 ///
 /// # Bioinformatics context:
 /// Represents a CDS (coding sequence), gene, or other annotated feature
-/// on a contig. Used for displaying gene tracks in the viewer.
+/// on a contig. Structural fields (position, strand, type) are stored directly;
+/// all qualifiers (product, function, locus_tag, etc.) go into a generic HashMap
+/// so that every qualifier from the source file is preserved.
 #[derive(Clone, Debug)]
 pub struct FeatureAnnotation {
     /// Database ID of the parent contig
@@ -370,15 +374,10 @@ pub struct FeatureAnnotation {
     pub strand: i64,
     /// Feature type (e.g., "CDS", "tRNA", "gene")
     pub feature_type: String,
-    /// Product description (e.g., "terminase large subunit")
-    /// Option<String> means this field might be empty/missing
-    pub product: Option<String>,
-    /// Functional annotation
-    pub function: Option<String>,
-    /// PHROG database annotation (phage-specific) - integer ID
-    pub phrog: Option<i32>,
-    /// Locus tag for isoform grouping (e.g., "GENE_001")
-    pub locus_tag: Option<String>,
+    /// All qualifiers from the source file (key-value pairs).
+    /// GenBank: product, function, locus_tag, phrog, protein_id, gene, note, db_xref, ...
+    /// GFF3: product, Name, ID, Parent, locus_tag, ...
+    pub qualifiers: HashMap<String, String>,
     /// Nucleotide sequence for CDS features (extracted from contig sequence)
     pub nucleotide_sequence: Option<String>,
     /// Protein sequence for CDS features (translated from nucleotide_sequence)

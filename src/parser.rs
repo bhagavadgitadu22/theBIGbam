@@ -65,7 +65,7 @@ fn detect_format(path: &Path) -> Result<AnnotationFormat> {
 // Main Entry Point
 // ============================================================================
 
-/// Parse annotation file and extract contigs and annotations.
+/// Parse annotation file and extract contigs, annotations, and contig-level qualifiers.
 ///
 /// This is the main entry point that auto-detects file format based on extension.
 ///
@@ -73,12 +73,13 @@ fn detect_format(path: &Path) -> Result<AnnotationFormat> {
 /// * `path` - Path to the annotation file (.gbk, .gbff, .gff, .gff3)
 ///
 /// # Returns
-/// A tuple of (contigs, annotations) where:
+/// A tuple of (contigs, annotations, contig_qualifiers) where:
 /// - contigs: Vector of ContigInfo with name and length
 /// - annotations: Vector of FeatureAnnotation with feature details
+/// - contig_qualifiers: Vector of (contig_id, HashMap) from source features
 pub fn parse_annotations(
     path: &Path,
-) -> Result<(Vec<ContigInfo>, Vec<FeatureAnnotation>)> {
+) -> Result<(Vec<ContigInfo>, Vec<FeatureAnnotation>, Vec<(i64, HashMap<String, String>)>)> {
     let format = detect_format(path)?;
 
     match format {
@@ -143,14 +144,18 @@ fn print_genbank_context(path: &Path, record_num: usize) {
 /// Parse GenBank file and extract contigs and annotations.
 ///
 /// Handles `.gbk`, `.gbff`, and `.gb` files using the gb_io crate.
+///
+/// Returns (contigs, annotations, contig_qualifiers) where contig_qualifiers
+/// are (contig_id, HashMap) pairs extracted from "source" features.
 pub fn parse_genbank(
     path: &Path,
-) -> Result<(Vec<ContigInfo>, Vec<FeatureAnnotation>)> {
+) -> Result<(Vec<ContigInfo>, Vec<FeatureAnnotation>, Vec<(i64, HashMap<String, String>)>)> {
     let file = File::open(path).context("Failed to open GenBank file")?;
     let reader = SeqReader::new(file);
 
     let mut contigs = Vec::new();
     let mut annotations = Vec::new();
+    let mut contig_qualifiers: Vec<(i64, HashMap<String, String>)> = Vec::new();
     let mut contig_id = 1i64;
     let mut record_num = 0usize;
 
@@ -197,7 +202,14 @@ pub fn parse_genbank(
         // Extract features
         for feature in &seq.features {
             let feature_type = feature.kind.to_string();
-            if feature_type == "source" || feature_type == "gene" {
+
+            // Skip "source" — its qualifiers are stored as contig-level metadata
+            if feature_type == "source" {
+                // Collect source qualifiers for this contig
+                let source_quals = collect_qualifiers(&feature.qualifiers);
+                if !source_quals.is_empty() {
+                    contig_qualifiers.push((contig_id, source_quals));
+                }
                 continue;
             }
 
@@ -214,22 +226,8 @@ pub fn parse_genbank(
                 1
             };
 
-            let product = feature
-                .qualifier_values("product")
-                .next()
-                .map(|s| s.to_string());
-            let function = feature
-                .qualifier_values("function")
-                .next()
-                .map(|s| s.to_string());
-            let phrog = feature
-                .qualifier_values("phrog")
-                .next()
-                .and_then(|s| s.parse::<i32>().ok());
-            let locus_tag = feature
-                .qualifier_values("locus_tag")
-                .next()
-                .map(|s| s.to_string());
+            // Collect all qualifiers from the feature
+            let qualifiers = collect_qualifiers(&feature.qualifiers);
 
             annotations.push(FeatureAnnotation {
                 contig_id,
@@ -237,10 +235,7 @@ pub fn parse_genbank(
                 end,
                 strand,
                 feature_type,
-                product,
-                function,
-                phrog,
-                locus_tag,
+                qualifiers,
                 nucleotide_sequence: None,
                 protein_sequence: None,
             });
@@ -249,7 +244,27 @@ pub fn parse_genbank(
         contig_id += 1;
     }
 
-    Ok((contigs, annotations))
+    Ok((contigs, annotations, contig_qualifiers))
+}
+
+/// Collect all qualifiers from a GenBank feature into a HashMap.
+///
+/// When a qualifier key appears multiple times (e.g., multiple db_xref entries),
+/// values are joined with "; ".
+fn collect_qualifiers(qualifiers: &[(std::borrow::Cow<'static, str>, Option<String>)]) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    for (key, value) in qualifiers {
+        if let Some(val) = value {
+            let key_str = key.to_string();
+            map.entry(key_str)
+                .and_modify(|existing: &mut String| {
+                    existing.push_str("; ");
+                    existing.push_str(val);
+                })
+                .or_insert_with(|| val.clone());
+        }
+    }
+    map
 }
 
 // ============================================================================
@@ -304,7 +319,7 @@ fn parse_gff3_attributes(attrs_str: &str) -> HashMap<String, String> {
 /// 2. Maximum feature end position (fallback)
 pub fn parse_gff3(
     path: &Path,
-) -> Result<(Vec<ContigInfo>, Vec<FeatureAnnotation>)> {
+) -> Result<(Vec<ContigInfo>, Vec<FeatureAnnotation>, Vec<(i64, HashMap<String, String>)>)> {
     let file = File::open(path).context("Failed to open GFF file")?;
     let reader = BufReader::new(file);
 
@@ -428,34 +443,46 @@ pub fn parse_gff3(
     for (seqid, feature_type, start, end, strand, attrs) in features_data {
         let contig_id = *contig_id_map.get(&seqid).unwrap_or(&1);
 
-        // Extract product - try multiple attribute names used by different tools
-        let product = attrs
-            .get("product")
-            .or_else(|| attrs.get("Product"))
-            .or_else(|| attrs.get("Name"))
-            .or_else(|| attrs.get("name"))
-            .or_else(|| attrs.get("description"))
-            .cloned();
+        // Normalize common GFF3 attribute aliases into canonical GenBank qualifier names.
+        // This ensures the Contig_annotation view works consistently regardless of format.
+        let mut qualifiers = attrs;
 
-        // Extract function
-        let function = attrs
-            .get("function")
-            .or_else(|| attrs.get("Function"))
-            .or_else(|| attrs.get("note"))
-            .or_else(|| attrs.get("Note"))
-            .cloned();
+        // product: GFF3 tools use Name, name, description, or product
+        if !qualifiers.contains_key("product") {
+            if let Some(val) = qualifiers.get("Product")
+                .or_else(|| qualifiers.get("Name"))
+                .or_else(|| qualifiers.get("name"))
+                .or_else(|| qualifiers.get("description"))
+                .cloned()
+            {
+                qualifiers.insert("product".to_string(), val);
+            }
+        }
 
-        // Extract phrog ID (pharokka-specific)
-        let phrog = attrs
-            .get("phrog")
-            .or_else(|| attrs.get("PHROG"))
-            .and_then(|s| s.parse::<i32>().ok());
+        // function: GFF3 tools use note/Note as a fallback
+        if !qualifiers.contains_key("function") {
+            if let Some(val) = qualifiers.get("Function")
+                .or_else(|| qualifiers.get("note"))
+                .or_else(|| qualifiers.get("Note"))
+                .cloned()
+            {
+                qualifiers.insert("function".to_string(), val);
+            }
+        }
 
-        // Extract locus_tag for isoform grouping
-        let locus_tag = attrs
-            .get("locus_tag")
-            .or_else(|| attrs.get("locus-tag"))
-            .cloned();
+        // phrog: normalize casing
+        if !qualifiers.contains_key("phrog") {
+            if let Some(val) = qualifiers.get("PHROG").cloned() {
+                qualifiers.insert("phrog".to_string(), val);
+            }
+        }
+
+        // locus_tag: normalize hyphen variant
+        if !qualifiers.contains_key("locus_tag") {
+            if let Some(val) = qualifiers.get("locus-tag").cloned() {
+                qualifiers.insert("locus_tag".to_string(), val);
+            }
+        }
 
         annotations.push(FeatureAnnotation {
             contig_id,
@@ -463,10 +490,7 @@ pub fn parse_gff3(
             end,
             strand,
             feature_type,
-            product,
-            function,
-            phrog,
-            locus_tag,
+            qualifiers,
             nucleotide_sequence: None,
             protein_sequence: None,
         });
@@ -479,7 +503,8 @@ pub fn parse_gff3(
         ));
     }
 
-    Ok((contigs, annotations))
+    // GFF3 has no "source" features, so contig_qualifiers is empty
+    Ok((contigs, annotations, Vec::new()))
 }
 
 // ============================================================================

@@ -91,11 +91,12 @@ class CustomTranslator(BiopythonTranslator):
 
     def compute_feature_label(self, feature):
         return None  # fallback to None if missing or invalid
-    
+
     def compute_feature_html(self, feature):
-        type_feature = feature.type
-        if type_feature == "CDS":
-            return feature.qualifiers.get("product", [])
+        tooltip_key = feature.qualifiers.get("_tooltip_key", "product")
+        value = feature.qualifiers.get(tooltip_key)
+        if value:
+            return value
         return feature.type
         
     
@@ -107,7 +108,7 @@ def get_contig_info(cur, contig_name):
         raise ValueError(f"Contig not found: {contig_name}")
     return row
 
-def make_bokeh_genemap(conn, contig_id, locus_name, locus_size, subplot_size, shared_xrange, xstart=None, xend=None, feature_types=None, use_phage_colors=False, plot_isoforms=True):
+def make_bokeh_genemap(conn, contig_id, locus_name, locus_size, subplot_size, shared_xrange, xstart=None, xend=None, feature_types=None, use_phage_colors=False, plot_isoforms=True, feature_label_key=None):
     cur = conn.cursor()
 
     # Build position filter clause for annotations
@@ -127,17 +128,28 @@ def make_bokeh_genemap(conn, contig_id, locus_name, locus_size, subplot_size, sh
     # When plot_isoforms is False, filter to show only longest isoform per (locus_tag, Type) pair
     # Features without locus_tag always display (Longest_isoform is NULL for them)
     if not plot_isoforms:
-        # Use pre-computed Longest_isoform boolean column for efficient filtering
         isoform_filter = " AND (Locus_tag IS NULL OR Longest_isoform = true)"
-        query = f'SELECT "Start", "End", Strand, "Type", Product, "Function", Phrog, Locus_tag FROM Contig_annotation WHERE Contig_id=?{position_filter}{type_filter}{isoform_filter}'
+        query = f'SELECT Annotation_id, "Start", "End", Strand, "Type", Product, "Function", Phrog, Locus_tag FROM Contig_annotation WHERE Contig_id=?{position_filter}{type_filter}{isoform_filter}'
     else:
-        query = f'SELECT "Start", "End", Strand, "Type", Product, "Function", Phrog, Locus_tag FROM Contig_annotation WHERE Contig_id=?{position_filter}{type_filter}'
-    
+        query = f'SELECT Annotation_id, "Start", "End", Strand, "Type", Product, "Function", Phrog, Locus_tag FROM Contig_annotation WHERE Contig_id=?{position_filter}{type_filter}'
+
     cur.execute(query, tuple(params))
     seq_ann_rows = cur.fetchall()
 
+    # Fetch tooltip qualifier values from the KV table if a label key is selected
+    label_map = {}
+    if feature_label_key and seq_ann_rows:
+        ann_ids = [row[0] for row in seq_ann_rows]
+        placeholders = ','.join('?' * len(ann_ids))
+        rows = cur.execute(
+            f'SELECT Annotation_id, "Value" FROM Annotation_qualifier '
+            f'WHERE "Key" = ? AND Annotation_id IN ({placeholders})',
+            [feature_label_key] + ann_ids
+        ).fetchall()
+        label_map = {aid: val for aid, val in rows}
+
     sequence_annotations = []
-    for start, end, strand, ftype, product, function, phrog, locus_tag in seq_ann_rows:
+    for ann_id, start, end, strand, ftype, product, function, phrog, locus_tag in seq_ann_rows:
         # Biopython FeatureLocation is 0-based half-open
         try:
             floc = FeatureLocation(start-1, end, strand=strand)
@@ -153,6 +165,11 @@ def make_bokeh_genemap(conn, contig_id, locus_name, locus_size, subplot_size, sh
         if locus_tag:
             qualifiers['locus_tag'] = locus_tag
         qualifiers['use_phage_colors'] = use_phage_colors
+        # Set tooltip key and value
+        if feature_label_key:
+            qualifiers['_tooltip_key'] = feature_label_key
+            if ann_id in label_map:
+                qualifiers[feature_label_key] = label_map[ann_id]
         feat = SeqFeature(location=floc, type=ftype, qualifiers=qualifiers)
         sequence_annotations.append(feat)
 
@@ -1166,7 +1183,7 @@ def parse_requested_features(list_features):
 
 
 ### Function to generate the bokeh plot
-def generate_bokeh_plot_per_sample(conn, list_features, contig_name, sample_name, xstart=None, xend=None, subplot_size=100, genbank_path=None, feature_types=None, use_phage_colors=False, plot_isoforms=True, plot_sequence=False, plot_translated_sequence=False, same_y_scale=False, genemap_size=None, sequence_size=None, translated_sequence_size=None, max_base_resolution=None, max_genemap_window=None, max_sequence_window=None, min_relative_value=0.0):
+def generate_bokeh_plot_per_sample(conn, list_features, contig_name, sample_name, xstart=None, xend=None, subplot_size=100, genbank_path=None, feature_types=None, use_phage_colors=False, plot_isoforms=True, plot_sequence=False, plot_translated_sequence=False, same_y_scale=False, genemap_size=None, sequence_size=None, translated_sequence_size=None, max_base_resolution=None, max_genemap_window=None, max_sequence_window=None, min_relative_value=0.0, feature_label_key=None):
     """Generate a Bokeh plot for a single sample."""
     cur = conn.cursor()
 
@@ -1187,7 +1204,8 @@ def generate_bokeh_plot_per_sample(conn, list_features, contig_name, sample_name
             conn, contig_id, locus_name, locus_size,
             genemap_size if genemap_size is not None else subplot_size,
             shared_xrange, xstart, xend,
-            feature_types=feature_types, use_phage_colors=use_phage_colors, plot_isoforms=plot_isoforms
+            feature_types=feature_types, use_phage_colors=use_phage_colors, plot_isoforms=plot_isoforms,
+            feature_label_key=feature_label_key
         )
     elif genbank_path and xstart is not None and xend is not None and (xend - xstart) > _genemap_threshold:
         print(f"Gene map not plotted: window > {_genemap_threshold} bp", flush=True)
