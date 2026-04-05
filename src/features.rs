@@ -6,7 +6,8 @@
 //! All features are calculated in a single pass through the BAM reads for efficiency.
 
 use crate::cigar::{raw_cigar_consumes_ref, raw_cigar_is_clipping, raw_boundary_event_length};
-use crate::circular::{increment_circular, increment_circular_long, increment_range};
+use crate::circular::{increment_circular, increment_circular_long, increment_range,
+    decrement_circular, decrement_circular_long, decrement_range};
 use crate::types::{FeatureAnnotation, SequencingType};
 use std::collections::HashMap;
 
@@ -114,6 +115,10 @@ pub struct FeatureArrays {
 
     /// Lengths of deletion events from CIGAR (one entry per deletion at each position).
     pub deletion_lengths: Vec<Vec<u32>>,
+
+    /// Per-base count of CIGAR 'N' (RNA splice / skip) events.
+    /// Mirrors `deletions` structurally: incremented across the full N span per primary read.
+    pub splices: Vec<u64>,
 
     /// Base mismatches (from MD tag).
     /// High mismatch rates may indicate errors or strain variation.
@@ -240,6 +245,7 @@ impl FeatureArrays {
             insertion_lengths: vec![Vec::new(); ref_length],
             deletions: vec![0u64; ref_length],
             deletion_lengths: vec![Vec::new(); ref_length],
+            splices: vec![0u64; ref_length],
             mismatches: vec![0u64; ref_length],
             mismatch_base_counts: vec![[0u32; 4]; ref_length],
             insertion_sequences: HashMap::new(),
@@ -762,6 +768,22 @@ fn inc(arr: &mut [u64], ctx: &ReadContext, raw_s: usize, raw_e: usize, delta: u6
     }
 }
 
+/// Saturating-subtract an array over a range, mirroring `inc()` dispatch.
+/// Used to remove CIGAR 'N' (splice) spans from coverage-like arrays that
+/// were populated by a flat range fill.
+#[inline]
+fn dec(arr: &mut [u64], ctx: &ReadContext, raw_s: usize, raw_e: usize, delta: u64) {
+    if ctx.circular {
+        if ctx.seq_type.is_long() {
+            decrement_circular_long(arr, raw_s, raw_e, delta);
+        } else {
+            decrement_circular(arr, raw_s % ctx.ref_length, raw_e, delta);
+        }
+    } else {
+        decrement_range(arr, raw_s % ctx.ref_length, raw_e, delta);
+    }
+}
+
 /// Compute the last-aligned-position index (end - 1, wrapped for circular).
 #[inline]
 fn end_pos(end: usize, ref_length: usize, circular: bool) -> usize {
@@ -820,6 +842,92 @@ fn process_coverage(arrays: &mut FeatureArrays, ctx: &ReadContext) {
             inc(&mut arrays.primary_reads_minus_only, ctx, ctx.raw_start, ctx.raw_end, 1);
         } else {
             inc(&mut arrays.primary_reads_plus_only, ctx, ctx.raw_start, ctx.raw_end, 1);
+        }
+    }
+
+    // Correct for CIGAR 'N' (splice/skip) spans: the flat inc() above wrongly
+    // counted intronic bases as covered. Subtract them, and for primary reads
+    // populate the splices per-position counter.
+    apply_n_corrections(arrays, ctx);
+}
+
+/// For each CIGAR 'N' op in the read, decrement the coverage-like arrays that
+/// `process_coverage` just flat-filled across `raw_start..raw_end`, and (for
+/// primary reads) bump `arrays.splices` across the full N span.
+///
+/// Fast-paths when the CIGAR has no N op → zero cost for prokaryotic data.
+#[inline]
+fn apply_n_corrections(arrays: &mut FeatureArrays, ctx: &ReadContext) {
+    // Fast path: no splice op in this read's CIGAR
+    if !ctx.cigar_raw.iter().any(|&(op, _)| op as u8 as char == 'N') {
+        return;
+    }
+
+    let is_primary = !ctx.is_secondary && !ctx.is_supplementary;
+    let ref_length = ctx.ref_length;
+
+    let mut ref_pos = ctx.raw_start;
+    for &(op, len) in ctx.cigar_raw {
+        let c = op as u8 as char;
+        let len_usize = len as usize;
+        match c {
+            'M' | '=' | 'X' | 'D' => ref_pos += len_usize,
+            'N' => {
+                let span_end = ref_pos + len_usize;
+
+                // Decrement the same arrays that process_coverage's flat inc() populated
+                if ctx.is_secondary {
+                    dec(&mut arrays.secondary_reads, ctx, ref_pos, span_end, 1);
+                } else if ctx.is_supplementary {
+                    dec(&mut arrays.supplementary_reads, ctx, ref_pos, span_end, 1);
+                } else {
+                    dec(&mut arrays.primary_reads, ctx, ref_pos, span_end, 1);
+                    dec(&mut arrays.sum_mapq, ctx, ref_pos, span_end, ctx.mapq as u64);
+                    if ctx.is_reverse {
+                        dec(&mut arrays.primary_reads_minus_only, ctx, ref_pos, span_end, 1);
+                    } else {
+                        dec(&mut arrays.primary_reads_plus_only, ctx, ref_pos, span_end, 1);
+                    }
+                }
+
+                // Splice tracking: only for primary reads (same gating as deletions).
+                if is_primary {
+                    for j in 0..len_usize {
+                        arrays.splices[(ref_pos + j) % ref_length] += 1;
+                    }
+                }
+
+                ref_pos += len_usize;
+            }
+            _ => {} // I / S / H / P — don't consume reference
+        }
+    }
+}
+
+/// Decrement `coverage_reduced` across any CIGAR 'N' span that intersects the
+/// given `[range_s, range_e)` sub-range. Called from `process_phagetermini`
+/// right after each `inc()` on `coverage_reduced` so that splice gaps aren't
+/// inflated in the phage-termini coverage track either.
+#[inline]
+fn dec_coverage_reduced_n_spans(arrays: &mut FeatureArrays, ctx: &ReadContext, range_s: usize, range_e: usize) {
+    if !ctx.cigar_raw.iter().any(|&(op, _)| op as u8 as char == 'N') {
+        return;
+    }
+    let mut ref_pos = ctx.raw_start;
+    for &(op, len) in ctx.cigar_raw {
+        let c = op as u8 as char;
+        let len_usize = len as usize;
+        match c {
+            'M' | '=' | 'X' | 'D' => ref_pos += len_usize,
+            'N' => {
+                let s = ref_pos.max(range_s);
+                let e = (ref_pos + len_usize).min(range_e);
+                if s < e {
+                    dec(&mut arrays.coverage_reduced, ctx, s, e, 1);
+                }
+                ref_pos += len_usize;
+            }
+            _ => {}
         }
     }
 }
@@ -1049,12 +1157,15 @@ fn process_phagetermini_long(arrays: &mut FeatureArrays, ctx: &ReadContext, star
     match (start_matches, end_matches) {
         (true, true) => {
             inc(&mut arrays.coverage_reduced, ctx, ctx.raw_start, ctx.raw_end, 1);
+            dec_coverage_reduced_n_spans(arrays, ctx, ctx.raw_start, ctx.raw_end);
         }
         (true, false) => {
             inc(&mut arrays.coverage_reduced, ctx, ctx.raw_start, midpoint, 1);
+            dec_coverage_reduced_n_spans(arrays, ctx, ctx.raw_start, midpoint);
         }
         (false, true) => {
             inc(&mut arrays.coverage_reduced, ctx, midpoint, ctx.raw_end, 1);
+            dec_coverage_reduced_n_spans(arrays, ctx, midpoint, ctx.raw_end);
         }
         (false, false) => {}
     }
@@ -1083,6 +1194,7 @@ fn process_phagetermini_short(arrays: &mut FeatureArrays, ctx: &ReadContext, sta
 
     arrays.clean_reads_count += 1;
     inc(&mut arrays.coverage_reduced, ctx, ctx.raw_start, ctx.raw_end, 1);
+    dec_coverage_reduced_n_spans(arrays, ctx, ctx.raw_start, ctx.raw_end);
 
     let epos = end_pos(ctx.end, ctx.ref_length, ctx.circular);
     let start_evt_len = start_event.unwrap();

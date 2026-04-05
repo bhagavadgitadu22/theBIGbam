@@ -719,6 +719,15 @@ fn add_features_from_arrays(
                 encode_sparse_blob(&pos, &vals, None, flags, ValueScale::Times1000, clen)));
         }
 
+        // splicings (value only, mirrors deletions) — per-base count of CIGAR 'N' spans
+        {
+            let splices_f64: Vec<f64> = arrays.splices.iter().map(|&x| x as f64).collect();
+            let (pos, vals) = filter_sparse(&splices_f64, &primary_reads_f64);
+            let flags = MetadataFlags { sparse: true, ..Default::default() };
+            blob_output.push(("splicings".into(), cn.clone(),
+                encode_sparse_blob(&pos, &vals, None, flags, ValueScale::Times1000, clen)));
+        }
+
         // insertions (with stats + sequence)
         {
             let (pos, vals) = filter_sparse(&insertion_counts, &primary_reads_f64);

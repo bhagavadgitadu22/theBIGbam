@@ -83,3 +83,62 @@ where
         arr[pos] += delta;
     }
 }
+
+// ============================================================================
+// DECREMENT COUNTERPARTS (u64, saturating)
+// ============================================================================
+// These mirror the increment_* functions but use saturating_sub to guard
+// against u64 underflow. Used to remove CIGAR 'N' (splice) spans from
+// coverage-like arrays that were populated by a flat range fill.
+
+/// Decrement values in a circular range [start, end), handling wrap-around.
+#[inline]
+pub fn decrement_circular(arr: &mut [u64], start: usize, end: usize, delta: u64) {
+    let len = arr.len();
+    let start_mod = start % len;
+    let end_mod = end % len;
+
+    if start_mod < end_mod {
+        for pos in start_mod..end_mod {
+            arr[pos] = arr[pos].saturating_sub(delta);
+        }
+    } else {
+        for pos in start_mod..len {
+            arr[pos] = arr[pos].saturating_sub(delta);
+        }
+        for pos in 0..end_mod {
+            arr[pos] = arr[pos].saturating_sub(delta);
+        }
+    }
+}
+
+/// Decrement values in a circular range for long reads that may span multiple reference lengths.
+#[inline]
+pub fn decrement_circular_long(arr: &mut [u64], raw_start: usize, raw_end: usize, delta: u64) {
+    let len = arr.len();
+    let read_length = raw_end - raw_start;
+
+    let full_laps = read_length / len;
+    if full_laps > 0 {
+        for pos in 0..len {
+            for _ in 0..full_laps {
+                arr[pos] = arr[pos].saturating_sub(delta);
+            }
+        }
+    }
+
+    let remaining = read_length % len;
+    if remaining > 0 {
+        let start_mod = raw_start % len;
+        let new_end = start_mod + remaining;
+        decrement_circular(arr, start_mod, new_end, delta);
+    }
+}
+
+/// Decrement values in a non-circular range [start, end).
+#[inline]
+pub fn decrement_range(arr: &mut [u64], start: usize, end: usize, delta: u64) {
+    for pos in start..end {
+        arr[pos] = arr[pos].saturating_sub(delta);
+    }
+}
