@@ -141,48 +141,115 @@ def get_filtering_metadata(db_path: str) -> dict:
                 'columns': columns
             }
 
-    # Add annotation columns to Contig category from Contig_annotation table
+    # Add Contig_qualifier keys (contig-level source qualifiers from GenBank) to Contig category
     if 'Contig' in result:
         try:
-            ann_cols_info = conn.execute("DESCRIBE Contig_annotation").fetchall()
+            cq_keys = [
+                row[0] for row in conn.execute(
+                    'SELECT DISTINCT "Key" FROM Contig_qualifier WHERE "Key" IS NOT NULL ORDER BY "Key"'
+                ).fetchall()
+            ]
         except duckdb.Error:
-            ann_cols_info = []
+            cq_keys = []
 
-        for col_name, col_type, *_ in ann_cols_info:
-            if col_name in ANNOTATION_EXCLUDED_COLUMNS:
+        for key in cq_keys:
+            # Avoid shadowing an existing Contig table column
+            if key in result['Contig']['columns']:
                 continue
-
-            is_text = any(t in col_type.upper() for t in text_types)
-            col_data = {
-                'type': 'text' if is_text else 'numeric',
-                'source': 'Contig_annotation'  # Mark as annotation column
+            try:
+                distinct = conn.execute(
+                    'SELECT DISTINCT "Value" FROM Contig_qualifier WHERE "Key" = ? AND "Value" IS NOT NULL ORDER BY "Value"',
+                    [key]
+                ).fetchall()
+                distinct_values = [row[0] for row in distinct]
+            except duckdb.Error:
+                distinct_values = []
+            if not distinct_values:
+                continue
+            result['Contig']['columns'][key] = {
+                'type': 'text',
+                'source': 'Contig_qualifier',
+                'qualifier_key': key,
+                'distinct_values': distinct_values,
             }
 
-            # For text columns, get distinct values
-            if is_text:
-                try:
-                    distinct = conn.execute(
-                        f'SELECT DISTINCT "{col_name}" FROM Contig_annotation WHERE "{col_name}" IS NOT NULL ORDER BY "{col_name}"'
-                    ).fetchall()
-                    col_data['distinct_values'] = [row[0] for row in distinct]
-                except duckdb.Error:
-                    col_data['distinct_values'] = []
+    # Build a new "Annotations" category from Contig_annotation view + Annotation_qualifier keys
+    annotations_columns = {}
 
-                # Skip columns with only NULL values
-                if not col_data['distinct_values']:
-                    continue
-            else:
-                # For numeric columns, check if there are any non-NULL values
-                try:
-                    has_values = conn.execute(
-                        f'SELECT 1 FROM Contig_annotation WHERE "{col_name}" IS NOT NULL LIMIT 1'
-                    ).fetchone()
-                    if not has_values:
-                        continue  # Skip columns with only NULL values
-                except duckdb.Error:
-                    continue
+    # 1. Columns from Contig_annotation view (pivoted qualifiers + structural fields)
+    try:
+        ann_cols_info = conn.execute("DESCRIBE Contig_annotation").fetchall()
+    except duckdb.Error:
+        ann_cols_info = []
 
-            result['Contig']['columns'][col_name] = col_data
+    for col_name, col_type, *_ in ann_cols_info:
+        if col_name in ANNOTATION_EXCLUDED_COLUMNS:
+            continue
+
+        is_text = any(t in col_type.upper() for t in text_types)
+        col_data = {
+            'type': 'text' if is_text else 'numeric',
+            'source': 'Contig_annotation',
+        }
+
+        if is_text:
+            try:
+                distinct = conn.execute(
+                    f'SELECT DISTINCT "{col_name}" FROM Contig_annotation WHERE "{col_name}" IS NOT NULL ORDER BY "{col_name}"'
+                ).fetchall()
+                col_data['distinct_values'] = [row[0] for row in distinct]
+            except duckdb.Error:
+                col_data['distinct_values'] = []
+            if not col_data['distinct_values']:
+                continue
+        else:
+            try:
+                has_values = conn.execute(
+                    f'SELECT 1 FROM Contig_annotation WHERE "{col_name}" IS NOT NULL LIMIT 1'
+                ).fetchone()
+                if not has_values:
+                    continue
+            except duckdb.Error:
+                continue
+
+        annotations_columns[col_name] = col_data
+
+    # 2. Distinct keys from Annotation_qualifier (exclude keys already pivoted in the view)
+    pivoted_lower = {c.lower() for c in annotations_columns.keys()}
+    try:
+        aq_keys = [
+            row[0] for row in conn.execute(
+                'SELECT DISTINCT "Key" FROM Annotation_qualifier WHERE "Key" IS NOT NULL ORDER BY "Key"'
+            ).fetchall()
+        ]
+    except duckdb.Error:
+        aq_keys = []
+
+    for key in aq_keys:
+        if key.lower() in pivoted_lower or key in annotations_columns:
+            continue
+        try:
+            distinct = conn.execute(
+                'SELECT DISTINCT "Value" FROM Annotation_qualifier WHERE "Key" = ? AND "Value" IS NOT NULL ORDER BY "Value"',
+                [key]
+            ).fetchall()
+            distinct_values = [row[0] for row in distinct]
+        except duckdb.Error:
+            distinct_values = []
+        if not distinct_values:
+            continue
+        annotations_columns[key] = {
+            'type': 'text',
+            'source': 'Annotation_qualifier',
+            'qualifier_key': key,
+            'distinct_values': distinct_values,
+        }
+
+    if annotations_columns:
+        result['Annotations'] = {
+            'source': 'Contig_annotation',
+            'columns': annotations_columns,
+        }
 
     conn.close()
     return result

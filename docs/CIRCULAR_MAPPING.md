@@ -16,8 +16,6 @@ We mapped both short and long reads to the 39.7 kbp genome of the model bacterio
 
 Circular mapping approximately doubled coverage at both contig ends. At the 3′ end, circular mapping increased coverage from 100 to 197 for short reads and from 2,482 to 6,337 for long reads. The region of improved coverage spanned approximately half the average read length (e.g. 75 bp for short reads) from each contig end. Circular mapping using long reads increased the global mean coverage from 5,000 to 5,700.
 
-
-
 ## SAM specification for circular genomes
 
 The output BAM follows the [SAM specification](https://samtools.github.io/hts-specs/SAMv1.pdf) (section 2.7) for circular references:

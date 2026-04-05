@@ -25,13 +25,13 @@ The only exception is:
 
 ### Core Tables
 
-| Table | Description |
-|-------|-------------|
-| `Contig` | One row per contig. `Contig_id`, `Contig_name`, `Contig_length`, GC stats, etc. |
-| `Sample` | One row per BAM file. `Sample_id`, `Sample_name`, `Sequencing_type` (long/paired-short/single-short), read counts, circular mapping flag. |
-| `Coverage` | One row per (contig, sample). Mean/median/trimmed coverage, CV, roughness, aligned fraction. All integer-scaled (×100 or ×1,000,000). Primary key: `(Contig_id, Sample_id)`. |
-| `Variable` | Feature metadata for the plotting layer. Maps each feature to its display properties (color, plot type, subplot grouping) and its `Feature_table_name` (always `"Feature_blob"` for sample-level features, or a `Contig_*` table name for contig-level features). |
-| `Feature_blob` | **The main data table.** One compressed BLOB per (contig, sample, feature). See below. |
+| Table          | Description                                                                                                                                                                                                                                                       |
+| -------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Contig`       | One row per contig. `Contig_id`, `Contig_name`, `Contig_length`, GC stats, etc.                                                                                                                                                                                   |
+| `Sample`       | One row per BAM file. `Sample_id`, `Sample_name`, `Sequencing_type` (long/paired-short/single-short), read counts, circular mapping flag.                                                                                                                         |
+| `Coverage`     | One row per (contig, sample). Mean/median/trimmed coverage, CV, roughness, aligned fraction. All integer-scaled (×100 or ×1,000,000). Primary key: `(Contig_id, Sample_id)`.                                                                                      |
+| `Variable`     | Feature metadata for the plotting layer. Maps each feature to its display properties (color, plot type, subplot grouping) and its `Feature_table_name` (always `"Feature_blob"` for sample-level features, or a `Contig_*` table name for contig-level features). |
+| `Feature_blob` | **The main data table.** One compressed BLOB per (contig, sample, feature). See below.                                                                                                                                                                            |
 
 ### Feature_blob Table
 
@@ -53,33 +53,33 @@ in `src/types.rs`), which is the single source of truth for all feature definiti
 
 These have no `Sample_id` — they describe properties of the contig itself:
 
-| Table | Content |
-|-------|---------|
-| `Contig_GCContent` | GC percentage per window. RLE: `(Contig_id, First_position, Last_position, Value)` |
-| `Contig_GCSkew` | GC skew per window (×100). Same RLE schema. |
-| `Contig_direct_repeat_count` | Number of overlapping direct repeats at each position. Materialized from sweep-line algorithm over `Contig_directRepeats`. |
-| `Contig_inverted_repeat_count` | Same for inverted repeats. |
-| `Contig_direct_repeat_identity` | Max percent identity of overlapping direct repeats. |
-| `Contig_inverted_repeat_identity` | Same for inverted repeats. |
-| `Contig_directRepeats` | Raw BLAST repeat hits: `(Position1, Position2, Position1prime, Position2prime, Pident)` |
-| `Contig_invertedRepeats` | Same for inverted repeats. |
+| Table                             | Content                                                                                                                    |
+| --------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| `Contig_GCContent`                | GC percentage per window. RLE: `(Contig_id, First_position, Last_position, Value)`                                         |
+| `Contig_GCSkew`                   | GC skew per window (×100). Same RLE schema.                                                                                |
+| `Contig_direct_repeat_count`      | Number of overlapping direct repeats at each position. Materialized from sweep-line algorithm over `Contig_directRepeats`. |
+| `Contig_inverted_repeat_count`    | Same for inverted repeats.                                                                                                 |
+| `Contig_direct_repeat_identity`   | Max percent identity of overlapping direct repeats.                                                                        |
+| `Contig_inverted_repeat_identity` | Same for inverted repeats.                                                                                                 |
+| `Contig_directRepeats`            | Raw BLAST repeat hits: `(Position1, Position2, Position1prime, Position2prime, Pident)`                                    |
+| `Contig_invertedRepeats`          | Same for inverted repeats.                                                                                                 |
 
 ### Other Tables
 
-| Table | Content |
-|-------|---------|
-| `Contig_annotation_core` | Gene annotations (start, end, strand, type, product, locus_tag, etc.) |
-| `Annotation_sequence` | Nucleotide/protein sequences for annotations (separate to avoid bloating annotation queries) |
-| `Phage_mechanisms` | Detected phage packaging mechanisms per (contig, sample) |
-| `Phage_termini` | Individual terminus peaks with statistics (SPC, tau, p-values) |
-| `Misassembly` | Per-contig/sample counts of assembly errors at ≥50% prevalence |
-| `Microdiversity` | Same at ≥10% prevalence |
-| `Side_misassembly` | Clipping events at contig edges |
-| `Topology` | Circularisation metrics (circularising reads, insert size deviation) |
-| `Codon_table` | Lookup: 64 codons (id 0–63) |
-| `Contig_sequence` | Full contig nucleotide sequence |
-| `Column_scales` | Scaling factors for all stored values |
-| `Constants_for_plotting` | Metadata flags about database content |
+| Table                    | Content                                                                                      |
+| ------------------------ | -------------------------------------------------------------------------------------------- |
+| `Contig_annotation_core` | Gene annotations (start, end, strand, type, product, locus_tag, etc.)                        |
+| `Annotation_sequence`    | Nucleotide/protein sequences for annotations (separate to avoid bloating annotation queries) |
+| `Phage_mechanisms`       | Detected phage packaging mechanisms per (contig, sample)                                     |
+| `Phage_termini`          | Individual terminus peaks with statistics (SPC, tau, p-values)                               |
+| `Misassembly`            | Per-contig/sample counts of assembly errors at ≥50% prevalence                               |
+| `Microdiversity`         | Same at ≥10% prevalence                                                                      |
+| `Side_misassembly`       | Clipping events at contig edges                                                              |
+| `Topology`               | Circularisation metrics (circularising reads, insert size deviation)                         |
+| `Codon_table`            | Lookup: 64 codons (id 0–63)                                                                  |
+| `Contig_sequence`        | Full contig nucleotide sequence                                                              |
+| `Column_scales`          | Scaling factors for all stored values                                                        |
+| `Constants_for_plotting` | Metadata flags about database content                                                        |
 
 ---
 
@@ -93,27 +93,27 @@ The `Feature_id` in `Feature_blob` is the 1-based position in this array.
 These are stored in dedicated `Contig_*` tables, not BLOBs, because they have no
 sample dimension.
 
-| # | Feature | Subplot | Plot Type |
-|---|---------|---------|-----------|
-| 1 | `direct_repeat_count` | Repeat count | Curve |
-| 2 | `inverted_repeat_count` | Repeat count | Curve |
-| 3 | `direct_repeat_identity` | Max repeat identity | Curve |
-| 4 | `inverted_repeat_identity` | Max repeat identity | Curve |
-| 5 | `gc_content` | GC content | Curve |
-| 6 | `gc_skew` | GC skew | Curve |
+| #   | Feature                    | Subplot             | Plot Type |
+| --- | -------------------------- | ------------------- | --------- |
+| 1   | `direct_repeat_count`      | Repeat count        | Curve     |
+| 2   | `inverted_repeat_count`    | Repeat count        | Curve     |
+| 3   | `direct_repeat_identity`   | Max repeat identity | Curve     |
+| 4   | `inverted_repeat_identity` | Max repeat identity | Curve     |
+| 5   | `gc_content`               | GC content          | Curve     |
+| 6   | `gc_skew`                  | GC skew             | Curve     |
 
 ### Coverage Module (dense BLOBs)
 
 All values stored at full base-pair resolution. Every position has a value.
 
-| # | Feature | Subplot | Scale | Description |
-|---|---------|---------|-------|-------------|
-| 7 | `primary_reads` | Primary alignments | Raw | Primary alignment depth at each position |
-| 8 | `primary_reads_plus_only` | Alignments by strand | Raw | Forward-strand primary reads |
-| 9 | `primary_reads_minus_only` | Alignments by strand | Raw | Reverse-strand primary reads |
-| 10 | `secondary_reads` | Other alignments | Raw | Secondary alignment depth |
-| 11 | `supplementary_reads` | Other alignments | Raw | Supplementary alignment depth |
-| 12 | `mapq` | MAPQ | ×100 | Mean mapping quality per position |
+| #   | Feature                    | Subplot              | Scale | Description                              |
+| --- | -------------------------- | -------------------- | ----- | ---------------------------------------- |
+| 7   | `primary_reads`            | Primary alignments   | Raw   | Primary alignment depth at each position |
+| 8   | `primary_reads_plus_only`  | Alignments by strand | Raw   | Forward-strand primary reads             |
+| 9   | `primary_reads_minus_only` | Alignments by strand | Raw   | Reverse-strand primary reads             |
+| 10  | `secondary_reads`          | Other alignments     | Raw   | Secondary alignment depth                |
+| 11  | `supplementary_reads`      | Other alignments     | Raw   | Supplementary alignment depth            |
+| 12  | `mapq`                     | MAPQ                 | ×100  | Mean mapping quality per position        |
 
 ### Misalignment Module (sparse BLOBs, filtered)
 
@@ -126,39 +126,39 @@ A position is kept only if **both** conditions are met:
 This filters out noise at high-coverage regions while retaining meaningful events
 at low-coverage regions.
 
-| # | Feature | Subplot | Metadata | Description |
-|---|---------|---------|----------|-------------|
-| 13 | `left_clippings` | Clippings | stats + sequence | Soft/hard clips at read starts. Stats = mean/median/std of clip length. Sequence = dominant clipped bases. |
-| 14 | `right_clippings` | Clippings | stats + sequence | Same at read ends. |
-| 15 | `insertions` | Indels | stats + sequence | Insertion events from CIGAR. Stats = mean/median/std of insertion length. Sequence = dominant inserted sequence. |
-| 16 | `deletions` | Indels | (none) | Deletion events from CIGAR. Count only, no metadata. |
-| 17 | `mismatches` | Mismatches | sequence + codons | Base mismatches from MD tag. Sequence = dominant alternate base. Codons = synonymous/non-synonymous classification + codon/AA change. |
+| #   | Feature           | Subplot    | Metadata          | Description                                                                                                                           |
+| --- | ----------------- | ---------- | ----------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| 13  | `left_clippings`  | Clippings  | stats + sequence  | Soft/hard clips at read starts. Stats = mean/median/std of clip length. Sequence = dominant clipped bases.                            |
+| 14  | `right_clippings` | Clippings  | stats + sequence  | Same at read ends.                                                                                                                    |
+| 15  | `insertions`      | Indels     | stats + sequence  | Insertion events from CIGAR. Stats = mean/median/std of insertion length. Sequence = dominant inserted sequence.                      |
+| 16  | `deletions`       | Indels     | (none)            | Deletion events from CIGAR. Count only, no metadata.                                                                                  |
+| 17  | `mismatches`      | Mismatches | sequence + codons | Base mismatches from MD tag. Sequence = dominant alternate base. Codons = synonymous/non-synonymous classification + codon/AA change. |
 
 ### Long-Reads Module (dense BLOB)
 
-| # | Feature | Subplot | Scale | Description |
-|---|---------|---------|-------|-------------|
-| 18 | `read_lengths` | Read lengths | Dense, ×10 | Mean read length of reads covering each position |
+| #   | Feature        | Subplot      | Scale      | Description                                      |
+| --- | -------------- | ------------ | ---------- | ------------------------------------------------ |
+| 18  | `read_lengths` | Read lengths | Dense, ×10 | Mean read length of reads covering each position |
 
 ### Paired-Reads Module (mixed encoding)
 
-| # | Feature | Subplot | Encoding | Description |
-|---|---------|---------|----------|-------------|
-| 19 | `insert_sizes` | Insert sizes | Dense, ×10 | Mean insert size of pairs covering each position |
-| 20 | `non_inward_pairs` | Non-inward pairs | Sparse, filtered | Pairs on same contig but wrong orientation |
-| 21 | `mate_not_mapped` | Missing mates | Sparse, filtered | Reads whose mate is unmapped |
-| 22 | `mate_on_another_contig` | Missing mates | Sparse, filtered | Reads whose mate maps to a different contig |
+| #   | Feature                  | Subplot          | Encoding         | Description                                      |
+| --- | ------------------------ | ---------------- | ---------------- | ------------------------------------------------ |
+| 19  | `insert_sizes`           | Insert sizes     | Dense, ×10       | Mean insert size of pairs covering each position |
+| 20  | `non_inward_pairs`       | Non-inward pairs | Sparse, filtered | Pairs on same contig but wrong orientation       |
+| 21  | `mate_not_mapped`        | Missing mates    | Sparse, filtered | Reads whose mate is unmapped                     |
+| 22  | `mate_on_another_contig` | Missing mates    | Sparse, filtered | Reads whose mate maps to a different contig      |
 
 Features 20–22 use the same `bar_ratio + min_occurrences` filtering as the
 Misalignment module.
 
 ### Phage Termini Module (mixed encoding)
 
-| # | Feature | Subplot | Encoding | Description |
-|---|---------|---------|----------|-------------|
-| 23 | `coverage_reduced` | Coverage reduced | Dense, Raw | Coverage counting only "clean" reads (no clipping/mismatch at alignment edges) |
-| 24 | `reads_starts` | Reads termini | Sparse, filtered, + sequence | Count of read 5' ends. Sequence = dominant clipped bases at that terminus. |
-| 25 | `reads_ends` | Reads termini | Sparse, filtered, + sequence | Count of read 3' ends. |
+| #   | Feature            | Subplot          | Encoding                     | Description                                                                    |
+| --- | ------------------ | ---------------- | ---------------------------- | ------------------------------------------------------------------------------ |
+| 23  | `coverage_reduced` | Coverage reduced | Dense, Raw                   | Coverage counting only "clean" reads (no clipping/mismatch at alignment edges) |
+| 24  | `reads_starts`     | Reads termini    | Sparse, filtered, + sequence | Count of read 5' ends. Sequence = dominant clipped bases at that terminus.     |
+| 25  | `reads_ends`       | Reads termini    | Sparse, filtered, + sequence | Count of read 3' ends.                                                         |
 
 ---
 
@@ -196,6 +196,7 @@ Values are split into 65,536-position chunks for random-access decompression.
 Used for mismatches, insertions, deletions, clippings, read termini, paired-read events.
 
 **Stored data:**
+
 - **Positions:** delta-encoded u32 → zigzag → varint → Zstd
 - **Values:** zigzag-encoded i32 → varint → Zstd (no delta — values aren't correlated)
 - **Event count:** u32
@@ -217,6 +218,7 @@ for fast visualization at different scales. Contig_blob has 1 level (10000bp).
 
 **Sparse zoom bins**: only nonzero bins are stored, matching base-resolution
 sparse philosophy. Format per level (inside Zstd envelope):
+
 - `nonzero_count` (u32)
 - `bin_indices[n]`: delta + zigzag + varint encoded
 - `max_values[n]`: zigzag + varint encoded
@@ -231,12 +233,12 @@ with base resolution (only positions/bins with events are returned).
 Values are stored as integers with a scale factor to preserve precision without
 floating-point overhead:
 
-| Scale Code | Factor | Used By |
-|------------|--------|---------|
-| 0 (Raw) | 1 | primary_reads, secondary_reads, supplementary_reads, coverage_reduced |
-| 1 (×100) | 100 | mapq |
-| 2 (×1000) | 1000 | All sparse/filtered features (relative to coverage) |
-| 3 (×10) | 10 | read_lengths, insert_sizes |
+| Scale Code | Factor | Used By                                                               |
+| ---------- | ------ | --------------------------------------------------------------------- |
+| 0 (Raw)    | 1      | primary_reads, secondary_reads, supplementary_reads, coverage_reduced |
+| 1 (×100)   | 100    | mapq                                                                  |
+| 2 (×1000)  | 1000   | All sparse/filtered features (relative to coverage)                   |
+| 3 (×10)    | 10     | read_lengths, insert_sizes                                            |
 
 When decoding: `float_value = stored_i32 / scale_factor`.
 
@@ -254,6 +256,7 @@ be satisfied:
 ### bar_ratio (default: 10.0, meaning 10%)
 
 A position is kept if:
+
 ```
 event_count > coverage[position] × (bar_ratio / 100)
 ```
@@ -264,6 +267,7 @@ a mismatch needs >100 occurrences. At 10× coverage, it needs >1 occurrence.
 ### min_occurrences (default: 2)
 
 A position is kept if:
+
 ```
 event_count > min_occurrences
 ```
@@ -277,6 +281,7 @@ kept = (event_count > coverage × bar_ratio/100) AND (event_count > min_occurren
 ```
 
 **Example:**
+
 ```
 Position:      1      2      3      4      5
 Coverage:    1000   1000     50     50   1000

@@ -129,9 +129,9 @@ def make_bokeh_genemap(conn, contig_id, locus_name, locus_size, subplot_size, sh
     # Features without locus_tag always display (Longest_isoform is NULL for them)
     if not plot_isoforms:
         isoform_filter = " AND (Locus_tag IS NULL OR Longest_isoform = true)"
-        query = f'SELECT Annotation_id, "Start", "End", Strand, "Type", Product, "Function", Phrog, Locus_tag FROM Contig_annotation WHERE Contig_id=?{position_filter}{type_filter}{isoform_filter}'
+        query = f'SELECT Annotation_id, "Start", "End", Strand, "Type", Product, "Function", Locus_tag FROM Contig_annotation WHERE Contig_id=?{position_filter}{type_filter}{isoform_filter}'
     else:
-        query = f'SELECT Annotation_id, "Start", "End", Strand, "Type", Product, "Function", Phrog, Locus_tag FROM Contig_annotation WHERE Contig_id=?{position_filter}{type_filter}'
+        query = f'SELECT Annotation_id, "Start", "End", Strand, "Type", Product, "Function", Locus_tag FROM Contig_annotation WHERE Contig_id=?{position_filter}{type_filter}'
 
     cur.execute(query, tuple(params))
     seq_ann_rows = cur.fetchall()
@@ -149,7 +149,7 @@ def make_bokeh_genemap(conn, contig_id, locus_name, locus_size, subplot_size, sh
         label_map = {aid: val for aid, val in rows}
 
     sequence_annotations = []
-    for ann_id, start, end, strand, ftype, product, function, phrog, locus_tag in seq_ann_rows:
+    for ann_id, start, end, strand, ftype, product, function, locus_tag in seq_ann_rows:
         # Biopython FeatureLocation is 0-based half-open
         try:
             floc = FeatureLocation(start-1, end, strand=strand)
@@ -160,8 +160,6 @@ def make_bokeh_genemap(conn, contig_id, locus_name, locus_size, subplot_size, sh
             qualifiers['product'] = product
         if function:
             qualifiers['function'] = function
-        if phrog:
-            qualifiers['phrog'] = phrog
         if locus_tag:
             qualifiers['locus_tag'] = locus_tag
         qualifiers['use_phage_colors'] = use_phage_colors
@@ -839,20 +837,39 @@ def _blob_to_feature_dict(blob_bytes, type_picked, xstart=None, xend=None, max_b
     x = data["x"]
     y = data["y"]
 
-    # Slice to window if specified
+    # Detect windowed data (GC content/skew) from spacing between positions
+    if len(x) >= 2:
+        spacing = int(x[1] - x[0])
+    else:
+        spacing = 1
+
+    # Slice to window if specified.
+    # Include one anchor point on each side (last x <= xstart, first x >= xend)
+    # so Bokeh always has a segment crossing the viewport — critical for windowed
+    # data (GC content 500bp, GC skew 1000bp) when zoomed below the window spacing.
     if xstart is not None and xend is not None:
-        # x is 0-indexed in BLOB, positions are 1-indexed in display
-        mask = (x >= max(0, xstart - 1)) & (x <= (xend - 1))
-        x = x[mask]
-        y = y[mask]
-        # Also slice metadata arrays
+        # x is 0-indexed in BLOB; xstart/xend are 1-indexed display positions.
+        lo = xstart - 1
+        hi = xend - 1
+        n_orig = len(x)
+        # x is sorted ascending (BLOB decode order) — use searchsorted for O(log n).
+        left_idx = int(np.searchsorted(x, lo, side="right")) - 1   # last x <= lo (may be -1)
+        right_idx = int(np.searchsorted(x, hi, side="left"))        # first x >= hi
+        start = max(0, left_idx)
+        stop = min(n_orig, right_idx + 1)
+        sl = slice(start, stop)
+        x = x[sl]
+        y = y[sl]
+        # Also slice metadata arrays with the same slice
         for key in list(data.keys()):
-            if key not in ("x", "y") and hasattr(data[key], '__len__') and len(data[key]) == len(mask):
-                if isinstance(data[key], np.ndarray):
-                    data[key] = data[key][mask]
-                elif isinstance(data[key], list):
-                    indices = [i for i, m in enumerate(mask) if m]
-                    data[key] = [data[key][i] for i in indices]
+            if key in ("x", "y"):
+                continue
+            val = data[key]
+            if hasattr(val, "__len__") and len(val) == n_orig:
+                if isinstance(val, np.ndarray):
+                    data[key] = val[sl]
+                elif isinstance(val, list):
+                    data[key] = val[start:stop]
 
     if len(x) == 0:
         return None

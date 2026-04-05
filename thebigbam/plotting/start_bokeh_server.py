@@ -232,6 +232,7 @@ def create_layout(db_path):
         source_table_map = {
             'Contig': 'Contig',
             'Sample': 'Sample',
+            'Annotations': 'Contig_annotation',
             'Coverage': 'Explicit_coverage',
             'Misassembly': 'Explicit_misassembly',
             'Microdiversity': 'Explicit_microdiversity',
@@ -254,29 +255,72 @@ def create_layout(db_path):
                 operator = "NOT LIKE"
                 value = f"%{value}%"
 
-            # Check if this column is from Contig_annotation table
+            # Check if this column is from Contig_annotation / Annotation_qualifier / Contig_qualifier
             col_info = filtering_metadata.get(category, {}).get('columns', {}).get(column_name, {})
             col_source = col_info.get('source')
+            qualifier_key = col_info.get('qualifier_key')
+            params = [value]
+            has_samples = widgets['has_samples']
 
-            if col_source == 'Contig_annotation' and widgets['has_samples']:
-                # Annotation column - join with Contig_annotation table
-                query = f'''
-                    SELECT DISTINCT c.Contig_name, s.Sample_name
-                    FROM Contig_annotation ca
-                    JOIN Contig c ON ca.Contig_id = c.Contig_id
-                    LEFT JOIN Coverage p ON c.Contig_id = p.Contig_id
-                    LEFT JOIN Sample s ON p.Sample_id = s.Sample_id
-                    WHERE ca."{column_name}" {operator} ?
-                '''
-            elif col_source == 'Contig_annotation':
-                # Annotation column - no samples available
-                query = f'''
-                    SELECT DISTINCT c.Contig_name, NULL
-                    FROM Contig_annotation ca
-                    JOIN Contig c ON ca.Contig_id = c.Contig_id
-                    WHERE ca."{column_name}" {operator} ?
-                '''
-            elif category == 'Contig' and widgets['has_samples']:
+            if col_source == 'Contig_annotation':
+                # Pivoted column from the Contig_annotation view — join via Contig_annotation_core
+                if has_samples:
+                    query = f'''
+                        SELECT DISTINCT c.Contig_name, s.Sample_name
+                        FROM Contig_annotation ca
+                        JOIN Contig c ON ca.Contig_id = c.Contig_id
+                        LEFT JOIN Coverage p ON c.Contig_id = p.Contig_id
+                        LEFT JOIN Sample s ON p.Sample_id = s.Sample_id
+                        WHERE ca."{column_name}" {operator} ?
+                    '''
+                else:
+                    query = f'''
+                        SELECT DISTINCT c.Contig_name, NULL
+                        FROM Contig_annotation ca
+                        JOIN Contig c ON ca.Contig_id = c.Contig_id
+                        WHERE ca."{column_name}" {operator} ?
+                    '''
+            elif col_source == 'Annotation_qualifier':
+                # KV-lookup — filter by Key + Value against Annotation_qualifier
+                params = [qualifier_key, value]
+                if has_samples:
+                    query = f'''
+                        SELECT DISTINCT c.Contig_name, s.Sample_name
+                        FROM Annotation_qualifier aq
+                        JOIN Contig_annotation_core cac ON aq.Annotation_id = cac.Annotation_id
+                        JOIN Contig c ON cac.Contig_id = c.Contig_id
+                        LEFT JOIN Coverage p ON c.Contig_id = p.Contig_id
+                        LEFT JOIN Sample s ON p.Sample_id = s.Sample_id
+                        WHERE aq."Key" = ? AND aq."Value" {operator} ?
+                    '''
+                else:
+                    query = f'''
+                        SELECT DISTINCT c.Contig_name, NULL
+                        FROM Annotation_qualifier aq
+                        JOIN Contig_annotation_core cac ON aq.Annotation_id = cac.Annotation_id
+                        JOIN Contig c ON cac.Contig_id = c.Contig_id
+                        WHERE aq."Key" = ? AND aq."Value" {operator} ?
+                    '''
+            elif col_source == 'Contig_qualifier':
+                # KV-lookup — filter by Key + Value against Contig_qualifier (contig-level)
+                params = [qualifier_key, value]
+                if has_samples:
+                    query = f'''
+                        SELECT DISTINCT c.Contig_name, s.Sample_name
+                        FROM Contig_qualifier cq
+                        JOIN Contig c ON cq.Contig_id = c.Contig_id
+                        LEFT JOIN Coverage p ON c.Contig_id = p.Contig_id
+                        LEFT JOIN Sample s ON p.Sample_id = s.Sample_id
+                        WHERE cq."Key" = ? AND cq."Value" {operator} ?
+                    '''
+                else:
+                    query = f'''
+                        SELECT DISTINCT c.Contig_name, NULL
+                        FROM Contig_qualifier cq
+                        JOIN Contig c ON cq.Contig_id = c.Contig_id
+                        WHERE cq."Key" = ? AND cq."Value" {operator} ?
+                    '''
+            elif category == 'Contig' and has_samples:
                 # Contig table has no Sample_name, left-join to preserve contigs with 0 samples
                 query = f'''
                     SELECT DISTINCT c.Contig_name, s.Sample_name
@@ -323,8 +367,11 @@ def create_layout(db_path):
                 except (ValueError, TypeError):
                     return set()
 
+            # value is always the last param; refresh it after coercion
+            params[-1] = value
+
             try:
-                cur.execute(query, [value])
+                cur.execute(query, params)
                 return {(row[0], row[1]) for row in cur.fetchall()}
             except duckdb.Error as e:
                 print(f"[get_filtering_filtered_pairs] Query error: {e}")

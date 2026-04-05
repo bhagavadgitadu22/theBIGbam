@@ -1407,10 +1407,9 @@ fn create_core_tables(conn: &Connection, has_bam: bool) -> Result<()> {
     // Key-value store for all annotation qualifiers (product, function, locus_tag, phrog, gene, note, db_xref, ...)
     conn.execute(
         "CREATE TABLE Annotation_qualifier (
-            Annotation_id INTEGER REFERENCES Contig_annotation_core(Annotation_id),
+            Annotation_id INTEGER,
             \"Key\" TEXT,
-            \"Value\" TEXT,
-            PRIMARY KEY (Annotation_id, \"Key\")
+            \"Value\" TEXT
         )",
         [],
     )
@@ -1419,10 +1418,9 @@ fn create_core_tables(conn: &Connection, has_bam: bool) -> Result<()> {
     // Key-value store for contig-level qualifiers from GenBank "source" features (organism, host, strain, ...)
     conn.execute(
         "CREATE TABLE Contig_qualifier (
-            Contig_id INTEGER REFERENCES Contig(Contig_id),
+            Contig_id INTEGER,
             \"Key\" TEXT,
-            \"Value\" TEXT,
-            PRIMARY KEY (Contig_id, \"Key\")
+            \"Value\" TEXT
         )",
         [],
     )
@@ -1449,7 +1447,6 @@ fn create_core_tables(conn: &Connection, has_bam: bool) -> Result<()> {
             MAX(CASE WHEN aq.\"Key\" = 'product' THEN aq.\"Value\" END) AS Product,
             MAX(CASE WHEN aq.\"Key\" = 'function' THEN aq.\"Value\" END) AS \"Function\",
             MAX(CASE WHEN aq.\"Key\" = 'locus_tag' THEN aq.\"Value\" END) AS Locus_tag,
-            MAX(CASE WHEN aq.\"Key\" = 'phrog' THEN TRY_CAST(aq.\"Value\" AS INTEGER) END) AS Phrog,
             MAX(CASE WHEN aq.\"Key\" = 'gene' THEN aq.\"Value\" END) AS Gene,
             MAX(aseq.Nucleotide_sequence) AS Nucleotide_sequence,
             MAX(aseq.Protein_sequence) AS Protein_sequence,
