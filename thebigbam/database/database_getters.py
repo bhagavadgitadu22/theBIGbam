@@ -1,7 +1,7 @@
 import duckdb
 
 # Columns to exclude from annotation filtering UI (internal/metadata columns)
-ANNOTATION_EXCLUDED_COLUMNS = {'Contig_id', 'Start', 'End', 'Strand', 'Longest_isoform', 'Locus_tag', 'Annotation_id'}
+ANNOTATION_EXCLUDED_COLUMNS = {'Contig_id', 'Start', 'End', 'Strand', 'Main_isoform', 'Parent_annotation_id', 'Locus_tag', 'Annotation_id', 'Segments'}
 
 
 def update_database_metadata(conn):
@@ -246,10 +246,22 @@ def get_filtering_metadata(db_path: str) -> dict:
         }
 
     if annotations_columns:
-        result['Annotations'] = {
-            'source': 'Contig_annotation',
-            'columns': annotations_columns,
-        }
+        # Insert Annotations right after Contig in the ordered dict
+        new_result = {}
+        for key, val in result.items():
+            new_result[key] = val
+            if key == 'Contig':
+                new_result['Annotations'] = {
+                    'source': 'Contig_annotation',
+                    'columns': annotations_columns,
+                }
+        # If Contig wasn't in result, append at end
+        if 'Annotations' not in new_result:
+            new_result['Annotations'] = {
+                'source': 'Contig_annotation',
+                'columns': annotations_columns,
+            }
+        result = new_result
 
     conn.close()
     return result

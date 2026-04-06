@@ -531,6 +531,10 @@ impl DbWriter {
             .context("Failed to create Feature_blob appender")?;
 
         for (feature_name, contig_name, blob_bytes) in blobs {
+            // Skip empty blobs (all-zero dense or no-event sparse)
+            if blob_bytes.is_empty() {
+                continue;
+            }
             if let (Some(&contig_id), Some(fid)) = (
                 self.contig_name_to_id.get(contig_name),
                 feature_name_to_id(feature_name),
@@ -1389,7 +1393,15 @@ fn create_core_tables(conn: &Connection, has_bam: bool) -> Result<()> {
     .context("Failed to create Topology table")?;
     } // end if has_bam (Misassembly, Microdiversity, Side_misassembly, Topology)
 
-    // Structural annotation data only — qualifiers go in Annotation_qualifier
+    // Structural annotation data only — qualifiers go in Annotation_qualifier.
+    // Main_isoform flags the canonical transcript per (locus_tag, feature_type):
+    //   - The first mRNA seen in file order per locus_tag is the main mRNA.
+    //   - CDS/exon rows whose Parent_annotation_id points at the main mRNA
+    //     inherit Main_isoform = TRUE.
+    //   - For features without an mRNA parent (prokaryotic CDS, tRNA, ...),
+    //     the first occurrence per (locus_tag, feature_type) is main.
+    // Parent_annotation_id links CDS/exon children to their parent mRNA
+    // (populated from GFF3 Parent= or GenBank segment containment matching).
     conn.execute(
         "CREATE TABLE Contig_annotation_core (
             Annotation_id INTEGER PRIMARY KEY,
@@ -1398,11 +1410,34 @@ fn create_core_tables(conn: &Connection, has_bam: bool) -> Result<()> {
             \"End\" INTEGER,
             Strand INTEGER,
             \"Type\" TEXT,
-            Longest_isoform BOOLEAN
+            Main_isoform BOOLEAN,
+            Parent_annotation_id INTEGER
         )",
         [],
     )
     .context("Failed to create Contig_annotation_core table")?;
+
+    // Sub-intervals of spliced CDS / mRNA features. Only populated when a
+    // feature has two or more segments (GenBank join(...), GFF3 exon/CDS
+    // children collapsed into their parent mRNA). Unspliced features have
+    // no rows here — their bounding box in Contig_annotation_core is
+    // sufficient.
+    conn.execute(
+        "CREATE TABLE Annotation_segments (
+            Annotation_id INTEGER,
+            Segment_index INTEGER,
+            Start_segment INTEGER,
+            End_segment INTEGER
+        )",
+        [],
+    )
+    .context("Failed to create Annotation_segments table")?;
+
+    conn.execute(
+        "CREATE INDEX idx_annotation_segments_id ON Annotation_segments(Annotation_id)",
+        [],
+    )
+    .context("Failed to create Annotation_segments index")?;
 
     // Key-value store for all annotation qualifiers (product, function, locus_tag, phrog, gene, note, db_xref, ...)
     conn.execute(
@@ -1429,7 +1464,7 @@ fn create_core_tables(conn: &Connection, has_bam: bool) -> Result<()> {
     // Heavy sequence data stored separately — only queried for codon analysis and export
     conn.execute(
         "CREATE TABLE Annotation_sequence (
-            Annotation_id INTEGER PRIMARY KEY REFERENCES Contig_annotation_core(Annotation_id),
+            Annotation_id INTEGER PRIMARY KEY,
             Nucleotide_sequence TEXT,
             Protein_sequence TEXT,
             S_sites INTEGER,
@@ -1441,9 +1476,12 @@ fn create_core_tables(conn: &Connection, has_bam: bool) -> Result<()> {
 
     // Convenience view that pivots common qualifiers into columns for backward compatibility.
     // All existing Python queries use this view.
+    // `Segments` is a list of {start, end} structs in genomic order when the
+    // feature is spliced, NULL otherwise.
     conn.execute(
         "CREATE VIEW Contig_annotation AS
-         SELECT ca.Annotation_id, ca.Contig_id, ca.\"Start\", ca.\"End\", ca.Strand, ca.\"Type\", ca.Longest_isoform,
+         SELECT ca.Annotation_id, ca.Contig_id, ca.\"Start\", ca.\"End\", ca.Strand, ca.\"Type\",
+            ca.Main_isoform, ca.Parent_annotation_id,
             MAX(CASE WHEN aq.\"Key\" = 'product' THEN aq.\"Value\" END) AS Product,
             MAX(CASE WHEN aq.\"Key\" = 'function' THEN aq.\"Value\" END) AS \"Function\",
             MAX(CASE WHEN aq.\"Key\" = 'locus_tag' THEN aq.\"Value\" END) AS Locus_tag,
@@ -1451,11 +1489,19 @@ fn create_core_tables(conn: &Connection, has_bam: bool) -> Result<()> {
             MAX(aseq.Nucleotide_sequence) AS Nucleotide_sequence,
             MAX(aseq.Protein_sequence) AS Protein_sequence,
             MAX(aseq.S_sites) AS S_sites,
-            MAX(aseq.N_sites) AS N_sites
+            MAX(aseq.N_sites) AS N_sites,
+            seg.Segments AS Segments
          FROM Contig_annotation_core ca
          LEFT JOIN Annotation_qualifier aq ON ca.Annotation_id = aq.Annotation_id
          LEFT JOIN Annotation_sequence aseq ON ca.Annotation_id = aseq.Annotation_id
-         GROUP BY ca.Annotation_id, ca.Contig_id, ca.\"Start\", ca.\"End\", ca.Strand, ca.\"Type\", ca.Longest_isoform",
+         LEFT JOIN (
+            SELECT Annotation_id,
+                   list({'start': Start_segment, 'end': End_segment} ORDER BY Segment_index) AS Segments
+            FROM Annotation_segments
+            GROUP BY Annotation_id
+         ) seg ON ca.Annotation_id = seg.Annotation_id
+         GROUP BY ca.Annotation_id, ca.Contig_id, ca.\"Start\", ca.\"End\", ca.Strand, ca.\"Type\",
+                  ca.Main_isoform, ca.Parent_annotation_id, seg.Segments",
         [],
     )
     .context("Failed to create Contig_annotation view")?;
@@ -1528,6 +1574,7 @@ fn create_core_tables(conn: &Connection, has_bam: bool) -> Result<()> {
             Codon TEXT PRIMARY KEY,
             AminoAcid TEXT NOT NULL,
             AminoAcid_name TEXT NOT NULL,
+            AminoAcid_label TEXT NOT NULL,
             Color TEXT NOT NULL
         )",
         [],
@@ -1606,7 +1653,7 @@ fn insert_codon_table(conn: &Connection) -> Result<()> {
     let mut appender = conn.appender("Codon_table")
         .context("Failed to create Codon_table appender")?;
 
-    // Standard genetic code: (codon, 1-letter AA, full name, color)
+    // Standard genetic code: (codon, 1-letter AA, full name, 3-letter label, color)
     // Colors by biochemical property:
     //   Hydrophobic aliphatic (G,A,V,L,I,P): #2d6a4f
     //   Aromatic (F,W,Y): #b5838d
@@ -1614,43 +1661,43 @@ fn insert_codon_table(conn: &Connection) -> Result<()> {
     //   Positively charged (K,R,H): #9b2226
     //   Negatively charged (D,E): #e9c46a
     //   Stop (*): #6a3d9a
-    let codons: &[(&str, &str, &str, &str)] = &[
-        ("TTT", "F", "Phenylalanine", "#b5838d"), ("TTC", "F", "Phenylalanine", "#b5838d"),
-        ("TTA", "L", "Leucine", "#2d6a4f"), ("TTG", "L", "Leucine", "#2d6a4f"),
-        ("TCT", "S", "Serine", "#457b9d"), ("TCC", "S", "Serine", "#457b9d"),
-        ("TCA", "S", "Serine", "#457b9d"), ("TCG", "S", "Serine", "#457b9d"),
-        ("TAT", "Y", "Tyrosine", "#b5838d"), ("TAC", "Y", "Tyrosine", "#b5838d"),
-        ("TAA", "*", "Stop", "#6a3d9a"), ("TAG", "*", "Stop", "#6a3d9a"),
-        ("TGT", "C", "Cysteine", "#457b9d"), ("TGC", "C", "Cysteine", "#457b9d"),
-        ("TGA", "*", "Stop", "#6a3d9a"), ("TGG", "W", "Tryptophan", "#b5838d"),
-        ("CTT", "L", "Leucine", "#2d6a4f"), ("CTC", "L", "Leucine", "#2d6a4f"),
-        ("CTA", "L", "Leucine", "#2d6a4f"), ("CTG", "L", "Leucine", "#2d6a4f"),
-        ("CCT", "P", "Proline", "#2d6a4f"), ("CCC", "P", "Proline", "#2d6a4f"),
-        ("CCA", "P", "Proline", "#2d6a4f"), ("CCG", "P", "Proline", "#2d6a4f"),
-        ("CAT", "H", "Histidine", "#9b2226"), ("CAC", "H", "Histidine", "#9b2226"),
-        ("CAA", "Q", "Glutamine", "#457b9d"), ("CAG", "Q", "Glutamine", "#457b9d"),
-        ("CGT", "R", "Arginine", "#9b2226"), ("CGC", "R", "Arginine", "#9b2226"),
-        ("CGA", "R", "Arginine", "#9b2226"), ("CGG", "R", "Arginine", "#9b2226"),
-        ("ATT", "I", "Isoleucine", "#2d6a4f"), ("ATC", "I", "Isoleucine", "#2d6a4f"),
-        ("ATA", "I", "Isoleucine", "#2d6a4f"), ("ATG", "M", "Methionine", "#457b9d"),
-        ("ACT", "T", "Threonine", "#457b9d"), ("ACC", "T", "Threonine", "#457b9d"),
-        ("ACA", "T", "Threonine", "#457b9d"), ("ACG", "T", "Threonine", "#457b9d"),
-        ("AAT", "N", "Asparagine", "#457b9d"), ("AAC", "N", "Asparagine", "#457b9d"),
-        ("AAA", "K", "Lysine", "#9b2226"), ("AAG", "K", "Lysine", "#9b2226"),
-        ("AGT", "S", "Serine", "#457b9d"), ("AGC", "S", "Serine", "#457b9d"),
-        ("AGA", "R", "Arginine", "#9b2226"), ("AGG", "R", "Arginine", "#9b2226"),
-        ("GTT", "V", "Valine", "#2d6a4f"), ("GTC", "V", "Valine", "#2d6a4f"),
-        ("GTA", "V", "Valine", "#2d6a4f"), ("GTG", "V", "Valine", "#2d6a4f"),
-        ("GCT", "A", "Alanine", "#2d6a4f"), ("GCC", "A", "Alanine", "#2d6a4f"),
-        ("GCA", "A", "Alanine", "#2d6a4f"), ("GCG", "A", "Alanine", "#2d6a4f"),
-        ("GAT", "D", "Aspartate", "#e9c46a"), ("GAC", "D", "Aspartate", "#e9c46a"),
-        ("GAA", "E", "Glutamate", "#e9c46a"), ("GAG", "E", "Glutamate", "#e9c46a"),
-        ("GGT", "G", "Glycine", "#2d6a4f"), ("GGC", "G", "Glycine", "#2d6a4f"),
-        ("GGA", "G", "Glycine", "#2d6a4f"), ("GGG", "G", "Glycine", "#2d6a4f"),
+    let codons: &[(&str, &str, &str, &str, &str)] = &[
+        ("TTT", "F", "Phenylalanine", "Phe", "#b5838d"), ("TTC", "F", "Phenylalanine", "Phe", "#b5838d"),
+        ("TTA", "L", "Leucine", "Leu", "#2d6a4f"), ("TTG", "L", "Leucine", "Leu", "#2d6a4f"),
+        ("TCT", "S", "Serine", "Ser", "#457b9d"), ("TCC", "S", "Serine", "Ser", "#457b9d"),
+        ("TCA", "S", "Serine", "Ser", "#457b9d"), ("TCG", "S", "Serine", "Ser", "#457b9d"),
+        ("TAT", "Y", "Tyrosine", "Tyr", "#b5838d"), ("TAC", "Y", "Tyrosine", "Tyr", "#b5838d"),
+        ("TAA", "*", "Stop", "*", "#6a3d9a"), ("TAG", "*", "Stop", "*", "#6a3d9a"),
+        ("TGT", "C", "Cysteine", "Cys", "#457b9d"), ("TGC", "C", "Cysteine", "Cys", "#457b9d"),
+        ("TGA", "*", "Stop", "*", "#6a3d9a"), ("TGG", "W", "Tryptophan", "Trp", "#b5838d"),
+        ("CTT", "L", "Leucine", "Leu", "#2d6a4f"), ("CTC", "L", "Leucine", "Leu", "#2d6a4f"),
+        ("CTA", "L", "Leucine", "Leu", "#2d6a4f"), ("CTG", "L", "Leucine", "Leu", "#2d6a4f"),
+        ("CCT", "P", "Proline", "Pro", "#2d6a4f"), ("CCC", "P", "Proline", "Pro", "#2d6a4f"),
+        ("CCA", "P", "Proline", "Pro", "#2d6a4f"), ("CCG", "P", "Proline", "Pro", "#2d6a4f"),
+        ("CAT", "H", "Histidine", "His", "#9b2226"), ("CAC", "H", "Histidine", "His", "#9b2226"),
+        ("CAA", "Q", "Glutamine", "Gln", "#457b9d"), ("CAG", "Q", "Glutamine", "Gln", "#457b9d"),
+        ("CGT", "R", "Arginine", "Arg", "#9b2226"), ("CGC", "R", "Arginine", "Arg", "#9b2226"),
+        ("CGA", "R", "Arginine", "Arg", "#9b2226"), ("CGG", "R", "Arginine", "Arg", "#9b2226"),
+        ("ATT", "I", "Isoleucine", "Ile", "#2d6a4f"), ("ATC", "I", "Isoleucine", "Ile", "#2d6a4f"),
+        ("ATA", "I", "Isoleucine", "Ile", "#2d6a4f"), ("ATG", "M", "Methionine", "Met", "#457b9d"),
+        ("ACT", "T", "Threonine", "Thr", "#457b9d"), ("ACC", "T", "Threonine", "Thr", "#457b9d"),
+        ("ACA", "T", "Threonine", "Thr", "#457b9d"), ("ACG", "T", "Threonine", "Thr", "#457b9d"),
+        ("AAT", "N", "Asparagine", "Asn", "#457b9d"), ("AAC", "N", "Asparagine", "Asn", "#457b9d"),
+        ("AAA", "K", "Lysine", "Lys", "#9b2226"), ("AAG", "K", "Lysine", "Lys", "#9b2226"),
+        ("AGT", "S", "Serine", "Ser", "#457b9d"), ("AGC", "S", "Serine", "Ser", "#457b9d"),
+        ("AGA", "R", "Arginine", "Arg", "#9b2226"), ("AGG", "R", "Arginine", "Arg", "#9b2226"),
+        ("GTT", "V", "Valine", "Val", "#2d6a4f"), ("GTC", "V", "Valine", "Val", "#2d6a4f"),
+        ("GTA", "V", "Valine", "Val", "#2d6a4f"), ("GTG", "V", "Valine", "Val", "#2d6a4f"),
+        ("GCT", "A", "Alanine", "Ala", "#2d6a4f"), ("GCC", "A", "Alanine", "Ala", "#2d6a4f"),
+        ("GCA", "A", "Alanine", "Ala", "#2d6a4f"), ("GCG", "A", "Alanine", "Ala", "#2d6a4f"),
+        ("GAT", "D", "Aspartate", "Asp", "#e9c46a"), ("GAC", "D", "Aspartate", "Asp", "#e9c46a"),
+        ("GAA", "E", "Glutamate", "Glu", "#e9c46a"), ("GAG", "E", "Glutamate", "Glu", "#e9c46a"),
+        ("GGT", "G", "Glycine", "Gly", "#2d6a4f"), ("GGC", "G", "Glycine", "Gly", "#2d6a4f"),
+        ("GGA", "G", "Glycine", "Gly", "#2d6a4f"), ("GGG", "G", "Glycine", "Gly", "#2d6a4f"),
     ];
 
-    for &(codon, aa, name, color) in codons {
-        appender.append_row(params![codon, aa, name, color])?;
+    for &(codon, aa, name, label, color) in codons {
+        appender.append_row(params![codon, aa, name, label, color])?;
     }
 
     appender.flush().context("Failed to flush Codon_table appender")?;
@@ -1713,6 +1760,16 @@ fn compute_sn_sites(nuc_seq: &str) -> (i64, i64) {
 }
 
 /// Insert annotations into the database using Appender for bulk loading.
+///
+/// Implements the three-pass Main_isoform / Parent_annotation_id logic:
+///   A. Assign sequential Annotation_ids and build self_key → id map.
+///   B. Resolve parent_key → parent_annotation_id.
+///   C. Compute Main_isoform via first-occurrence rule:
+///      - The first mRNA seen per locus_tag is the main mRNA.
+///      - CDS/exon rows whose parent is the main mRNA inherit Main_isoform = TRUE.
+///      - For rows without a parent, the first per (locus_tag, feature_type) is main.
+///
+/// Also populates Annotation_segments for any feature with >= 2 segments.
 fn insert_annotations(conn: &Connection, annotations: &[FeatureAnnotation]) -> Result<()> {
     // PHAROKKA function categories (must match plotting_data_per_sample.py)
     let pharokka_keys = vec![
@@ -1729,20 +1786,8 @@ fn insert_annotations(conn: &Connection, annotations: &[FeatureAnnotation]) -> R
         "connector",
     ];
 
-    // First pass: group annotations by (locus_tag, feature_type) to find longest per group
-    let mut group_max_length: std::collections::HashMap<(String, String), usize> = std::collections::HashMap::new();
     let mut has_pharokka_function = false;
-
     for ann in annotations {
-        let length = (ann.end - ann.start + 1) as usize;
-
-        if let Some(locus_tag) = ann.qualifiers.get("locus_tag") {
-            let key = (locus_tag.clone(), ann.feature_type.clone());
-            group_max_length.entry(key)
-                .and_modify(|max| { if length > *max { *max = length; } })
-                .or_insert(length);
-        }
-
         if !has_pharokka_function && ann.feature_type == "CDS" {
             if let Some(function) = ann.qualifiers.get("function") {
                 let func_lower = function.to_lowercase();
@@ -1756,33 +1801,104 @@ fn insert_annotations(conn: &Connection, annotations: &[FeatureAnnotation]) -> R
         }
     }
 
-    let mut ann_appender = conn.appender("Contig_annotation_core")
+    // ------------------------------------------------------------------
+    // Pass A: assign sequential ids and build self_key → id map.
+    // ------------------------------------------------------------------
+    let ids: Vec<i64> = (1..=annotations.len() as i64).collect();
+    let mut self_key_to_id: std::collections::HashMap<String, i64> =
+        std::collections::HashMap::new();
+    for (ann, &id) in annotations.iter().zip(ids.iter()) {
+        if let Some(sk) = &ann.self_key {
+            self_key_to_id.entry(sk.clone()).or_insert(id);
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Pass B: resolve parent_key → parent_annotation_id.
+    // ------------------------------------------------------------------
+    let parent_ids: Vec<Option<i64>> = annotations
+        .iter()
+        .map(|ann| {
+            ann.parent_key
+                .as_ref()
+                .and_then(|pk| self_key_to_id.get(pk).copied())
+        })
+        .collect();
+
+    // ------------------------------------------------------------------
+    // Pass C: first-occurrence Main_isoform selection.
+    // ------------------------------------------------------------------
+    // Step 1: first mRNA per locus_tag → main_mrna_ids.
+    let mut main_mrna_ids: std::collections::HashSet<i64> = std::collections::HashSet::new();
+    let mut seen_mrna_locus: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
+    for (ann, &id) in annotations.iter().zip(ids.iter()) {
+        if ann.feature_type != "mRNA" {
+            continue;
+        }
+        if let Some(lt) = ann.qualifiers.get("locus_tag") {
+            if seen_mrna_locus.insert(lt.clone()) {
+                main_mrna_ids.insert(id);
+            }
+        }
+    }
+
+    // Step 2: first flat row per (locus_tag, feature_type) for rows WITHOUT a
+    // resolved parent link — used only when parent_annotation_id is None.
+    let mut main_flat_ids: std::collections::HashSet<i64> = std::collections::HashSet::new();
+    let mut seen_flat: std::collections::HashSet<(String, String)> =
+        std::collections::HashSet::new();
+    for (i, (ann, &id)) in annotations.iter().zip(ids.iter()).enumerate() {
+        if parent_ids[i].is_some() || ann.feature_type == "mRNA" {
+            continue;
+        }
+        if let Some(lt) = ann.qualifiers.get("locus_tag") {
+            let key = (lt.clone(), ann.feature_type.clone());
+            if seen_flat.insert(key) {
+                main_flat_ids.insert(id);
+            }
+        }
+    }
+
+    // Step 3: per-annotation Main_isoform resolution.
+    let main_isoforms: Vec<Option<bool>> = annotations
+        .iter()
+        .enumerate()
+        .map(|(i, ann)| {
+            if ann.qualifiers.get("locus_tag").is_none() {
+                return None;
+            }
+            let id = ids[i];
+            if ann.feature_type == "mRNA" {
+                return Some(main_mrna_ids.contains(&id));
+            }
+            if let Some(pid) = parent_ids[i] {
+                return Some(main_mrna_ids.contains(&pid));
+            }
+            Some(main_flat_ids.contains(&id))
+        })
+        .collect();
+
+    // ------------------------------------------------------------------
+    // Insertion.
+    // ------------------------------------------------------------------
+    let mut ann_appender = conn
+        .appender("Contig_annotation_core")
         .context("Failed to create Contig_annotation_core appender")?;
-    let mut seq_appender = conn.appender("Annotation_sequence")
+    let mut seq_appender = conn
+        .appender("Annotation_sequence")
         .context("Failed to create Annotation_sequence appender")?;
-    let mut qual_appender = conn.appender("Annotation_qualifier")
+    let mut qual_appender = conn
+        .appender("Annotation_qualifier")
         .context("Failed to create Annotation_qualifier appender")?;
+    let mut seg_appender = conn
+        .appender("Annotation_segments")
+        .context("Failed to create Annotation_segments appender")?;
 
-    let mut longest_assigned: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
-    let mut annotation_id: i64 = 1;
-
-    for ann in annotations {
-        let length = (ann.end - ann.start + 1) as usize;
-
-        // Determine Longest_isoform: NULL if no locus_tag, TRUE/FALSE otherwise
-        let longest_isoform: Option<bool> = if let Some(locus_tag) = ann.qualifiers.get("locus_tag") {
-            let key = (locus_tag.clone(), ann.feature_type.clone());
-            let max_length = *group_max_length.get(&key).unwrap_or(&0);
-            let is_longest = if length == max_length && !longest_assigned.contains(&key) {
-                longest_assigned.insert(key);
-                true
-            } else {
-                false
-            };
-            Some(is_longest)
-        } else {
-            None
-        };
+    for (i, ann) in annotations.iter().enumerate() {
+        let annotation_id = ids[i];
+        let main_isoform = main_isoforms[i];
+        let parent_annotation_id = parent_ids[i];
 
         let (s_sites, n_sites): (Option<i64>, Option<i64>) = match &ann.nucleotide_sequence {
             Some(seq) if !seq.is_empty() => {
@@ -1793,55 +1909,81 @@ fn insert_annotations(conn: &Connection, annotations: &[FeatureAnnotation]) -> R
         };
 
         // Structural annotation row
-        ann_appender.append_row(params![
-            annotation_id,
-            ann.contig_id,
-            ann.start,
-            ann.end,
-            ann.strand,
-            &ann.feature_type,
-            longest_isoform,
-        ])
-        .with_context(|| format!(
-            "Failed to append annotation: contig_id={}, start={}, end={}, type={}",
-            ann.contig_id, ann.start, ann.end, ann.feature_type
-        ))?;
+        ann_appender
+            .append_row(params![
+                annotation_id,
+                ann.contig_id,
+                ann.start,
+                ann.end,
+                ann.strand,
+                &ann.feature_type,
+                main_isoform,
+                parent_annotation_id,
+            ])
+            .with_context(|| {
+                format!(
+                    "Failed to append annotation: contig_id={}, start={}, end={}, type={}",
+                    ann.contig_id, ann.start, ann.end, ann.feature_type
+                )
+            })?;
 
         // All qualifiers → KV table
         for (key, value) in &ann.qualifiers {
-            qual_appender.append_row(params![
-                annotation_id,
-                key,
-                value,
-            ])
-            .with_context(|| format!(
-                "Failed to append qualifier: annotation_id={}, key={}",
-                annotation_id, key
-            ))?;
+            qual_appender
+                .append_row(params![annotation_id, key, value])
+                .with_context(|| {
+                    format!(
+                        "Failed to append qualifier: annotation_id={}, key={}",
+                        annotation_id, key
+                    )
+                })?;
         }
 
         // Heavy sequence row
-        seq_appender.append_row(params![
-            annotation_id,
-            &ann.nucleotide_sequence,
-            &ann.protein_sequence,
-            s_sites,
-            n_sites,
-        ])
-        .with_context(|| format!(
-            "Failed to append annotation sequence: annotation_id={}",
-            annotation_id
-        ))?;
+        seq_appender
+            .append_row(params![
+                annotation_id,
+                &ann.nucleotide_sequence,
+                &ann.protein_sequence,
+                s_sites,
+                n_sites,
+            ])
+            .with_context(|| {
+                format!(
+                    "Failed to append annotation sequence: annotation_id={}",
+                    annotation_id
+                )
+            })?;
 
-        annotation_id += 1;
+        // Segment rows — only for features with two or more parts.
+        for (seg_idx, &(seg_start, seg_end)) in ann.segments.iter().enumerate() {
+            seg_appender
+                .append_row(params![annotation_id, seg_idx as i64, seg_start, seg_end])
+                .with_context(|| {
+                    format!(
+                        "Failed to append segment: annotation_id={}, seg_idx={}",
+                        annotation_id, seg_idx
+                    )
+                })?;
+        }
     }
 
-    ann_appender.flush().context("Failed to flush Contig_annotation_core appender")?;
-    qual_appender.flush().context("Failed to flush Annotation_qualifier appender")?;
-    seq_appender.flush().context("Failed to flush Annotation_sequence appender")?;
+    ann_appender
+        .flush()
+        .context("Failed to flush Contig_annotation_core appender")?;
+    qual_appender
+        .flush()
+        .context("Failed to flush Annotation_qualifier appender")?;
+    seq_appender
+        .flush()
+        .context("Failed to flush Annotation_sequence appender")?;
+    seg_appender
+        .flush()
+        .context("Failed to flush Annotation_segments appender")?;
 
     // Check if any locus_tag appears more than once (isoforms present)
-    let mut locus_tag_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut locus_tag_counts: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
     for ann in annotations {
         if let Some(locus_tag) = ann.qualifiers.get("locus_tag") {
             *locus_tag_counts.entry(locus_tag.clone()).or_insert(0) += 1;
@@ -2282,17 +2424,25 @@ fn cleanup_unused_variables(conn: &Connection) -> Result<()> {
 
     let mut deleted_count = 0;
     for (var_name, table_name) in rows {
-        // Skip contig-level variables stored in Contig_* tables (always exist)
-        if var_name == "direct_repeat_count" || var_name == "inverted_repeat_count" || var_name == "direct_repeat_identity" || var_name == "inverted_repeat_identity" || var_name == "gc_content" || var_name == "gc_skew" {
-            continue;
-        }
-
-        // Skip Feature_blob variables — these are the active storage path
         if table_name == "Feature_blob" {
+            // Check if any row exists for this feature's Feature_id
+            if let Some(fid) = feature_name_to_id(&var_name) {
+                let has_data: bool = conn
+                    .query_row(
+                        "SELECT EXISTS(SELECT 1 FROM Feature_blob WHERE Feature_id = ?1)",
+                        params![fid as i32],
+                        |row| row.get(0),
+                    )
+                    .unwrap_or(false);
+                if has_data {
+                    continue;
+                }
+            }
+        } else if table_name == "Contig_blob" {
+            // Contig-level variables — always kept
             continue;
         }
 
-        // Any remaining Variable entries with non-Feature_blob table names are stale
         conn.execute("DELETE FROM Variable WHERE Variable_name = ?1", params![var_name])?;
         deleted_count += 1;
     }

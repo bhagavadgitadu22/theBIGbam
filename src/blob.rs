@@ -353,6 +353,10 @@ fn encode_zoom_levels_sparse(levels: &[Vec<ZoomBinSparse>]) -> Vec<u8> {
 /// * `scale` - Scale factor applied to values
 /// * `contig_length` - Length of the contig in base pairs
 pub fn encode_dense_blob(values: &[i32], scale: ValueScale, contig_length: u32) -> Vec<u8> {
+    // Skip encoding when all values are zero — caller filters empty blobs
+    if values.iter().all(|&v| v == 0) {
+        return Vec::new();
+    }
     let mut blob = Vec::with_capacity(32 + values.len() * 2);
 
     // === Header (32 bytes) ===
@@ -435,6 +439,11 @@ pub fn encode_sparse_blob(
     contig_length: u32,
 ) -> Vec<u8> {
     assert_eq!(positions.len(), values.len());
+
+    // Skip encoding when no events — caller filters empty blobs
+    if positions.is_empty() {
+        return Vec::new();
+    }
 
     let mut blob = Vec::with_capacity(32 + positions.len() * 8);
 

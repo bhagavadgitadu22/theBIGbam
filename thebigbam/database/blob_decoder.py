@@ -510,26 +510,11 @@ def get_blob_header(blob_bytes):
 
 
 # ============================================================================
-# Feature ID Mapping (must match VARIABLES in src/types.rs)
+# Feature ID Mapping (read from DB Variable table)
 # ============================================================================
 
-# This mapping is derived from the VARIABLES array order in types.rs
-# Feature_id = 1-based index into VARIABLES
-_FEATURE_NAMES = [
-    "direct_repeat_count", "inverted_repeat_count",
-    "direct_repeat_identity", "inverted_repeat_identity",
-    "gc_content", "gc_skew",
-    "primary_reads", "primary_reads_plus_only", "primary_reads_minus_only",
-    "secondary_reads", "supplementary_reads", "mapq",
-    "left_clippings", "right_clippings", "insertions", "deletions", "mismatches",
-    "read_lengths",
-    "insert_sizes", "non_inward_pairs", "mate_not_mapped", "mate_on_another_contig",
-    "coverage_reduced", "reads_starts", "reads_ends",
-]
-
-_NAME_TO_ID = {name: i + 1 for i, name in enumerate(_FEATURE_NAMES)}
-
 # Contig_blob feature IDs (stored in Feature_id column)
+# These are a separate ID space with fixed values assigned in Rust.
 _CONTIG_BLOB_IDS = {
     1: "gc_content",
     2: "gc_skew",
@@ -541,9 +526,16 @@ _CONTIG_BLOB_IDS = {
 _CONTIG_BLOB_NAMES = {v: k for k, v in _CONTIG_BLOB_IDS.items()}
 
 
-def feature_name_to_id(name):
-    """Convert feature name to feature_id (1-based) for Feature_blob."""
-    return _NAME_TO_ID.get(name)
+def feature_name_to_id(name, conn):
+    """Look up Feature_id from the Variable table (1-based).
+
+    Uses the DB as source of truth so Python never goes out of sync
+    with the Rust VARIABLES array.
+    """
+    row = conn.execute(
+        "SELECT Variable_id FROM Variable WHERE Variable_name = ?", [name]
+    ).fetchone()
+    return row[0] if row else None
 
 
 def contig_blob_name_to_id(name):

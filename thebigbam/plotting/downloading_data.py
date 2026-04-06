@@ -326,7 +326,7 @@ def download_feature_data_csv(db_path, contig_name, sample_names, xstart=None, x
         if blob_features:
             from thebigbam.database.blob_decoder import feature_name_to_id, decode_blob
             for _, var_name_b, _ in blob_features:
-                fid = feature_name_to_id(var_name_b)
+                fid = feature_name_to_id(var_name_b, cur)
                 if fid is None:
                     continue
                 for sid in sample_ids:

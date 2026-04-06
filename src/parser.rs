@@ -97,6 +97,47 @@ fn is_complement(loc: &gb_io::seq::Location) -> bool {
     matches!(loc, gb_io::seq::Location::Complement(_))
 }
 
+/// Recursively walk a gb-io Location, flattening Join/Order parts and
+/// stripping Complement wrappers, to produce a list of 1-based inclusive
+/// (start, end) sub-intervals in the order they appear in the source file.
+fn collect_ranges(loc: &gb_io::seq::Location, out: &mut Vec<(i64, i64)>) {
+    use gb_io::seq::Location::*;
+    match loc {
+        // gb-io stores ranges 0-based half-open; convert to 1-based inclusive.
+        Range((a, _), (b, _)) => out.push((*a + 1, *b)),
+        Complement(inner) => collect_ranges(inner, out),
+        Join(parts) | Order(parts) => {
+            for p in parts {
+                collect_ranges(p, out);
+            }
+        }
+        // Bond, OneOf, External, Gap, etc. — not representable as a genomic
+        // interval on this contig; silently skipped.
+        _ => {}
+    }
+}
+
+/// Extract (bounding_box, segments, strand) from a gb-io Location.
+///
+/// - `bounding_box` is `(min_start, max_end)` over all sub-intervals, 1-based inclusive.
+/// - `segments` is the full list of sub-intervals when the location has more
+///   than one part; empty for a single Range (no need for Annotation_segments rows).
+/// - `strand` is -1 when the outermost wrapper is `Complement`, else 1.
+fn extract_location(
+    loc: &gb_io::seq::Location,
+) -> Option<((i64, i64), Vec<(i64, i64)>, i64)> {
+    let strand = if is_complement(loc) { -1i64 } else { 1i64 };
+    let mut parts: Vec<(i64, i64)> = Vec::new();
+    collect_ranges(loc, &mut parts);
+    if parts.is_empty() {
+        return None;
+    }
+    let bbox_start = parts.iter().map(|&(s, _)| s).min().unwrap();
+    let bbox_end = parts.iter().map(|&(_, e)| e).max().unwrap();
+    let segments = if parts.len() >= 2 { parts } else { Vec::new() };
+    Some(((bbox_start, bbox_end), segments, strand))
+}
+
 /// Print context lines around a problematic area in the file
 fn print_genbank_context(path: &Path, record_num: usize) {
     // Try to find the start of the problematic record by counting LOCUS lines
@@ -200,6 +241,8 @@ pub fn parse_genbank(
         });
 
         // Extract features
+        let mut mrna_counter: usize = 0;
+        let contig_feature_start = annotations.len();
         for feature in &seq.features {
             let feature_type = feature.kind.to_string();
 
@@ -213,21 +256,25 @@ pub fn parse_genbank(
                 continue;
             }
 
-            // Use find_bounds() for start/end (returns 0-based exclusive range)
-            let (start, end) = match feature.location.find_bounds() {
-                Ok((s, e)) => (s + 1, e), // Convert to 1-based
-                Err(_) => continue,
-            };
-
-            // Check if complement (reverse strand)
-            let strand = if is_complement(&feature.location) {
-                -1
-            } else {
-                1
+            // Walk the Location tree: bbox + per-interval segments + strand.
+            // Single-Range features yield empty `segments`; Join/Order features
+            // carry the sub-intervals so we can store them in Annotation_segments.
+            let ((start, end), segments, strand) = match extract_location(&feature.location) {
+                Some(v) => v,
+                None => continue,
             };
 
             // Collect all qualifiers from the feature
             let qualifiers = collect_qualifiers(&feature.qualifiers);
+
+            // Assign a synthetic self_key for mRNA features so that CDS
+            // containment matching (resolve_genbank_parents) can point at them.
+            let self_key = if feature_type == "mRNA" {
+                mrna_counter += 1;
+                Some(format!("gbk_mrna_{}_{}", contig_id, mrna_counter))
+            } else {
+                None
+            };
 
             annotations.push(FeatureAnnotation {
                 contig_id,
@@ -238,13 +285,103 @@ pub fn parse_genbank(
                 qualifiers,
                 nucleotide_sequence: None,
                 protein_sequence: None,
+                segments,
+                parent_key: None,
+                self_key,
             });
         }
+
+        // For GenBank: resolve CDS → mRNA relationships within this contig by
+        // segment containment + shared locus_tag/gene. Runs once per contig so
+        // the matching window is small.
+        resolve_genbank_parents(&mut annotations[contig_feature_start..]);
 
         contig_id += 1;
     }
 
     Ok((contigs, annotations, contig_qualifiers))
+}
+
+/// Resolve CDS → mRNA parent links within a single GenBank contig's features.
+///
+/// GenBank has no explicit `Parent=` attribute, so we match each CDS against
+/// the mRNAs sharing the same locus_tag (or gene as fallback) on the same
+/// strand, keeping only the mRNA whose segments fully cover the CDS's
+/// segments. If exactly one mRNA matches, we set the CDS's `parent_key` to
+/// that mRNA's `self_key`; zero or multiple matches leave `parent_key = None`
+/// and the CDS falls through to the per-locus first-occurrence rule.
+fn resolve_genbank_parents(features: &mut [FeatureAnnotation]) {
+    // Collect an immutable snapshot of (index, locus_key, self_key, strand, segments or bbox) for mRNAs.
+    let mrnas: Vec<(usize, String, String, i64, Vec<(i64, i64)>)> = features
+        .iter()
+        .enumerate()
+        .filter(|(_, f)| f.feature_type == "mRNA")
+        .filter_map(|(i, f)| {
+            let key = f
+                .qualifiers
+                .get("locus_tag")
+                .or_else(|| f.qualifiers.get("gene"))
+                .cloned()?;
+            let sk = f.self_key.clone()?;
+            // Use segments when present; otherwise fall back to a single bbox interval
+            // (unspliced mRNA — rare but handled).
+            let segs = if f.segments.is_empty() {
+                vec![(f.start, f.end)]
+            } else {
+                f.segments.clone()
+            };
+            Some((i, key, sk, f.strand, segs))
+        })
+        .collect();
+
+    if mrnas.is_empty() {
+        return;
+    }
+
+    for cds in features.iter_mut() {
+        if cds.feature_type != "CDS" {
+            continue;
+        }
+        let cds_key = match cds
+            .qualifiers
+            .get("locus_tag")
+            .or_else(|| cds.qualifiers.get("gene"))
+        {
+            Some(v) => v.clone(),
+            None => continue,
+        };
+        let cds_segs: Vec<(i64, i64)> = if cds.segments.is_empty() {
+            vec![(cds.start, cds.end)]
+        } else {
+            cds.segments.clone()
+        };
+
+        // A match requires: same locus_key, same strand, and every CDS segment
+        // is fully contained in some mRNA segment.
+        let mut matched: Option<&str> = None;
+        let mut ambiguous = false;
+        for (_, mrna_key, mrna_sk, mrna_strand, mrna_segs) in &mrnas {
+            if *mrna_key != cds_key || *mrna_strand != cds.strand {
+                continue;
+            }
+            let all_contained = cds_segs.iter().all(|&(cs, ce)| {
+                mrna_segs.iter().any(|&(ms, me)| ms <= cs && me >= ce)
+            });
+            if !all_contained {
+                continue;
+            }
+            if matched.is_some() {
+                ambiguous = true;
+                break;
+            }
+            matched = Some(mrna_sk.as_str());
+        }
+        if !ambiguous {
+            if let Some(sk) = matched {
+                cds.parent_key = Some(sk.to_string());
+            }
+        }
+    }
 }
 
 /// Collect all qualifiers from a GenBank feature into a HashMap.
@@ -299,6 +436,46 @@ fn parse_gff3_attributes(attrs_str: &str) -> HashMap<String, String> {
     }
 
     attrs
+}
+
+/// Normalize GFF3 attribute aliases into canonical GenBank qualifier names.
+/// Ensures the Contig_annotation view works consistently regardless of format.
+fn normalize_gff_qualifiers(qualifiers: &mut HashMap<String, String>) {
+    // product: GFF3 tools use Name, name, description, or product
+    if !qualifiers.contains_key("product") {
+        if let Some(val) = qualifiers
+            .get("Product")
+            .or_else(|| qualifiers.get("Name"))
+            .or_else(|| qualifiers.get("name"))
+            .or_else(|| qualifiers.get("description"))
+            .cloned()
+        {
+            qualifiers.insert("product".to_string(), val);
+        }
+    }
+    // function: GFF3 tools use note/Note as a fallback
+    if !qualifiers.contains_key("function") {
+        if let Some(val) = qualifiers
+            .get("Function")
+            .or_else(|| qualifiers.get("note"))
+            .or_else(|| qualifiers.get("Note"))
+            .cloned()
+        {
+            qualifiers.insert("function".to_string(), val);
+        }
+    }
+    // phrog: normalize casing
+    if !qualifiers.contains_key("phrog") {
+        if let Some(val) = qualifiers.get("PHROG").cloned() {
+            qualifiers.insert("phrog".to_string(), val);
+        }
+    }
+    // locus_tag: normalize hyphen variant
+    if !qualifiers.contains_key("locus_tag") {
+        if let Some(val) = qualifiers.get("locus-tag").cloned() {
+            qualifiers.insert("locus_tag".to_string(), val);
+        }
+    }
 }
 
 /// Parse GFF3 file and extract contigs and annotations.
@@ -437,63 +614,173 @@ pub fn parse_gff3(
         });
     }
 
-    // Build annotations
+    // Normalize qualifiers on every row so ID/Parent lookups and downstream
+    // queries all see canonical keys (product, function, locus_tag, ...).
+    for row in features_data.iter_mut() {
+        normalize_gff_qualifiers(&mut row.5);
+    }
+
+    // Build the ID → index map for rows that expose an `ID=` attribute.
+    let mut id_to_index: HashMap<String, usize> = HashMap::new();
+    for (idx, row) in features_data.iter().enumerate() {
+        if let Some(id) = row.5.get("ID") {
+            id_to_index.entry(id.clone()).or_insert(idx);
+        }
+    }
+
+    // Group child rows (exon / CDS) under their transcript-like parent and
+    // mark them as absorbed so they aren't emitted as standalone annotations.
+    let mut exon_segments_by_parent: HashMap<usize, Vec<(i64, i64)>> = HashMap::new();
+    let mut cds_segments_by_parent: HashMap<usize, Vec<(i64, i64)>> = HashMap::new();
+    // For the collapsed CDS row we need a strand (first child's) and a
+    // qualifier overlay (first child's — typically has protein_id / phase).
+    let mut cds_overlay_by_parent: HashMap<usize, (i64, HashMap<String, String>)> =
+        HashMap::new();
+    let mut absorbed: Vec<bool> = vec![false; features_data.len()];
+
+    for idx in 0..features_data.len() {
+        let child_type = features_data[idx].1.clone();
+        if child_type != "exon" && child_type != "CDS" {
+            continue;
+        }
+        let parent_raw = match features_data[idx].5.get("Parent").cloned() {
+            Some(p) => p,
+            None => continue,
+        };
+        // Parent= can be a comma-separated list; pick the first resolvable
+        // transcript-like ancestor.
+        let parent_idx_opt = parent_raw
+            .split(',')
+            .filter_map(|p| id_to_index.get(p.trim()).copied())
+            .find(|&pi| {
+                matches!(
+                    features_data[pi].1.as_str(),
+                    "mRNA" | "transcript" | "primary_transcript"
+                )
+            });
+        let parent_idx = match parent_idx_opt {
+            Some(i) => i,
+            None => continue,
+        };
+        let (_, _, c_start, c_end, c_strand, c_attrs) = features_data[idx].clone();
+        if child_type == "exon" {
+            exon_segments_by_parent
+                .entry(parent_idx)
+                .or_default()
+                .push((c_start, c_end));
+        } else {
+            cds_segments_by_parent
+                .entry(parent_idx)
+                .or_default()
+                .push((c_start, c_end));
+            cds_overlay_by_parent
+                .entry(parent_idx)
+                .or_insert((c_strand, c_attrs));
+        }
+        absorbed[idx] = true;
+    }
+
+    // Sort collected segments in genomic order once.
+    for segs in exon_segments_by_parent.values_mut() {
+        segs.sort_by_key(|&(s, _)| s);
+    }
+    for segs in cds_segments_by_parent.values_mut() {
+        segs.sort_by_key(|&(s, _)| s);
+    }
+
+    // Build annotations: walk features_data in file order, skipping absorbed
+    // rows. For each transcript-like parent that has exon/CDS children, fold
+    // them into the transcript and synthesise a collapsed CDS sibling.
     let mut annotations = Vec::new();
 
-    for (seqid, feature_type, start, end, strand, attrs) in features_data {
+    for (idx, (seqid, feature_type, start, end, strand, attrs)) in
+        features_data.into_iter().enumerate()
+    {
+        if absorbed[idx] {
+            continue;
+        }
         let contig_id = *contig_id_map.get(&seqid).unwrap_or(&1);
+        let qualifiers = attrs;
 
-        // Normalize common GFF3 attribute aliases into canonical GenBank qualifier names.
-        // This ensures the Contig_annotation view works consistently regardless of format.
-        let mut qualifiers = attrs;
+        let is_transcript = matches!(
+            feature_type.as_str(),
+            "mRNA" | "transcript" | "primary_transcript"
+        );
+        let self_id = qualifiers.get("ID").cloned();
 
-        // product: GFF3 tools use Name, name, description, or product
-        if !qualifiers.contains_key("product") {
-            if let Some(val) = qualifiers.get("Product")
-                .or_else(|| qualifiers.get("Name"))
-                .or_else(|| qualifiers.get("name"))
-                .or_else(|| qualifiers.get("description"))
-                .cloned()
-            {
-                qualifiers.insert("product".to_string(), val);
-            }
-        }
+        // Exon children → segments of the transcript itself.
+        let exon_segs = if is_transcript {
+            exon_segments_by_parent.remove(&idx).unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        // CDS children → a separate collapsed CDS annotation that references
+        // this transcript as its parent.
+        let cds_segs = if is_transcript {
+            cds_segments_by_parent.remove(&idx).unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let cds_overlay = if is_transcript {
+            cds_overlay_by_parent.remove(&idx)
+        } else {
+            None
+        };
 
-        // function: GFF3 tools use note/Note as a fallback
-        if !qualifiers.contains_key("function") {
-            if let Some(val) = qualifiers.get("Function")
-                .or_else(|| qualifiers.get("note"))
-                .or_else(|| qualifiers.get("Note"))
-                .cloned()
-            {
-                qualifiers.insert("function".to_string(), val);
-            }
-        }
-
-        // phrog: normalize casing
-        if !qualifiers.contains_key("phrog") {
-            if let Some(val) = qualifiers.get("PHROG").cloned() {
-                qualifiers.insert("phrog".to_string(), val);
-            }
-        }
-
-        // locus_tag: normalize hyphen variant
-        if !qualifiers.contains_key("locus_tag") {
-            if let Some(val) = qualifiers.get("locus-tag").cloned() {
-                qualifiers.insert("locus_tag".to_string(), val);
-            }
-        }
-
+        // Emit the transcript (or non-transcript) row itself. Its bounding box
+        // is the row's own start/end; if exon children were present their
+        // min/max matches the transcript's declared extent anyway.
+        let transcript_segments = if exon_segs.len() >= 2 {
+            exon_segs.clone()
+        } else {
+            Vec::new()
+        };
         annotations.push(FeatureAnnotation {
             contig_id,
             start,
             end,
             strand,
             feature_type,
-            qualifiers,
+            qualifiers: qualifiers.clone(),
             nucleotide_sequence: None,
             protein_sequence: None,
+            segments: transcript_segments,
+            parent_key: None,
+            self_key: if is_transcript { self_id.clone() } else { None },
         });
+
+        // Synthesise the collapsed CDS sibling when the transcript carried
+        // CDS children.
+        if !cds_segs.is_empty() {
+            let (cds_strand, cds_child_attrs) = cds_overlay.unwrap_or((strand, HashMap::new()));
+            // Start from the transcript's qualifiers (they carry product,
+            // gene, locus_tag) and overlay the first CDS child's attributes
+            // (protein_id, phase, etc.).
+            let mut cds_qualifiers = qualifiers.clone();
+            for (k, v) in cds_child_attrs {
+                cds_qualifiers.entry(k).or_insert(v);
+            }
+            let cds_start = cds_segs.iter().map(|&(s, _)| s).min().unwrap();
+            let cds_end = cds_segs.iter().map(|&(_, e)| e).max().unwrap();
+            let cds_segments_vec = if cds_segs.len() >= 2 {
+                cds_segs
+            } else {
+                Vec::new()
+            };
+            annotations.push(FeatureAnnotation {
+                contig_id,
+                start: cds_start,
+                end: cds_end,
+                strand: cds_strand,
+                feature_type: "CDS".to_string(),
+                qualifiers: cds_qualifiers,
+                nucleotide_sequence: None,
+                protein_sequence: None,
+                segments: cds_segments_vec,
+                parent_key: self_id,
+                self_key: None,
+            });
+        }
     }
 
     if contigs.is_empty() {
@@ -635,17 +922,43 @@ pub fn compute_annotation_sequences(
             continue;
         };
 
-        let start = (ann.start - 1) as usize; // 1-based to 0-based
-        let end = ann.end as usize;
-        if end > seq.len() || start >= end {
+        // Spliced CDS: concatenate exon segments in genomic order, then apply
+        // reverse complement if on the minus strand. For an unspliced CDS the
+        // segments list is empty and we fall back to the bounding box slice.
+        let nuc: Vec<u8> = if !ann.segments.is_empty() {
+            let mut buf = Vec::with_capacity(
+                ann.segments.iter().map(|&(s, e)| (e - s + 1) as usize).sum::<usize>(),
+            );
+            let mut ok = true;
+            for &(s, e) in &ann.segments {
+                let s0 = (s - 1) as usize;
+                let e0 = e as usize;
+                if e0 > seq.len() || s0 >= e0 {
+                    ok = false;
+                    break;
+                }
+                buf.extend_from_slice(&seq[s0..e0]);
+            }
+            if !ok {
+                continue;
+            }
+            buf
+        } else {
+            let start = (ann.start - 1) as usize;
+            let end = ann.end as usize;
+            if end > seq.len() || start >= end {
+                continue;
+            }
+            seq[start..end].to_vec()
+        };
+
+        if nuc.is_empty() {
             continue;
         }
-
-        let subseq = &seq[start..end];
         let nuc = if ann.strand == -1 {
-            reverse_complement(subseq)
+            reverse_complement(&nuc)
         } else {
-            subseq.to_vec()
+            nuc
         };
 
         let nuc_str = String::from_utf8_lossy(&nuc).into_owned();

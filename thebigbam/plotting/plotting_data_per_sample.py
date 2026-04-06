@@ -52,6 +52,69 @@ TYPE_COLORS = {
     # features not listed here will get black color by default
 }
 
+
+def _normalize_segments(segments, fallback_start, fallback_end):
+    """Return list of (start, end) 1-based inclusive tuples in genomic order.
+
+    DuckDB returns Segments as None (unspliced) or a list of
+    {'start': int, 'end': int} dicts. Unspliced features get a single-element
+    list built from the bounding box so callers use one loop for both cases.
+    """
+    if not segments:
+        return [(int(fallback_start), int(fallback_end))]
+    out = [(int(s['start']), int(s['end'])) for s in segments]
+    out.sort(key=lambda se: se[0])
+    return out
+
+
+def _codon_quads_for_aa(segments, strand, aa_index):
+    """Return [(left, right), ...] quads for the aa_index-th amino acid.
+
+    segments: genomic-ordered [(start, end), ...] 1-based inclusive (from
+    _normalize_segments). Walks 3 nt starting at aa_index*3 along the
+    concatenated mRNA coordinate system. Forward strand walks left-to-right;
+    reverse strand walks right-to-left through reversed segments.
+
+    Codons straddling an exon boundary yield multiple quads. Each quad's
+    (left, right) is inset by 0.5 to match the existing codon-rectangle
+    convention.
+    """
+    ordered = list(segments) if strand >= 0 else list(reversed(segments))
+
+    codon_start_mrna = aa_index * 3
+    codon_end_mrna = codon_start_mrna + 3  # exclusive
+
+    quads = []
+    cursor = 0
+    for (g_start, g_end) in ordered:
+        seg_len = g_end - g_start + 1
+        seg_mrna_end = cursor + seg_len
+
+        lo = max(codon_start_mrna, cursor)
+        hi = min(codon_end_mrna, seg_mrna_end)
+        if lo >= hi:
+            cursor = seg_mrna_end
+            if cursor >= codon_end_mrna:
+                break
+            continue
+
+        offset_lo = lo - cursor
+        offset_hi = hi - cursor - 1  # inclusive
+        if strand >= 0:
+            g_lo = g_start + offset_lo
+            g_hi = g_start + offset_hi
+        else:
+            g_lo = g_end - offset_hi
+            g_hi = g_end - offset_lo
+        quads.append((g_lo - 0.5, g_hi + 0.5))
+
+        cursor = seg_mrna_end
+        if cursor >= codon_end_mrna:
+            break
+
+    return quads
+
+
 class CustomTranslator(BiopythonTranslator):
 
     # Track seen unknown feature types at the class level
@@ -125,10 +188,13 @@ def make_bokeh_genemap(conn, contig_id, locus_name, locus_size, subplot_size, sh
         type_filter = f' AND "Type" IN ({placeholders})'
         params.extend(feature_types)
 
-    # When plot_isoforms is False, filter to show only longest isoform per (locus_tag, Type) pair
-    # Features without locus_tag always display (Longest_isoform is NULL for them)
+    # When plot_isoforms is False, filter to show only the main isoform per
+    # (locus_tag, Type) pair. For spliced eukaryotic annotations this returns
+    # the first mRNA seen in file order plus every CDS/exon linked to it via
+    # Parent_annotation_id. Features without locus_tag always display
+    # (Main_isoform is NULL for them).
     if not plot_isoforms:
-        isoform_filter = " AND (Locus_tag IS NULL OR Longest_isoform = true)"
+        isoform_filter = " AND (Locus_tag IS NULL OR Main_isoform = true)"
         query = f'SELECT Annotation_id, "Start", "End", Strand, "Type", Product, "Function", Locus_tag FROM Contig_annotation WHERE Contig_id=?{position_filter}{type_filter}{isoform_filter}'
     else:
         query = f'SELECT Annotation_id, "Start", "End", Strand, "Type", Product, "Function", Locus_tag FROM Contig_annotation WHERE Contig_id=?{position_filter}{type_filter}'
@@ -464,6 +530,8 @@ def make_bokeh_sequence_subplot(conn, contig_name, xstart, xend, height, x_range
             color=colors,
             nucleotide=nucleotides,
             position=positions,
+            x_center=[float(p) for p in positions],
+            y_center=[0.5] * len(positions),
         ))
 
         p = figure(
@@ -476,6 +544,12 @@ def make_bokeh_sequence_subplot(conn, contig_name, xstart, xend, height, x_range
         p.quad(
             left='left', right='right', bottom='bottom', top='top',
             color='color', source=source, line_color=None
+        )
+
+        p.text(
+            x='x_center', y='y_center', text='nucleotide', source=source,
+            text_align='center', text_baseline='middle',
+            text_font_size='8pt', text_color='white', text_font_style='bold',
         )
 
         hover = HoverTool(tooltips=[
@@ -529,11 +603,11 @@ def make_bokeh_translated_sequence_subplot(conn, contig_name, xstart, xend, heig
         if cur.fetchone() is None:
             return None
 
-        # Load codon color/name lookup
-        cur.execute("SELECT Codon, AminoAcid, AminoAcid_name, Color FROM Codon_table")
+        # Load codon color/name/label lookup
+        cur.execute("SELECT Codon, AminoAcid, AminoAcid_name, AminoAcid_label, Color FROM Codon_table")
         codon_info = {}
-        for codon, aa, aa_name, color in cur.fetchall():
-            codon_info[codon.upper()] = (aa, aa_name, color)
+        for codon, aa, aa_name, aa_label, color in cur.fetchall():
+            codon_info[codon.upper()] = (aa, aa_name, aa_label, color)
 
         # Get contig_id
         cur.execute("SELECT Contig_id FROM Contig WHERE Contig_name = ?", (contig_name,))
@@ -542,14 +616,14 @@ def make_bokeh_translated_sequence_subplot(conn, contig_name, xstart, xend, heig
             return None
         contig_id = row[0]
 
-        # Query CDS rows that overlap the visible window (only longest isoforms)
+        # Query CDS rows that overlap the visible window (main isoform only)
         cur.execute("""
-            SELECT Start, "End", Strand, Nucleotide_sequence, Protein_sequence, Product
+            SELECT Start, "End", Strand, Nucleotide_sequence, Protein_sequence, Product, Segments
             FROM Contig_annotation
             WHERE Contig_id = ? AND Type = 'CDS'
               AND Protein_sequence IS NOT NULL
               AND "End" >= ? AND Start <= ?
-              AND (Locus_tag IS NULL OR Longest_isoform = true)
+              AND (Locus_tag IS NULL OR Main_isoform = true)
         """, (contig_id, xstart, xend))
         cds_rows = cur.fetchall()
 
@@ -580,78 +654,70 @@ def make_bokeh_translated_sequence_subplot(conn, contig_name, xstart, xend, heig
                 assignment[cds_idx] = assigned_lane
             return assignment
 
-        forward_cds = []
-        reverse_cds = []
-        for cds_idx, (cds_start, cds_end, strand, nuc_seq, prot_seq, product) in enumerate(cds_rows):
-            strand = int(strand) if strand is not None else 1
-            if strand >= 0:
-                forward_cds.append((cds_idx, cds_start, cds_end))
-            else:
-                reverse_cds.append((cds_idx, cds_start, cds_end))
-        forward_cds.sort(key=lambda x: x[1])
-        reverse_cds.sort(key=lambda x: x[1])
-
-        fwd_lanes = assign_lanes(forward_cds)
-        rev_lanes = assign_lanes(reverse_cds)
-        cds_lane = {**fwd_lanes, **rev_lanes}
-
-        fwd_num_lanes = max(fwd_lanes.values(), default=-1) + 1  # 0 if empty
-        rev_num_lanes = max(rev_lanes.values(), default=-1) + 1
-        total_lanes = fwd_num_lanes + rev_num_lanes
+        all_cds = [(cds_idx, cds_rows[cds_idx][0], cds_rows[cds_idx][1]) for cds_idx in range(len(cds_rows))]
+        all_cds.sort(key=lambda x: x[1])
+        cds_lane = assign_lanes(all_cds)
+        total_lanes = max(cds_lane.values(), default=0) + 1
 
         # --- Pass 2: build rectangles with lane-aware y-coords ---
         # All CDS share the full 0.0–1.0 band: forward lanes first (top), reverse lanes below.
         lefts, rights, bottoms, tops = [], [], [], []
-        colors, amino_acids, aa_names, codons_list = [], [], [], []
+        colors, amino_acids, aa_names, aa_labels, codons_list = [], [], [], [], []
         pos_starts, pos_ends = [], []
 
-        for cds_idx, (cds_start, cds_end, strand, nuc_seq, prot_seq, product) in enumerate(cds_rows):
+        for cds_idx, (cds_start, cds_end, strand, nuc_seq, prot_seq, product, segments_raw) in enumerate(cds_rows):
             strand = int(strand) if strand is not None else 1
             lane = cds_lane[cds_idx]
-            # Global lane index: forward lanes 0..fwd-1, then reverse lanes fwd..fwd+rev-1
-            global_lane = lane if strand >= 0 else fwd_num_lanes + lane
+
+            # Normalize segments: unspliced CDS get a single-element list
+            segments = _normalize_segments(segments_raw, cds_start, cds_end)
 
             for i, aa in enumerate(prot_seq):
-                # Compute genomic coordinates of this codon
-                if strand >= 0:  # forward
-                    left = cds_start + i * 3 - 0.5
-                    right = cds_start + i * 3 + 2.5
-                else:  # reverse
-                    left = cds_end - (i + 1) * 3 + 1 - 0.5
-                    right = cds_end - i * 3 + 0.5
-
-                # Clip to visible window
-                if right < xstart or left > xend:
+                # Walk exon segments to find the genomic position(s) for this codon.
+                # Codons straddling an exon boundary produce multiple quads.
+                quads = _codon_quads_for_aa(segments, strand, i)
+                if not quads:
                     continue
 
                 # Extract the codon triplet from nucleotide sequence
                 codon_str = nuc_seq[i * 3:i * 3 + 3].upper() if nuc_seq and i * 3 + 3 <= len(nuc_seq) else "???"
 
-                info = codon_info.get(codon_str, (aa, 'Unknown', '#999999'))
+                info = codon_info.get(codon_str, (aa, 'Unknown', '???', '#999999'))
 
                 # Compute y-coords: full 0.0–1.0 band divided among all lanes
                 lane_height = 1.0 / total_lanes
-                top_y = 1.0 - global_lane * lane_height
+                top_y = 1.0 - lane * lane_height
                 bottom_y = top_y - lane_height
 
-                lefts.append(left)
-                rights.append(right)
-                bottoms.append(bottom_y)
-                tops.append(top_y)
-                colors.append(info[2])
-                amino_acids.append(aa)
-                aa_names.append(info[1])
-                codons_list.append(codon_str)
-                pos_starts.append(int(left + 0.5))
-                pos_ends.append(int(right - 0.5))
+                for (left, right) in quads:
+                    # Clip to visible window
+                    if right < xstart or left > xend:
+                        continue
+
+                    lefts.append(left)
+                    rights.append(right)
+                    bottoms.append(bottom_y)
+                    tops.append(top_y)
+                    colors.append(info[3])
+                    amino_acids.append(aa)
+                    aa_names.append(info[1])
+                    aa_labels.append(info[2])
+                    codons_list.append(codon_str)
+                    pos_starts.append(int(left + 0.5))
+                    pos_ends.append(int(right - 0.5))
 
         if not lefts:
             return None
 
+        x_centers = [(l + r) / 2 for l, r in zip(lefts, rights)]
+        y_centers = [(b + t) / 2 for b, t in zip(bottoms, tops)]
+
         source = ColumnDataSource(data=dict(
             left=lefts, right=rights, bottom=bottoms, top=tops,
             color=colors, amino_acid=amino_acids, amino_acid_name=aa_names,
-            codon=codons_list, position_start=pos_starts, position_end=pos_ends,
+            aa_label=aa_labels, codon=codons_list,
+            position_start=pos_starts, position_end=pos_ends,
+            x_center=x_centers, y_center=y_centers,
         ))
 
         p = figure(
@@ -664,6 +730,12 @@ def make_bokeh_translated_sequence_subplot(conn, contig_name, xstart, xend, heig
         p.quad(
             left='left', right='right', bottom='bottom', top='top',
             color='color', source=source, line_color=None
+        )
+
+        p.text(
+            x='x_center', y='y_center', text='aa_label', source=source,
+            text_align='center', text_baseline='middle',
+            text_font_size='7pt', text_color='white', text_font_style='bold',
         )
 
         hover = HoverTool(tooltips=[
@@ -754,7 +826,7 @@ def _get_feature_blob(cur, contig_id, sample_id, feature_name):
     Returns raw bytes or None if not found.
     """
     from thebigbam.database.blob_decoder import feature_name_to_id
-    fid = feature_name_to_id(feature_name)
+    fid = feature_name_to_id(feature_name, cur)
     if fid is None:
         return None
     cur.execute(
@@ -771,7 +843,7 @@ def _get_feature_blobs_batch(cur, contig_id, sample_ids, feature_name):
     Returns dict mapping sample_id -> raw bytes. Missing samples are omitted.
     """
     from thebigbam.database.blob_decoder import feature_name_to_id
-    fid = feature_name_to_id(feature_name)
+    fid = feature_name_to_id(feature_name, cur)
     if fid is None:
         return {}
     placeholders = ", ".join(["?"] * len(sample_ids))

@@ -680,7 +680,7 @@ fn add_features_from_arrays(
                 let cov = coverage[i];
                 if val > cov * bar_threshold && val > min_occ as f64 {
                     positions.push(i as u32);
-                    values.push(val.round() as i32);
+                    values.push((val / cov * 1000.0).round() as i32);
                 }
             }
             (positions, values)
@@ -853,7 +853,7 @@ fn add_features_from_arrays(
                 let cov = coverage[i];
                 if val > cov * bar_threshold && val > min_occ as f64 {
                     positions.push(i as u32);
-                    vals.push(val.round() as i32);
+                    vals.push((val / cov * 1000.0).round() as i32);
                 }
             }
             (positions, vals)
@@ -930,7 +930,7 @@ fn add_features_from_arrays(
                 let cov = cov_reduced_f64[i];
                 if val > cov * bar_threshold && val > min_occ as f64 {
                     rs_pos.push(i as u32);
-                    rs_vals.push(val.round() as i32);
+                    rs_vals.push((val / cov * 1000.0).round() as i32);
                 }
             }
             let rs_meta: Vec<EventMeta> = rs_pos.iter().map(|&p| {
@@ -957,7 +957,7 @@ fn add_features_from_arrays(
                 let cov = cov_reduced_f64[i];
                 if val > cov * bar_threshold && val > min_occ as f64 {
                     re_pos.push(i as u32);
-                    re_vals.push(val.round() as i32);
+                    re_vals.push((val / cov * 1000.0).round() as i32);
                 }
             }
             let re_meta: Vec<EventMeta> = re_pos.iter().map(|&p| {

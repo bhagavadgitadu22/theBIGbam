@@ -216,7 +216,7 @@ pub const VARIABLES: &[VariableConfig] = &[
     VariableConfig { name: "mismatches", subplot: "Mismatches", module: "Misalignment", module_order: 3, plot_type: PlotType::Bars, color: "#5a0f0b", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Mismatches", help: None },
 
     // RNA module
-    VariableConfig { name: "splicings", subplot: "Splicings", module: "RNA", module_order: 1, plot_type: PlotType::Curve, color: "#06d6a0", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Splicings", help: None },
+    VariableConfig { name: "splicings", subplot: "Splicings", module: "RNA", module_order: 1, plot_type: PlotType::Bars, color: "#06d6a0", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Splicings", help: None },
 
     // Per read metrics (long reads)
     VariableConfig { name: "read_lengths", subplot: "Read lengths", module: "Long-reads", module_order: 1, plot_type: PlotType::Curve, color: "#ed8b00", alpha: 0.8, fill_alpha: 0.4, size: 1.0, title: "Read lengths", help: None },
@@ -385,6 +385,19 @@ pub struct FeatureAnnotation {
     pub nucleotide_sequence: Option<String>,
     /// Protein sequence for CDS features (translated from nucleotide_sequence)
     pub protein_sequence: Option<String>,
+    /// Sub-intervals (1-based inclusive) for spliced features. Empty when the
+    /// feature is a single interval — the bounding box start/end alone then
+    /// fully describe the feature and no Annotation_segments rows are emitted.
+    /// Populated from GenBank `join(...)` and from GFF3 exon/CDS children
+    /// collapsed into their parent mRNA.
+    pub segments: Vec<(i64, i64)>,
+    /// Parse-time handle that children use to locate their parent during the
+    /// insertion pass (GFF3 `Parent=`, GTF `transcript_id`, or a synthesised
+    /// key for GenBank CDS↔mRNA containment matches). Resolved to
+    /// `Parent_annotation_id` once annotation ids are assigned.
+    pub parent_key: Option<String>,
+    /// Parse-time handle a feature exposes so its children can point at it.
+    pub self_key: Option<String>,
 }
 
 /// Coverage data for a contig in a sample.

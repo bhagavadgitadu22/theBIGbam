@@ -40,7 +40,7 @@ def run_inspect(args):
 
     # Detect contig-level vs sample-level feature
     contig_feature_id = contig_blob_name_to_id(args.feature)
-    sample_feature_id = feature_name_to_id(args.feature)
+    sample_feature_id = feature_name_to_id(args.feature, conn)
 
     if contig_feature_id is not None:
         # Contig-level feature (Contig_blob)
