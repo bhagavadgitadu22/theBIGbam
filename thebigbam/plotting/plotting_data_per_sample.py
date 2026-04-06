@@ -1080,6 +1080,12 @@ def get_feature_data(cur, feature, contig_id, sample_id, xstart=None, xend=None,
                     blob_dict = _blob_to_feature_dict(blob_bytes, type_picked, xstart, xend, max_base_resolution)
 
                     if blob_dict is not None:
+                        # Filter sparse positions: zero out y values below min_relative_value * max(y)
+                        if min_relative_value > 0.0 and "y" in blob_dict and blob_dict["y"]:
+                            max_y = max(blob_dict["y"])
+                            if max_y > 0:
+                                threshold = min_relative_value * max_y
+                                blob_dict["y"] = [v if v >= threshold else 0 for v in blob_dict["y"]]
                         feature_dict.update(blob_dict)
                         feature_dict["is_relative_scaled"] = False  # BLOB values already descaled
                         feature_dict["has_stats"] = "mean" in blob_dict
@@ -1170,6 +1176,12 @@ def get_feature_data_batch(cur, feature, contig_id, sample_ids, xstart=None, xen
                 for sid, blob_bytes in blobs_by_sample.items():
                     blob_dict = _blob_to_feature_dict(blob_bytes, type_picked, xstart, xend, max_base_resolution)
                     if blob_dict is not None:
+                        # Filter sparse positions: zero out y values below min_relative_value * max(y)
+                        if min_relative_value > 0.0 and "y" in blob_dict and blob_dict["y"]:
+                            max_y = max(blob_dict["y"])
+                            if max_y > 0:
+                                threshold = min_relative_value * max_y
+                                blob_dict["y"] = [v if v >= threshold else 0 for v in blob_dict["y"]]
                         feature_dict = {
                             "type": type_picked, "color": color, "alpha": alpha,
                             "fill_alpha": fill_alpha, "size": size, "title": title,

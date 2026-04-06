@@ -31,6 +31,7 @@ def add_add_variable_args(parser):
     parser.add_argument('--color', required=True, help='Color for the variable (hex code: example #FF0000 for red)')
     parser.add_argument('--title', required=True, help='Title for the variable')
     parser.add_argument('--csv', dest='csv_file', required=True, help='CSV file with variable data. Required columns Contig,Sample,First_position,Last_position,Value. If all values for Sample are empty a Contig feature will be added instead of Contig/Sample pair feature.')
+    parser.add_argument('--force', action='store_true', default=False, help='Remove existing variable with the same name before adding')
 
 
 def run_add_variable(args):
@@ -63,9 +64,16 @@ def run_add_variable(args):
 
     try:
         # --- Check variable existence ---
-        cur.execute("SELECT Variable_id FROM Variable WHERE Variable_name=?", (var_name,))
-        if cur.fetchone():
-            raise ValueError(f"ERROR: Variable '{var_name}' already exists in the database.")
+        cur.execute("SELECT Variable_id, Feature_table_name FROM Variable WHERE Variable_name=?", (var_name,))
+        existing = cur.fetchone()
+        if existing:
+            if args.force:
+                existing_id, existing_table = existing
+                cur.execute(f"DROP TABLE IF EXISTS {existing_table}")
+                cur.execute("DELETE FROM Variable WHERE Variable_id=?", (existing_id,))
+                print(f"Removed existing variable '{var_name}' (--force)")
+            else:
+                raise ValueError(f"ERROR: Variable '{var_name}' already exists in the database. Use --force to replace it.")
 
         # --- Read known samples and contigs ---
         cur.execute("SELECT 1 FROM information_schema.tables WHERE table_name = 'Sample'")

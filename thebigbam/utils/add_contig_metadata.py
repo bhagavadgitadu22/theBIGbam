@@ -13,6 +13,7 @@ def add_add_contig_metadata_args(parser):
     """Define command-line arguments for add-contig-metadata."""
     parser.add_argument('--db', required=True, help='Path to DuckDB database')
     parser.add_argument('--csv', dest='csv_file', required=True, help='CSV file with Contig column and metadata columns. Header should be like: Contig,Var1,Var2,... followed by one row per contig containing the values per variable and per contig.')
+    parser.add_argument('--force', action='store_true', default=False, help='Drop existing columns that conflict with CSV columns before adding them')
 
 
 def _infer_column_type(values):
@@ -121,10 +122,13 @@ def run_add_contig_metadata(args):
             # Check for column name conflicts
             conflicts = [col for col in new_columns if col in existing_columns]
             if conflicts:
-                print(f"Error: The following columns already exist in Contig table: {', '.join(conflicts)}")
-                print("Please rename these columns in your CSV file.")
-                conn.close()
-                return 1
+                if args.force:
+                    print(f"Overwriting existing columns (--force): {', '.join(conflicts)}")
+                else:
+                    print(f"Error: The following columns already exist in Contig table: {', '.join(conflicts)}")
+                    print("Use --force to overwrite them, or rename these columns in your CSV file.")
+                    conn.close()
+                    return 1
             
             # Read all rows to infer types and prepare data
             rows = list(reader)
@@ -143,8 +147,10 @@ def run_add_contig_metadata(args):
         # Infer types for each column
         column_types = {col: _infer_column_type(values) for col, values in column_values.items()}
         
-        # Add new columns to Contig table
+        # Add new columns to Contig table (skip columns that already exist)
         for col in new_columns:
+            if col in existing_columns:
+                continue
             col_type = column_types[col]
             # Quote column name to handle special characters
             conn.execute(f'ALTER TABLE Contig ADD COLUMN "{col}" {col_type}')
