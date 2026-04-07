@@ -244,7 +244,7 @@ impl DbWriter {
         microdiversity: &[MicrodiversityData],
         side_misassembly: &[SideMisassemblyData],
         topology: &[TopologyData],
-        feature_blobs: &[(String, String, Vec<u8>)],
+        feature_blobs: &[(String, String, crate::blob::EncodedBlob)],
         circular: bool,
     ) -> Result<()> {
         let sample_id = {
@@ -522,7 +522,7 @@ impl DbWriter {
     ///
     /// Each tuple is (feature_name, contig_name, blob_bytes).
     /// Feature names are mapped to feature_ids via VARIABLES index.
-    pub fn write_feature_blobs(&self, conn: &Connection, sample_id: i64, blobs: &[(String, String, Vec<u8>)]) -> Result<()> {
+    pub fn write_feature_blobs(&self, conn: &Connection, sample_id: i64, blobs: &[(String, String, crate::blob::EncodedBlob)]) -> Result<()> {
         if blobs.is_empty() {
             return Ok(());
         }
@@ -530,16 +530,16 @@ impl DbWriter {
         let mut appender = conn.appender("Feature_blob")
             .context("Failed to create Feature_blob appender")?;
 
-        for (feature_name, contig_name, blob_bytes) in blobs {
+        for (feature_name, contig_name, encoded) in blobs {
             // Skip empty blobs (all-zero dense or no-event sparse)
-            if blob_bytes.is_empty() {
+            if encoded.data.is_empty() {
                 continue;
             }
             if let (Some(&contig_id), Some(fid)) = (
                 self.contig_name_to_id.get(contig_name),
                 feature_name_to_id(feature_name),
             ) {
-                appender.append_row(params![contig_id, sample_id, fid as i32, blob_bytes.as_slice()])?;
+                appender.append_row(params![contig_id, sample_id, fid as i32, encoded.data.as_slice(), encoded.zoom.as_slice()])?;
             }
         }
 
@@ -720,7 +720,7 @@ impl DbWriter {
                 let contig_length = (values.len() as u32) * GC_WINDOW_SIZE;
 
                 // Encode as dense BLOB (array index is window number)
-                let blob_data = encode_contig_dense_blob(
+                let encoded = encode_contig_dense_blob(
                     &values,
                     ValueScale::Raw,
                     contig_length,
@@ -730,7 +730,8 @@ impl DbWriter {
                 appender.append_row(params![
                     contig_id,
                     GC_CONTENT_FEATURE_ID,
-                    blob_data
+                    encoded.data,
+                    encoded.zoom
                 ])?;
             }
         }
@@ -770,7 +771,7 @@ impl DbWriter {
                 let contig_length = (values.len() as u32) * GC_SKEW_WINDOW_SIZE;
 
                 // Encode as dense BLOB (array index is window number)
-                let blob_data = encode_contig_dense_blob(
+                let encoded = encode_contig_dense_blob(
                     &values,
                     ValueScale::Raw,
                     contig_length,
@@ -780,7 +781,8 @@ impl DbWriter {
                 appender.append_row(params![
                     contig_id,
                     GC_SKEW_FEATURE_ID,
-                    blob_data
+                    encoded.data,
+                    encoded.zoom
                 ])?;
             }
         }
@@ -794,7 +796,7 @@ impl DbWriter {
     /// Converts RLE segments into dense per-bp arrays, then encodes as dense contig BLOBs.
     /// Delta+zstd compression handles constant-value runs very efficiently.
     fn write_repeat_features_to_blob_static(conn: &Connection) -> Result<()> {
-        use crate::blob::{encode_contig_dense_blob, ValueScale};
+        use crate::blob::{encode_dense_blob, ValueScale};
 
         // Feature IDs for repeat features
         const DIRECT_REPEAT_COUNT_ID: i16 = 3;
@@ -879,8 +881,8 @@ impl DbWriter {
                         dense[pos] = v;
                     }
                 }
-                let blob_data = encode_contig_dense_blob(&dense, scale, contig_length, 1);
-                appender.append_row(params![*contig_id, feature_id, blob_data])?;
+                let encoded = encode_dense_blob(&dense, scale, contig_length);
+                appender.append_row(params![*contig_id, feature_id, encoded.data, encoded.zoom])?;
             }
         }
 
@@ -1214,6 +1216,7 @@ fn create_core_tables(conn: &Connection, has_bam: bool) -> Result<()> {
             Sample_id  INTEGER NOT NULL REFERENCES Sample(Sample_id),
             Feature_id SMALLINT NOT NULL,
             Data       BLOB NOT NULL,
+            Zoom_data  BLOB NOT NULL,
             PRIMARY KEY (Contig_id, Sample_id, Feature_id)
         )",
         [],
@@ -1229,6 +1232,7 @@ fn create_core_tables(conn: &Connection, has_bam: bool) -> Result<()> {
             Contig_id   INTEGER NOT NULL REFERENCES Contig,
             Feature_id  SMALLINT NOT NULL,
             Data        BLOB NOT NULL,
+            Zoom_data   BLOB NOT NULL,
             PRIMARY KEY (Contig_id, Feature_id)
         )",
         [],
@@ -1514,6 +1518,8 @@ fn create_core_tables(conn: &Connection, has_bam: bool) -> Result<()> {
             Module TEXT,
             Module_order INTEGER,
             \"Type\" TEXT,
+            Encoding TEXT,
+            Value_scale TEXT,
             Color TEXT,
             Alpha REAL,
             Fill_alpha REAL,
@@ -2054,8 +2060,8 @@ fn create_variable_tables(conn: &Connection) -> Result<()> {
         };
 
         conn.execute(
-            "INSERT INTO Variable (Variable_id, Variable_name, Subplot, Module, Module_order, \"Type\", Color, Alpha, Fill_alpha, \"Size\", Title, Help, Feature_table_name)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            "INSERT INTO Variable (Variable_id, Variable_name, Subplot, Module, Module_order, \"Type\", Encoding, Value_scale, Color, Alpha, Fill_alpha, \"Size\", Title, Help, Feature_table_name)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
             params![
                 (i + 1) as i64,
                 v.name,
@@ -2063,6 +2069,8 @@ fn create_variable_tables(conn: &Connection) -> Result<()> {
                 v.module,
                 v.module_order,
                 v.plot_type.as_str(),
+                v.encoding.as_str(),
+                v.value_scale.as_str(),
                 v.color,
                 v.alpha,
                 v.fill_alpha,

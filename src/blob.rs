@@ -43,35 +43,25 @@ const NUM_CONTIG_ZOOM_LEVELS: u8 = 1;
 /// Zstd compression level (3 = good balance of speed and compression)
 const ZSTD_LEVEL: i32 = 3;
 
+/// Magic bytes for standalone zoom BLOB
+const ZOOM_MAGIC: &[u8; 4] = b"TBZ\x01";
+
 // ============================================================================
 // Types
 // ============================================================================
 
-/// Scale factor applied to values before integer encoding.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum ValueScale {
-    /// Raw integer values (no scaling)
-    Raw = 0,
-    /// Values multiplied by 100 (e.g., MAPQ stored as integer × 100)
-    Times100 = 1,
-    /// Values multiplied by 1000 (e.g., relative values × 1000)
-    Times1000 = 2,
-    /// Values multiplied by 10
-    Times10 = 3,
+/// Result of encoding a feature BLOB: the full data blob and a lightweight zoom-only blob.
+/// The zoom blob can be fetched independently for large-window views, avoiding the cost
+/// of transferring the full base-resolution data from the database.
+pub struct EncodedBlob {
+    /// Full BLOB (header + base resolution + zoom levels + metadata)
+    pub data: Vec<u8>,
+    /// Standalone zoom-only BLOB (small header + zoom levels only)
+    pub zoom: Vec<u8>,
 }
 
-impl ValueScale {
-    #[allow(dead_code)]
-    fn from_code(code: u8) -> Self {
-        match code {
-            0 => Self::Raw,
-            1 => Self::Times100,
-            2 => Self::Times1000,
-            3 => Self::Times10,
-            _ => Self::Raw,
-        }
-    }
-}
+// ValueScale is defined in types.rs (single source of truth) and re-exported here for convenience.
+pub use crate::types::ValueScale;
 
 /// Flags indicating what metadata is present in a sparse BLOB.
 #[derive(Clone, Copy, Debug, Default)]
@@ -340,6 +330,28 @@ fn encode_zoom_levels_sparse(levels: &[Vec<ZoomBinSparse>]) -> Vec<u8> {
 }
 
 // ============================================================================
+// Standalone Zoom BLOB
+// ============================================================================
+
+/// Build a standalone zoom BLOB that can be fetched independently of base-resolution data.
+///
+/// Format: ZOOM_MAGIC (4) + scale_code (1) + flags (1) + num_zoom_levels (1) + reserved (1)
+///       + contig_length (4) + reserved (4) = 16-byte header + zoom level data
+fn build_zoom_blob(scale: ValueScale, sparse: bool, num_zoom_levels: u8, contig_length: u32, zoom_bytes: &[u8]) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(16 + zoom_bytes.len());
+    buf.extend_from_slice(ZOOM_MAGIC);          // [0..4] magic
+    buf.push(scale as u8);                       // [4] scale_code
+    let flags: u8 = if sparse { 0x01 } else { 0x00 };
+    buf.push(flags);                             // [5] flags (sparse bit)
+    buf.push(num_zoom_levels);                   // [6] num_zoom_levels
+    buf.push(0);                                 // [7] reserved
+    write_u32(&mut buf, contig_length);          // [8..12] contig_length
+    write_u32(&mut buf, 0);                      // [12..16] reserved
+    buf.extend_from_slice(zoom_bytes);           // zoom level data
+    buf
+}
+
+// ============================================================================
 // Dense BLOB Encoding
 // ============================================================================
 
@@ -352,10 +364,10 @@ fn encode_zoom_levels_sparse(levels: &[Vec<ZoomBinSparse>]) -> Vec<u8> {
 /// * `values` - Per-position values (length = contig_length)
 /// * `scale` - Scale factor applied to values
 /// * `contig_length` - Length of the contig in base pairs
-pub fn encode_dense_blob(values: &[i32], scale: ValueScale, contig_length: u32) -> Vec<u8> {
+pub fn encode_dense_blob(values: &[i32], scale: ValueScale, contig_length: u32) -> EncodedBlob {
     // Skip encoding when all values are zero — caller filters empty blobs
     if values.iter().all(|&v| v == 0) {
-        return Vec::new();
+        return EncodedBlob { data: Vec::new(), zoom: Vec::new() };
     }
     let mut blob = Vec::with_capacity(32 + values.len() * 2);
 
@@ -411,7 +423,8 @@ pub fn encode_dense_blob(values: &[i32], scale: ValueScale, contig_length: u32) 
     let zoom_bytes = encode_zoom_levels_dense(&zoom_levels);
     blob.extend_from_slice(&zoom_bytes);
 
-    blob
+    let zoom_blob = build_zoom_blob(scale, false, NUM_ZOOM_LEVELS, contig_length, &zoom_bytes);
+    EncodedBlob { data: blob, zoom: zoom_blob }
 }
 
 // ============================================================================
@@ -437,12 +450,12 @@ pub fn encode_sparse_blob(
     flags: MetadataFlags,
     scale: ValueScale,
     contig_length: u32,
-) -> Vec<u8> {
+) -> EncodedBlob {
     assert_eq!(positions.len(), values.len());
 
     // Skip encoding when no events — caller filters empty blobs
     if positions.is_empty() {
-        return Vec::new();
+        return EncodedBlob { data: Vec::new(), zoom: Vec::new() };
     }
 
     let mut blob = Vec::with_capacity(32 + positions.len() * 8);
@@ -516,7 +529,8 @@ pub fn encode_sparse_blob(
         }
     }
 
-    blob
+    let zoom_blob = build_zoom_blob(scale, true, NUM_ZOOM_LEVELS, contig_length, &zoom_bytes);
+    EncodedBlob { data: blob, zoom: zoom_blob }
 }
 
 /// Encode sparse metadata in columnar format.
@@ -580,7 +594,7 @@ fn encode_sparse_metadata(metadata: &[EventMeta], flags: &MetadataFlags) -> Vec<
 ///
 /// `window_size` is the genomic window each value represents (e.g. 500 for GC content).
 /// Zoom bins are computed in window-index space so indices align with the values array.
-pub fn encode_contig_dense_blob(values: &[i32], scale: ValueScale, contig_length: u32, window_size: u32) -> Vec<u8> {
+pub fn encode_contig_dense_blob(values: &[i32], scale: ValueScale, contig_length: u32, window_size: u32) -> EncodedBlob {
     let mut blob = Vec::with_capacity(32 + values.len() * 2);
 
     // === Header (32 bytes) ===
@@ -639,7 +653,8 @@ pub fn encode_contig_dense_blob(values: &[i32], scale: ValueScale, contig_length
     let zoom_bytes = encode_zoom_levels_dense(&zoom_levels);
     blob.extend_from_slice(&zoom_bytes);
 
-    blob
+    let zoom_blob = build_zoom_blob(scale, false, NUM_CONTIG_ZOOM_LEVELS, contig_length, &zoom_bytes);
+    EncodedBlob { data: blob, zoom: zoom_blob }
 }
 
 /// Encode a sparse contig feature (repeat features) as a compressed BLOB.
@@ -649,7 +664,7 @@ pub fn encode_contig_sparse_blob(
     values: &[i32],
     scale: ValueScale,
     contig_length: u32,
-) -> Vec<u8> {
+) -> EncodedBlob {
     assert_eq!(positions.len(), values.len());
 
     let mut blob = Vec::with_capacity(32 + positions.len() * 8);
@@ -705,7 +720,8 @@ pub fn encode_contig_sparse_blob(
     let zoom_bytes = encode_zoom_levels_sparse(&zoom_levels);
     blob.extend_from_slice(&zoom_bytes);
 
-    blob
+    let zoom_blob = build_zoom_blob(scale, true, NUM_ZOOM_LEVELS, contig_length, &zoom_bytes);
+    EncodedBlob { data: blob, zoom: zoom_blob }
 }
 
 // ============================================================================

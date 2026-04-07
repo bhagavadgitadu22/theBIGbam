@@ -95,6 +95,78 @@ impl SequencingType {
 }
 
 // ============================================================================
+// Encoding Types
+// ============================================================================
+
+/// How a feature's per-position data is encoded in BLOBs.
+///
+/// - `Dense`: One value per position (or per window). Good for continuous signals
+///   like coverage, GC content, MAPQ — every position has a meaningful value.
+/// - `Sparse`: Only positions where events occur are stored. Good for discrete
+///   events like clippings, insertions, read starts — most positions are zero.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Encoding {
+    /// One value per position/window — continuous signals
+    Dense,
+    /// Only non-zero positions stored — discrete events
+    Sparse,
+}
+
+impl Encoding {
+    #[inline]
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Dense => "dense",
+            Self::Sparse => "sparse",
+        }
+    }
+}
+
+// ============================================================================
+// Value Scale
+// ============================================================================
+
+/// Scale factor applied to values before integer encoding in BLOBs.
+///
+/// Genomic features often have fractional values (e.g., relative to coverage).
+/// Since BLOBs store integers, values are multiplied by a scale factor before
+/// encoding and divided back when decoding.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ValueScale {
+    /// Raw integer values (no scaling) — e.g., coverage counts
+    Raw = 0,
+    /// Values multiplied by 100 — e.g., MAPQ (fractional quality scores)
+    Times100 = 1,
+    /// Values multiplied by 1000 — e.g., coverage-relative ratios
+    Times1000 = 2,
+    /// Values multiplied by 10 — e.g., insert sizes, read lengths
+    Times10 = 3,
+}
+
+impl ValueScale {
+    /// Convert a code byte (from BLOB header) back to a ValueScale.
+    pub fn from_code(code: u8) -> Self {
+        match code {
+            0 => Self::Raw,
+            1 => Self::Times100,
+            2 => Self::Times1000,
+            3 => Self::Times10,
+            _ => Self::Raw,
+        }
+    }
+
+    #[inline]
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Raw => "raw",
+            Self::Times100 => "times100",
+            Self::Times1000 => "times1000",
+            Self::Times10 => "times10",
+        }
+    }
+}
+
+// ============================================================================
 // Plot Types
 // ============================================================================
 
@@ -159,6 +231,10 @@ pub struct VariableConfig {
     pub module_order: i32,
     /// How to visualize this variable
     pub plot_type: PlotType,
+    /// How per-position data is encoded in BLOBs
+    pub encoding: Encoding,
+    /// Scale factor for integer encoding in BLOBs
+    pub value_scale: ValueScale,
     /// Hex color code for plotting (e.g., "#333333")
     pub color: &'static str,
     /// Line/marker opacity (0.0 = transparent, 1.0 = opaque)
@@ -192,45 +268,45 @@ pub struct VariableConfig {
 pub const VARIABLES: &[VariableConfig] = &[
     // Genome module - genomic properties
     // Repeat count subplot (button 1)
-    VariableConfig { name: "direct_repeat_count", subplot: "Repeat count", module: "Genome", module_order: 1, plot_type: PlotType::Curve, color: "#c1121f", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Direct repeat count", help: Some("Direct repeats detected by self-BLAST (e.g., terminal repeats)") },
-    VariableConfig { name: "inverted_repeat_count", subplot: "Repeat count", module: "Genome", module_order: 1, plot_type: PlotType::Curve, color: "#12C1B4", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Inverted repeat count", help: Some("Inverted repeats detected by self-BLAST (e.g., terminal repeats)") },
+    VariableConfig { name: "direct_repeat_count", subplot: "Repeat count", module: "Genome", module_order: 1, plot_type: PlotType::Curve, encoding: Encoding::Sparse, value_scale: ValueScale::Raw, color: "#c1121f", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Direct repeat count", help: Some("Direct repeats detected by self-BLAST (e.g., terminal repeats)") },
+    VariableConfig { name: "inverted_repeat_count", subplot: "Repeat count", module: "Genome", module_order: 1, plot_type: PlotType::Curve, encoding: Encoding::Sparse, value_scale: ValueScale::Raw, color: "#12C1B4", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Inverted repeat count", help: Some("Inverted repeats detected by self-BLAST (e.g., terminal repeats)") },
     // Max repeat identity subplot (button 2)
-    VariableConfig { name: "direct_repeat_identity", subplot: "Max repeat identity", module: "Genome", module_order: 2, plot_type: PlotType::Curve, color: "#c1121f", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Max direct repeat identity", help: Some("Direct repeats detected by self-BLAST (e.g., terminal repeats)") },
-    VariableConfig { name: "inverted_repeat_identity", subplot: "Max repeat identity", module: "Genome", module_order: 2, plot_type: PlotType::Curve, color: "#12C1B4", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Max inverted repeat identity", help: Some("Inverted repeats detected by self-BLAST (e.g., terminal repeats)") },
-    VariableConfig { name: "gc_content", subplot: "GC content", module: "Genome", module_order: 3, plot_type: PlotType::Curve, color: "#693efe", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "GC content", help: None },
-    VariableConfig { name: "gc_skew", subplot: "GC skew", module: "Genome", module_order: 4, plot_type: PlotType::Curve, color: "#C8A2C8", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "GC skew", help: None },   
-    
+    VariableConfig { name: "direct_repeat_identity", subplot: "Max repeat identity", module: "Genome", module_order: 2, plot_type: PlotType::Curve, encoding: Encoding::Sparse, value_scale: ValueScale::Times100, color: "#c1121f", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Max direct repeat identity", help: Some("Direct repeats detected by self-BLAST (e.g., terminal repeats)") },
+    VariableConfig { name: "inverted_repeat_identity", subplot: "Max repeat identity", module: "Genome", module_order: 2, plot_type: PlotType::Curve, encoding: Encoding::Sparse, value_scale: ValueScale::Times100, color: "#12C1B4", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Max inverted repeat identity", help: Some("Inverted repeats detected by self-BLAST (e.g., terminal repeats)") },
+    VariableConfig { name: "gc_content", subplot: "GC content", module: "Genome", module_order: 3, plot_type: PlotType::Curve, encoding: Encoding::Dense, value_scale: ValueScale::Raw, color: "#693efe", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "GC content", help: None },
+    VariableConfig { name: "gc_skew", subplot: "GC skew", module: "Genome", module_order: 4, plot_type: PlotType::Curve, encoding: Encoding::Dense, value_scale: ValueScale::Raw, color: "#C8A2C8", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "GC skew", help: None },
+
     // Coverage module - basic read depth
-    VariableConfig { name: "primary_reads", subplot: "Primary alignments", module: "Coverage", module_order: 1, plot_type: PlotType::Curve, color: "#333333", alpha: 0.8, fill_alpha: 0.4, size: 1.0, title: "Primary reads", help: None },
-    VariableConfig { name: "primary_reads_plus_only", subplot: "Alignments by strand", module: "Coverage", module_order: 2, plot_type: PlotType::Curve, color: "#a1665e", alpha: 0.8, fill_alpha: 0.4, size: 1.0, title: "Primary reads (+ only)", help: None },
-    VariableConfig { name: "primary_reads_minus_only", subplot: "Alignments by strand", module: "Coverage", module_order: 2, plot_type: PlotType::Curve, color: "#5E99A1", alpha: 0.8, fill_alpha: 0.4, size: 1.0, title: "Primary reads (- only)", help: None },
-    VariableConfig { name: "secondary_reads", subplot: "Other alignments", module: "Coverage", module_order: 3, plot_type: PlotType::Curve, color: "#1f77b4", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Secondary reads", help: None },
-    VariableConfig { name: "supplementary_reads", subplot: "Other alignments", module: "Coverage", module_order: 3, plot_type: PlotType::Curve, color: "#B45C1F", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Supplementary reads", help: None },
-    VariableConfig { name: "mapq", subplot: "MAPQ", module: "Coverage", module_order: 4, plot_type: PlotType::Curve, color: "#77dd77", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Mapping quality", help: None },
-        
-    // Per position errors from reads (Assembly check)
-    VariableConfig { name: "left_clippings", subplot: "Clippings", module: "Misalignment", module_order: 1, plot_type: PlotType::Bars, color: "#8e43e7", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Left clippings", help: Some("Extra bases are missing on the left of the contig") },
-    VariableConfig { name: "right_clippings", subplot: "Clippings", module: "Misalignment", module_order: 1, plot_type: PlotType::Bars, color: "#9CE743", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Right clippings", help: Some("Extra bases are missing on the right of the contig") },
-    VariableConfig { name: "insertions", subplot: "Indels", module: "Misalignment", module_order: 2, plot_type: PlotType::Bars, color: "#e50001", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Insertions", help: Some("Extra bases are present in the read but not in the contig") },
-    VariableConfig { name: "deletions", subplot: "Indels", module: "Misalignment", module_order: 2, plot_type: PlotType::Bars, color: "#00E5E4", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Deletions", help: Some("A stretch of the contig has no corresponding bases in the read") },
-    VariableConfig { name: "mismatches", subplot: "Mismatches", module: "Misalignment", module_order: 3, plot_type: PlotType::Bars, color: "#5a0f0b", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Mismatches", help: None },
+    VariableConfig { name: "primary_reads", subplot: "Primary alignments", module: "Coverage", module_order: 1, plot_type: PlotType::Curve, encoding: Encoding::Dense, value_scale: ValueScale::Raw, color: "#333333", alpha: 0.8, fill_alpha: 0.4, size: 1.0, title: "Primary reads", help: None },
+    VariableConfig { name: "primary_reads_plus_only", subplot: "Alignments by strand", module: "Coverage", module_order: 2, plot_type: PlotType::Curve, encoding: Encoding::Dense, value_scale: ValueScale::Raw, color: "#a1665e", alpha: 0.8, fill_alpha: 0.4, size: 1.0, title: "Primary reads (+ only)", help: None },
+    VariableConfig { name: "primary_reads_minus_only", subplot: "Alignments by strand", module: "Coverage", module_order: 2, plot_type: PlotType::Curve, encoding: Encoding::Dense, value_scale: ValueScale::Raw, color: "#5E99A1", alpha: 0.8, fill_alpha: 0.4, size: 1.0, title: "Primary reads (- only)", help: None },
+    VariableConfig { name: "secondary_reads", subplot: "Other alignments", module: "Coverage", module_order: 3, plot_type: PlotType::Curve, encoding: Encoding::Dense, value_scale: ValueScale::Raw, color: "#1f77b4", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Secondary reads", help: None },
+    VariableConfig { name: "supplementary_reads", subplot: "Other alignments", module: "Coverage", module_order: 3, plot_type: PlotType::Curve, encoding: Encoding::Dense, value_scale: ValueScale::Raw, color: "#B45C1F", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Supplementary reads", help: None },
+    VariableConfig { name: "mapq", subplot: "MAPQ", module: "Coverage", module_order: 4, plot_type: PlotType::Curve, encoding: Encoding::Dense, value_scale: ValueScale::Times100, color: "#77dd77", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Mapping quality", help: None },
+
+    // Per position errors from reads (Misalignment)
+    VariableConfig { name: "left_clippings", subplot: "Clippings", module: "Misalignment", module_order: 1, plot_type: PlotType::Bars, encoding: Encoding::Sparse, value_scale: ValueScale::Times1000, color: "#8e43e7", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Left clippings", help: Some("Extra bases are missing on the left of the contig") },
+    VariableConfig { name: "right_clippings", subplot: "Clippings", module: "Misalignment", module_order: 1, plot_type: PlotType::Bars, encoding: Encoding::Sparse, value_scale: ValueScale::Times1000, color: "#9CE743", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Right clippings", help: Some("Extra bases are missing on the right of the contig") },
+    VariableConfig { name: "insertions", subplot: "Indels", module: "Misalignment", module_order: 2, plot_type: PlotType::Bars, encoding: Encoding::Sparse, value_scale: ValueScale::Times1000, color: "#e50001", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Insertions", help: Some("Extra bases are present in the read but not in the contig") },
+    VariableConfig { name: "deletions", subplot: "Indels", module: "Misalignment", module_order: 2, plot_type: PlotType::Bars, encoding: Encoding::Sparse, value_scale: ValueScale::Times1000, color: "#00E5E4", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Deletions", help: Some("A stretch of the contig has no corresponding bases in the read") },
+    VariableConfig { name: "mismatches", subplot: "Mismatches", module: "Misalignment", module_order: 3, plot_type: PlotType::Bars, encoding: Encoding::Sparse, value_scale: ValueScale::Times1000, color: "#5a0f0b", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Mismatches", help: None },
 
     // RNA module
-    VariableConfig { name: "splicings", subplot: "Splicings", module: "RNA", module_order: 1, plot_type: PlotType::Curve, color: "#06d6a0", alpha: 0.8, fill_alpha: 0.4, size: 1.0, title: "Splicings", help: None },
+    VariableConfig { name: "splicings", subplot: "Splicings", module: "RNA", module_order: 1, plot_type: PlotType::Curve, encoding: Encoding::Sparse, value_scale: ValueScale::Raw, color: "#06d6a0", alpha: 0.8, fill_alpha: 0.4, size: 1.0, title: "Splicings", help: None },
 
     // Per read metrics (long reads)
-    VariableConfig { name: "read_lengths", subplot: "Read lengths", module: "Long-reads", module_order: 1, plot_type: PlotType::Curve, color: "#ed8b00", alpha: 0.8, fill_alpha: 0.4, size: 1.0, title: "Read lengths", help: None },
+    VariableConfig { name: "read_lengths", subplot: "Read lengths", module: "Long-reads", module_order: 1, plot_type: PlotType::Curve, encoding: Encoding::Dense, value_scale: ValueScale::Times10, color: "#ed8b00", alpha: 0.8, fill_alpha: 0.4, size: 1.0, title: "Read lengths", help: None },
 
-    // Per read metrics (paired-reads)  
-    VariableConfig { name: "insert_sizes", subplot: "Insert sizes", module: "Paired-reads", module_order: 1, plot_type: PlotType::Curve, color: "#ed8b00", alpha: 0.8, fill_alpha: 0.4, size: 1.0, title: "Insert sizes", help: None },
-    VariableConfig { name: "non_inward_pairs", subplot: "Non-inward pairs", module: "Paired-reads", module_order: 2, plot_type: PlotType::Curve, color: "#c94009", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Non-inward pairs", help: None },
-    VariableConfig { name: "mate_not_mapped", subplot: "Missing mates", module: "Paired-reads", module_order: 3, plot_type: PlotType::Curve, color: "#302DD2", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Mate unmapped", help: None },
-    VariableConfig { name: "mate_on_another_contig", subplot: "Missing mates", module: "Paired-reads", module_order: 4, plot_type: PlotType::Curve, color: "#CFD22D", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Mate mapped on another contig", help: None },
+    // Per read metrics (paired-reads)
+    VariableConfig { name: "insert_sizes", subplot: "Insert sizes", module: "Paired-reads", module_order: 1, plot_type: PlotType::Curve, encoding: Encoding::Dense, value_scale: ValueScale::Times10, color: "#ed8b00", alpha: 0.8, fill_alpha: 0.4, size: 1.0, title: "Insert sizes", help: None },
+    VariableConfig { name: "non_inward_pairs", subplot: "Non-inward pairs", module: "Paired-reads", module_order: 2, plot_type: PlotType::Curve, encoding: Encoding::Sparse, value_scale: ValueScale::Times1000, color: "#c94009", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Non-inward pairs", help: None },
+    VariableConfig { name: "mate_not_mapped", subplot: "Missing mates", module: "Paired-reads", module_order: 3, plot_type: PlotType::Curve, encoding: Encoding::Sparse, value_scale: ValueScale::Times1000, color: "#302DD2", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Mate unmapped", help: None },
+    VariableConfig { name: "mate_on_another_contig", subplot: "Missing mates", module: "Paired-reads", module_order: 4, plot_type: PlotType::Curve, encoding: Encoding::Sparse, value_scale: ValueScale::Times1000, color: "#CFD22D", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Mate mapped on another contig", help: None },
 
     // Phage termini module - for detecting phage DNA packaging sites
-    VariableConfig { name: "coverage_reduced", subplot: "Coverage reduced", module: "Phage termini", module_order: 1, plot_type: PlotType::Curve, color: "#00c53b", alpha: 0.8, fill_alpha: 0.4, size: 1.0, title: "Coverage reduced", help: Some("Retains primary mappings starting with an exact match (and ending with an exact match for long reads)") },
-    VariableConfig { name: "reads_starts", subplot: "Reads termini", module: "Phage termini", module_order: 2, plot_type: PlotType::Bars, color: "#215732", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Read starts", help: None },
-    VariableConfig { name: "reads_ends", subplot: "Reads termini", module: "Phage termini", module_order: 3, plot_type: PlotType::Bars, color: "#572146", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Read ends", help: None },
+    VariableConfig { name: "coverage_reduced", subplot: "Coverage reduced", module: "Phage termini", module_order: 1, plot_type: PlotType::Curve, encoding: Encoding::Dense, value_scale: ValueScale::Raw, color: "#00c53b", alpha: 0.8, fill_alpha: 0.4, size: 1.0, title: "Coverage reduced", help: Some("Retains primary mappings starting with an exact match (and ending with an exact match for long reads)") },
+    VariableConfig { name: "reads_starts", subplot: "Reads termini", module: "Phage termini", module_order: 2, plot_type: PlotType::Bars, encoding: Encoding::Sparse, value_scale: ValueScale::Times1000, color: "#215732", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Read starts", help: None },
+    VariableConfig { name: "reads_ends", subplot: "Reads termini", module: "Phage termini", module_order: 3, plot_type: PlotType::Bars, encoding: Encoding::Sparse, value_scale: ValueScale::Times1000, color: "#572146", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Read ends", help: None },
 ];
 
 // ============================================================================

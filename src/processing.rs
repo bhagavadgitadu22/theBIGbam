@@ -511,7 +511,7 @@ fn add_features_from_arrays(
     primary_count: u64,
     repeats: &[RepeatsData],
     cds_index: Option<&CdsIndex>,
-    blob_output: &mut Vec<(String, String, Vec<u8>)>,
+    blob_output: &mut Vec<(String, String, crate::blob::EncodedBlob)>,
 ) -> (Option<PackagingData>, Option<(MisassemblyData, MicrodiversityData, SideMisassemblyData, TopologyData)>) {
     use crate::blob::{encode_dense_blob, encode_sparse_blob, EventMeta, MetadataFlags, ValueScale,
                        codon_category_to_id, codon_to_id, aa_to_id};
@@ -1116,7 +1116,7 @@ pub fn process_sample(
     is_circular: bool,
     repeats: &[RepeatsData],
     annotations: &[crate::types::FeatureAnnotation],
-) -> Result<(Vec<(String, String, Vec<u8>)>, Vec<PresenceData>, Vec<PackagingData>, Vec<MisassemblyData>, Vec<MicrodiversityData>, Vec<SideMisassemblyData>, Vec<TopologyData>, String, SequencingType, u64, u64, bool)> {
+) -> Result<(Vec<(String, String, crate::blob::EncodedBlob)>, Vec<PresenceData>, Vec<PackagingData>, Vec<MisassemblyData>, Vec<MicrodiversityData>, Vec<SideMisassemblyData>, Vec<TopologyData>, String, SequencingType, u64, u64, bool)> {
     let sample_name = bam_path
         .file_stem()
         .unwrap_or_default()
@@ -1194,7 +1194,7 @@ pub fn process_sample(
             }
 
             // Calculate features for this contig
-            let mut feature_blobs: Vec<(String, String, Vec<u8>)> = Vec::new();
+            let mut feature_blobs: Vec<(String, String, crate::blob::EncodedBlob)> = Vec::new();
             let (packaging_info, metrics_info) = add_features_from_arrays(&mut arrays, &ref_name, ref_length, config, is_circular, seq_type, flags, primary_count, repeats, cds_index.as_ref(), &mut feature_blobs);
             let coverage_median = arrays.coverage_median() as f32;
             let coverage_trimmed_mean = arrays.coverage_trimmed_mean(0.05) as f32;
@@ -1253,7 +1253,7 @@ pub fn process_sample(
         .collect();
 
     // Merge results from all contigs
-    let mut all_feature_blobs: Vec<(String, String, Vec<u8>)> = Vec::new();
+    let mut all_feature_blobs: Vec<(String, String, crate::blob::EncodedBlob)> = Vec::new();
     let mut all_presences = Vec::new();
     let mut all_packaging = Vec::new();
     let mut all_misassembly = Vec::new();
@@ -1603,8 +1603,8 @@ struct SampleResult {
     total_reads: u64,
     mapped_reads: u64,
     is_circular: bool,
-    /// Compressed BLOB data: Vec<(feature_name, contig_name, blob_bytes)>
-    feature_blobs: Vec<(String, String, Vec<u8>)>,
+    /// Compressed BLOB data: Vec<(feature_name, contig_name, encoded_blob)>
+    feature_blobs: Vec<(String, String, crate::blob::EncodedBlob)>,
     presences: Vec<PresenceData>,
     packaging: Vec<PackagingData>,
     misassembly: Vec<MisassemblyData>,

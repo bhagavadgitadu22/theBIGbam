@@ -21,6 +21,7 @@ except ImportError:
 # ============================================================================
 
 MAGIC = b"TBB\x01"
+ZOOM_MAGIC = b"TBZ\x01"
 CHUNK_SIZE = 65536
 # Zoom level bin sizes (100bp, 1000bp, 10000bp)
 ZOOM_BIN_SIZES = [100, 1000, 10000]
@@ -378,6 +379,7 @@ def decode_blob(blob_bytes):
         result = {
             "x": positions,
             "y": values.astype(np.float64) / scale if scale != 1 else values.astype(np.float64),
+            "sparse": True,
         }
         # Decode metadata if present
         meta = _decode_sparse_metadata(blob_bytes, header, len(positions))
@@ -397,6 +399,7 @@ def decode_blob(blob_bytes):
         return {
             "x": x,
             "y": values.astype(np.float64) / scale if scale != 1 else values.astype(np.float64),
+            "sparse": False,
         }
 
 
@@ -447,6 +450,7 @@ def _zoom_bins_to_dict(bins, bin_size, contig_length, scale, is_sparse):
             "bin_end": bin_ends,
             "max": np.array([b["max"] for b in bins], dtype=np.float64) / scale,
             "mean": np.array([b["mean"] for b in bins], dtype=np.float64) / scale,
+            "sparse": True,
         }
     else:
         bin_starts = np.arange(n, dtype=np.uint32) * bin_size
@@ -456,6 +460,7 @@ def _zoom_bins_to_dict(bins, bin_size, contig_length, scale, is_sparse):
             "bin_start": bin_starts,
             "bin_end": bin_ends,
             "mean": np.array([b["mean"] for b in bins], dtype=np.float64) / scale,
+            "sparse": False,
         }
 
 
@@ -495,6 +500,100 @@ def decode_zoom_by_bin_size(blob_bytes, target_bin_size):
             if zoom["bin_size"] == try_size:
                 result = _zoom_bins_to_dict(zoom["bins"], try_size, contig_length, scale, is_sparse)
                 return result
+
+    return None
+
+
+def decode_zoom_standalone(zoom_blob_bytes, target_bin_size):
+    """
+    Decode zoom levels from a standalone Zoom_data BLOB (TBZ format).
+
+    This is the lightweight alternative to decode_zoom_by_bin_size() that works
+    on the separate Zoom_data column, avoiding the need to fetch the full Data BLOB.
+
+    Format: ZOOM_MAGIC (4) + scale_code (1) + flags (1) + num_zoom_levels (1)
+          + reserved (1) + contig_length (4) + reserved (4) = 16-byte header + zoom data
+
+    Returns dict or None if no suitable bin size is available.
+    """
+    if isinstance(zoom_blob_bytes, memoryview):
+        zoom_blob_bytes = bytes(zoom_blob_bytes)
+
+    if len(zoom_blob_bytes) < 16 or zoom_blob_bytes[:4] != ZOOM_MAGIC:
+        return None
+
+    scale_code = zoom_blob_bytes[4]
+    flags_byte = zoom_blob_bytes[5]
+    num_zoom_levels = zoom_blob_bytes[6]
+    contig_length = struct.unpack_from("<I", zoom_blob_bytes, 8)[0]
+
+    scale = SCALE_DIVISORS.get(scale_code, 1)
+    is_sparse = (flags_byte & 0x01) != 0
+
+    if num_zoom_levels == 1:
+        zoom_bin_sizes = [10000]
+    else:
+        zoom_bin_sizes = ZOOM_BIN_SIZES
+
+    # Decode zoom levels from offset 16
+    offset = 16
+    levels = []
+    for level_idx in range(num_zoom_levels):
+        if offset + 4 > len(zoom_blob_bytes):
+            break
+        compressed_size = struct.unpack_from("<I", zoom_blob_bytes, offset)[0]
+        offset += 4
+        if offset + compressed_size > len(zoom_blob_bytes):
+            break
+        level_data = _zstd_decompress(zoom_blob_bytes[offset:offset + compressed_size])
+        offset += compressed_size
+
+        bin_size = zoom_bin_sizes[level_idx] if level_idx < len(zoom_bin_sizes) else 10000
+        num_bins = (contig_length + bin_size - 1) // bin_size
+
+        if is_sparse:
+            pos = 0
+            nonzero_count = struct.unpack_from("<I", level_data, pos)[0]
+            pos += 4
+            bins = []
+            if nonzero_count > 0:
+                idx_len = struct.unpack_from("<I", level_data, pos)[0]
+                pos += 4
+                idx_unsigned = _varint_decode(level_data[pos:pos + idx_len])
+                pos += idx_len
+                idx_signed = _zigzag_decode(idx_unsigned)
+                bin_indices = _delta_decode(idx_signed)
+
+                val_len = struct.unpack_from("<I", level_data, pos)[0]
+                pos += 4
+                val_unsigned = _varint_decode(level_data[pos:pos + val_len])
+                val_values = _zigzag_decode(val_unsigned)
+
+                for i in range(nonzero_count):
+                    bins.append({"idx": bin_indices[i], "max": val_values[i], "mean": val_values[i]})
+        else:
+            bins = []
+            pos = 0
+            for _ in range(num_bins):
+                if pos + 4 > len(level_data):
+                    break
+                mean_val = struct.unpack_from("<i", level_data, pos)[0]
+                pos += 4
+                bins.append({"mean": mean_val})
+
+        levels.append({"bin_size": bin_size, "bins": bins})
+
+    # Try exact match first, then next larger bin size
+    available_bins = [100, 1000, 10000]
+    bin_sizes_to_try = [target_bin_size]
+    fallback = [b for b in available_bins if b > target_bin_size]
+    if fallback:
+        bin_sizes_to_try.append(min(fallback))
+
+    for try_size in bin_sizes_to_try:
+        for zoom in levels:
+            if zoom["bin_size"] == try_size:
+                return _zoom_bins_to_dict(zoom["bins"], try_size, contig_length, scale, is_sparse)
 
     return None
 

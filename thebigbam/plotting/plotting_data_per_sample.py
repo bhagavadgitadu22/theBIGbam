@@ -29,8 +29,9 @@ PHAROKKA_CDS_COLORS = {
 # From https://github.com/oschwengers/bakta/blob/d6443639958750c3bece5822e84978271d1a4dc7/bakta/plot.py#L40
 TYPE_COLORS = {
     # grey for protein-coding genes
+    'gene': '#555555',
+    'mRNA': "#777777",
     'CDS': '#cccccc',
-    'mRNA': '#777777',
     # green for RNA genes
     'tRNA': '#66c2a5',
     'tmRNA': '#99d8c9',
@@ -820,8 +821,11 @@ _DEFAULT_MAX_BASE_RESOLUTION = 10_000  # 10 kb
 # BLOB-based feature data retrieval
 # ============================================================================
 
-def _get_feature_blob(cur, contig_id, sample_id, feature_name):
+def _get_feature_blob(cur, contig_id, sample_id, feature_name, zoom_only=False):
     """Fetch a single feature BLOB from the Feature_blob table.
+
+    Args:
+        zoom_only: If True, fetch only the lightweight Zoom_data column (for large windows).
 
     Returns raw bytes or None if not found.
     """
@@ -829,16 +833,20 @@ def _get_feature_blob(cur, contig_id, sample_id, feature_name):
     fid = feature_name_to_id(feature_name, cur)
     if fid is None:
         return None
+    col = "Zoom_data" if zoom_only else "Data"
     cur.execute(
-        "SELECT Data FROM Feature_blob WHERE Contig_id=? AND Sample_id=? AND Feature_id=?",
+        f"SELECT {col} FROM Feature_blob WHERE Contig_id=? AND Sample_id=? AND Feature_id=?",
         (contig_id, sample_id, fid)
     )
     row = cur.fetchone()
     return row[0] if row else None
 
 
-def _get_feature_blobs_batch(cur, contig_id, sample_ids, feature_name):
+def _get_feature_blobs_batch(cur, contig_id, sample_ids, feature_name, zoom_only=False):
     """Fetch feature BLOBs for multiple samples in one query.
+
+    Args:
+        zoom_only: If True, fetch only the lightweight Zoom_data column (for large windows).
 
     Returns dict mapping sample_id -> raw bytes. Missing samples are omitted.
     """
@@ -846,19 +854,23 @@ def _get_feature_blobs_batch(cur, contig_id, sample_ids, feature_name):
     fid = feature_name_to_id(feature_name, cur)
     if fid is None:
         return {}
+    col = "Zoom_data" if zoom_only else "Data"
     placeholders = ", ".join(["?"] * len(sample_ids))
     cur.execute(
-        f"SELECT Sample_id, Data FROM Feature_blob WHERE Contig_id=? AND Feature_id=? AND Sample_id IN ({placeholders})",
+        f"SELECT Sample_id, {col} FROM Feature_blob WHERE Contig_id=? AND Feature_id=? AND Sample_id IN ({placeholders})",
         [contig_id, fid] + list(sample_ids)
     )
     return {row[0]: row[1] for row in cur.fetchall()}
 
 
-def _get_contig_blob(cur, contig_id, feature_name):
+def _get_contig_blob(cur, contig_id, feature_name, zoom_only=False):
     """Fetch a single Contig_blob entry for a contig-level feature.
 
     Contig_blob stores contig-level features (gc_content, gc_skew, repeat stats).
     Unlike Feature_blob, Contig_blob has no sample dimension.
+
+    Args:
+        zoom_only: If True, fetch only the lightweight Zoom_data column (for large windows).
 
     Returns raw bytes or None if not found.
     """
@@ -866,24 +878,27 @@ def _get_contig_blob(cur, contig_id, feature_name):
     fid = contig_blob_name_to_id(feature_name)
     if fid is None:
         return None
+    col = "Zoom_data" if zoom_only else "Data"
     cur.execute(
-        "SELECT Data FROM Contig_blob WHERE Contig_id=? AND Feature_id=?",
+        f"SELECT {col} FROM Contig_blob WHERE Contig_id=? AND Feature_id=?",
         (contig_id, fid)
     )
     row = cur.fetchone()
     return row[0] if row else None
 
 
-def _blob_to_feature_dict(blob_bytes, type_picked, xstart=None, xend=None, max_base_resolution=None):
+def _blob_to_feature_dict(blob_bytes, type_picked, xstart=None, xend=None, max_base_resolution=None, zoom_blob_bytes=None):
     """Decode a BLOB and format for Bokeh plotting.
 
     Args:
         max_base_resolution: Window size (bp) below which base resolution is used.
             Above this, zoom levels are tried. Default: 10_000.
+        zoom_blob_bytes: Optional standalone zoom BLOB (TBZ format). When provided and
+            the window is large enough for zoom, this is decoded instead of the full BLOB.
 
     Returns dict with x, y, and optional metadata arrays, or None if empty.
     """
-    from thebigbam.database.blob_decoder import decode_blob, decode_zoom_by_bin_size
+    from thebigbam.database.blob_decoder import decode_blob, decode_zoom_by_bin_size, decode_zoom_standalone
 
     threshold = max_base_resolution if max_base_resolution is not None else _DEFAULT_MAX_BASE_RESOLUTION
     window = (xend - xstart) if (xstart is not None and xend is not None) else 0
@@ -891,13 +906,16 @@ def _blob_to_feature_dict(blob_bytes, type_picked, xstart=None, xend=None, max_b
     # Try zoom levels for windows larger than threshold
     # Pick smallest bin size that keeps points under ~10,000
     if window > threshold:
+        # Use standalone zoom blob if available (avoids fetching full Data BLOB)
+        zoom_decoder = decode_zoom_standalone if zoom_blob_bytes is not None else decode_zoom_by_bin_size
+        zoom_src = zoom_blob_bytes if zoom_blob_bytes is not None else blob_bytes
         for bin_size in [100, 1000, 10000]:
             if window // bin_size <= 10_000:
-                data = decode_zoom_by_bin_size(blob_bytes, bin_size)
+                data = zoom_decoder(zoom_src, bin_size)
                 if data is not None:
                     return _format_zoom_for_bokeh(data, type_picked, xstart, xend)
         # Fallback to coarsest zoom
-        data = decode_zoom_by_bin_size(blob_bytes, 10000)
+        data = zoom_decoder(zoom_src, 10000)
         if data is not None:
             return _format_zoom_for_bokeh(data, type_picked, xstart, xend)
 
@@ -945,6 +963,27 @@ def _blob_to_feature_dict(blob_bytes, type_picked, xstart=None, xend=None, max_b
 
     if len(x) == 0:
         return None
+
+    # For sparse features, insert zero-anchor points between distant events
+    # so Bokeh lines/areas drop to zero instead of interpolating across gaps.
+    if data.get("sparse") and type_picked != "bars" and len(x) > 0:
+        new_x = []
+        new_y = []
+        for i in range(len(x)):
+            if i == 0 and x[i] > 0:
+                new_x.append(x[i] - 1)
+                new_y.append(0.0)
+            elif i > 0 and x[i] > x[i - 1] + 1:
+                new_x.append(x[i - 1] + 1)
+                new_y.append(0.0)
+                new_x.append(x[i] - 1)
+                new_y.append(0.0)
+            new_x.append(x[i])
+            new_y.append(float(y[i]))
+        new_x.append(x[-1] + 1)
+        new_y.append(0.0)
+        x = np.array(new_x, dtype=np.uint32)
+        y = np.array(new_y, dtype=np.float64)
 
     # Convert 0-indexed to 1-indexed for display
     result = {
@@ -1013,6 +1052,31 @@ def _format_zoom_for_bokeh(zoom_data, type_picked, xstart=None, xend=None):
     else:
         # For curves: use mean
         y_values = zoom_data.get("mean", []).tolist()
+
+        # For sparse zoom data, insert zero-anchor points between non-contiguous bins
+        if zoom_data.get("sparse") and len(midpoints) > 0:
+            bin_size = int(bin_ends[0] - bin_starts[0] + 1) if len(bin_starts) > 0 else 1
+            new_x = []
+            new_y = []
+            for i in range(len(midpoints)):
+                if i == 0:
+                    # Zero just before first bin
+                    new_x.append(midpoints[i] - bin_size)
+                    new_y.append(0.0)
+                elif bin_starts[i] > bin_ends[i - 1] + 1:
+                    # Gap between bins — insert zeros on both sides
+                    new_x.append(midpoints[i - 1] + bin_size)
+                    new_y.append(0.0)
+                    new_x.append(midpoints[i] - bin_size)
+                    new_y.append(0.0)
+                new_x.append(midpoints[i])
+                new_y.append(y_values[i])
+            # Zero just after last bin
+            new_x.append(midpoints[-1] + bin_size)
+            new_y.append(0.0)
+            midpoints = new_x
+            y_values = new_y
+
         return {
             "x": midpoints,
             "y": y_values,
@@ -1075,25 +1139,31 @@ def get_feature_data(cur, feature, contig_id, sample_id, xstart=None, xend=None,
             feature_var_name = vname_row[0] if vname_row else None
 
             if feature_var_name:
-                blob_bytes = _get_feature_blob(cur, contig_id, sample_id, feature_var_name)
-                if blob_bytes is not None:
-                    blob_dict = _blob_to_feature_dict(blob_bytes, type_picked, xstart, xend, max_base_resolution)
+                # Decide whether to fetch lightweight zoom-only blob or full data
+                _threshold = max_base_resolution if max_base_resolution is not None else _DEFAULT_MAX_BASE_RESOLUTION
+                _window = (xend - xstart) if (xstart is not None and xend is not None) else 0
+                _use_zoom = _window > _threshold
+                if _use_zoom:
+                    zoom_blob = _get_feature_blob(cur, contig_id, sample_id, feature_var_name, zoom_only=True)
+                    blob_dict = _blob_to_feature_dict(None, type_picked, xstart, xend, max_base_resolution, zoom_blob_bytes=zoom_blob) if zoom_blob else None
+                else:
+                    blob_bytes = _get_feature_blob(cur, contig_id, sample_id, feature_var_name)
+                    blob_dict = _blob_to_feature_dict(blob_bytes, type_picked, xstart, xend, max_base_resolution) if blob_bytes else None
 
-                    if blob_dict is not None:
-                        # Filter sparse positions: zero out y values below min_relative_value * max(y)
-                        if min_relative_value > 0.0 and "y" in blob_dict and blob_dict["y"]:
-                            max_y = max(blob_dict["y"])
-                            if max_y > 0:
-                                threshold = min_relative_value * max_y
-                                blob_dict["y"] = [v if v >= threshold else 0 for v in blob_dict["y"]]
-                        feature_dict.update(blob_dict)
-                        feature_dict["is_relative_scaled"] = False  # BLOB values already descaled
-                        feature_dict["has_stats"] = "mean" in blob_dict
-                        feature_dict["has_sequences"] = "sequence" in blob_dict
-                        list_feature_dict.append(feature_dict)
-                    continue  # Skip legacy path for this feature
+                if blob_dict is not None:
+                    # Filter sparse positions: zero out y values below min_relative_value * max(y)
+                    if min_relative_value > 0.0 and "y" in blob_dict and blob_dict["y"]:
+                        max_y = max(blob_dict["y"])
+                        if max_y > 0:
+                            threshold = min_relative_value * max_y
+                            blob_dict["y"] = [v if v >= threshold else 0 for v in blob_dict["y"]]
+                    feature_dict.update(blob_dict)
+                    feature_dict["is_relative_scaled"] = False  # BLOB values already descaled
+                    feature_dict["has_stats"] = "mean" in blob_dict
+                    feature_dict["has_sequences"] = "sequence" in blob_dict
+                    list_feature_dict.append(feature_dict)
+                    continue
 
-            # BLOB feature not found or failed — skip (no legacy fallback)
             continue
 
         # --- CONTIG BLOB PATH: contig-level features (GC content, GC skew, repeats) ---
@@ -1106,22 +1176,24 @@ def get_feature_data(cur, feature, contig_id, sample_id, xstart=None, xend=None,
             contig_feature_name = vname_row[0] if vname_row else None
 
             if contig_feature_name:
-                blob_bytes = _get_contig_blob(cur, contig_id, contig_feature_name)
-                if blob_bytes is not None:
-                    # GC content/skew base resolution is already windowed (500/1000 bp),
-                    # so use base resolution up to 10 Mbp window
-                    res_threshold = 10_000_000 if contig_feature_name in ("gc_content", "gc_skew") else max_base_resolution
-                    blob_dict = _blob_to_feature_dict(blob_bytes, type_picked, xstart, xend, res_threshold)
-                    if blob_dict is not None:
-                        feature_dict.update(blob_dict)
-                        feature_dict["is_relative_scaled"] = False
-                        feature_dict["has_stats"] = False
-                        feature_dict["has_sequences"] = False
-                        list_feature_dict.append(feature_dict)
+                # GC content/skew base resolution is already windowed (500/1000 bp),
+                # so use base resolution up to 10 Mbp window
+                res_threshold = 10_000_000 if contig_feature_name in ("gc_content", "gc_skew") else max_base_resolution
+                _window = (xend - xstart) if (xstart is not None and xend is not None) else 0
+                _use_zoom = _window > (res_threshold if res_threshold is not None else _DEFAULT_MAX_BASE_RESOLUTION)
+                if _use_zoom:
+                    zoom_blob = _get_contig_blob(cur, contig_id, contig_feature_name, zoom_only=True)
+                    blob_dict = _blob_to_feature_dict(None, type_picked, xstart, xend, res_threshold, zoom_blob_bytes=zoom_blob) if zoom_blob else None
+                else:
+                    blob_bytes = _get_contig_blob(cur, contig_id, contig_feature_name)
+                    blob_dict = _blob_to_feature_dict(blob_bytes, type_picked, xstart, xend, res_threshold) if blob_bytes else None
+                if blob_dict is not None:
+                    feature_dict.update(blob_dict)
+                    feature_dict["is_relative_scaled"] = False
+                    feature_dict["has_stats"] = False
+                    feature_dict["has_sequences"] = False
+                    list_feature_dict.append(feature_dict)
             continue
-
-        # All features should be handled by BLOB paths above.
-        # If we reach here, the feature is not supported or missing.
 
     return list_feature_dict
 
@@ -1171,10 +1243,17 @@ def get_feature_data_batch(cur, feature, contig_id, sample_ids, xstart=None, xen
             feature_var_name = vname_row[0] if vname_row else None
 
             if feature_var_name:
+                # Decide whether to fetch lightweight zoom-only blob or full data
+                _threshold = max_base_resolution if max_base_resolution is not None else _DEFAULT_MAX_BASE_RESOLUTION
+                _window = (xend - xstart) if (xstart is not None and xend is not None) else 0
+                _use_zoom = _window > _threshold
                 # Single query for all samples instead of N individual queries
-                blobs_by_sample = _get_feature_blobs_batch(cur, contig_id, sample_ids, feature_var_name)
+                blobs_by_sample = _get_feature_blobs_batch(cur, contig_id, sample_ids, feature_var_name, zoom_only=_use_zoom)
                 for sid, blob_bytes in blobs_by_sample.items():
-                    blob_dict = _blob_to_feature_dict(blob_bytes, type_picked, xstart, xend, max_base_resolution)
+                    if _use_zoom:
+                        blob_dict = _blob_to_feature_dict(None, type_picked, xstart, xend, max_base_resolution, zoom_blob_bytes=blob_bytes)
+                    else:
+                        blob_dict = _blob_to_feature_dict(blob_bytes, type_picked, xstart, xend, max_base_resolution)
                     if blob_dict is not None:
                         # Filter sparse positions: zero out y values below min_relative_value * max(y)
                         if min_relative_value > 0.0 and "y" in blob_dict and blob_dict["y"]:
@@ -1203,14 +1282,19 @@ def get_feature_data_batch(cur, feature, contig_id, sample_ids, xstart=None, xen
             contig_feature_name = vname_row[0] if vname_row else None
 
             if contig_feature_name:
-                blob_bytes = _get_contig_blob(cur, contig_id, contig_feature_name)
-                if blob_bytes is not None:
-                    # GC content/skew base resolution is already windowed (500/1000 bp),
-                    # so use base resolution up to 10 Mbp window
-                    res_threshold = 10_000_000 if contig_feature_name in ("gc_content", "gc_skew") else max_base_resolution
-                    blob_dict = _blob_to_feature_dict(blob_bytes, type_picked, xstart, xend, res_threshold)
-                    if blob_dict is not None:
-                        for sid in sample_ids:
+                # GC content/skew base resolution is already windowed (500/1000 bp),
+                # so use base resolution up to 10 Mbp window
+                res_threshold = 10_000_000 if contig_feature_name in ("gc_content", "gc_skew") else max_base_resolution
+                _window = (xend - xstart) if (xstart is not None and xend is not None) else 0
+                _use_zoom = _window > (res_threshold if res_threshold is not None else _DEFAULT_MAX_BASE_RESOLUTION)
+                if _use_zoom:
+                    zoom_blob = _get_contig_blob(cur, contig_id, contig_feature_name, zoom_only=True)
+                    blob_dict = _blob_to_feature_dict(None, type_picked, xstart, xend, res_threshold, zoom_blob_bytes=zoom_blob) if zoom_blob else None
+                else:
+                    blob_bytes = _get_contig_blob(cur, contig_id, contig_feature_name)
+                    blob_dict = _blob_to_feature_dict(blob_bytes, type_picked, xstart, xend, res_threshold) if blob_bytes else None
+                if blob_dict is not None:
+                    for sid in sample_ids:
                             feature_dict = {
                                 "type": type_picked, "color": color, "alpha": alpha,
                                 "fill_alpha": fill_alpha, "size": size, "title": title,
