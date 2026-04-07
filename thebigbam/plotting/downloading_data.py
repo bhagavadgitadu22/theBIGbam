@@ -255,17 +255,17 @@ def download_feature_data_csv(db_path, contig_name, sample_names, xstart=None, x
             return None
         contig_id = row[0]
 
-        # Resolve sample_ids
-        placeholders = ",".join(["?"] * len(sample_names))
-        cur.execute(f"SELECT Sample_id, Sample_name FROM Sample WHERE Sample_name IN ({placeholders})", sample_names)
-        sample_rows = cur.fetchall()
-        if not sample_rows:
-            print(f"[downloading_data] Download data: No valid samples found", flush=True)
-            conn.close()
-            return None
-        sample_id_to_name = {r[0]: r[1] for r in sample_rows}
-        sample_ids = list(sample_id_to_name.keys())
-        sample_ids_sql = ", ".join(str(sid) for sid in sample_ids)
+        # Resolve sample_ids (may be empty in no-bam mode)
+        sample_id_to_name = {}
+        sample_ids = []
+        sample_ids_sql = ""
+        if sample_names:
+            placeholders = ",".join(["?"] * len(sample_names))
+            cur.execute(f"SELECT Sample_id, Sample_name FROM Sample WHERE Sample_name IN ({placeholders})", sample_names)
+            sample_rows = cur.fetchall()
+            sample_id_to_name = {r[0]: r[1] for r in sample_rows}
+            sample_ids = list(sample_id_to_name.keys())
+            sample_ids_sql = ", ".join(str(sid) for sid in sample_ids)
 
         # Get all feature tables and their metadata from Variable table
         cur.execute("SELECT DISTINCT Feature_table_name, Variable_name, Subplot FROM Variable WHERE Feature_table_name IS NOT NULL")
@@ -320,28 +320,51 @@ def download_feature_data_csv(db_path, contig_name, sample_names, xstart=None, x
                     f"WHERE f.Contig_id = {contig_id}{pos_filter}"
                 )
 
-        # === BLOB export: decode Feature_blob entries and add as CSV rows ===
+        # === BLOB export: decode Feature_blob_chunk entries and add as CSV rows ===
         blob_csv_rows = []
         blob_features = [(tn, vn, sn) for tn, vn, sn in variable_rows if tn == "Feature_blob"]
         if blob_features:
-            from thebigbam.database.blob_decoder import feature_name_to_id, decode_blob
+            from thebigbam.database.blob_decoder import (
+                feature_name_to_id, decode_raw_chunks, decode_raw_sparse_chunks,
+                get_scale_from_zoom_blob, is_sparse_zoom_blob,
+            )
+            import numpy as np
             for _, var_name_b, _ in blob_features:
                 fid = feature_name_to_id(var_name_b, cur)
                 if fid is None:
                     continue
                 for sid in sample_ids:
                     try:
+                        # Fetch zoom blob for scale/sparse detection
                         cur.execute(
-                            "SELECT Data FROM Feature_blob WHERE Contig_id=? AND Sample_id=? AND Feature_id=?",
+                            "SELECT Zoom_data FROM Feature_blob WHERE Contig_id=? AND Sample_id=? AND Feature_id=?",
                             (contig_id, sid, fid)
                         )
-                        blob_row = cur.fetchone()
-                        if blob_row is None:
+                        zoom_row = cur.fetchone()
+                        if zoom_row is None:
                             continue
-                        data = decode_blob(blob_row[0])
+                        zoom_blob = zoom_row[0]
+                        scale_div = get_scale_from_zoom_blob(zoom_blob)
+                        sparse = is_sparse_zoom_blob(zoom_blob)
+
+                        # Fetch all chunks
+                        cur.execute(
+                            "SELECT Chunk_idx, Data FROM Feature_blob_chunk "
+                            "WHERE Contig_id=? AND Sample_id=? AND Feature_id=? ORDER BY Chunk_idx",
+                            (contig_id, sid, fid)
+                        )
+                        chunk_rows = [(r[0], r[1]) for r in cur.fetchall()]
+                        if not chunk_rows:
+                            continue
+
+                        if sparse:
+                            data = decode_raw_sparse_chunks(chunk_rows, scale_div)
+                        else:
+                            data = decode_raw_chunks(chunk_rows, scale_div)
                         x_arr = data["x"]
                         y_arr = data["y"]
-                        # Apply position filter
+
+                        # Apply position filter (x is 0-indexed)
                         if xstart is not None and xend is not None:
                             mask = (x_arr >= (xstart - 1)) & (x_arr <= (xend - 1))
                             x_arr = x_arr[mask]
@@ -357,26 +380,48 @@ def download_feature_data_csv(db_path, contig_name, sample_names, xstart=None, x
                     except Exception:
                         pass
 
-        # === Contig_blob export: decode contig-level features ===
+        # === Contig_blob export: decode contig-level features from chunks ===
         contig_blob_features = [(tn, vn, sn) for tn, vn, sn in variable_rows if tn == "Contig_blob"]
         if contig_blob_features:
-            from thebigbam.database.blob_decoder import contig_blob_name_to_id, decode_blob
+            from thebigbam.database.blob_decoder import (
+                contig_blob_name_to_id, decode_raw_chunks, get_scale_from_zoom_blob,
+            )
+            import numpy as np
             for _, var_name_b, _ in contig_blob_features:
                 fid = contig_blob_name_to_id(var_name_b)
                 if fid is None:
                     continue
                 try:
+                    # Fetch zoom blob for scale detection
                     cur.execute(
-                        "SELECT Data FROM Contig_blob WHERE Contig_id=? AND Feature_id=?",
+                        "SELECT Zoom_data FROM Contig_blob WHERE Contig_id=? AND Feature_id=?",
                         (contig_id, fid)
                     )
-                    blob_row = cur.fetchone()
-                    if blob_row is None:
+                    zoom_row = cur.fetchone()
+                    if zoom_row is None:
                         continue
-                    data = decode_blob(blob_row[0])
+                    scale_div = get_scale_from_zoom_blob(zoom_row[0])
+
+                    # Fetch all chunks
+                    cur.execute(
+                        "SELECT Chunk_idx, Data FROM Contig_blob_chunk "
+                        "WHERE Contig_id=? AND Feature_id=? ORDER BY Chunk_idx",
+                        (contig_id, fid)
+                    )
+                    chunk_rows = [(r[0], r[1]) for r in cur.fetchall()]
+                    if not chunk_rows:
+                        continue
+
+                    data = decode_raw_chunks(chunk_rows, scale_div)
                     x_arr = data["x"]
                     y_arr = data["y"]
-                    # Apply position filter
+
+                    # For windowed data (GC content/skew), convert array indices to genomic positions
+                    gc_window = 500 if var_name_b == "gc_content" else (1000 if var_name_b == "gc_skew" else 1)
+                    if gc_window > 1:
+                        x_arr = x_arr * gc_window
+
+                    # Apply position filter (x is 0-indexed)
                     if xstart is not None and xend is not None:
                         mask = (x_arr >= (xstart - 1)) & (x_arr <= (xend - 1))
                         x_arr = x_arr[mask]

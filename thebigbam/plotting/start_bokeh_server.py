@@ -796,15 +796,12 @@ def create_layout(db_path):
             )
             # Show buttons when plot exists (but some are hidden in 0-sample mode)
             download_contig_button.visible = True  # Always show download contig button
+            peruse_button.visible = True  # Always show — contig summary available even without samples
+            download_data_button.visible = True  # Always show — contig features available even without samples
             if has_samples:
-                peruse_button.visible = True
                 download_metrics_button.visible = True
-                download_data_button.visible = True
             else:
-                # No samples: hide sample-related buttons
-                peruse_button.visible = False
                 download_metrics_button.visible = False
-                download_data_button.visible = False
             
             # Display the plot
             main_placeholder.objects = [pn.Column(toolbar_row, grid, sizing_mode="stretch_both")]
@@ -831,34 +828,32 @@ def create_layout(db_path):
             print("[start_bokeh_server] Peruse: No contig selected", flush=True)
             return
 
-        # If no samples in database, cannot peruse
         if not has_samples:
-            print("[start_bokeh_server] Peruse: No samples in database", flush=True)
-            return
-
-        is_all = (views.active == 1)
-
-        if is_all:
-            # All Samples view: get filtered samples
-            filtered_samples = [s for s in orig_samples if s in widgets['contig_to_samples'].get(contig, set())]
-            # Apply Filtering2 query builder conditions
-            filtering_pairs = get_filtering_filtered_pairs()
-            if filtering_pairs is not None:
-                allowed_samples = {pair[1] for pair in filtering_pairs}
-                filtered_samples = [s for s in filtered_samples if s in allowed_samples]
-
-            if not filtered_samples:
-                print("[start_bokeh_server] Peruse: No samples match filters", flush=True)
-                return
-
-            sample_names = filtered_samples
+            sample_names = []
         else:
-            # One Sample view: use selected sample
-            sample = widgets['sample_select'].value
-            if not sample:
-                print("[start_bokeh_server] Peruse: No sample selected", flush=True)
-                return
-            sample_names = [sample]
+            is_all = (views.active == 1)
+
+            if is_all:
+                # All Samples view: get filtered samples
+                filtered_samples = [s for s in orig_samples if s in widgets['contig_to_samples'].get(contig, set())]
+                # Apply Filtering2 query builder conditions
+                filtering_pairs = get_filtering_filtered_pairs()
+                if filtering_pairs is not None:
+                    allowed_samples = {pair[1] for pair in filtering_pairs}
+                    filtered_samples = [s for s in filtered_samples if s in allowed_samples]
+
+                if not filtered_samples:
+                    print("[start_bokeh_server] Peruse: No samples match filters", flush=True)
+                    return
+
+                sample_names = filtered_samples
+            else:
+                # One Sample view: use selected sample
+                sample = widgets['sample_select'].value
+                if not sample:
+                    print("[start_bokeh_server] Peruse: No sample selected", flush=True)
+                    return
+                sample_names = [sample]
 
         # Generate and open HTML in new window
         generate_and_open_peruse_html(conn, contig, sample_names)
@@ -971,7 +966,9 @@ def create_layout(db_path):
             xstart = 1
             xend = contig_length
 
-        if is_all:
+        if not widgets['has_samples']:
+            sample_names = []
+        elif is_all:
             filtered_samples = [s for s in orig_samples if s in widgets['contig_to_samples'].get(contig, set())]
             filtering_pairs = get_filtering_filtered_pairs()
             if filtering_pairs is not None:
@@ -982,7 +979,7 @@ def create_layout(db_path):
                 return io.StringIO("")
             sample_names = filtered_samples
         else:
-            sample = widgets['sample_select'].value if widgets['has_samples'] else None
+            sample = widgets['sample_select'].value
             if not sample:
                 print("[start_bokeh_server] Download data: No sample selected", flush=True)
                 return io.StringIO("")
@@ -995,7 +992,9 @@ def create_layout(db_path):
         )
         if csv_content:
             safe_contig = make_safe_filename(contig)
-            if is_all:
+            if not sample_names:
+                filename = f"{safe_contig}_contig_data.csv"
+            elif is_all:
                 filename = f"{safe_contig}_all_samples_data.csv"
             else:
                 safe_sample = make_safe_filename(sample_names[0])

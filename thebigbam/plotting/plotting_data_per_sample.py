@@ -821,11 +821,8 @@ _DEFAULT_MAX_BASE_RESOLUTION = 10_000  # 10 kb
 # BLOB-based feature data retrieval
 # ============================================================================
 
-def _get_feature_blob(cur, contig_id, sample_id, feature_name, zoom_only=False):
-    """Fetch a single feature BLOB from the Feature_blob table.
-
-    Args:
-        zoom_only: If True, fetch only the lightweight Zoom_data column (for large windows).
+def _get_feature_blob(cur, contig_id, sample_id, feature_name):
+    """Fetch Zoom_data for a single feature from Feature_blob.
 
     Returns raw bytes or None if not found.
     """
@@ -833,20 +830,16 @@ def _get_feature_blob(cur, contig_id, sample_id, feature_name, zoom_only=False):
     fid = feature_name_to_id(feature_name, cur)
     if fid is None:
         return None
-    col = "Zoom_data" if zoom_only else "Data"
     cur.execute(
-        f"SELECT {col} FROM Feature_blob WHERE Contig_id=? AND Sample_id=? AND Feature_id=?",
+        "SELECT Zoom_data FROM Feature_blob WHERE Contig_id=? AND Sample_id=? AND Feature_id=?",
         (contig_id, sample_id, fid)
     )
     row = cur.fetchone()
     return row[0] if row else None
 
 
-def _get_feature_blobs_batch(cur, contig_id, sample_ids, feature_name, zoom_only=False):
-    """Fetch feature BLOBs for multiple samples in one query.
-
-    Args:
-        zoom_only: If True, fetch only the lightweight Zoom_data column (for large windows).
+def _get_feature_blobs_batch(cur, contig_id, sample_ids, feature_name):
+    """Fetch Zoom_data for multiple samples in one query.
 
     Returns dict mapping sample_id -> raw bytes. Missing samples are omitted.
     """
@@ -854,23 +847,16 @@ def _get_feature_blobs_batch(cur, contig_id, sample_ids, feature_name, zoom_only
     fid = feature_name_to_id(feature_name, cur)
     if fid is None:
         return {}
-    col = "Zoom_data" if zoom_only else "Data"
     placeholders = ", ".join(["?"] * len(sample_ids))
     cur.execute(
-        f"SELECT Sample_id, {col} FROM Feature_blob WHERE Contig_id=? AND Feature_id=? AND Sample_id IN ({placeholders})",
+        f"SELECT Sample_id, Zoom_data FROM Feature_blob WHERE Contig_id=? AND Feature_id=? AND Sample_id IN ({placeholders})",
         [contig_id, fid] + list(sample_ids)
     )
     return {row[0]: row[1] for row in cur.fetchall()}
 
 
-def _get_contig_blob(cur, contig_id, feature_name, zoom_only=False):
-    """Fetch a single Contig_blob entry for a contig-level feature.
-
-    Contig_blob stores contig-level features (gc_content, gc_skew, repeat stats).
-    Unlike Feature_blob, Contig_blob has no sample dimension.
-
-    Args:
-        zoom_only: If True, fetch only the lightweight Zoom_data column (for large windows).
+def _get_contig_blob(cur, contig_id, feature_name):
+    """Fetch Zoom_data for a contig-level feature from Contig_blob.
 
     Returns raw bytes or None if not found.
     """
@@ -878,9 +864,8 @@ def _get_contig_blob(cur, contig_id, feature_name, zoom_only=False):
     fid = contig_blob_name_to_id(feature_name)
     if fid is None:
         return None
-    col = "Zoom_data" if zoom_only else "Data"
     cur.execute(
-        f"SELECT {col} FROM Contig_blob WHERE Contig_id=? AND Feature_id=?",
+        "SELECT Zoom_data FROM Contig_blob WHERE Contig_id=? AND Feature_id=?",
         (contig_id, fid)
     )
     row = cur.fetchone()
@@ -911,8 +896,11 @@ def _get_feature_chunks(cur, contig_id, sample_id, feature_name, start_pos, end_
         return None
 
 
-def _get_contig_chunks(cur, contig_id, feature_name, start_pos, end_pos):
+def _get_contig_chunks(cur, contig_id, feature_name, start_pos, end_pos, window_size=1):
     """Fetch only the base-resolution chunks overlapping [start_pos, end_pos) from Contig_blob_chunk.
+
+    For windowed data (GC content/skew), pass window_size to convert genomic positions
+    to window indices before computing chunk indices.
 
     Returns list of (chunk_idx, raw_bytes) sorted by chunk_idx, or None if table doesn't exist.
     """
@@ -920,8 +908,11 @@ def _get_contig_chunks(cur, contig_id, feature_name, start_pos, end_pos):
     fid = contig_blob_name_to_id(feature_name)
     if fid is None:
         return None
-    first_chunk = max(0, start_pos // CHUNK_SIZE)
-    last_chunk = end_pos // CHUNK_SIZE
+    # Convert genomic positions to array indices (for windowed data like GC)
+    start_idx = start_pos // window_size
+    end_idx = end_pos // window_size
+    first_chunk = max(0, start_idx // CHUNK_SIZE)
+    last_chunk = end_idx // CHUNK_SIZE
     try:
         cur.execute(
             "SELECT Chunk_idx, Data FROM Contig_blob_chunk "
@@ -1233,13 +1224,13 @@ def get_feature_data(cur, feature, contig_id, sample_id, xstart=None, xend=None,
                 _window = (xend - xstart) if (xstart is not None and xend is not None) else 0
                 _use_zoom = _window > _threshold
                 if _use_zoom:
-                    zoom_blob = _get_feature_blob(cur, contig_id, sample_id, feature_var_name, zoom_only=True)
+                    zoom_blob = _get_feature_blob(cur, contig_id, sample_id, feature_var_name)
                     blob_dict = _blob_to_feature_dict(None, type_picked, xstart, xend, max_base_resolution, zoom_blob_bytes=zoom_blob) if zoom_blob else None
                 else:
                     # Zoomed in: fetch only 1-2 x 65kbp chunks from chunk table
                     from thebigbam.database.blob_decoder import decode_raw_chunks, decode_raw_sparse_chunks, get_scale_from_zoom_blob, is_sparse_zoom_blob
                     chunk_rows = _get_feature_chunks(cur, contig_id, sample_id, feature_var_name, xstart - 1, xend - 1)
-                    zoom_blob = _get_feature_blob(cur, contig_id, sample_id, feature_var_name, zoom_only=True)
+                    zoom_blob = _get_feature_blob(cur, contig_id, sample_id, feature_var_name)
                     scale_div = get_scale_from_zoom_blob(zoom_blob) if zoom_blob else 1
                     if chunk_rows:
                         if zoom_blob and is_sparse_zoom_blob(zoom_blob):
@@ -1282,18 +1273,37 @@ def get_feature_data(cur, feature, contig_id, sample_id, xstart=None, xend=None,
                 _window = (xend - xstart) if (xstart is not None and xend is not None) else 0
                 _use_zoom = _window > (res_threshold if res_threshold is not None else _DEFAULT_MAX_BASE_RESOLUTION)
                 if _use_zoom:
-                    zoom_blob = _get_contig_blob(cur, contig_id, contig_feature_name, zoom_only=True)
+                    zoom_blob = _get_contig_blob(cur, contig_id, contig_feature_name)
                     blob_dict = _blob_to_feature_dict(None, type_picked, xstart, xend, res_threshold, zoom_blob_bytes=zoom_blob) if zoom_blob else None
-                elif not is_gc and xstart is not None and xend is not None:
-                    # Repeats zoomed in: fetch 1-2 x 65kbp chunks
+                elif xstart is not None and xend is not None:
+                    # Zoomed in: fetch chunks
                     from thebigbam.database.blob_decoder import decode_raw_chunks, get_scale_from_zoom_blob
-                    chunk_rows = _get_contig_chunks(cur, contig_id, contig_feature_name, xstart - 1, xend - 1)
-                    zoom_blob = _get_contig_blob(cur, contig_id, contig_feature_name, zoom_only=True)
+                    gc_window = 500 if contig_feature_name == "gc_content" else (1000 if contig_feature_name == "gc_skew" else 1)
+                    chunk_rows = _get_contig_chunks(cur, contig_id, contig_feature_name, xstart - 1, xend - 1, window_size=gc_window)
+                    zoom_blob = _get_contig_blob(cur, contig_id, contig_feature_name)
                     scale_div = get_scale_from_zoom_blob(zoom_blob) if zoom_blob else 1
-                    blob_dict = _format_chunks_for_bokeh(decode_raw_chunks(chunk_rows, scale_div), xstart, xend) if chunk_rows else None
+                    if chunk_rows:
+                        chunk_dict = decode_raw_chunks(chunk_rows, scale_div)
+                        # For windowed data, convert array indices to genomic positions
+                        if gc_window > 1:
+                            chunk_dict["x"] = chunk_dict["x"] * gc_window
+                        blob_dict = _format_chunks_for_bokeh(chunk_dict, xstart, xend)
+                    else:
+                        blob_dict = None
                 else:
-                    blob_bytes = _get_contig_blob(cur, contig_id, contig_feature_name)
-                    blob_dict = _blob_to_feature_dict(blob_bytes, type_picked, xstart, xend, res_threshold) if blob_bytes else None
+                    # No window specified — fetch all chunks
+                    from thebigbam.database.blob_decoder import decode_raw_chunks, get_scale_from_zoom_blob
+                    gc_window = 500 if contig_feature_name == "gc_content" else (1000 if contig_feature_name == "gc_skew" else 1)
+                    chunk_rows = _get_contig_chunks(cur, contig_id, contig_feature_name, 0, 2**31, window_size=gc_window)
+                    zoom_blob = _get_contig_blob(cur, contig_id, contig_feature_name)
+                    scale_div = get_scale_from_zoom_blob(zoom_blob) if zoom_blob else 1
+                    if chunk_rows:
+                        chunk_dict = decode_raw_chunks(chunk_rows, scale_div)
+                        if gc_window > 1:
+                            chunk_dict["x"] = chunk_dict["x"] * gc_window
+                        blob_dict = {"x": (chunk_dict["x"] + 1).tolist(), "y": chunk_dict["y"].tolist()}
+                    else:
+                        blob_dict = None
                 if blob_dict is not None:
                     feature_dict.update(blob_dict)
                     feature_dict["is_relative_scaled"] = False
@@ -1359,7 +1369,7 @@ def get_feature_data_batch(cur, feature, contig_id, sample_ids, xstart=None, xen
                 if _use_chunks:
                     # Chunk path per sample (fast: only 1-2 small rows each)
                     from thebigbam.database.blob_decoder import decode_raw_chunks, decode_raw_sparse_chunks, get_scale_from_zoom_blob, is_sparse_zoom_blob
-                    zoom_blob = _get_feature_blob(cur, contig_id, sample_ids[0], feature_var_name, zoom_only=True)
+                    zoom_blob = _get_feature_blob(cur, contig_id, sample_ids[0], feature_var_name)
                     scale_div = get_scale_from_zoom_blob(zoom_blob) if zoom_blob else 1
                     _sparse = zoom_blob and is_sparse_zoom_blob(zoom_blob)
                     for sid in sample_ids:
@@ -1389,7 +1399,7 @@ def get_feature_data_batch(cur, feature, contig_id, sample_ids, xstart=None, xen
                     continue
 
                 # Single query for all samples instead of N individual queries
-                blobs_by_sample = _get_feature_blobs_batch(cur, contig_id, sample_ids, feature_var_name, zoom_only=_use_zoom)
+                blobs_by_sample = _get_feature_blobs_batch(cur, contig_id, sample_ids, feature_var_name)
                 for sid, blob_bytes in blobs_by_sample.items():
                     if _use_zoom:
                         blob_dict = _blob_to_feature_dict(None, type_picked, xstart, xend, max_base_resolution, zoom_blob_bytes=blob_bytes)
@@ -1430,17 +1440,36 @@ def get_feature_data_batch(cur, feature, contig_id, sample_ids, xstart=None, xen
                 _window = (xend - xstart) if (xstart is not None and xend is not None) else 0
                 _use_zoom = _window > (res_threshold if res_threshold is not None else _DEFAULT_MAX_BASE_RESOLUTION)
                 if _use_zoom:
-                    zoom_blob = _get_contig_blob(cur, contig_id, contig_feature_name, zoom_only=True)
+                    zoom_blob = _get_contig_blob(cur, contig_id, contig_feature_name)
                     blob_dict = _blob_to_feature_dict(None, type_picked, xstart, xend, res_threshold, zoom_blob_bytes=zoom_blob) if zoom_blob else None
-                elif not is_gc and xstart is not None and xend is not None:
+                elif xstart is not None and xend is not None:
+                    # Zoomed in: fetch chunks
                     from thebigbam.database.blob_decoder import decode_raw_chunks, get_scale_from_zoom_blob
-                    chunk_rows = _get_contig_chunks(cur, contig_id, contig_feature_name, xstart - 1, xend - 1)
-                    zoom_blob = _get_contig_blob(cur, contig_id, contig_feature_name, zoom_only=True)
+                    gc_window = 500 if contig_feature_name == "gc_content" else (1000 if contig_feature_name == "gc_skew" else 1)
+                    chunk_rows = _get_contig_chunks(cur, contig_id, contig_feature_name, xstart - 1, xend - 1, window_size=gc_window)
+                    zoom_blob = _get_contig_blob(cur, contig_id, contig_feature_name)
                     scale_div = get_scale_from_zoom_blob(zoom_blob) if zoom_blob else 1
-                    blob_dict = _format_chunks_for_bokeh(decode_raw_chunks(chunk_rows, scale_div), xstart, xend) if chunk_rows else None
+                    if chunk_rows:
+                        chunk_dict = decode_raw_chunks(chunk_rows, scale_div)
+                        if gc_window > 1:
+                            chunk_dict["x"] = chunk_dict["x"] * gc_window
+                        blob_dict = _format_chunks_for_bokeh(chunk_dict, xstart, xend)
+                    else:
+                        blob_dict = None
                 else:
-                    blob_bytes = _get_contig_blob(cur, contig_id, contig_feature_name)
-                    blob_dict = _blob_to_feature_dict(blob_bytes, type_picked, xstart, xend, res_threshold) if blob_bytes else None
+                    # No window specified — fetch all chunks
+                    from thebigbam.database.blob_decoder import decode_raw_chunks, get_scale_from_zoom_blob
+                    gc_window = 500 if contig_feature_name == "gc_content" else (1000 if contig_feature_name == "gc_skew" else 1)
+                    chunk_rows = _get_contig_chunks(cur, contig_id, contig_feature_name, 0, 2**31, window_size=gc_window)
+                    zoom_blob = _get_contig_blob(cur, contig_id, contig_feature_name)
+                    scale_div = get_scale_from_zoom_blob(zoom_blob) if zoom_blob else 1
+                    if chunk_rows:
+                        chunk_dict = decode_raw_chunks(chunk_rows, scale_div)
+                        if gc_window > 1:
+                            chunk_dict["x"] = chunk_dict["x"] * gc_window
+                        blob_dict = {"x": (chunk_dict["x"] + 1).tolist(), "y": chunk_dict["y"].tolist()}
+                    else:
+                        blob_dict = None
                 if blob_dict is not None:
                     for sid in sample_ids:
                             feature_dict = {

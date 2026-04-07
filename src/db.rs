@@ -534,14 +534,14 @@ impl DbWriter {
 
         for (feature_name, contig_name, encoded) in blobs {
             // Skip empty blobs (all-zero dense or no-event sparse)
-            if encoded.data.is_empty() {
+            if encoded.zoom.is_empty() {
                 continue;
             }
             if let (Some(&contig_id), Some(fid)) = (
                 self.contig_name_to_id.get(contig_name),
                 feature_name_to_id(feature_name),
             ) {
-                appender.append_row(params![contig_id, sample_id, fid as i32, encoded.data.as_slice(), encoded.zoom.as_slice()])?;
+                appender.append_row(params![contig_id, sample_id, fid as i32, encoded.zoom.as_slice()])?;
 
                 // Write individual base-resolution chunks for fast zoomed-in queries
                 for (chunk_idx, chunk_data) in encoded.chunks.iter().enumerate() {
@@ -715,6 +715,8 @@ impl DbWriter {
         let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
         let mut appender = conn.appender("Contig_blob")
             .context("Failed to create Contig_blob appender")?;
+        let mut chunk_appender = conn.appender("Contig_blob_chunk")
+            .context("Failed to create Contig_blob_chunk appender")?;
 
         const GC_CONTENT_FEATURE_ID: i16 = 1;
         const GC_WINDOW_SIZE: u32 = 500; // Standard GC content window size
@@ -742,13 +744,18 @@ impl DbWriter {
                 appender.append_row(params![
                     contig_id,
                     GC_CONTENT_FEATURE_ID,
-                    encoded.data,
                     encoded.zoom
                 ])?;
+                for (chunk_idx, chunk_data) in encoded.chunks.iter().enumerate() {
+                    chunk_appender.append_row(params![
+                        contig_id, GC_CONTENT_FEATURE_ID, chunk_idx as i16, chunk_data.as_slice()
+                    ])?;
+                }
             }
         }
 
         appender.flush().context("Failed to flush Contig_blob appender")?;
+        chunk_appender.flush().context("Failed to flush Contig_blob_chunk appender")?;
 
         Ok(())
     }
@@ -766,6 +773,8 @@ impl DbWriter {
         let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
         let mut appender = conn.appender("Contig_blob")
             .context("Failed to create Contig_blob appender")?;
+        let mut chunk_appender = conn.appender("Contig_blob_chunk")
+            .context("Failed to create Contig_blob_chunk appender")?;
 
         const GC_SKEW_FEATURE_ID: i16 = 2;
         const GC_SKEW_WINDOW_SIZE: u32 = 1000; // Standard GC skew window size
@@ -793,13 +802,18 @@ impl DbWriter {
                 appender.append_row(params![
                     contig_id,
                     GC_SKEW_FEATURE_ID,
-                    encoded.data,
                     encoded.zoom
                 ])?;
+                for (chunk_idx, chunk_data) in encoded.chunks.iter().enumerate() {
+                    chunk_appender.append_row(params![
+                        contig_id, GC_SKEW_FEATURE_ID, chunk_idx as i16, chunk_data.as_slice()
+                    ])?;
+                }
             }
         }
 
         appender.flush().context("Failed to flush Contig_blob appender")?;
+        chunk_appender.flush().context("Failed to flush Contig_blob_chunk appender")?;
 
         Ok(())
     }
@@ -896,7 +910,7 @@ impl DbWriter {
                     }
                 }
                 let encoded = encode_dense_blob(&dense, scale, contig_length);
-                appender.append_row(params![*contig_id, feature_id, encoded.data, encoded.zoom])?;
+                appender.append_row(params![*contig_id, feature_id, encoded.zoom])?;
                 for (chunk_idx, chunk_data) in encoded.chunks.iter().enumerate() {
                     chunk_appender.append_row(params![
                         *contig_id, feature_id, chunk_idx as i16, chunk_data.as_slice()
@@ -1227,15 +1241,13 @@ fn create_core_tables(conn: &Connection, has_bam: bool) -> Result<()> {
         [],
     )
     .context("Failed to create Phage_termini table")?;
-    // Feature_blob table - compressed BLOB storage for per-position feature data
-    // Replaces the ~20 separate Feature_* tables with a single table.
-    // Each row stores one feature for one contig/sample as a compressed BLOB.
+    // Feature_blob table - zoom-level summaries for per-position feature data.
+    // Base-resolution data is stored in Feature_blob_chunk (one row per 65kbp chunk).
     conn.execute(
         "CREATE TABLE Feature_blob (
             Contig_id  INTEGER NOT NULL REFERENCES Contig(Contig_id),
             Sample_id  INTEGER NOT NULL REFERENCES Sample(Sample_id),
             Feature_id SMALLINT NOT NULL,
-            Data       BLOB NOT NULL,
             Zoom_data  BLOB NOT NULL,
             PRIMARY KEY (Contig_id, Sample_id, Feature_id)
         )",
@@ -1261,13 +1273,12 @@ fn create_core_tables(conn: &Connection, has_bam: bool) -> Result<()> {
 
     } // end if has_bam (Sample, Coverage, Phage_mechanisms, Phage_termini, Feature_blob, Feature_blob_chunk)
 
-    // Contig_blob table - stores contig-level features (GC content, GC skew) as compressed BLOBs
-    // Contig-level features have no sample dimension, unlike Feature_blob
+    // Contig_blob table - zoom-level summaries for contig-level features (GC content, GC skew, repeats).
+    // Base-resolution data is stored in Contig_blob_chunk.
     conn.execute(
         "CREATE TABLE Contig_blob (
             Contig_id   INTEGER NOT NULL REFERENCES Contig,
             Feature_id  SMALLINT NOT NULL,
-            Data        BLOB NOT NULL,
             Zoom_data   BLOB NOT NULL,
             PRIMARY KEY (Contig_id, Feature_id)
         )",

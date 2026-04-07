@@ -676,6 +676,7 @@ pub fn encode_contig_dense_blob(values: &[i32], scale: ValueScale, contig_length
     write_u16(&mut blob, num_chunks as u16);
     write_u32(&mut blob, CHUNK_SIZE);
 
+    let mut chunks = Vec::with_capacity(num_chunks as usize);
     for chunk_idx in 0..num_chunks {
         let start = (chunk_idx * CHUNK_SIZE) as usize;
         let end = ((chunk_idx + 1) * CHUNK_SIZE) as usize;
@@ -690,6 +691,7 @@ pub fn encode_contig_dense_blob(values: &[i32], scale: ValueScale, contig_length
 
         write_u32(&mut blob, compressed.len() as u32);
         blob.extend_from_slice(&compressed);
+        chunks.push(compressed);
     }
 
     let base_block_end = blob.len() as u32;
@@ -708,7 +710,7 @@ pub fn encode_contig_dense_blob(values: &[i32], scale: ValueScale, contig_length
     blob.extend_from_slice(&zoom_bytes);
 
     let zoom_blob = build_zoom_blob(scale, false, NUM_CONTIG_ZOOM_LEVELS, contig_length, &zoom_bytes);
-    EncodedBlob { data: blob, zoom: zoom_blob, chunks: Vec::new() }
+    EncodedBlob { data: blob, zoom: zoom_blob, chunks }
 }
 
 /// Encode a sparse contig feature (repeat features) as a compressed BLOB.

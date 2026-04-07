@@ -29,10 +29,6 @@ def generate_and_open_peruse_html(conn, contig_name, sample_names):
         # Build data
         content = build_summary_data(conn, contig_name, sample_names)
 
-        if content is None or len(content) == 0:
-            print("[perusing_data] No data available", flush=True)
-            return False
-
         # Build contig features table HTML
         contig_table_html = f"""
         <table style="border-collapse: collapse; margin-bottom: 20px; background-color: white; border-radius: 5px; width: 100%;">
@@ -78,12 +74,13 @@ def generate_and_open_peruse_html(conn, contig_name, sample_names):
             "<body>",
             f"<h2>{contig_name}</h2>",
             contig_table_html,
-            "<h3>Metrics summary:</h3>",
         ]
-        
-        # Add each content item (all are HTML strings now)
-        for item in content:
-            html_parts.append(item)
+
+        # Add metrics summary if sample data is available
+        if content and len(content) > 0:
+            html_parts.append("<h3>Metrics summary:</h3>")
+            for item in content:
+                html_parts.append(item)
         
         html_parts.extend([
             "</body>",
