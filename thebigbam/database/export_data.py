@@ -17,7 +17,7 @@ METRIC_TO_VIEW = {
     "RPKM": ("Explicit_coverage", "RPKM"),
     "TPM": ("Explicit_coverage", "TPM"),
     "Coverage_coefficient_of_variation": ("Explicit_coverage", "Coverage_coefficient_of_variation"),
-    "Coverage_relative_coverage_roughness": ("Explicit_coverage", "Coverage_relative_coverage_roughness"),
+    "Relative_coverage_roughness": ("Explicit_coverage", "Relative_coverage_roughness"),
     # Explicit_misassembly
     "Misassembly_mismatches_per_100kbp": ("Explicit_misassembly", "Mismatches_per_100kbp"),
     "Misassembly_deletions_per_100kbp": ("Explicit_misassembly", "Deletions_per_100kbp"),
@@ -68,7 +68,7 @@ available metrics (grouped by module):
   coverage:
     Aligned_fraction_percentage, Above_expected_aligned_fraction,
     Read_count, Coverage_mean, Coverage_median, Coverage_trimmed_mean,
-    RPKM, TPM, Coverage_coefficient_of_variation, Coverage_relative_coverage_roughness
+    RPKM, TPM, Coverage_coefficient_of_variation, Relative_coverage_roughness
 
   misassembly:
     Misassembly_mismatches_per_100kbp, Misassembly_deletions_per_100kbp,

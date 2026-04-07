@@ -209,6 +209,190 @@ def _decode_sparse_base(blob, header):
     return np.array(positions[:event_count], dtype=np.uint32), np.array(values[:event_count], dtype=np.int32)
 
 
+def decode_raw_chunks(chunk_rows, scale_divisor, chunk_size=CHUNK_SIZE):
+    """Decode raw chunk blobs fetched from Feature_blob_chunk / Contig_blob_chunk.
+
+    Args:
+        chunk_rows: list of (chunk_idx, raw_bytes) sorted by chunk_idx
+        scale_divisor: value scale divisor (1, 100, 1000, or 10)
+        chunk_size: positions per chunk (default 65536)
+
+    Returns dict: {"x": ndarray, "y": ndarray, "sparse": False}
+    """
+    all_values = []
+    first_chunk_idx = chunk_rows[0][0] if chunk_rows else 0
+    for _chunk_idx, raw_bytes in chunk_rows:
+        if isinstance(raw_bytes, memoryview):
+            raw_bytes = bytes(raw_bytes)
+        decompressed = _zstd_decompress(raw_bytes)
+        unsigned_vals = _varint_decode(decompressed)
+        signed_deltas = _zigzag_decode(unsigned_vals)
+        chunk_values = _delta_decode(signed_deltas)
+        all_values.extend(chunk_values)
+
+    base_offset = first_chunk_idx * chunk_size
+    n = len(all_values)
+    x = np.arange(base_offset, base_offset + n, dtype=np.uint32)
+    values = np.array(all_values, dtype=np.float64)
+    if scale_divisor != 1:
+        values = values / scale_divisor
+    return {"x": x, "y": values, "sparse": False}
+
+
+def get_scale_from_zoom_blob(zoom_blob_bytes):
+    """Extract scale divisor from a standalone zoom BLOB (TBZ format).
+
+    Returns scale divisor (1, 100, 1000, or 10), or 1 if parsing fails.
+    """
+    if isinstance(zoom_blob_bytes, memoryview):
+        zoom_blob_bytes = bytes(zoom_blob_bytes)
+    if len(zoom_blob_bytes) < 16 or zoom_blob_bytes[:4] != ZOOM_MAGIC:
+        return 1
+    scale_code = zoom_blob_bytes[4]
+    return SCALE_DIVISORS.get(scale_code, 1)
+
+
+def is_sparse_zoom_blob(zoom_blob_bytes):
+    """Check if a standalone zoom BLOB represents sparse data."""
+    if isinstance(zoom_blob_bytes, memoryview):
+        zoom_blob_bytes = bytes(zoom_blob_bytes)
+    if len(zoom_blob_bytes) < 16 or zoom_blob_bytes[:4] != ZOOM_MAGIC:
+        return False
+    return bool(zoom_blob_bytes[5] & 0x01)
+
+
+
+def _decode_chunk_metadata(meta_data, event_count, has_stats, has_sequence, has_codons):
+    """Decode sparse metadata from raw decompressed bytes (same format as full BLOB metadata)."""
+    result = {}
+    pos = 0
+    n = event_count
+
+    if has_stats:
+        result["mean"] = np.frombuffer(meta_data[pos:pos + n * 4], dtype="<i4") / 100.0
+        pos += n * 4
+        result["median"] = np.frombuffer(meta_data[pos:pos + n * 4], dtype="<i4") / 100.0
+        pos += n * 4
+        result["std"] = np.frombuffer(meta_data[pos:pos + n * 4], dtype="<i4") / 100.0
+        pos += n * 4
+
+    if has_sequence:
+        sequences = []
+        for _ in range(n):
+            seq_len = meta_data[pos]
+            pos += 1
+            if seq_len > 0:
+                sequences.append(meta_data[pos:pos + seq_len].decode("ascii", errors="replace"))
+                pos += seq_len
+            else:
+                sequences.append(None)
+        result["sequence"] = sequences
+        result["sequence_prevalence"] = np.frombuffer(meta_data[pos:pos + n * 2], dtype="<i2").astype(np.float64) / 10.0
+        pos += n * 2
+
+    if has_codons:
+        cat_bytes = meta_data[pos:pos + n]
+        pos += n
+        codon_id_bytes = meta_data[pos:pos + n]
+        pos += n
+        aa_id_bytes = meta_data[pos:pos + n]
+        pos += n
+        result["codon_category"] = [CODON_CATEGORIES.get(cat_bytes[i]) for i in range(n)]
+        result["codon_change"] = [CODON_TABLE[codon_id_bytes[i]] if codon_id_bytes[i] < 64 else None for i in range(n)]
+        result["aa_change"] = [AMINO_ACID_TABLE[aa_id_bytes[i]] if aa_id_bytes[i] < 21 else None for i in range(n)]
+
+    return result
+
+
+def decode_raw_sparse_chunks(chunk_rows, scale_divisor, chunk_size=CHUNK_SIZE):
+    """Decode raw sparse chunk blobs from Feature_blob_chunk / Contig_blob_chunk.
+
+    Each chunk blob format:
+        [event_count: u32]
+        [positions_compressed_size: u32][positions_compressed]
+        [values_compressed_size: u32][values_compressed]
+        [has_metadata: u8]
+        [metadata_compressed_size: u32][metadata_compressed]  // if has_metadata
+
+    Args:
+        chunk_rows: list of (chunk_idx, raw_bytes) sorted by chunk_idx
+        scale_divisor: value scale divisor (1, 100, 1000, or 10)
+
+    Returns dict: {"x": ndarray, "y": ndarray, "sparse": True, ...metadata}
+    """
+    all_positions = []
+    all_values = []
+    all_meta = {}
+
+    for _chunk_idx, raw_bytes in chunk_rows:
+        if isinstance(raw_bytes, memoryview):
+            raw_bytes = bytes(raw_bytes)
+        if not raw_bytes:
+            continue
+
+        off = 0
+        event_count = struct.unpack_from("<I", raw_bytes, off)[0]
+        off += 4
+        if event_count == 0:
+            continue
+
+        # Positions
+        pos_size = struct.unpack_from("<I", raw_bytes, off)[0]
+        off += 4
+        pos_data = _zstd_decompress(raw_bytes[off:off + pos_size])
+        off += pos_size
+        pos_unsigned = _varint_decode(pos_data)
+        pos_signed = _zigzag_decode(pos_unsigned)
+        positions = _delta_decode(pos_signed)
+
+        # Values
+        val_size = struct.unpack_from("<I", raw_bytes, off)[0]
+        off += 4
+        val_data = _zstd_decompress(raw_bytes[off:off + val_size])
+        off += val_size
+        val_unsigned = _varint_decode(val_data)
+        values = _zigzag_decode(val_unsigned)
+
+        all_positions.extend(positions[:event_count])
+        all_values.extend(values[:event_count])
+
+        # Metadata — flags byte encodes which fields are present (same as BLOB header flags)
+        if off < len(raw_bytes):
+            flags_byte = raw_bytes[off]
+            off += 1
+            if flags_byte:
+                has_stats = bool(flags_byte & 0x02)
+                has_seq = bool(flags_byte & 0x04)
+                has_codons = bool(flags_byte & 0x08)
+                meta_size = struct.unpack_from("<I", raw_bytes, off)[0]
+                off += 4
+                meta_data = _zstd_decompress(raw_bytes[off:off + meta_size])
+                chunk_meta = _decode_chunk_metadata(meta_data, event_count, has_stats, has_seq, has_codons)
+                for key, val in chunk_meta.items():
+                    if key not in all_meta:
+                        all_meta[key] = []
+                    if isinstance(val, np.ndarray):
+                        all_meta[key].append(val)
+                    elif isinstance(val, list):
+                        all_meta[key].extend(val)
+
+    if not all_positions:
+        return {"x": np.array([], dtype=np.uint32), "y": np.array([], dtype=np.float64), "sparse": True}
+
+    x = np.array(all_positions, dtype=np.uint32)
+    y = np.array(all_values, dtype=np.float64)
+    if scale_divisor != 1:
+        y = y / scale_divisor
+
+    result = {"x": x, "y": y, "sparse": True}
+    for key, val in all_meta.items():
+        if isinstance(val, list) and val and isinstance(val[0], np.ndarray):
+            result[key] = np.concatenate(val)
+        else:
+            result[key] = val
+    return result
+
+
 # ============================================================================
 # Sparse Metadata Decoding
 # ============================================================================
@@ -386,6 +570,7 @@ def decode_blob(blob_bytes):
         result.update(meta)
         return result
     else:
+        # decode_blob always decodes all chunks (no range)
         values = _decode_dense_base(blob_bytes, header)
         n = len(values)
         contig_length = header["contig_length"]

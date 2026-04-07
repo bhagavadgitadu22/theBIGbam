@@ -136,7 +136,7 @@ def download_metrics_summary_csv(db_path, contig_name, sample_names):
                 select_parts.extend([
                     'cov.Aligned_fraction_percentage', 'cov.Above_expected_aligned_fraction',
                     'cov.Read_count', 'cov.Coverage_mean', 'cov.Coverage_median', 'cov.Coverage_trimmed_mean',
-                    'cov.RPKM', 'cov.TPM', 'cov.Coverage_coefficient_of_variation', 'cov.Coverage_relative_coverage_roughness',
+                    'cov.RPKM', 'cov.TPM', 'cov.Coverage_coefficient_of_variation', 'cov.Relative_coverage_roughness',
                 ])
                 join_parts.append(f"LEFT JOIN Explicit_coverage cov ON s.Sample_name = cov.Sample_name AND cov.Contig_name = '{safe_contig}'")
 

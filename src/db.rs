@@ -529,6 +529,8 @@ impl DbWriter {
 
         let mut appender = conn.appender("Feature_blob")
             .context("Failed to create Feature_blob appender")?;
+        let mut chunk_appender = conn.appender("Feature_blob_chunk")
+            .context("Failed to create Feature_blob_chunk appender")?;
 
         for (feature_name, contig_name, encoded) in blobs {
             // Skip empty blobs (all-zero dense or no-event sparse)
@@ -540,21 +542,31 @@ impl DbWriter {
                 feature_name_to_id(feature_name),
             ) {
                 appender.append_row(params![contig_id, sample_id, fid as i32, encoded.data.as_slice(), encoded.zoom.as_slice()])?;
+
+                // Write individual base-resolution chunks for fast zoomed-in queries
+                for (chunk_idx, chunk_data) in encoded.chunks.iter().enumerate() {
+                    chunk_appender.append_row(params![
+                        contig_id, sample_id, fid as i32, chunk_idx as i16, chunk_data.as_slice()
+                    ])?;
+                }
             }
         }
 
         appender.flush().context("Failed to flush Feature_blob appender")?;
+        chunk_appender.flush().context("Failed to flush Feature_blob_chunk appender")?;
         Ok(())
     }
 
     /// Write repeats data to the database (both direct and inverted).
     /// This is called once during database creation (not per-sample).
     pub fn write_repeats(&self, repeats: &[RepeatsData]) -> Result<()> {
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
+
         if repeats.is_empty() {
+            // Autoblast ran but found no repeats — set 0% for all contigs
+            conn.execute("UPDATE Contig SET Duplication_percentage = 0", [])?;
             return Ok(());
         }
-
-        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
         let mut direct_appender = conn.appender("Contig_directRepeats")
             .context("Failed to create Contig_directRepeats appender")?;
         let mut inverted_appender = conn.appender("Contig_invertedRepeats")
@@ -814,6 +826,8 @@ impl DbWriter {
 
         let mut appender = conn.appender("Contig_blob")
             .context("Failed to create Contig_blob appender")?;
+        let mut chunk_appender = conn.appender("Contig_blob_chunk")
+            .context("Failed to create Contig_blob_chunk appender")?;
 
         for (table_name, feature_id) in tables {
             // Check if table exists (it might not if there are no repeats)
@@ -883,10 +897,16 @@ impl DbWriter {
                 }
                 let encoded = encode_dense_blob(&dense, scale, contig_length);
                 appender.append_row(params![*contig_id, feature_id, encoded.data, encoded.zoom])?;
+                for (chunk_idx, chunk_data) in encoded.chunks.iter().enumerate() {
+                    chunk_appender.append_row(params![
+                        *contig_id, feature_id, chunk_idx as i16, chunk_data.as_slice()
+                    ])?;
+                }
             }
         }
 
         appender.flush().context("Failed to flush Contig_blob appender")?;
+        chunk_appender.flush().context("Failed to flush Contig_blob_chunk appender")?;
         Ok(())
     }
 
@@ -1223,7 +1243,23 @@ fn create_core_tables(conn: &Connection, has_bam: bool) -> Result<()> {
     )
     .context("Failed to create Feature_blob table")?;
 
-    } // end if has_bam (Sample, Coverage, Phage_mechanisms, Phage_termini, Feature_blob)
+    // Feature_blob_chunk table - individual base-resolution chunks (65,536 bp each).
+    // Python fetches only the 1-2 chunks overlapping a zoomed-in view instead of
+    // the entire multi-MB Data BLOB from Feature_blob.
+    conn.execute(
+        "CREATE TABLE Feature_blob_chunk (
+            Contig_id  INTEGER NOT NULL,
+            Sample_id  INTEGER NOT NULL,
+            Feature_id SMALLINT NOT NULL,
+            Chunk_idx  SMALLINT NOT NULL,
+            Data       BLOB NOT NULL,
+            PRIMARY KEY (Contig_id, Sample_id, Feature_id, Chunk_idx)
+        )",
+        [],
+    )
+    .context("Failed to create Feature_blob_chunk table")?;
+
+    } // end if has_bam (Sample, Coverage, Phage_mechanisms, Phage_termini, Feature_blob, Feature_blob_chunk)
 
     // Contig_blob table - stores contig-level features (GC content, GC skew) as compressed BLOBs
     // Contig-level features have no sample dimension, unlike Feature_blob
@@ -1238,6 +1274,19 @@ fn create_core_tables(conn: &Connection, has_bam: bool) -> Result<()> {
         [],
     )
     .context("Failed to create Contig_blob table")?;
+
+    // Contig_blob_chunk table - individual base-resolution chunks for contig-level features
+    conn.execute(
+        "CREATE TABLE Contig_blob_chunk (
+            Contig_id   INTEGER NOT NULL,
+            Feature_id  SMALLINT NOT NULL,
+            Chunk_idx   SMALLINT NOT NULL,
+            Data        BLOB NOT NULL,
+            PRIMARY KEY (Contig_id, Feature_id, Chunk_idx)
+        )",
+        [],
+    )
+    .context("Failed to create Contig_blob_chunk table")?;
 
     // Column_scales table - documents scaling factors for all features/columns
     // Both Rust (encoding) and Python (decoding) can read from here instead of hardcoding
@@ -2223,7 +2272,7 @@ fn create_views(conn: &Connection, has_bam: bool) -> Result<()> {
              rb.RPKM,
              CASE WHEN rs.total_rpkm > 0 THEN (rb.RPKM / rs.total_rpkm) * 1e6 ELSE 0 END AS TPM,
              ROUND(p.Coverage_coefficient_of_variation / 1000000.0, 2) AS Coverage_coefficient_of_variation,
-             ROUND(p.Coverage_relative_coverage_roughness / 1000000.0, 4) AS Coverage_relative_coverage_roughness
+             ROUND(p.Coverage_relative_coverage_roughness / 1000000.0, 4) AS Relative_coverage_roughness
          FROM Coverage p
          JOIN Contig c ON p.Contig_id = c.Contig_id
          JOIN Sample s ON p.Sample_id = s.Sample_id

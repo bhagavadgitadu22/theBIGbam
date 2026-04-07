@@ -58,6 +58,11 @@ pub struct EncodedBlob {
     pub data: Vec<u8>,
     /// Standalone zoom-only BLOB (small header + zoom levels only)
     pub zoom: Vec<u8>,
+    /// Individual base-resolution chunks (one per CHUNK_SIZE bp region).
+    /// Each entry is the raw zstd-compressed chunk data, stored as separate DB rows
+    /// so Python can fetch only the 1-2 chunks overlapping a zoomed-in view.
+    /// Empty for sparse BLOBs (sparse data is small enough to fetch whole).
+    pub chunks: Vec<Vec<u8>>,
 }
 
 // ValueScale is defined in types.rs (single source of truth) and re-exported here for convenience.
@@ -367,7 +372,7 @@ fn build_zoom_blob(scale: ValueScale, sparse: bool, num_zoom_levels: u8, contig_
 pub fn encode_dense_blob(values: &[i32], scale: ValueScale, contig_length: u32) -> EncodedBlob {
     // Skip encoding when all values are zero — caller filters empty blobs
     if values.iter().all(|&v| v == 0) {
-        return EncodedBlob { data: Vec::new(), zoom: Vec::new() };
+        return EncodedBlob { data: Vec::new(), zoom: Vec::new(), chunks: Vec::new() };
     }
     let mut blob = Vec::with_capacity(32 + values.len() * 2);
 
@@ -396,6 +401,7 @@ pub fn encode_dense_blob(values: &[i32], scale: ValueScale, contig_length: u32) 
     write_u16(&mut blob, num_chunks as u16);
     write_u32(&mut blob, CHUNK_SIZE);
 
+    let mut chunks = Vec::with_capacity(num_chunks as usize);
     for chunk_idx in 0..num_chunks {
         let start = (chunk_idx * CHUNK_SIZE) as usize;
         let end = ((chunk_idx + 1) * CHUNK_SIZE) as usize;
@@ -410,6 +416,7 @@ pub fn encode_dense_blob(values: &[i32], scale: ValueScale, contig_length: u32) 
 
         write_u32(&mut blob, compressed.len() as u32);
         blob.extend_from_slice(&compressed);
+        chunks.push(compressed);
     }
 
     let base_block_end = blob.len() as u32;
@@ -424,7 +431,7 @@ pub fn encode_dense_blob(values: &[i32], scale: ValueScale, contig_length: u32) 
     blob.extend_from_slice(&zoom_bytes);
 
     let zoom_blob = build_zoom_blob(scale, false, NUM_ZOOM_LEVELS, contig_length, &zoom_bytes);
-    EncodedBlob { data: blob, zoom: zoom_blob }
+    EncodedBlob { data: blob, zoom: zoom_blob, chunks }
 }
 
 // ============================================================================
@@ -455,7 +462,7 @@ pub fn encode_sparse_blob(
 
     // Skip encoding when no events — caller filters empty blobs
     if positions.is_empty() {
-        return EncodedBlob { data: Vec::new(), zoom: Vec::new() };
+        return EncodedBlob { data: Vec::new(), zoom: Vec::new(), chunks: Vec::new() };
     }
 
     let mut blob = Vec::with_capacity(32 + positions.len() * 8);
@@ -529,8 +536,55 @@ pub fn encode_sparse_blob(
         }
     }
 
+    // === Build sparse chunks: group events by CHUNK_SIZE bp position ranges ===
+    let has_meta = metadata.is_some()
+        && metadata.unwrap().len() == positions.len()
+        && (flags.has_stats || flags.has_sequence || flags.has_codons);
+    let num_chunks = (contig_length + CHUNK_SIZE - 1) / CHUNK_SIZE;
+    let mut chunks = Vec::with_capacity(num_chunks as usize);
+    for chunk_idx in 0..num_chunks {
+        let range_start = chunk_idx * CHUNK_SIZE;
+        let range_end = range_start + CHUNK_SIZE;
+        // Binary search for events in [range_start, range_end)
+        let lo = positions.partition_point(|&p| p < range_start);
+        let hi = positions.partition_point(|&p| p < range_end);
+        if lo >= hi {
+            chunks.push(Vec::new()); // empty chunk
+            continue;
+        }
+        let chunk_pos = &positions[lo..hi];
+        let chunk_vals = &values[lo..hi];
+        let n_events = (hi - lo) as u32;
+
+        let mut cb = Vec::new();
+        write_u32(&mut cb, n_events);
+        // Positions: delta → zigzag → varint → zstd
+        let p_deltas = delta_encode(&chunk_pos.iter().map(|&p| p as i32).collect::<Vec<_>>());
+        let p_zig: Vec<u32> = p_deltas.iter().map(|&d| zigzag_encode_val(d)).collect();
+        let p_compressed = zstd_compress(&varint_encode(&p_zig));
+        write_u32(&mut cb, p_compressed.len() as u32);
+        cb.extend_from_slice(&p_compressed);
+        // Values: zigzag → varint → zstd
+        let v_zig: Vec<u32> = chunk_vals.iter().map(|&v| zigzag_encode_val(v)).collect();
+        let v_compressed = zstd_compress(&varint_encode(&v_zig));
+        write_u32(&mut cb, v_compressed.len() as u32);
+        cb.extend_from_slice(&v_compressed);
+        // Metadata slice — store flags byte so decoder knows which fields are present
+        if has_meta {
+            let chunk_meta = &metadata.unwrap()[lo..hi];
+            let meta_bytes = encode_sparse_metadata(chunk_meta, &flags);
+            let meta_compressed = zstd_compress(&meta_bytes);
+            cb.push(flags.to_byte()); // flags byte (has_stats, has_sequence, has_codons)
+            write_u32(&mut cb, meta_compressed.len() as u32);
+            cb.extend_from_slice(&meta_compressed);
+        } else {
+            cb.push(0u8); // no metadata
+        }
+        chunks.push(cb);
+    }
+
     let zoom_blob = build_zoom_blob(scale, true, NUM_ZOOM_LEVELS, contig_length, &zoom_bytes);
-    EncodedBlob { data: blob, zoom: zoom_blob }
+    EncodedBlob { data: blob, zoom: zoom_blob, chunks }
 }
 
 /// Encode sparse metadata in columnar format.
@@ -654,7 +708,7 @@ pub fn encode_contig_dense_blob(values: &[i32], scale: ValueScale, contig_length
     blob.extend_from_slice(&zoom_bytes);
 
     let zoom_blob = build_zoom_blob(scale, false, NUM_CONTIG_ZOOM_LEVELS, contig_length, &zoom_bytes);
-    EncodedBlob { data: blob, zoom: zoom_blob }
+    EncodedBlob { data: blob, zoom: zoom_blob, chunks: Vec::new() }
 }
 
 /// Encode a sparse contig feature (repeat features) as a compressed BLOB.
@@ -721,8 +775,11 @@ pub fn encode_contig_sparse_blob(
     blob.extend_from_slice(&zoom_bytes);
 
     let zoom_blob = build_zoom_blob(scale, true, NUM_ZOOM_LEVELS, contig_length, &zoom_bytes);
-    EncodedBlob { data: blob, zoom: zoom_blob }
+    EncodedBlob { data: blob, zoom: zoom_blob, chunks: Vec::new() }
 }
+
+/// Chunk size in base pairs (must match CHUNK_SIZE constant used in encoding).
+pub const BLOB_CHUNK_SIZE: u32 = CHUNK_SIZE;
 
 // ============================================================================
 // Feature ID Mapping

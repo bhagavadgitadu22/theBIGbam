@@ -1536,9 +1536,7 @@ pub fn run_all_samples(
     let has_sequences = blast_contigs.iter().any(|c| c.sequence.is_some());
     let repeats = if has_sequences {
         let reps = run_autoblast(blast_contigs, config.threads)?;
-        if !reps.is_empty() {
-            db_writer.write_repeats(&reps)?;
-        }
+        db_writer.write_repeats(&reps)?;
         reps
     } else {
         Vec::new()
