@@ -681,6 +681,8 @@ pub struct ModuleFlags {
     pub paired_read_metrics: bool,
     /// Calculate phage termini features (coverage_reduced, reads_starts, reads_ends, tau)
     pub phagetermini: bool,
+    /// Calculate RNA-specific features (splicings from CIGAR 'N' ops)
+    pub rna: bool,
 }
 
 impl ModuleFlags {
@@ -700,14 +702,16 @@ impl ModuleFlags {
         let mapping_metrics = has("Misalignment");
         let long_read_metrics = has("Long-reads");
         let paired_read_metrics = has("Paired-reads");
+        let rna = has("RNA");
 
         Self {
             // Coverage needed if explicitly requested or if dependent modules are enabled
-            coverage: has("Coverage") || mapping_metrics || long_read_metrics || paired_read_metrics,
+            coverage: has("Coverage") || mapping_metrics || long_read_metrics || paired_read_metrics || rna,
             mapping_metrics,
             long_read_metrics,
             paired_read_metrics,
             phagetermini: has("Phage termini"),
+            rna,
         }
     }
 

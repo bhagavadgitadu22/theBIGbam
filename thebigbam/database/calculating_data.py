@@ -66,6 +66,7 @@ def add_calculate_args(parser):
 MODULE_ALIASES = {
     "coverage": "Coverage",
     "misalignment": "Misalignment",
+    "rna": "RNA",
     "longreads": "Long-reads",
     "pairedreads": "Paired-reads",
     "phagetermini": "Phage termini",

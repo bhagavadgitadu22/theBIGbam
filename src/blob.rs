@@ -643,7 +643,7 @@ pub fn encode_contig_dense_blob(values: &[i32], scale: ValueScale, contig_length
 }
 
 /// Encode a sparse contig feature (repeat features) as a compressed BLOB.
-/// Uses only 10kbp zoom level for contigs > 1 Mbp.
+/// Uses 100bp, 1000bp, 10000bp zoom levels (same as sample-level blobs).
 pub fn encode_contig_sparse_blob(
     positions: &[u32],
     values: &[i32],
@@ -661,7 +661,7 @@ pub fn encode_contig_sparse_blob(
     meta_flags.sparse = true;
     blob.push(meta_flags.to_byte());                        // [5] flags
     blob.push(scale as u8);                                 // [6] scale_code
-    blob.push(NUM_CONTIG_ZOOM_LEVELS);                      // [7] num_zoom_levels (1 for contig)
+    blob.push(NUM_ZOOM_LEVELS);                              // [7] num_zoom_levels (3: 100bp, 1000bp, 10000bp)
     write_u32(&mut blob, contig_length);                    // [8..12] contig_length
     let base_block_offset_pos = blob.len();
     write_u32(&mut blob, 0);                                // [12..16] base_block_offset
@@ -697,11 +697,11 @@ pub fn encode_contig_sparse_blob(
     let base_block_end = blob.len() as u32;
     patch_u32(&mut blob, base_block_size_pos, base_block_end - base_block_start);
 
-    // === Zoom Levels (only 10kbp for contig features) ===
+    // === Zoom Levels (100bp, 1000bp, 10000bp — same as sample-level blobs) ===
     let zoom_offset = blob.len() as u32;
     patch_u32(&mut blob, zoom_index_offset_pos, zoom_offset);
 
-    let zoom_levels = compute_zoom_levels_sparse(positions, values, contig_length, CONTIG_ZOOM_BIN_SIZES);
+    let zoom_levels = compute_zoom_levels_sparse(positions, values, contig_length, ZOOM_BIN_SIZES);
     let zoom_bytes = encode_zoom_levels_sparse(&zoom_levels);
     blob.extend_from_slice(&zoom_bytes);
 

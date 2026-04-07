@@ -484,10 +484,7 @@ def decode_zoom_by_bin_size(blob_bytes, target_bin_size):
     levels = _decode_zoom_levels(blob_bytes, header)
 
     # Try exact match first, then next larger bin size
-    if header["num_zoom_levels"] == 1:
-        available_bins = [10000]
-    else:
-        available_bins = [100, 1000, 10000]
+    available_bins = [100, 1000, 10000]
     bin_sizes_to_try = [target_bin_size]
     fallback = [b for b in available_bins if b > target_bin_size]
     if fallback:

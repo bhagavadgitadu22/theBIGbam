@@ -216,7 +216,7 @@ pub const VARIABLES: &[VariableConfig] = &[
     VariableConfig { name: "mismatches", subplot: "Mismatches", module: "Misalignment", module_order: 3, plot_type: PlotType::Bars, color: "#5a0f0b", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Mismatches", help: None },
 
     // RNA module
-    VariableConfig { name: "splicings", subplot: "Splicings", module: "RNA", module_order: 1, plot_type: PlotType::Bars, color: "#06d6a0", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Splicings", help: None },
+    VariableConfig { name: "splicings", subplot: "Splicings", module: "RNA", module_order: 1, plot_type: PlotType::Curve, color: "#06d6a0", alpha: 0.8, fill_alpha: 0.4, size: 1.0, title: "Splicings", help: None },
 
     // Per read metrics (long reads)
     VariableConfig { name: "read_lengths", subplot: "Read lengths", module: "Long-reads", module_order: 1, plot_type: PlotType::Curve, color: "#ed8b00", alpha: 0.8, fill_alpha: 0.4, size: 1.0, title: "Read lengths", help: None },

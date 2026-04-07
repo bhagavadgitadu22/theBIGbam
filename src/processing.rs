@@ -633,6 +633,28 @@ fn add_features_from_arrays(
             Some(&primary_reads_f64), "right_clippings", config);
     }
             
+    // Shared constants for sparse feature encoding (used by mapping_metrics + rna modules)
+    let clen = contig_length as u32;
+    let cn = contig_name.to_string();
+    let bar_threshold = config.bar_ratio * 0.01;
+    let min_occ = config.min_occurrences;
+
+    // Helper: filter positions by coverage threshold AND min_occurrences, produce (positions, values)
+    let filter_sparse = |counts: &[f64], coverage: &[f64]| -> (Vec<u32>, Vec<i32>) {
+        let mut positions = Vec::new();
+        let mut values = Vec::new();
+        let n = counts.len().min(coverage.len());
+        for i in 0..n {
+            let val = counts[i];
+            let cov = coverage[i];
+            if val > cov * bar_threshold && val > min_occ as f64 {
+                positions.push(i as u32);
+                values.push((val / cov * 1000.0).round() as i32);
+            }
+        }
+        (positions, values)
+    };
+
     if flags.mapping_metrics {
         let mismatches_f64: Vec<f64> = arrays.mismatches.iter().map(|&x| x as f64).collect();
         let deletions_f64: Vec<f64> = arrays.deletions.iter().map(|&x| x as f64).collect();
@@ -664,28 +686,6 @@ fn add_features_from_arrays(
             cds_index, contig_length, threshold,
         );
 
-        // === BLOB encoding for mapping metrics (sparse features) ===
-        let clen = contig_length as u32;
-        let cn = contig_name.to_string();
-        let bar_threshold = config.bar_ratio * 0.01;
-        let min_occ = config.min_occurrences;
-
-        // Helper: filter positions by coverage threshold AND min_occurrences, produce (positions, values)
-        let filter_sparse = |counts: &[f64], coverage: &[f64]| -> (Vec<u32>, Vec<i32>) {
-            let mut positions = Vec::new();
-            let mut values = Vec::new();
-            let n = counts.len().min(coverage.len());
-            for i in 0..n {
-                let val = counts[i];
-                let cov = coverage[i];
-                if val > cov * bar_threshold && val > min_occ as f64 {
-                    positions.push(i as u32);
-                    values.push((val / cov * 1000.0).round() as i32);
-                }
-            }
-            (positions, values)
-        };
-
         // mismatches (with sequence + codons)
         {
             let (pos, vals) = filter_sparse(&mismatches_f64, &primary_reads_f64);
@@ -716,15 +716,6 @@ fn add_features_from_arrays(
             let (pos, vals) = filter_sparse(&deletions_f64, &primary_reads_f64);
             let flags = MetadataFlags { sparse: true, ..Default::default() };
             blob_output.push(("deletions".into(), cn.clone(),
-                encode_sparse_blob(&pos, &vals, None, flags, ValueScale::Times1000, clen)));
-        }
-
-        // splicings (value only, mirrors deletions) — per-base count of CIGAR 'N' spans
-        {
-            let splices_f64: Vec<f64> = arrays.splices.iter().map(|&x| x as f64).collect();
-            let (pos, vals) = filter_sparse(&splices_f64, &primary_reads_f64);
-            let flags = MetadataFlags { sparse: true, ..Default::default() };
-            blob_output.push(("splicings".into(), cn.clone(),
                 encode_sparse_blob(&pos, &vals, None, flags, ValueScale::Times1000, clen)));
         }
 
@@ -821,6 +812,24 @@ fn add_features_from_arrays(
             blob_output.push(("right_clippings".into(), cn.clone(),
                 encode_sparse_blob(&pos, &vals, Some(&meta), flags, ValueScale::Times1000, clen)));
         }
+    }
+
+    // RNA module
+    if flags.rna {
+        // splicings — absolute per-base count of CIGAR 'N' spans
+        // Stored as raw counts (not coverage-relative) because N-correction
+        // decrements coverage at intronic positions, making the ratio meaningless.
+        let mut spl_pos = Vec::new();
+        let mut spl_vals = Vec::new();
+        for (i, &count) in arrays.splices.iter().enumerate() {
+            if count > 0 {
+                spl_pos.push(i as u32);
+                spl_vals.push(count as i32);
+            }
+        }
+        let flags = MetadataFlags { sparse: true, ..Default::default() };
+        blob_output.push(("splicings".into(), cn.clone(),
+            encode_sparse_blob(&spl_pos, &spl_vals, None, flags, ValueScale::Raw, clen)));
     }
 
     // Paired-reads module
