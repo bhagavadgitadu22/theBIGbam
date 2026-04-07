@@ -65,7 +65,7 @@ mod python {
     ///     genbank_path: Path to the GenBank annotation file (empty string to skip)
     ///     bam_files: List of BAM file paths to process
     ///     output_db: Output database file path (.db)
-    ///     modules: List of modules to compute: "Coverage", "Misalignment", "Long-reads", "Paired-reads", "Phage termini"
+    ///     modules: List of modules to compute: "Coverage", "Misalignment", "RNA", "Long-reads", "Paired-reads", "Phage termini"
     ///     threads: Number of threads to use
     ///     min_aligned_fraction: Minimum alignment-length coverage fraction for contig inclusion (default 50.0)
     ///     min_coverage_depth: Minimum mean coverage depth for contig inclusion (default 0.0 = disabled)
