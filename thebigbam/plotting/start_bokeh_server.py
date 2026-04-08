@@ -803,8 +803,11 @@ def create_layout(db_path):
             else:
                 download_metrics_button.visible = False
             
+            # Hide any previous command hint when plot is refreshed
+            command_hint_pane.visible = False
+
             # Display the plot
-            main_placeholder.objects = [pn.Column(toolbar_row, grid, sizing_mode="stretch_both")]
+            main_placeholder.objects = [pn.Column(toolbar_row, command_hint_pane, grid, sizing_mode="stretch_both")]
 
         except Exception as e:
             peruse_button.visible = False
@@ -860,10 +863,10 @@ def create_layout(db_path):
 
     ## Download functionality using Panel FileDownload widgets
     import io
-    
+
     # Store references to download widgets (created later, after widgets dict exists)
     download_widgets = {'contig': None, 'metrics': None, 'data': None}
-    
+
     # Track current plot state for x-range preservation across APPLY clicks
     current_plot_state = {
         'contig': None,
@@ -942,72 +945,18 @@ def create_layout(db_path):
             return io.StringIO(csv_content)
         return io.StringIO("")
 
-    def make_data_download_callback():
-        """Create callback for feature data download.
-
-        Queries DuckDB directly for feature data within the
-        current contig/sample/position range.
-        """
-        from .downloading_data import download_feature_data_csv, make_safe_filename
-
-        contig = widgets['contig_select'].value
-        if not contig:
-            print("[start_bokeh_server] Download data: No contig selected", flush=True)
-            return io.StringIO("")
-
-        is_all = (views.active == 1) if widgets['has_samples'] else False
-
-        # Parse current position range
-        contig_length = widgets['contig_lengths'].get(contig, 0)
-        try:
-            xstart = int(from_position_input.value) if from_position_input.value.strip() else 1
-            xend = int(to_position_input.value) if to_position_input.value.strip() else contig_length
-        except ValueError:
-            xstart = 1
-            xend = contig_length
-
-        if not widgets['has_samples']:
-            sample_names = []
-        elif is_all:
-            filtered_samples = [s for s in orig_samples if s in widgets['contig_to_samples'].get(contig, set())]
-            filtering_pairs = get_filtering_filtered_pairs()
-            if filtering_pairs is not None:
-                allowed_samples = {pair[1] for pair in filtering_pairs}
-                filtered_samples = [s for s in filtered_samples if s in allowed_samples]
-            if not filtered_samples:
-                print("[start_bokeh_server] Download data: No samples match filters", flush=True)
-                return io.StringIO("")
-            sample_names = filtered_samples
-        else:
-            sample = widgets['sample_select'].value
-            if not sample:
-                print("[start_bokeh_server] Download data: No sample selected", flush=True)
-                return io.StringIO("")
-            sample_names = [sample]
-
-        csv_content = download_feature_data_csv(
-            db_path, contig, sample_names,
-            xstart=xstart, xend=xend,
-            is_all_samples=is_all
-        )
-        if csv_content:
-            safe_contig = make_safe_filename(contig)
-            if not sample_names:
-                filename = f"{safe_contig}_contig_data.csv"
-            elif is_all:
-                filename = f"{safe_contig}_all_samples_data.csv"
-            else:
-                safe_sample = make_safe_filename(sample_names[0])
-                filename = f"{safe_contig}_{safe_sample}_data.csv"
-            if download_widgets['data']:
-                download_widgets['data'].filename = filename
-            return io.StringIO(csv_content)
-        return io.StringIO("")
-
     ### Creating all DOM elements
     # Open DuckDB database connection to build widgets depending on data
     conn = duckdb.connect(db_path, read_only=True)
     widgets = build_controls(conn)
+
+    # Build subplot → variable_name(s) mapping for inspect command generation
+    _subplot_to_varnames = {}
+    _cur = conn.cursor()
+    _cur.execute("SELECT Variable_name, Subplot FROM Variable WHERE Variable_name IS NOT NULL AND Subplot IS NOT NULL")
+    for _vname, _subplot in _cur.fetchall():
+        _subplot_to_varnames.setdefault(_subplot, []).append(_vname)
+    _cur.close()
 
     # Load the CSS and logo
     static_path = os.path.join(os.path.dirname(__file__), "..", "static")
@@ -1921,15 +1870,114 @@ def create_layout(db_path):
     )
     download_widgets['metrics'] = download_metrics_button
 
-    # Download feature data - Panel FileDownload widget
-    download_data_button = pn.widgets.FileDownload(
-        callback=make_data_download_callback,
-        filename="data.csv",
-        label="DOWNLOAD DATA",
-        button_type="primary",
+    # Download data — show CLI command hint instead of generating huge CSV in browser
+    # Hidden pane to display the inspect command (shown on click, hidden on next APPLY)
+    command_hint_pane = pn.pane.HTML("", visible=False, sizing_mode="stretch_width")
+
+    def _show_inspect_command(event):
+        """Build and display the thebigbam inspect CLI command from current widget state."""
+        contig = widgets['contig_select'].value
+        if not contig:
+            command_hint_pane.object = '<div style="color:#c00;padding:6px">No contig selected.</div>'
+            command_hint_pane.visible = True
+            return
+
+        is_all = (views.active == 1) if widgets['has_samples'] else False
+        has_samples = widgets['has_samples']
+        contig_length = widgets['contig_lengths'].get(contig, 0)
+
+        # Determine region
+        try:
+            xstart = int(from_position_input.value) if from_position_input.value.strip() else 1
+            xend = int(to_position_input.value) if to_position_input.value.strip() else contig_length
+        except ValueError:
+            xstart = 1
+            xend = contig_length
+        region_arg = ""
+        if xstart > 1 or xend < contig_length:
+            region_arg = f" --region {xstart}-{xend}"
+
+        # Collect active feature subplots → variable names
+        active_vars = widgets['variables_widgets_all'] if is_all else widgets['variables_widgets_one']
+        feature_names = []
+        # Contig-level features from combined_features_cbg
+        if combined_features_cbg is not None:
+            for idx in combined_features_cbg.active:
+                subplot = combined_features_cbg.labels[idx]
+                feature_names.extend(_subplot_to_varnames.get(subplot, [subplot]))
+        # Sample-level features from module checkboxes
+        if is_all:
+            # All-samples view: only one variable selected
+            for cbg in active_vars:
+                if cbg.active:
+                    subplot = cbg.labels[cbg.active[-1]]
+                    feature_names.extend(_subplot_to_varnames.get(subplot, [subplot]))
+                    break
+        else:
+            for cbg in active_vars:
+                for idx in cbg.active:
+                    subplot = cbg.labels[idx]
+                    feature_names.extend(_subplot_to_varnames.get(subplot, [subplot]))
+
+        if not feature_names:
+            command_hint_pane.object = '<div style="color:#c00;padding:6px">No features selected.</div>'
+            command_hint_pane.visible = True
+            return
+
+        # Determine samples
+        sample_arg = ""
+        if has_samples:
+            if is_all:
+                filtered_samples = [s for s in orig_samples if s in widgets['contig_to_samples'].get(contig, set())]
+                filtering_pairs = get_filtering_filtered_pairs()
+                if filtering_pairs is not None:
+                    allowed = {pair[1] for pair in filtering_pairs}
+                    filtered_samples = [s for s in filtered_samples if s in allowed]
+                if filtered_samples:
+                    sample_arg = f" --sample {','.join(filtered_samples)}"
+            else:
+                sample = widgets['sample_select'].value
+                if sample:
+                    sample_arg = f" --sample {sample}"
+
+        # Separate contig-level features (no --sample needed) from sample-level features
+        from thebigbam.database.blob_decoder import contig_blob_name_to_id
+        contig_features = [f for f in feature_names if contig_blob_name_to_id(f) is not None]
+        sample_features = [f for f in feature_names if contig_blob_name_to_id(f) is None]
+
+        commands = []
+        if contig_features:
+            cmd = f"thebigbam inspect -d {db_path} --contig {contig} --feature {','.join(contig_features)}{region_arg} > output.tsv"
+            commands.append(cmd)
+        if sample_features and sample_arg:
+            cmd = f"thebigbam inspect -d {db_path} --contig {contig}{sample_arg} --feature {','.join(sample_features)}{region_arg} > output.tsv"
+            commands.append(cmd)
+        elif sample_features and not sample_arg:
+            cmd = f"thebigbam inspect -d {db_path} --contig {contig} --sample &lt;SAMPLE&gt; --feature {','.join(sample_features)}{region_arg} > output.tsv"
+            commands.append(cmd)
+
+        cmd_html = "".join(
+            f'<pre style="background:#1a1a2e;color:#e0e0e0;padding:8px 12px;border-radius:4px;'
+            f'font-size:13px;white-space:pre-wrap;word-break:break-all;margin:4px 0;'
+            f'user-select:all;cursor:pointer" title="Click to select, then Ctrl+C to copy">{c}</pre>'
+            for c in commands
+        )
+        command_hint_pane.object = (
+            f'<div style="padding:6px 0">'
+            f'<div style="font-size:12px;color:#888;margin-bottom:4px">'
+            f'Run in your terminal to download data as TSV (click command to select):</div>'
+            f'{cmd_html}</div>'
+        )
+        command_hint_pane.visible = True
+
+    download_data_button = pn.widgets.Button(
+        name="DOWNLOAD DATA",
         height=30,
+        stylesheets=[stylesheet],
+        css_classes=["apply-btn"],
         visible=False
     )
+    download_data_button.on_click(_show_inspect_command)
     download_widgets['data'] = download_data_button
 
     # Only Apply button in left panel now

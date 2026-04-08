@@ -38,8 +38,6 @@ def generate_bokeh_plot_all_samples(conn, variable, contig_name, xstart=None, xe
     annotation_fig = None
     if genbank_path and xstart is not None and xend is not None and (xend - xstart) <= _genemap_threshold:
         annotation_fig = make_bokeh_genemap(conn, contig_id, locus_name, locus_size, genemap_size if genemap_size is not None else subplot_size, shared_xrange, xstart, xend, feature_types=feature_types, use_phage_colors=use_phage_colors, feature_label_key=feature_label_key)
-    elif genbank_path and xstart is not None and xend is not None and (xend - xstart) > _genemap_threshold:
-        print(f"Gene map not plotted: window > {_genemap_threshold} bp", flush=True)
 
     # Get list of samples
     cur.execute("SELECT Coverage.Sample_id, Sample_name FROM Coverage JOIN Sample ON Coverage.Sample_id = Sample.Sample_id WHERE Contig_id=?", (contig_id,))

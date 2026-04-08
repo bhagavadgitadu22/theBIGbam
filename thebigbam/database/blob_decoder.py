@@ -85,20 +85,6 @@ def _varint_decode(data):
     return values
 
 
-def _zigzag_decode(values):
-    """Decode zigzag-encoded unsigned integers back to signed."""
-    return [(v >> 1) ^ -(v & 1) for v in values]
-
-
-def _delta_decode(deltas):
-    """Reconstruct original values from deltas using prefix sum."""
-    if not deltas:
-        return []
-    values = [deltas[0]]
-    for i in range(1, len(deltas)):
-        values.append(values[-1] + deltas[i])
-    return values
-
 
 # ============================================================================
 # Header Parsing
@@ -153,25 +139,24 @@ def _decode_dense_base(blob, header):
     chunk_size = struct.unpack_from("<I", blob, offset + 2)[0]
     offset += 6
 
-    all_values = []
+    all_chunks = []
     for _ in range(num_chunks):
         compressed_size = struct.unpack_from("<I", blob, offset)[0]
         offset += 4
         compressed_data = blob[offset:offset + compressed_size]
         offset += compressed_size
 
-        # Decompress: zstd → varint → zigzag → delta
+        # Decompress: zstd → varint → vectorized zigzag+delta
         decompressed = _zstd_decompress(compressed_data)
         unsigned_vals = _varint_decode(decompressed)
-        signed_deltas = _zigzag_decode(unsigned_vals)
-        chunk_values = _delta_decode(signed_deltas)
-        all_values.extend(chunk_values)
+        arr = np.array(unsigned_vals, dtype=np.int64)
+        chunk_values = np.cumsum((arr >> 1) ^ -(arr & 1))
+        all_chunks.append(chunk_values)
 
     # Trim to contig length (last chunk may have padding)
     contig_length = header["contig_length"]
-    all_values = all_values[:contig_length]
-
-    return np.array(all_values, dtype=np.int32)
+    values = np.concatenate(all_chunks) if all_chunks else np.array([], dtype=np.int64)
+    return values[:contig_length].astype(np.int32)
 
 
 # ============================================================================
@@ -193,9 +178,8 @@ def _decode_sparse_base(blob, header):
     pos_data = _zstd_decompress(blob[offset:offset + pos_compressed_size])
     offset += pos_compressed_size
 
-    pos_unsigned = _varint_decode(pos_data)
-    pos_signed = _zigzag_decode(pos_unsigned)
-    positions = _delta_decode(pos_signed)
+    pos_arr = np.array(_varint_decode(pos_data), dtype=np.int64)
+    positions = np.cumsum((pos_arr >> 1) ^ -(pos_arr & 1))  # vectorized zigzag+delta
 
     # Values: compressed block
     val_compressed_size = struct.unpack_from("<I", blob, offset)[0]
@@ -203,10 +187,10 @@ def _decode_sparse_base(blob, header):
     val_data = _zstd_decompress(blob[offset:offset + val_compressed_size])
     offset += val_compressed_size
 
-    val_unsigned = _varint_decode(val_data)
-    values = _zigzag_decode(val_unsigned)
+    val_arr = np.array(_varint_decode(val_data), dtype=np.int64)
+    values = (val_arr >> 1) ^ -(val_arr & 1)  # vectorized zigzag (no delta for values)
 
-    return np.array(positions[:event_count], dtype=np.uint32), np.array(values[:event_count], dtype=np.int32)
+    return positions[:event_count].astype(np.uint32), values[:event_count].astype(np.int32)
 
 
 def decode_raw_chunks(chunk_rows, scale_divisor, chunk_size=CHUNK_SIZE):
@@ -219,21 +203,22 @@ def decode_raw_chunks(chunk_rows, scale_divisor, chunk_size=CHUNK_SIZE):
 
     Returns dict: {"x": ndarray, "y": ndarray, "sparse": False}
     """
-    all_values = []
+    all_chunks = []
     first_chunk_idx = chunk_rows[0][0] if chunk_rows else 0
     for _chunk_idx, raw_bytes in chunk_rows:
         if isinstance(raw_bytes, memoryview):
             raw_bytes = bytes(raw_bytes)
         decompressed = _zstd_decompress(raw_bytes)
         unsigned_vals = _varint_decode(decompressed)
-        signed_deltas = _zigzag_decode(unsigned_vals)
-        chunk_values = _delta_decode(signed_deltas)
-        all_values.extend(chunk_values)
+        arr = np.array(unsigned_vals, dtype=np.int64)
+        chunk_values = np.cumsum((arr >> 1) ^ -(arr & 1))  # vectorized zigzag + delta
+        all_chunks.append(chunk_values)
 
+    values = np.concatenate(all_chunks) if all_chunks else np.array([], dtype=np.int64)
     base_offset = first_chunk_idx * chunk_size
-    n = len(all_values)
+    n = len(values)
     x = np.arange(base_offset, base_offset + n, dtype=np.uint32)
-    values = np.array(all_values, dtype=np.float64)
+    values = values.astype(np.float64)
     if scale_divisor != 1:
         values = values / scale_divisor
     return {"x": x, "y": values, "sparse": False}
@@ -336,25 +321,24 @@ def decode_raw_sparse_chunks(chunk_rows, scale_divisor, chunk_size=CHUNK_SIZE):
         if event_count == 0:
             continue
 
-        # Positions
+        # Positions (zigzag + delta encoded)
         pos_size = struct.unpack_from("<I", raw_bytes, off)[0]
         off += 4
         pos_data = _zstd_decompress(raw_bytes[off:off + pos_size])
         off += pos_size
-        pos_unsigned = _varint_decode(pos_data)
-        pos_signed = _zigzag_decode(pos_unsigned)
-        positions = _delta_decode(pos_signed)
+        pos_arr = np.array(_varint_decode(pos_data), dtype=np.int64)
+        positions = np.cumsum((pos_arr >> 1) ^ -(pos_arr & 1))  # vectorized zigzag+delta
 
-        # Values
+        # Values (zigzag encoded, no delta)
         val_size = struct.unpack_from("<I", raw_bytes, off)[0]
         off += 4
         val_data = _zstd_decompress(raw_bytes[off:off + val_size])
         off += val_size
-        val_unsigned = _varint_decode(val_data)
-        values = _zigzag_decode(val_unsigned)
+        val_arr = np.array(_varint_decode(val_data), dtype=np.int64)
+        values = (val_arr >> 1) ^ -(val_arr & 1)  # vectorized zigzag
 
-        all_positions.extend(positions[:event_count])
-        all_values.extend(values[:event_count])
+        all_positions.append(positions[:event_count])
+        all_values.append(values[:event_count])
 
         # Metadata — flags byte encodes which fields are present (same as BLOB header flags)
         if off < len(raw_bytes):
@@ -379,8 +363,8 @@ def decode_raw_sparse_chunks(chunk_rows, scale_divisor, chunk_size=CHUNK_SIZE):
     if not all_positions:
         return {"x": np.array([], dtype=np.uint32), "y": np.array([], dtype=np.float64), "sparse": True}
 
-    x = np.array(all_positions, dtype=np.uint32)
-    y = np.array(all_values, dtype=np.float64)
+    x = np.concatenate(all_positions).astype(np.uint32)
+    y = np.concatenate(all_values).astype(np.float64)
     if scale_divisor != 1:
         y = y / scale_divisor
 
@@ -510,14 +494,15 @@ def _decode_zoom_levels(blob, header):
                 pos += 4
                 idx_unsigned = _varint_decode(level_data[pos:pos + idx_len])
                 pos += idx_len
-                idx_signed = _zigzag_decode(idx_unsigned)
-                bin_indices = _delta_decode(idx_signed)
+                idx_arr = np.array(idx_unsigned, dtype=np.int64)
+                bin_indices = np.cumsum((idx_arr >> 1) ^ -(idx_arr & 1))
 
                 # Max values: length-prefixed varint block, zigzag encoded
                 val_len = struct.unpack_from("<I", level_data, pos)[0]
                 pos += 4
                 val_unsigned = _varint_decode(level_data[pos:pos + val_len])
-                val_values = _zigzag_decode(val_unsigned)
+                val_arr = np.array(val_unsigned, dtype=np.int64)
+                val_values = (val_arr >> 1) ^ -(val_arr & 1)
 
                 for i in range(nonzero_count):
                     bins.append({"idx": bin_indices[i], "max": val_values[i], "mean": val_values[i]})
@@ -746,13 +731,14 @@ def decode_zoom_standalone(zoom_blob_bytes, target_bin_size):
                 pos += 4
                 idx_unsigned = _varint_decode(level_data[pos:pos + idx_len])
                 pos += idx_len
-                idx_signed = _zigzag_decode(idx_unsigned)
-                bin_indices = _delta_decode(idx_signed)
+                idx_arr = np.array(idx_unsigned, dtype=np.int64)
+                bin_indices = np.cumsum((idx_arr >> 1) ^ -(idx_arr & 1))
 
                 val_len = struct.unpack_from("<I", level_data, pos)[0]
                 pos += 4
                 val_unsigned = _varint_decode(level_data[pos:pos + val_len])
-                val_values = _zigzag_decode(val_unsigned)
+                val_arr = np.array(val_unsigned, dtype=np.int64)
+                val_values = (val_arr >> 1) ^ -(val_arr & 1)
 
                 for i in range(nonzero_count):
                     bins.append({"idx": bin_indices[i], "max": val_values[i], "mean": val_values[i]})

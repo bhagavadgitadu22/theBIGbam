@@ -1453,6 +1453,8 @@ def get_feature_data_batch(cur, feature, contig_id, sample_ids, xstart=None, xen
                         chunk_dict = decode_raw_chunks(chunk_rows, scale_div)
                         if gc_window > 1:
                             chunk_dict["x"] = chunk_dict["x"] * gc_window
+                        if contig_feature_name == "gc_skew":
+                            chunk_dict["y"] = chunk_dict["y"] / 100.0
                         blob_dict = _format_chunks_for_bokeh(chunk_dict, xstart, xend)
                     else:
                         blob_dict = None
@@ -1569,8 +1571,6 @@ def generate_bokeh_plot_per_sample(conn, list_features, contig_name, sample_name
             feature_types=feature_types, use_phage_colors=use_phage_colors, plot_isoforms=plot_isoforms,
             feature_label_key=feature_label_key
         )
-    elif genbank_path and xstart is not None and xend is not None and (xend - xstart) > _genemap_threshold:
-        print(f"Gene map not plotted: window > {_genemap_threshold} bp", flush=True)
 
     # Get sample characteristics (optional – contig-level features work without a sample)
     sample_id = None

@@ -792,9 +792,10 @@ impl DbWriter {
                 let contig_length = (values.len() as u32) * GC_SKEW_WINDOW_SIZE;
 
                 // Encode as dense BLOB (array index is window number)
+                // Values are stored as integer ×100 (e.g. -40 = -0.40), use Times100 scale
                 let encoded = encode_contig_dense_blob(
                     &values,
-                    ValueScale::Raw,
+                    ValueScale::Times100,
                     contig_length,
                     GC_SKEW_WINDOW_SIZE,
                 );
