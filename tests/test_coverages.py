@@ -24,17 +24,35 @@ def blob_to_int_array(conn, contig_id, sample_id, feature_name, length):
     Returns a list of integers (length = contig length), 0-filled for positions
     without data. Dense blobs cover every position; sparse blobs only have events.
     """
-    from thebigbam.database.blob_decoder import feature_name_to_id, decode_blob
+    from thebigbam.database.blob_decoder import (
+        feature_name_to_id, decode_raw_chunks, decode_raw_sparse_chunks,
+        get_scale_from_zoom_blob, is_sparse_zoom_blob,
+    )
 
-    fid = feature_name_to_id(feature_name)
+    fid = feature_name_to_id(feature_name, conn)
+
+    # Get scale/sparse info from zoom blob
     row = conn.execute(
-        "SELECT Data FROM Feature_blob WHERE Contig_id=? AND Sample_id=? AND Feature_id=?",
+        "SELECT Zoom_data FROM Feature_blob WHERE Contig_id=? AND Sample_id=? AND Feature_id=?",
         (contig_id, sample_id, fid)
     ).fetchone()
     if row is None:
         return [0] * length
+    zoom_blob = bytes(row[0])
+    scale_div = get_scale_from_zoom_blob(zoom_blob)
+    sparse = is_sparse_zoom_blob(zoom_blob)
 
-    data = decode_blob(row[0])
+    # Decode from chunks
+    chunk_rows = conn.execute(
+        "SELECT Chunk_idx, Data FROM Feature_blob_chunk "
+        "WHERE Contig_id=? AND Sample_id=? AND Feature_id=? ORDER BY Chunk_idx",
+        (contig_id, sample_id, fid)
+    ).fetchall()
+    if not chunk_rows:
+        return [0] * length
+    chunk_rows = [(r[0], r[1]) for r in chunk_rows]
+
+    data = decode_raw_sparse_chunks(chunk_rows, scale_div) if sparse else decode_raw_chunks(chunk_rows, scale_div)
     x = data["x"]
     y = data["y"]
 
