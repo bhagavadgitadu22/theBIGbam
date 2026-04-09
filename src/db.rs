@@ -1994,8 +1994,11 @@ fn insert_annotations(conn: &Connection, annotations: &[FeatureAnnotation]) -> R
                 )
             })?;
 
-        // All qualifiers → KV table
+        // All qualifiers → KV table (skip "translation" — stored separately in Annotation_sequence)
         for (key, value) in &ann.qualifiers {
+            if key == "translation" {
+                continue;
+            }
             qual_appender
                 .append_row(params![annotation_id, key, value])
                 .with_context(|| {

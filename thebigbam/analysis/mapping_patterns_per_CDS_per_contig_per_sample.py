@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Export per-gene feature signals from a theBIGbam database.
+"""Export per-CDS mapping signals from a theBIGbam database.
 
-Produces a TSV with one row per (sample, gene) combination, containing
+Produces a TSV with one row per (sample, CDS) combination, containing
 coverage, GC, mismatch, and structural variant metrics.
 
 Sparse feature values (mismatches, insertions, deletions, clippings) are
@@ -24,25 +24,18 @@ import numpy as np
 import duckdb
 
 from thebigbam.database.blob_decoder import (
-    feature_name_to_id, contig_blob_name_to_id,
+    feature_name_to_id,
     decode_raw_chunks, decode_raw_sparse_chunks,
-    get_scale_from_zoom_blob, is_sparse_zoom_blob,
+    get_scale_from_zoom_blob,
 )
 
 
 COLUMNS = [
     "sample_name",
     "contig_name",
-    "contig_length",
-    "gene_start",
-    "gene_end",
-    "gene_length",
-    "gene_product",
-    "gene_function",
-    "phrog_id",
-    "contig_gc_content",
-    "gene_gc_content",
+    "gene_name",
     "contig_aligned_fraction",
+    "gene_aligned_fraction",
     "contig_coverage_median",
     "gene_coverage_median",
     "coverage_ratio",
@@ -119,7 +112,6 @@ def _compute_sn_sites(nuc_seq):
 
 
 def _column_exists(conn, table_name, column_name):
-    """Check if a column exists in a table."""
     try:
         conn.execute(f'SELECT "{column_name}" FROM {table_name} LIMIT 0')
         return True
@@ -128,7 +120,6 @@ def _column_exists(conn, table_name, column_name):
 
 
 def _table_exists(conn, table_name):
-    """Check if a table exists in the database."""
     return (
         conn.execute(
             "SELECT 1 FROM information_schema.tables WHERE table_name = ?",
@@ -143,7 +134,6 @@ def _table_exists(conn, table_name):
 # ============================================================================
 
 def _resolve_feature_ids(conn):
-    """Build {feature_id: feature_name} map for all needed features."""
     id_to_name = {}
     name_to_id = {}
     for name in _DENSE_FEATURES + _SPARSE_FEATURES:
@@ -155,12 +145,7 @@ def _resolve_feature_ids(conn):
 
 
 def _load_all_features(conn, contig_id, sample_id, contig_length, id_to_name, name_to_id):
-    """Decode all sample-level features for one (contig, sample) in 2 SQL queries.
-
-    Returns dict: {feature_name: ndarray (dense) or sparse_dict (sparse)}
-    Missing features get zeros/empty arrays.
-    """
-    # Query 1: all zoom headers
+    """Decode all sample-level features for one (contig, sample) in 2 SQL queries."""
     zoom_map = {}
     for row in conn.execute(
         "SELECT Feature_id, Zoom_data FROM Feature_blob "
@@ -170,7 +155,6 @@ def _load_all_features(conn, contig_id, sample_id, contig_length, id_to_name, na
         if fid in id_to_name:
             zoom_map[fid] = bytes(row[1])
 
-    # Query 2: all chunks
     chunks_by_fid = defaultdict(list)
     for row in conn.execute(
         "SELECT Feature_id, Chunk_idx, Data FROM Feature_blob_chunk "
@@ -183,7 +167,6 @@ def _load_all_features(conn, contig_id, sample_id, contig_length, id_to_name, na
 
     result = {}
 
-    # Decode dense features → full-length numpy arrays
     for name in _DENSE_FEATURES:
         fid = name_to_id.get(name)
         if fid is None or fid not in zoom_map or fid not in chunks_by_fid:
@@ -197,7 +180,6 @@ def _load_all_features(conn, contig_id, sample_id, contig_length, id_to_name, na
         arr[x[valid].astype(np.intp)] = y[valid]
         result[name] = arr
 
-    # Decode sparse features → position/value/metadata dicts
     _empty_sparse = {"x": np.array([], dtype=np.uint32), "y": np.array([], dtype=np.float64)}
     for name in _SPARSE_FEATURES:
         fid = name_to_id.get(name)
@@ -210,84 +192,62 @@ def _load_all_features(conn, contig_id, sample_id, contig_length, id_to_name, na
     return result
 
 
-def _load_contig_gc(conn, contig_id, contig_length):
-    """Decode GC content from Contig_blob for one contig. Returns full-length array."""
-    fid = contig_blob_name_to_id("gc_content")
-    zoom_row = conn.execute(
-        "SELECT Zoom_data FROM Contig_blob WHERE Contig_id=? AND Feature_id=?",
-        [contig_id, fid]
-    ).fetchone()
-    if zoom_row is None:
-        return None
-
-    chunk_rows = conn.execute(
-        "SELECT Chunk_idx, Data FROM Contig_blob_chunk "
-        "WHERE Contig_id=? AND Feature_id=? ORDER BY Chunk_idx",
-        [contig_id, fid]
-    ).fetchall()
-    if not chunk_rows:
-        return None
-
-    zoom_blob = bytes(zoom_row[0])
-    scale_div = get_scale_from_zoom_blob(zoom_blob)
-    chunk_rows = [(r[0], r[1]) for r in chunk_rows]
-    data = decode_raw_chunks(chunk_rows, scale_div)
-
-    # x = window indices (0-based), y = GC values; 500bp windows
-    window_size = 500
-    arr = np.full(contig_length, np.nan, dtype=np.float64)
-    for i in range(len(data["x"])):
-        start = int(data["x"][i]) * window_size
-        end = min(start + window_size, contig_length)
-        arr[start:end] = data["y"][i]
-    return arr
-
-
 # ============================================================================
 # Sparse feature helpers
 # ============================================================================
 
 def _sparse_stats(sparse_dict, start_0, end_0):
-    """Count positions and sum prevalence for a sparse feature within [start_0, end_0)."""
     x = sparse_dict["x"]
     if len(x) == 0:
-        return None, None
+        return 0, 0
     mask = (x >= start_0) & (x < end_0)
     count = int(np.sum(mask))
     if count == 0:
-        return None, None
+        return 0, 0
     return count, round(float(np.sum(sparse_dict["y"][mask])), 4)
 
 
 def _mismatch_stats(mm_dict, start_0, end_0):
-    """Mismatch positions/prevalence with synonymous/nonsynonymous split.
-
-    Returns (total_pos, total_prev, syn_pos, syn_prev, nonsyn_pos, nonsyn_prev).
-    """
     x = mm_dict["x"]
     if len(x) == 0:
-        return None, None, None, None, None, None
+        return 0, 0, 0, 0, 0, 0
 
     mask = (x >= start_0) & (x < end_0)
     total_pos = int(np.sum(mask))
     if total_pos == 0:
-        return None, None, None, None, None, None
+        return 0, 0, 0, 0, 0, 0
 
     total_prev = round(float(np.sum(mm_dict["y"][mask])), 4)
 
     cats = mm_dict.get("codon_category")
     if cats is None:
-        return total_pos, total_prev, None, None, None, None
+        return total_pos, total_prev, 0, 0, 0, 0
 
     cat_arr = np.array(cats) if not isinstance(cats, np.ndarray) else cats
     syn_mask = mask & (cat_arr == "Synonymous")
     nonsyn_mask = mask & (cat_arr == "Non-synonymous")
     syn_pos = int(np.sum(syn_mask))
-    syn_prev = round(float(np.sum(mm_dict["y"][syn_mask])), 4) if syn_pos else None
+    syn_prev = round(float(np.sum(mm_dict["y"][syn_mask])), 4) if syn_pos else 0
     nonsyn_pos = int(np.sum(nonsyn_mask))
-    nonsyn_prev = round(float(np.sum(mm_dict["y"][nonsyn_mask])), 4) if nonsyn_pos else None
+    nonsyn_prev = round(float(np.sum(mm_dict["y"][nonsyn_mask])), 4) if nonsyn_pos else 0
 
     return total_pos, total_prev, syn_pos, syn_prev, nonsyn_pos, nonsyn_prev
+
+
+# ============================================================================
+# Gene naming
+# ============================================================================
+
+def _build_gene_names(genes, contig_info):
+    """Assign <contig_name>_tbb_<N> names to CDS features, numbered per contig by Start."""
+    counter = defaultdict(int)
+    names = []
+    for g in genes:
+        contig_id = g[0]
+        contig_name = contig_info[contig_id][0]
+        counter[contig_id] += 1
+        names.append(f"{contig_name}_tbb_{counter[contig_id]}")
+    return names
 
 
 # ============================================================================
@@ -295,114 +255,54 @@ def _mismatch_stats(mm_dict, start_0, end_0):
 # ============================================================================
 
 def process_sample(conn, sample_id, sample_name, contig_info, cov_map, af_map,
-                   gc_arrays, id_to_name, name_to_id, has_sn_sites):
-    """Process all genes for one sample. Yields row tuples."""
+                   id_to_name, name_to_id, genes_by_contig, gene_names_by_contig):
+    """Process all CDS for one sample. Yields row tuples."""
     contig_ids = list(cov_map.keys())
     if not contig_ids:
         return
 
-    id_list = ",".join(str(c) for c in contig_ids)
-
-    # Fetch genes with Phrog from qualifier table
-    if has_sn_sites:
-        genes = conn.execute(
-            f"""
-            SELECT ca.Contig_id, ca."Start", ca."End", ca."End" - ca."Start" + 1,
-                   ca.Product, ca."Function",
-                   aq_phrog."Value",
-                   ca.S_sites, ca.N_sites
-            FROM Contig_annotation ca
-            LEFT JOIN Annotation_qualifier aq_phrog
-              ON ca.Annotation_id = aq_phrog.Annotation_id AND aq_phrog."Key" = 'phrog'
-            WHERE ca.Contig_id IN ({id_list})
-            ORDER BY ca.Contig_id, ca."Start"
-            """
-        ).fetchall()
-    else:
-        raw = conn.execute(
-            f"""
-            SELECT ca.Contig_id, ca."Start", ca."End", ca."End" - ca."Start" + 1,
-                   ca.Product, ca."Function",
-                   aq_phrog."Value",
-                   ca.Nucleotide_sequence
-            FROM Contig_annotation ca
-            LEFT JOIN Annotation_qualifier aq_phrog
-              ON ca.Annotation_id = aq_phrog.Annotation_id AND aq_phrog."Key" = 'phrog'
-            WHERE ca.Contig_id IN ({id_list})
-            ORDER BY ca.Contig_id, ca."Start"
-            """
-        ).fetchall()
-        genes = []
-        for r in raw:
-            nuc_seq = r[7]
-            if nuc_seq:
-                s, n = _compute_sn_sites(nuc_seq)
-            else:
-                s, n = None, None
-            genes.append((*r[:7], s, n))
-
-    if not genes:
-        return
-
-    # Group genes by contig
-    genes_by_contig = defaultdict(list)
-    for g in genes:
-        genes_by_contig[g[0]].append(g)
-
-    # Process each contig: batch-decode all features, then iterate genes
     for contig_id in contig_ids:
         contig_genes = genes_by_contig.get(contig_id)
         if not contig_genes:
             continue
 
-        contig_name, contig_length, contig_gc = contig_info[contig_id]
+        contig_name, contig_length, _ = contig_info[contig_id]
         contig_cov_med = cov_map[contig_id]
         contig_af = af_map[contig_id]
 
-        # 2 SQL queries → all features decoded
         features = _load_all_features(
             conn, contig_id, sample_id, contig_length, id_to_name, name_to_id
         )
 
-        gc_arr = gc_arrays.get(contig_id)
+        gene_names = gene_names_by_contig.get(contig_id, [])
 
-        for g in contig_genes:
-            gene_start, gene_end, gene_length = g[1], g[2], g[3]
-            s_sites, n_sites = g[7], g[8]
+        for idx, g in enumerate(contig_genes):
+            gene_start, gene_end = g[1], g[2]
+            s_sites, n_sites = g[4], g[5]
+            gene_name = gene_names[idx] if idx < len(gene_names) else ""
 
-            # 0-based half-open slice
             s0 = gene_start - 1
             e0 = gene_end
 
-            # Dense: gene median
-            gene_cov_med = float(np.median(features["primary_reads"][s0:e0]))
+            gene_slice = features["primary_reads"][s0:e0]
+            gene_cov_med = float(np.median(gene_slice))
+            gene_af = round(float(np.count_nonzero(gene_slice) / len(gene_slice) * 100), 2) if len(gene_slice) > 0 else 0
             gene_sec_med = float(np.median(features["secondary_reads"][s0:e0]))
 
-            coverage_ratio = None
+            coverage_ratio = 0
             if contig_cov_med is not None and contig_cov_med > 0:
                 coverage_ratio = round(gene_cov_med / contig_cov_med, 4)
 
-            # GC per gene
-            gene_gc = None
-            if gc_arr is not None:
-                gene_slice = gc_arr[s0:e0]
-                valid = ~np.isnan(gene_slice)
-                if np.any(valid):
-                    gene_gc = round(float(np.mean(gene_slice[valid])), 1)
-
-            # Mismatches with syn/nonsyn split
             mm = _mismatch_stats(features["mismatches"], s0, e0)
             total_pos, total_prev = mm[0], mm[1]
             syn_pos, syn_prev = mm[2], mm[3]
             nonsyn_pos, nonsyn_prev = mm[4], mm[5]
 
-            # dN/dS
-            dnds = None
-            if (syn_prev is not None and nonsyn_prev is not None
+            dnds = 0
+            if (syn_prev and nonsyn_prev
                     and syn_prev > 0 and n_sites and s_sites):
                 dnds = round((nonsyn_prev * s_sites) / (syn_prev * n_sites), 4)
 
-            # Sparse event features
             ins_pos, ins_prev = _sparse_stats(features["insertions"], s0, e0)
             del_pos, del_prev = _sparse_stats(features["deletions"], s0, e0)
             lc_pos, lc_prev = _sparse_stats(features["left_clippings"], s0, e0)
@@ -411,16 +311,9 @@ def process_sample(conn, sample_id, sample_name, contig_info, cov_map, af_map,
             yield (
                 sample_name,
                 contig_name,
-                contig_length,
-                gene_start,
-                gene_end,
-                gene_length,
-                g[4],  # product
-                g[5],  # function
-                g[6],  # phrog
-                contig_gc,
-                gene_gc,
+                gene_name,
                 contig_af,
+                gene_af,
                 contig_cov_med,
                 gene_cov_med,
                 coverage_ratio,
@@ -445,12 +338,43 @@ def process_sample(conn, sample_id, sample_name, contig_info, cov_map, af_map,
             )
 
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="Export per-gene feature signals from a theBIGbam database."
-    )
-    parser.add_argument("db", help="Path to the theBIGbam DuckDB database")
-    parser.add_argument("output", help="Path to the output TSV file")
+DESCRIPTION = """\
+Export per-CDS mapping signals from a theBIGbam database.
+
+Output columns (one row per sample x CDS):
+- sample_name: BAM sample name
+- contig_name: contig the CDS belongs to
+- gene_name: stable identifier <contig_name>_tbb_<N>, numbered per contig by start position
+- contig_aligned_fraction: percentage of the contig covered by aligned reads (0-100)
+- gene_aligned_fraction: percentage of positions in the CDS covered by at least one primary read (0-100)
+- contig_coverage_median: median primary read depth across the whole contig
+- gene_coverage_median: median primary read depth across the CDS
+- coverage_ratio: gene_coverage_median / contig_coverage_median
+- gene_secondary_coverage_median: median secondary (non-primary) read depth across the CDS
+- mismatches_positions: number of positions in the CDS with at least one mismatch
+- mismatches_prevalence: sum of per-position mismatch prevalences (count/coverage) across the CDS
+- synonymous_positions: number of mismatch positions classified as synonymous
+- synonymous_prevalence: sum of per-position prevalences for synonymous mismatches
+- nonsynonymous_positions: number of mismatch positions classified as non-synonymous
+- nonsynonymous_prevalence: sum of per-position prevalences for non-synonymous mismatches
+- s_sites: number of synonymous sites in the CDS (from codon degeneracy)
+- n_sites: number of non-synonymous sites in the CDS
+- dnds_ratio: (nonsynonymous_prevalence x s_sites) / (synonymous_prevalence x n_sites)
+- insertions_positions: number of positions in the CDS with at least one insertion
+- insertions_prevalence: sum of per-position insertion prevalences across the CDS
+- deletions_positions: number of positions in the CDS with at least one deletion
+- deletions_prevalence: sum of per-position deletion prevalences across the CDS
+- left_clippings_positions: number of positions with left soft-clipping events
+- left_clippings_prevalence: sum of per-position left-clipping prevalences
+- right_clippings_positions: number of positions with right soft-clipping events
+- right_clippings_prevalence: sum of per-position right-clipping prevalences
+"""
+
+
+def add_args(parser):
+    """Register arguments on an existing subparser."""
+    parser.add_argument("--db", required=True, help="Path to the theBIGbam DuckDB database")
+    parser.add_argument("--output", required=True, help="Path to the output TSV file")
     parser.add_argument(
         "--min_aligned_fraction",
         type=float,
@@ -463,7 +387,10 @@ def main():
         default=10,
         help="Minimum median coverage depth to include a contig-sample pair (default: 10)",
     )
-    args = parser.parse_args()
+
+
+def run(args):
+    """Entry point called by CLI dispatcher."""
 
     if not 0 <= args.min_aligned_fraction <= 100:
         print("Error: --min_aligned_fraction must be between 0 and 100.", file=sys.stderr)
@@ -472,7 +399,7 @@ def main():
     conn = duckdb.connect(args.db, read_only=True)
 
     if not _table_exists(conn, "Contig_annotation"):
-        print("Error: No Contig_annotation table. Run pharokka annotation first.", file=sys.stderr)
+        print("Error: No Contig_annotation table. Run annotation first.", file=sys.stderr)
         sys.exit(1)
 
     if not _table_exists(conn, "Sample"):
@@ -486,28 +413,58 @@ def main():
         print("Error: No samples found in database.", file=sys.stderr)
         sys.exit(1)
 
-    # Contig info (sample-independent)
     contigs = conn.execute(
         "SELECT Contig_id, Contig_name, Contig_length, GC_mean FROM Contig ORDER BY Contig_id"
     ).fetchall()
     contig_info = {r[0]: (r[1], r[2], r[3]) for r in contigs}
 
-    # Resolve feature IDs once
     id_to_name, name_to_id = _resolve_feature_ids(conn)
-
     has_sn_sites = _column_exists(conn, "Contig_annotation", "S_sites")
     has_coverage = _table_exists(conn, "Coverage")
 
-    # Precompute GC arrays per contig (sample-independent)
-    gc_arrays = {}
-    for contig_id, (_, contig_length, _) in contig_info.items():
-        gc_arr = _load_contig_gc(conn, contig_id, contig_length)
-        if gc_arr is not None:
-            gc_arrays[contig_id] = gc_arr
+    # Fetch all CDS ordered by contig, start
+    all_contig_ids = ",".join(str(c) for c in contig_info.keys())
+    if has_sn_sites:
+        all_genes = conn.execute(
+            f"""
+            SELECT ca.Contig_id, ca."Start", ca."End", ca."End" - ca."Start" + 1,
+                   ca.S_sites, ca.N_sites
+            FROM Contig_annotation ca
+            WHERE ca.Contig_id IN ({all_contig_ids}) AND ca."Type" = 'CDS'
+            ORDER BY ca.Contig_id, ca."Start"
+            """
+        ).fetchall()
+    else:
+        raw = conn.execute(
+            f"""
+            SELECT ca.Contig_id, ca."Start", ca."End", ca."End" - ca."Start" + 1,
+                   ca.Nucleotide_sequence
+            FROM Contig_annotation ca
+            WHERE ca.Contig_id IN ({all_contig_ids}) AND ca."Type" = 'CDS'
+            ORDER BY ca.Contig_id, ca."Start"
+            """
+        ).fetchall()
+        all_genes = []
+        for r in raw:
+            nuc_seq = r[4]
+            if nuc_seq:
+                s, n = _compute_sn_sites(nuc_seq)
+            else:
+                s, n = None, None
+            all_genes.append((r[0], r[1], r[2], r[3], s, n))
+
+    # Build gene names and group by contig
+    gene_names = _build_gene_names(all_genes, contig_info)
+    genes_by_contig = defaultdict(list)
+    gene_names_by_contig = defaultdict(list)
+    for i, g in enumerate(all_genes):
+        genes_by_contig[g[0]].append(g)
+        gene_names_by_contig[g[0]].append(gene_names[i])
 
     print(
         f"Processing {len(samples)} sample(s), "
-        f"{len(name_to_id)} feature(s) available...",
+        f"{len(name_to_id)} feature(s), "
+        f"{len(all_genes)} CDS...",
         file=sys.stderr,
     )
     print(
@@ -516,7 +473,6 @@ def main():
         file=sys.stderr,
     )
 
-    # Thresholds in stored units (×10)
     af_threshold = args.min_aligned_fraction * 10
     cov_threshold = args.min_coverage_depth * 10
 
@@ -548,17 +504,27 @@ def main():
             sample_rows = 0
             for row in process_sample(
                 conn, sample_id, sample_name, contig_info, cov_map, af_map,
-                gc_arrays, id_to_name, name_to_id, has_sn_sites,
+                id_to_name, name_to_id, genes_by_contig, gene_names_by_contig,
             ):
                 writer.writerow(row)
                 sample_rows += 1
 
             total_rows += sample_rows
-            print(f"  Done: {sample_name} ({sample_rows} genes)", file=sys.stderr)
+            print(f"  Done: {sample_name} ({sample_rows} CDS)", file=sys.stderr)
 
     conn.close()
     print(f"Wrote {total_rows} rows to {args.output}", file=sys.stderr)
 
 
+def main():
+    parser = argparse.ArgumentParser(
+        description=DESCRIPTION,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    add_args(parser)
+    args = parser.parse_args()
+    return run(args)
+
+
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

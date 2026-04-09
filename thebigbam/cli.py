@@ -7,6 +7,21 @@ from thebigbam.utils import (
 )
 from thebigbam.database import add_variable, calculating_data, export_data, inspect_blob
 from thebigbam.plotting import start_bokeh_server
+from thebigbam.analysis import (
+    mapping_patterns_per_CDS_per_contig_per_sample,
+    annotations_per_CDS_per_contig,
+)
+
+ANALYSIS_SCRIPTS = {
+    'cds-mapping-patterns': (
+        'Export per-CDS mapping signals (coverage, mismatches, indels, clippings)',
+        mapping_patterns_per_CDS_per_contig_per_sample,
+    ),
+    'cds-annotations': (
+        'Export all annotation info per CDS (qualifiers, GC, coordinates)',
+        annotations_per_CDS_per_contig,
+    ),
+}
 
 SCRIPTS = {
     'mapping-per-sample': 'Map reads for a single sample (one CSV row)',
@@ -102,6 +117,15 @@ def build_argparser():
     # inspect command
     sp = sub.add_parser('inspect', help=SCRIPTS['inspect'])
     inspect_blob.add_inspect_args(sp)
+
+    # analysis subcommand group
+    analysis_parser = sub.add_parser('analysis', help='Run analysis scripts on a theBIGbam database')
+    analysis_sub = analysis_parser.add_subparsers(dest="analysis_cmd", required=True)
+    for name, (desc, module) in ANALYSIS_SCRIPTS.items():
+        asp = analysis_sub.add_parser(name, help=desc,
+                                      description=getattr(module, 'DESCRIPTION', desc),
+                                      formatter_class=argparse.RawDescriptionHelpFormatter)
+        module.add_args(asp)
 
     return p
 
@@ -220,6 +244,10 @@ def main(argv=None):
 
     if args.cmd == 'inspect':
         return inspect_blob.run_inspect(args)
+
+    if args.cmd == 'analysis':
+        _, module = ANALYSIS_SCRIPTS[args.analysis_cmd]
+        return module.run(args)
 
     if args.cmd == 'list-variables':
             try:
