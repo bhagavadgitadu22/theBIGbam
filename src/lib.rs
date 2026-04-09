@@ -144,10 +144,130 @@ mod python {
         Ok(result)
     }
 
+    // ========================================================================
+    // Fast chunk decoders for Python (replaces pure-Python _varint_decode)
+    // ========================================================================
+
+    /// Varint (LEB128) decode a byte slice into unsigned 64-bit values.
+    fn varint_decode_slice(data: &[u8]) -> Vec<u64> {
+        let mut values = Vec::with_capacity(data.len() / 2);
+        let mut i = 0;
+        while i < data.len() {
+            let mut val: u64 = 0;
+            let mut shift = 0u32;
+            loop {
+                if i >= data.len() { break; }
+                let byte = data[i];
+                i += 1;
+                val |= ((byte & 0x7F) as u64) << shift;
+                shift += 7;
+                if byte & 0x80 == 0 { break; }
+            }
+            values.push(val);
+        }
+        values
+    }
+
+    /// Decode a dense chunk: zstd decompress → varint → zigzag → delta accumulate.
+    ///
+    /// Input: raw compressed bytes from Feature_blob_chunk.Data / Contig_blob_chunk.Data
+    /// Returns: list[int] — cumulative delta-decoded signed values
+    #[pyfunction]
+    fn decode_dense_chunk(compressed: &[u8]) -> PyResult<Vec<i64>> {
+        let decompressed = zstd::stream::decode_all(std::io::Cursor::new(compressed))
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(
+                format!("zstd decompression failed: {e}")))?;
+
+        let unsigned_vals = varint_decode_slice(&decompressed);
+
+        // Zigzag decode + delta accumulate in one pass
+        let mut result = Vec::with_capacity(unsigned_vals.len());
+        let mut acc: i64 = 0;
+        for v in unsigned_vals {
+            let signed = ((v >> 1) as i64) ^ -((v & 1) as i64);
+            acc += signed;
+            result.push(acc);
+        }
+        Ok(result)
+    }
+
+    /// Decode the positions and values from a sparse chunk.
+    ///
+    /// Sparse chunk format (uncompressed outer):
+    ///   [event_count: u32 LE]
+    ///   [pos_compressed_size: u32 LE][pos_compressed: zstd(varint(zigzag(delta)))]
+    ///   [val_compressed_size: u32 LE][val_compressed: zstd(varint(zigzag))]
+    ///   ... metadata follows (parsed in Python)
+    ///
+    /// Returns: (positions: list[int], values: list[int])
+    /// Positions are delta-decoded, values are zigzag-only (no delta).
+    /// Both truncated to event_count.
+    #[pyfunction]
+    fn decode_sparse_chunk(raw_bytes: &[u8]) -> PyResult<(Vec<i64>, Vec<i64>)> {
+        if raw_bytes.len() < 4 {
+            return Ok((vec![], vec![]));
+        }
+
+        let event_count = u32::from_le_bytes(
+            [raw_bytes[0], raw_bytes[1], raw_bytes[2], raw_bytes[3]]) as usize;
+        let mut off = 4usize;
+
+        if event_count == 0 {
+            return Ok((vec![], vec![]));
+        }
+
+        // Positions: size + zstd-compressed varint data
+        if off + 4 > raw_bytes.len() { return Ok((vec![], vec![])); }
+        let pos_size = u32::from_le_bytes(
+            [raw_bytes[off], raw_bytes[off+1], raw_bytes[off+2], raw_bytes[off+3]]) as usize;
+        off += 4;
+        if off + pos_size > raw_bytes.len() { return Ok((vec![], vec![])); }
+
+        let pos_decompressed = zstd::stream::decode_all(
+            std::io::Cursor::new(&raw_bytes[off..off + pos_size]))
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(
+                format!("zstd pos decompression failed: {e}")))?;
+        off += pos_size;
+
+        let pos_unsigned = varint_decode_slice(&pos_decompressed);
+        // Zigzag + delta decode positions
+        let mut positions = Vec::with_capacity(event_count);
+        let mut acc: i64 = 0;
+        for v in &pos_unsigned {
+            let signed = ((*v >> 1) as i64) ^ -((*v & 1) as i64);
+            acc += signed;
+            positions.push(acc);
+        }
+        positions.truncate(event_count);
+
+        // Values: size + zstd-compressed varint data
+        if off + 4 > raw_bytes.len() { return Ok((positions, vec![])); }
+        let val_size = u32::from_le_bytes(
+            [raw_bytes[off], raw_bytes[off+1], raw_bytes[off+2], raw_bytes[off+3]]) as usize;
+        off += 4;
+        if off + val_size > raw_bytes.len() { return Ok((positions, vec![])); }
+
+        let val_decompressed = zstd::stream::decode_all(
+            std::io::Cursor::new(&raw_bytes[off..off + val_size]))
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(
+                format!("zstd val decompression failed: {e}")))?;
+
+        let val_unsigned = varint_decode_slice(&val_decompressed);
+        // Zigzag decode only (no delta for sparse values)
+        let mut values: Vec<i64> = val_unsigned.iter()
+            .map(|&v| ((v >> 1) as i64) ^ -((v & 1) as i64))
+            .collect();
+        values.truncate(event_count);
+
+        Ok((positions, values))
+    }
+
     /// theBIGbam Rust bindings for Python.
     #[pymodule]
     fn thebigbam_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(process_all_samples, m)?)?;
+        m.add_function(wrap_pyfunction!(decode_dense_chunk, m)?)?;
+        m.add_function(wrap_pyfunction!(decode_sparse_chunk, m)?)?;
         m.add("__doc__", "theBIGbam Rust bindings - fast BAM processing")?;
         Ok(())
     }

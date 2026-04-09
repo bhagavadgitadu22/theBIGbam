@@ -9,6 +9,7 @@ numpy-based decoding for use in Bokeh visualization and CSV export.
 
 import struct
 import numpy as np
+from thebigbam_rs import decode_dense_chunk, decode_sparse_chunk
 
 try:
     import zstandard as zstd
@@ -208,10 +209,7 @@ def decode_raw_chunks(chunk_rows, scale_divisor, chunk_size=CHUNK_SIZE):
     for _chunk_idx, raw_bytes in chunk_rows:
         if isinstance(raw_bytes, memoryview):
             raw_bytes = bytes(raw_bytes)
-        decompressed = _zstd_decompress(raw_bytes)
-        unsigned_vals = _varint_decode(decompressed)
-        arr = np.array(unsigned_vals, dtype=np.int64)
-        chunk_values = np.cumsum((arr >> 1) ^ -(arr & 1))  # vectorized zigzag + delta
+        chunk_values = np.array(decode_dense_chunk(raw_bytes), dtype=np.int64)
         all_chunks.append(chunk_values)
 
     values = np.concatenate(all_chunks) if all_chunks else np.array([], dtype=np.int64)
@@ -315,30 +313,24 @@ def decode_raw_sparse_chunks(chunk_rows, scale_divisor, chunk_size=CHUNK_SIZE):
         if not raw_bytes:
             continue
 
-        off = 0
-        event_count = struct.unpack_from("<I", raw_bytes, off)[0]
-        off += 4
+        event_count = struct.unpack_from("<I", raw_bytes, 0)[0]
         if event_count == 0:
             continue
 
-        # Positions (zigzag + delta encoded)
-        pos_size = struct.unpack_from("<I", raw_bytes, off)[0]
-        off += 4
-        pos_data = _zstd_decompress(raw_bytes[off:off + pos_size])
-        off += pos_size
-        pos_arr = np.array(_varint_decode(pos_data), dtype=np.int64)
-        positions = np.cumsum((pos_arr >> 1) ^ -(pos_arr & 1))  # vectorized zigzag+delta
-
-        # Values (zigzag encoded, no delta)
-        val_size = struct.unpack_from("<I", raw_bytes, off)[0]
-        off += 4
-        val_data = _zstd_decompress(raw_bytes[off:off + val_size])
-        off += val_size
-        val_arr = np.array(_varint_decode(val_data), dtype=np.int64)
-        values = (val_arr >> 1) ^ -(val_arr & 1)  # vectorized zigzag
+        # Decode positions + values in Rust (zstd + varint + zigzag + delta)
+        pos_list, val_list = decode_sparse_chunk(raw_bytes)
+        positions = np.array(pos_list, dtype=np.int64)
+        values = np.array(val_list, dtype=np.int64)
 
         all_positions.append(positions[:event_count])
         all_values.append(values[:event_count])
+
+        # Advance offset past positions and values to reach metadata
+        off = 4
+        pos_size = struct.unpack_from("<I", raw_bytes, off)[0]
+        off += 4 + pos_size
+        val_size = struct.unpack_from("<I", raw_bytes, off)[0]
+        off += 4 + val_size
 
         # Metadata — flags byte encodes which fields are present (same as BLOB header flags)
         if off < len(raw_bytes):

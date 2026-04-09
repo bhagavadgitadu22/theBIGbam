@@ -1876,6 +1876,11 @@ def create_layout(db_path):
 
     def _show_inspect_command(event):
         """Build and display the thebigbam inspect CLI command from current widget state."""
+        # Toggle off if already visible
+        if command_hint_pane.visible:
+            command_hint_pane.visible = False
+            return
+
         contig = widgets['contig_select'].value
         if not contig:
             command_hint_pane.object = '<div style="color:#c00;padding:6px">No contig selected.</div>'
@@ -1973,8 +1978,7 @@ def create_layout(db_path):
     download_data_button = pn.widgets.Button(
         name="DOWNLOAD DATA",
         height=30,
-        stylesheets=[stylesheet],
-        css_classes=["apply-btn"],
+        button_type="primary",
         visible=False
     )
     download_data_button.on_click(_show_inspect_command)
