@@ -122,6 +122,11 @@ class CustomTranslator(BiopythonTranslator):
     _seen_unknown_types = set()
 
     def compute_feature_color(self, feature):
+        # Custom user-defined color takes highest priority
+        custom_color = feature.qualifiers.get("_custom_color")
+        if custom_color:
+            return custom_color
+
         type_feature = feature.type
 
         if type_feature == "CDS":
@@ -172,7 +177,7 @@ def get_contig_info(cur, contig_name):
         raise ValueError(f"Contig not found: {contig_name}")
     return row
 
-def make_bokeh_genemap(conn, contig_id, locus_name, locus_size, subplot_size, shared_xrange, xstart=None, xend=None, feature_types=None, use_phage_colors=False, plot_isoforms=True, feature_label_key=None):
+def make_bokeh_genemap(conn, contig_id, locus_name, locus_size, subplot_size, shared_xrange, xstart=None, xend=None, feature_types=None, use_phage_colors=False, plot_isoforms=True, feature_label_key=None, custom_colors=None):
     cur = conn.cursor()
 
     # Build position filter clause for annotations
@@ -215,6 +220,47 @@ def make_bokeh_genemap(conn, contig_id, locus_name, locus_size, subplot_size, sh
         ).fetchall()
         label_map = {aid: val for aid, val in rows}
 
+    # Build custom color map: annotation_id -> hex color (first matching rule wins)
+    custom_color_map = {}
+    if custom_colors and seq_ann_rows:
+        from collections import defaultdict
+        rules_by_key = defaultdict(list)
+        for rule in custom_colors:
+            rules_by_key[rule['qualifier_key']].append(rule)
+
+        ann_ids = [r[0] for r in seq_ann_rows]
+        placeholders = ','.join('?' * len(ann_ids))
+        # Column index map for direct columns in seq_ann_rows
+        direct_col_idx = {
+            'Product': 5, 'Function': 6, 'Locus_tag': 7,
+            'product': 5, 'function': 6, 'locus_tag': 7,
+            'Type': 4, 'type': 4,
+        }
+        for qkey, rules in rules_by_key.items():
+            # Query KV table for this qualifier key
+            kv_map = {}
+            try:
+                kv_rows = cur.execute(
+                    f'SELECT Annotation_id, "Value" FROM Annotation_qualifier '
+                    f'WHERE "Key" = ? AND Annotation_id IN ({placeholders})',
+                    [qkey] + ann_ids
+                ).fetchall()
+                kv_map = {aid: val for aid, val in kv_rows}
+            except Exception:
+                pass
+            for rule in rules:
+                for seq_row in seq_ann_rows:
+                    aid = seq_row[0]
+                    if aid in custom_color_map:
+                        continue
+                    val = kv_map.get(aid)
+                    if val is None:
+                        col_idx = direct_col_idx.get(qkey)
+                        if col_idx is not None:
+                            val = seq_row[col_idx]
+                    if val and val == rule['value']:
+                        custom_color_map[aid] = rule['color']
+
     sequence_annotations = []
     for ann_id, start, end, strand, ftype, product, function, locus_tag in seq_ann_rows:
         # Biopython FeatureLocation is 0-based half-open
@@ -230,6 +276,8 @@ def make_bokeh_genemap(conn, contig_id, locus_name, locus_size, subplot_size, sh
         if locus_tag:
             qualifiers['locus_tag'] = locus_tag
         qualifiers['use_phage_colors'] = use_phage_colors
+        if custom_color_map and ann_id in custom_color_map:
+            qualifiers['_custom_color'] = custom_color_map[ann_id]
         # Set tooltip key and value
         if feature_label_key:
             qualifiers['_tooltip_key'] = feature_label_key
@@ -1547,7 +1595,7 @@ def parse_requested_features(list_features):
 
 
 ### Function to generate the bokeh plot
-def generate_bokeh_plot_per_sample(conn, list_features, contig_name, sample_name, xstart=None, xend=None, subplot_size=100, genbank_path=None, feature_types=None, use_phage_colors=False, plot_isoforms=True, plot_sequence=False, plot_translated_sequence=False, same_y_scale=False, genemap_size=None, sequence_size=None, translated_sequence_size=None, max_base_resolution=None, max_genemap_window=None, max_sequence_window=None, min_relative_value=0.0, feature_label_key=None):
+def generate_bokeh_plot_per_sample(conn, list_features, contig_name, sample_name, xstart=None, xend=None, subplot_size=100, genbank_path=None, feature_types=None, use_phage_colors=False, plot_isoforms=True, plot_sequence=False, plot_translated_sequence=False, same_y_scale=False, genemap_size=None, sequence_size=None, translated_sequence_size=None, max_base_resolution=None, max_genemap_window=None, max_sequence_window=None, min_relative_value=0.0, feature_label_key=None, custom_colors=None):
     """Generate a Bokeh plot for a single sample."""
     cur = conn.cursor()
 
@@ -1569,7 +1617,7 @@ def generate_bokeh_plot_per_sample(conn, list_features, contig_name, sample_name
             genemap_size if genemap_size is not None else subplot_size,
             shared_xrange, xstart, xend,
             feature_types=feature_types, use_phage_colors=use_phage_colors, plot_isoforms=plot_isoforms,
-            feature_label_key=feature_label_key
+            feature_label_key=feature_label_key, custom_colors=custom_colors
         )
 
     # Get sample characteristics (optional – contig-level features work without a sample)

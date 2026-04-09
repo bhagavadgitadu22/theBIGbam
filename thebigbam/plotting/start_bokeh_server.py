@@ -7,7 +7,7 @@ import panel as pn
 
 from bokeh.layouts import column, row
 from bokeh.models import Div, InlineStyleSheet, Tooltip
-from bokeh.models.widgets import CheckboxGroup, HelpButton, Button, RadioButtonGroup, CheckboxButtonGroup, Select, TextInput, Spinner, MultiChoice
+from bokeh.models.widgets import CheckboxGroup, HelpButton, Button, RadioButtonGroup, CheckboxButtonGroup, Select, TextInput, Spinner, MultiChoice, ColorPicker
 
 # Import the plotting function from the repo
 from .plotting_data_per_sample import generate_bokeh_plot_per_sample
@@ -602,6 +602,15 @@ def create_layout(db_path):
             plot_isoforms = (0 in plot_isoforms_cbg.active) if (plot_isoforms_cbg is not None and genbank_path) else True
             feature_label_key = feature_label_select.value if feature_label_select is not None else None
 
+            # Read custom color rules from color rows
+            custom_colors = []
+            for row_data in custom_color_rows:
+                key = row_data['qualifier_select'].value
+                val = row_data['value_select'].value
+                color = row_data['color_picker'].color
+                if key and val and color:
+                    custom_colors.append({'qualifier_key': key, 'value': val, 'color': color})
+
             # Select the correct widget set based on current view
             active_variables_widgets = widgets['variables_widgets_all'] if is_all else widgets['variables_widgets_one']
 
@@ -728,7 +737,8 @@ def create_layout(db_path):
                     plot_translated_sequence=plot_translated_sequence, same_y_scale=same_y_scale, subplot_size=subplot_size, genemap_size=genemap_size,
                     sequence_size=sequence_size, translated_sequence_size=translated_sequence_size, order_by_column=order_by, max_base_resolution=max_binning,
                     max_genemap_window=max_genemap_window, min_relative_value=min_coverage_freq,
-                    feature_label_key=feature_label_key
+                    feature_label_key=feature_label_key,
+                    custom_colors=custom_colors if custom_colors else None
                 )
             else:
                 # One-sample view: collect possibly-many requested features and call per-sample plot
@@ -757,7 +767,8 @@ def create_layout(db_path):
                     max_genemap_window=int(max_genemap_window_input.value),
                     max_sequence_window=int(max_sequence_window_input.value),
                     min_relative_value=min_coverage_freq,
-                    feature_label_key=feature_label_key
+                    feature_label_key=feature_label_key,
+                    custom_colors=custom_colors if custom_colors else None
                 )
 
             # Restore preserved x-range and update state
@@ -1191,7 +1202,7 @@ def create_layout(db_path):
         comparison_select.on_change('value', update_input_on_operator_change)
 
         query_row = pn.Row(category_select, subcategory_select, comparison_select, input_container, minus_btn,
-                       sizing_mode="stretch_width", margin=(5, 0, 5, 0))
+                       sizing_mode="stretch_width", margin=(2, 0, 2, 0))
 
         # Store reference to this row
         row_data = {
@@ -1243,7 +1254,7 @@ def create_layout(db_path):
                     select_widget = Select(
                         options=["AND", "OR"],
                         value="AND",
-                        margin=(5, 0, 5, 0)
+                        margin=(2, 0, 2, 0)
                     )
                     select_widget.on_change('value', lambda attr, old, new: refresh_on_filter_change())
                     row_data['and_div'] = select_widget
@@ -1269,7 +1280,7 @@ def create_layout(db_path):
         # Use Panel button instead of Bokeh button for proper dynamic event handling
         add_and_btn = pn.widgets.Button(
             name="+ Add AND/OR",
-            margin=(5, 0, 5, 0),
+            margin=(2, 0, 2, 0),
             button_type="success",
             stylesheets=[stylesheet]
         )
@@ -1322,7 +1333,7 @@ def create_layout(db_path):
                 select_widget = Select(
                     options=["AND", "OR"],
                     value=old_val,
-                    margin=(5, 0, 5, 0)
+                    margin=(2, 0, 2, 0)
                 )
                 select_widget.on_change('value', lambda attr, old, new: refresh_on_filter_change())
                 inter_section_selects.append(select_widget)
@@ -1551,6 +1562,83 @@ def create_layout(db_path):
             active=[]
         )
 
+    # Build qualifier key options for custom color rows (reuse Annotations filtering metadata)
+    color_qualifier_options = []
+    annotation_meta = filtering_metadata.get('Annotations', {}).get('columns', {})
+    for col_name, col_info in annotation_meta.items():
+        if col_info.get('type') == 'text':
+            color_qualifier_options.append(col_name)
+
+    # Custom color row system (pure Bokeh widgets for compatibility with Bokeh column layout)
+    custom_color_rows = []
+    add_color_btn = Button(
+        label="Add coloring rule",
+        margin=(0, 0, 0, 0),
+        button_type="success",
+        stylesheets=[stylesheet]
+    )
+    custom_color_column = column(add_color_btn, sizing_mode="stretch_width",
+                                 styles={'border-left': '3px solid #00b17c', 'padding-left': '10px', 'margin-left': '5px'})
+
+    def create_color_row():
+        """Create a single custom color row with qualifier select, value select, color picker and remove button."""
+        initial_key = color_qualifier_options[0] if color_qualifier_options else ""
+        initial_distinct = annotation_meta.get(initial_key, {}).get('distinct_values', [])
+
+        qualifier_select = Select(
+            options=[(k, k.replace("_", " ").replace("percentage", "(%)")) for k in color_qualifier_options],
+            value=initial_key,
+            sizing_mode="stretch_width",
+            margin=(0, 2, 0, 0)
+        )
+
+        value_select = Select(
+            options=initial_distinct,
+            value=initial_distinct[0] if initial_distinct else "",
+            sizing_mode="stretch_width",
+            margin=(0, 2, 0, 0)
+        )
+
+        color_picker = ColorPicker(color="#cccccc", width=60, margin=(0, 2, 0, 0))
+
+        minus_btn = Button(label="\u2212", width=30, height=30, margin=(0, 10, 0, 0), stylesheets=[stylesheet])
+
+        row_data = {
+            'qualifier_select': qualifier_select,
+            'value_select': value_select,
+            'color_picker': color_picker,
+            'minus_btn': minus_btn,
+            'row_widget': row(qualifier_select, value_select, color_picker, minus_btn,
+                              sizing_mode="stretch_width", margin=(0, 0, 0, 0))
+        }
+
+        def on_qualifier_change(attr, old, new):
+            distinct = annotation_meta.get(new, {}).get('distinct_values', [])
+            value_select.options = distinct
+            value_select.value = distinct[0] if distinct else ""
+
+        qualifier_select.on_change('value', on_qualifier_change)
+
+        def remove_row_callback(event):
+            if row_data in custom_color_rows:
+                custom_color_rows.remove(row_data)
+                rebuild_color_rows()
+
+        minus_btn.on_click(remove_row_callback)
+        return row_data
+
+    def rebuild_color_rows():
+        children = [rd['row_widget'] for rd in custom_color_rows]
+        children.append(add_color_btn)
+        custom_color_column.children = children
+
+    def add_color_callback(event):
+        new_row = create_color_row()
+        custom_color_rows.append(new_row)
+        rebuild_color_rows()
+
+    add_color_btn.on_click(add_color_callback)
+
     # Feature label dropdown - populated with distinct qualifier keys from Annotation_qualifier
     feature_label_select = None
     try:
@@ -1661,20 +1749,28 @@ def create_layout(db_path):
             genome_hdr = genome_title
 
         # Build genome section
-        # Layout: feature_type_multichoice, sequence_row (if available), phage_colors_cbg (if available), plot_isoforms_cbg (if available), genome_hdr, combined_features_cbg
         genome_children = []
+        # Title above multichoice
+        annotations_title = Div(text="<b>Genomic annotations to plot:</b>")
+        genome_children.append(annotations_title)
         if feature_type_multichoice is not None:
             genome_children.append(feature_type_multichoice)
+        if plot_isoforms_cbg is not None:
+            genome_children.append(plot_isoforms_cbg)
+        # Color section
+        if phage_colors_cbg is not None or color_qualifier_options:
+            color_label = Div(text="Color features with:")
+            genome_children.append(color_label)
+        if phage_colors_cbg is not None:
+            genome_children.append(phage_colors_cbg)
+        if color_qualifier_options:
+            genome_children.append(custom_color_column)
         if feature_label_select is not None:
             genome_children.append(feature_label_select)
         if sequence_row is not None:
             genome_children.append(sequence_row)
         if translated_sequence_row is not None:
             genome_children.append(translated_sequence_row)
-        if phage_colors_cbg is not None:
-            genome_children.append(phage_colors_cbg)
-        if plot_isoforms_cbg is not None:
-            genome_children.append(plot_isoforms_cbg)
         genome_children.append(genome_hdr)
         if combined_features_cbg is not None:
             combined_features_cbg.visible = True
