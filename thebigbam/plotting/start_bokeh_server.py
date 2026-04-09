@@ -1569,16 +1569,18 @@ def create_layout(db_path):
         if col_info.get('type') == 'text':
             color_qualifier_options.append(col_name)
 
-    # Custom color row system (pure Bokeh widgets for compatibility with Bokeh column layout)
+    # Custom color row system (Panel widgets, same pattern as filtering rows)
     custom_color_rows = []
-    add_color_btn = Button(
-        label="Add coloring rule",
-        margin=(0, 0, 0, 0),
+    add_color_btn = pn.widgets.Button(
+        name="+ Add coloring rule",
+        margin=(2, 0, 2, 0),
         button_type="success",
         stylesheets=[stylesheet]
     )
-    custom_color_column = column(add_color_btn, sizing_mode="stretch_width",
-                                 styles={'border-left': '3px solid #00b17c', 'padding-left': '10px', 'margin-left': '5px'})
+    custom_color_column = pn.Column(
+        add_color_btn, sizing_mode="stretch_width",
+        styles={'border-left': '3px solid #00b17c', 'padding-left': '10px', 'margin-left': '5px'}
+    )
 
     def create_color_row():
         """Create a single custom color row with qualifier select, value select, color picker and remove button."""
@@ -1599,17 +1601,17 @@ def create_layout(db_path):
             margin=(0, 2, 0, 0)
         )
 
-        color_picker = ColorPicker(color="#cccccc", width=60, margin=(0, 2, 0, 0))
+        color_picker = ColorPicker(color="#cccccc", width=60, height=30, margin=(0, 2, 0, 0))
 
-        minus_btn = Button(label="\u2212", width=30, height=30, margin=(0, 10, 0, 0), stylesheets=[stylesheet])
+        minus_btn = pn.widgets.Button(name="\u2212", width=30, height=30, margin=(0, 10, 0, 0), stylesheets=[stylesheet])
 
         row_data = {
             'qualifier_select': qualifier_select,
             'value_select': value_select,
             'color_picker': color_picker,
             'minus_btn': minus_btn,
-            'row_widget': row(qualifier_select, value_select, color_picker, minus_btn,
-                              sizing_mode="stretch_width", margin=(0, 0, 0, 0))
+            'row_widget': pn.Row(qualifier_select, value_select, color_picker, minus_btn,
+                                 sizing_mode="stretch_width", margin=(2, 0, 2, 0))
         }
 
         def on_qualifier_change(attr, old, new):
@@ -1630,7 +1632,7 @@ def create_layout(db_path):
     def rebuild_color_rows():
         children = [rd['row_widget'] for rd in custom_color_rows]
         children.append(add_color_btn)
-        custom_color_column.children = children
+        custom_color_column.objects = children
 
     def add_color_callback(event):
         new_row = create_color_row()
@@ -1775,7 +1777,7 @@ def create_layout(db_path):
         if combined_features_cbg is not None:
             combined_features_cbg.visible = True
             genome_children.append(combined_features_cbg)
-        genome_section = column(*genome_children, visible=True, sizing_mode="stretch_width", margin=(0, 0, 0, 0))
+        genome_section = pn.Column(*genome_children, visible=True, sizing_mode="stretch_width", margin=(0, 0, 0, 0))
 
     if genome_section is not None:
         below_contig_children = list(below_contig_children) + [genome_section]
@@ -1786,7 +1788,7 @@ def create_layout(db_path):
     if genome_section is None and translated_sequence_row is not None:
         below_contig_children.append(translated_sequence_row)
 
-    below_contig_content = column(
+    below_contig_content = pn.Column(
         *below_contig_children,
         visible=True, sizing_mode="stretch_width", margin=(0, 0, 0, 0)
     )
