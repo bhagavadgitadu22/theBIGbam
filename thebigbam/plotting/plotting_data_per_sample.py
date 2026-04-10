@@ -1,4 +1,6 @@
 import os
+import colorsys
+import hashlib
 import duckdb
 import numpy as np
 from Bio.Seq import Seq
@@ -6,8 +8,53 @@ from Bio.SeqRecord import SeqRecord
 from Bio.SeqFeature import SeqFeature, FeatureLocation
 from bokeh.models import Range1d, ColumnDataSource, HoverTool, WheelZoomTool, NumeralTickFormatter, TapTool
 from bokeh.layouts import gridplot
+from bokeh.palettes import Viridis256
 from bokeh.plotting import figure
 from dna_features_viewer import BiopythonTranslator
+
+
+_NULL_STRINGS = {'', 'none', 'null', 'nan'}
+
+
+def _is_nullish(val):
+    if val is None:
+        return True
+    if isinstance(val, str) and val.strip().lower() in _NULL_STRINGS:
+        return True
+    return False
+
+
+def _hash_color(s):
+    """Deterministic hex color — same input always yields the same hue."""
+    h = int(hashlib.md5(str(s).encode()).hexdigest()[:8], 16)
+    hue = (h % 360) / 360.0
+    r, g, b = colorsys.hls_to_rgb(hue, 0.55, 0.65)
+    return f'#{int(r*255):02x}{int(g*255):02x}{int(b*255):02x}'
+
+
+def _try_numeric_map(values):
+    """Return {str(raw_val): float(raw_val)} iff every non-null value parses as number."""
+    out = {}
+    for v in values:
+        if _is_nullish(v):
+            continue
+        try:
+            out[str(v)] = float(v)
+        except (TypeError, ValueError):
+            return None
+    return out or None
+
+
+def _gradient_palette(numeric_map):
+    """Assign each distinct value a Viridis256 color based on its float position."""
+    floats = list(numeric_map.values())
+    vmin, vmax = min(floats), max(floats)
+    span = (vmax - vmin) if vmax != vmin else 1.0
+    last = len(Viridis256) - 1
+    return {
+        k: Viridis256[int(((f - vmin) / span) * last)]
+        for k, f in numeric_map.items()
+    }
 
 ### Custom translator for coloring and labeling features (with DNAFeaturesViewer python library)
 # Define function-to-color mapping
@@ -92,8 +139,11 @@ class CustomTranslator(BiopythonTranslator):
     def compute_feature_html(self, feature):
         tooltip_key = feature.qualifiers.get("_tooltip_key", "product")
         value = feature.qualifiers.get(tooltip_key)
-        if value:
-            return value
+        # Compare against None explicitly so numeric 0 and empty-ish values
+        # from fields like S_sites / N_sites still display instead of falling
+        # back to the feature type.
+        if value is not None and value != "":
+            return str(value)
         return feature.type
         
     
@@ -148,17 +198,55 @@ def make_bokeh_genemap(conn, contig_id, locus_name, locus_size, subplot_size, sh
     cur.execute(query, tuple(params))
     seq_ann_rows = cur.fetchall()
 
-    # Fetch tooltip qualifier values from the KV table if a label key is selected
+    # Direct columns in seq_ann_rows: Strand (col 3), Type (col 4).
+    direct_col_idx = {'Type': 4, 'type': 4, 'Strand': 3, 'strand': 3}
+    # Whitelist of Contig_annotation_core columns that the label/color paths
+    # may query directly. Prevents SQL injection via qualifier names.
+    ALLOWED_CORE_COLUMNS = {'Main_isoform'}
+
+    ann_ids = [r[0] for r in seq_ann_rows]
+    placeholders = ','.join('?' * len(ann_ids)) if ann_ids else ''
+
+    def fetch_values_for_qkey(qkey):
+        """Return {annotation_id: value}: KV first, then direct row col, then core table.
+
+        Shared by the 'Label features with:' tooltip map and the custom color
+        rules, so every qualifier exposed in filtering_metadata['Annotations']
+        resolves through the same fallback chain.
+        """
+        if not ann_ids:
+            return {}
+        try:
+            kv_rows = cur.execute(
+                f'SELECT Annotation_id, "Value" FROM Annotation_qualifier '
+                f'WHERE "Key" = ? AND Annotation_id IN ({placeholders})',
+                [qkey] + ann_ids
+            ).fetchall()
+            kv = {aid: val for aid, val in kv_rows if val is not None}
+            if kv:
+                return kv
+        except Exception:
+            pass
+        col_idx = direct_col_idx.get(qkey)
+        if col_idx is not None:
+            return {r[0]: r[col_idx] for r in seq_ann_rows if r[col_idx] is not None}
+        if qkey in ALLOWED_CORE_COLUMNS:
+            try:
+                rows = cur.execute(
+                    f'SELECT Annotation_id, "{qkey}" FROM Contig_annotation_core '
+                    f'WHERE Annotation_id IN ({placeholders})',
+                    ann_ids
+                ).fetchall()
+                return {aid: val for aid, val in rows if val is not None}
+            except Exception:
+                pass
+        return {}
+
+    # Fetch tooltip values for the label key; uses the shared fallback so
+    # direct columns (Type, Strand, Main_isoform, …) work alongside KV keys.
     label_map = {}
     if feature_label_key and seq_ann_rows:
-        ann_ids = [row[0] for row in seq_ann_rows]
-        placeholders = ','.join('?' * len(ann_ids))
-        rows = cur.execute(
-            f'SELECT Annotation_id, "Value" FROM Annotation_qualifier '
-            f'WHERE "Key" = ? AND Annotation_id IN ({placeholders})',
-            [feature_label_key] + ann_ids
-        ).fetchall()
-        label_map = {aid: val for aid, val in rows}
+        label_map = fetch_values_for_qkey(feature_label_key)
 
     # Build custom color map: annotation_id -> hex color (first matching rule wins)
     custom_color_map = {}
@@ -168,45 +256,80 @@ def make_bokeh_genemap(conn, contig_id, locus_name, locus_size, subplot_size, sh
         for rule in custom_colors:
             rules_by_key[rule['qualifier_key']].append(rule)
 
-        ann_ids = [r[0] for r in seq_ann_rows]
-        placeholders = ','.join('?' * len(ann_ids))
-        # Column index map for direct columns in seq_ann_rows.
-        # Type lives on Contig_annotation_core (not in Annotation_qualifier),
-        # so it needs the direct-column fallback. product/function/locus_tag
-        # are fetched via KV query above.
-        direct_col_idx = {'Type': 4, 'type': 4}
         for qkey, rules in rules_by_key.items():
-            # Query KV table for this qualifier key
-            kv_map = {}
-            try:
-                kv_rows = cur.execute(
-                    f'SELECT Annotation_id, "Value" FROM Annotation_qualifier '
-                    f'WHERE "Key" = ? AND Annotation_id IN ({placeholders})',
-                    [qkey] + ann_ids
-                ).fetchall()
-                kv_map = {aid: val for aid, val in kv_rows}
-            except Exception:
-                pass
+            values = fetch_values_for_qkey(qkey)
             for rule in rules:
-                match_mode = rule.get('match_mode', 'exact')
-                rule_val = rule['value']
-                rule_val_lower = rule_val.lower() if isinstance(rule_val, str) else rule_val
-                for seq_row in seq_ann_rows:
-                    aid = seq_row[0]
-                    if aid in custom_color_map:
-                        continue
-                    val = kv_map.get(aid)
-                    if val is None:
-                        col_idx = direct_col_idx.get(qkey)
-                        if col_idx is not None:
-                            val = seq_row[col_idx]
-                    if not val:
-                        continue
-                    if match_mode == 'contains':
-                        if isinstance(val, str) and rule_val_lower in val.lower():
-                            custom_color_map[aid] = rule['color']
+                mode = rule.get('match_mode', 'exact')
+
+                if mode == 'random':
+                    # Skip nullish values; they fall through to the default color.
+                    filtered = {aid: val for aid, val in values.items() if not _is_nullish(val)}
+                    numeric_map = _try_numeric_map(filtered.values())
+                    if numeric_map is not None:
+                        value_to_color = _gradient_palette(numeric_map)
                     else:
-                        if val == rule_val:
+                        distinct = {str(v) for v in filtered.values()}
+                        value_to_color = {v: _hash_color(v) for v in distinct}
+                    for aid, val in filtered.items():
+                        if aid in custom_color_map:
+                            continue
+                        color = value_to_color.get(str(val))
+                        if color:
+                            custom_color_map[aid] = color
+                    continue
+
+                rule_val = rule['value']
+
+                if mode in ('lt', 'gt'):
+                    # Numeric comparison: both sides must parse as floats.
+                    try:
+                        rule_num = float(rule_val)
+                    except (TypeError, ValueError):
+                        continue
+                    for aid, val in values.items():
+                        if aid in custom_color_map or _is_nullish(val):
+                            continue
+                        try:
+                            v_num = float(val)
+                        except (TypeError, ValueError):
+                            continue
+                        if mode == 'lt' and v_num < rule_num:
+                            custom_color_map[aid] = rule['color']
+                        elif mode == 'gt' and v_num > rule_num:
+                            custom_color_map[aid] = rule['color']
+                    continue
+
+                rule_val_str = str(rule_val)
+                rule_val_lower = rule_val_str.lower()
+                # For numeric rule values (Spinner), attempt float equality so
+                # a rule value of 1.0 matches a stored int of 1. Fall back to
+                # string equality when either side isn't numeric.
+                rule_val_num = float(rule_val) if isinstance(rule_val, (int, float)) else None
+
+                def _values_equal(val):
+                    if rule_val_num is not None:
+                        try:
+                            return float(val) == rule_val_num
+                        except (TypeError, ValueError):
+                            pass
+                    return str(val) == rule_val_str
+
+                for aid, val in values.items():
+                    if aid in custom_color_map or _is_nullish(val):
+                        continue
+                    val_str = str(val)
+                    val_lower = val_str.lower()
+                    if mode == 'has':
+                        if rule_val_lower in val_lower:
+                            custom_color_map[aid] = rule['color']
+                    elif mode == 'has_not':
+                        if rule_val_lower not in val_lower:
+                            custom_color_map[aid] = rule['color']
+                    elif mode == 'not_equal':
+                        if not _values_equal(val):
+                            custom_color_map[aid] = rule['color']
+                    else:  # 'exact'
+                        if _values_equal(val):
                             custom_color_map[aid] = rule['color']
 
     sequence_annotations = []

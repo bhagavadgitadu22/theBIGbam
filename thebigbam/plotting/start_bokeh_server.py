@@ -602,16 +602,37 @@ def create_layout(db_path):
             feature_label_key = feature_label_select.value if feature_label_select is not None else None
 
             # Read custom color rules from color rows
+            OP_TO_MODE = {
+                '=': 'exact',
+                '!=': 'not_equal',
+                'has': 'has',
+                'has not': 'has_not',
+                '<': 'lt',
+                '>': 'gt',
+                'Use random colors': 'random',
+            }
             custom_colors = []
             for row_data in custom_color_rows:
                 key = row_data['qualifier_select'].value
-                val = row_data['value_select'].value
+                if not key:
+                    continue
+                operator = row_data['operator_select'].value
+                mode = OP_TO_MODE.get(operator, 'exact')
+                if mode == 'random':
+                    custom_colors.append({'qualifier_key': key, 'match_mode': 'random'})
+                    continue
+                widget = row_data['input_ref']['widget']
+                raw_val = widget.value
                 color = row_data['color_picker'].color
-                if key and val and color:
-                    custom_colors.append({
-                        'qualifier_key': key, 'value': val, 'color': color,
-                        'match_mode': row_data.get('match_mode', 'exact')
-                    })
+                if raw_val is None or raw_val == "" or not color:
+                    continue
+                # Spinner values come through as int/float; keep as number so
+                # downstream lt/gt comparisons don't have to re-parse.
+                val = float(raw_val) if isinstance(raw_val, (int, float)) else raw_val
+                custom_colors.append({
+                    'qualifier_key': key, 'value': val, 'color': color,
+                    'match_mode': mode,
+                })
 
             # Select the correct widget set based on current view
             active_variables_widgets = widgets['variables_widgets_all'] if is_all else widgets['variables_widgets_one']
@@ -1551,16 +1572,17 @@ def create_layout(db_path):
         )
 
     # Load color templates from database
-    color_templates = {}  # {template_name: [{qualifier_name, qualifier_value, color}, ...]}
+    color_templates = {}  # {template_name: [{qualifier_name, operator, qualifier_value, color}, ...]}
     try:
         template_rows = conn.execute(
-            "SELECT t.Template_name, r.Qualifier_name, r.Qualifier_value, r.Color "
+            "SELECT t.Template_name, r.Qualifier_name, r.Operator, r.Qualifier_value, r.Color "
             "FROM Color_templates t JOIN Color_rules r ON t.Template_id = r.Template_id "
             "ORDER BY t.Template_name, r.Rule_id"
         ).fetchall()
-        for tname, qname, qvalue, color in template_rows:
+        for tname, qname, op, qvalue, color in template_rows:
             color_templates.setdefault(tname, []).append({
-                'qualifier_name': qname, 'qualifier_value': qvalue, 'color': color
+                'qualifier_name': qname, 'operator': op,
+                'qualifier_value': qvalue, 'color': color,
             })
     except Exception:
         pass
@@ -1575,12 +1597,10 @@ def create_layout(db_path):
             sizing_mode="stretch_width"
         )
 
-    # Build qualifier key options for custom color rows (reuse Annotations filtering metadata)
-    color_qualifier_options = []
+    # Build qualifier key options for custom color rows — reuse the exact same
+    # list the Filtering section iterates over (text + numeric alike).
     annotation_meta = filtering_metadata.get('Annotations', {}).get('columns', {})
-    for col_name, col_info in annotation_meta.items():
-        if col_info.get('type') == 'text':
-            color_qualifier_options.append(col_name)
+    color_qualifier_options = list(annotation_meta.keys())
 
     # Custom color row system (Panel widgets, same pattern as filtering rows)
     custom_color_rows = []
@@ -1595,45 +1615,154 @@ def create_layout(db_path):
         styles={'border-left': '3px solid #00b17c', 'padding-left': '10px', 'margin-left': '5px'}
     )
 
+    TEXT_OPS = ["=", "!=", "has", "has not", "Use random colors"]
+    NUMERIC_OPS = ["=", ">", "<", "!=", "Use random colors"]
+
+    def _build_color_value_widget(is_text, operator, distinct_values):
+        """Return the value widget that matches (type, operator).
+
+        Widgets live directly inside the row (no wrapper container), so each
+        one carries its own stretch_width sizing and the 2px right margin
+        that separates it from the color picker.
+        """
+        if is_text:
+            if operator in ("has", "has not"):
+                return TextInput(value="", placeholder="Search...",
+                                 sizing_mode="stretch_width",
+                                 margin=(0, 2, 0, 0)), False
+            # = / != / Use random colors → SearchableSelect (kept even in random
+            # mode so the widget shape is consistent when user flips back).
+            return SearchableSelect(
+                value="", options=[str(v) for v in distinct_values],
+                placeholder="Search...", sizing_mode="stretch_width",
+                margin=(0, 2, 0, 0),
+            ), True
+        # Numeric columns always get a Spinner regardless of operator.
+        return Spinner(value=0, placeholder="Value...",
+                       sizing_mode="stretch_width",
+                       margin=(0, 2, 0, 0)), False
+
     def create_color_row():
-        """Create a single custom color row with qualifier select, value select, color picker and remove button."""
+        """Create a single custom color row with qualifier / operator / value / color / remove widgets.
+
+        Mirrors create_query_row(): text columns get SearchableSelect (or
+        TextInput under has/has not), numeric columns get Spinner. Both types
+        gain a 'Use random colors' operator that hides the value container and
+        the color picker.
+        """
         initial_key = color_qualifier_options[0] if color_qualifier_options else ""
-        initial_distinct = annotation_meta.get(initial_key, {}).get('distinct_values', [])
+        initial_info = annotation_meta.get(initial_key, {})
+        initial_is_text = initial_info.get('type') == 'text'
+        initial_distinct = initial_info.get('distinct_values', [])
 
         qualifier_select = Select(
             options=[(k, k.replace("_", " ").replace("percentage", "(%)")) for k in color_qualifier_options],
             value=initial_key,
-            sizing_mode="stretch_width",
+            width=100,
             margin=(0, 2, 0, 0)
         )
 
-        value_select = Select(
-            options=initial_distinct,
-            value=initial_distinct[0] if initial_distinct else "",
-            sizing_mode="stretch_width",
-            margin=(0, 2, 0, 0)
+        operator_select = Select(
+            options=TEXT_OPS if initial_is_text else NUMERIC_OPS,
+            value="=",
+            width=50,
+            margin=(0, 2, 0, 0),
         )
+
+        # Dynamic value widget sits directly at index 2 of the Row — swapped
+        # in place when the qualifier type or operator changes. No wrapper
+        # pn.Column, because stretch_width on a wrapper introduces extra
+        # vertical/horizontal padding that pushed the widget out of line.
+        initial_input, initial_is_panel = _build_color_value_widget(
+            initial_is_text, "=", initial_distinct
+        )
+        current_input_ref = {'widget': initial_input, 'is_panel': initial_is_panel}
 
         color_picker = ColorPicker(color="#cccccc", width=60, height=30, margin=(0, 2, 0, 0))
 
         minus_btn = pn.widgets.Button(name="\u2212", width=30, height=30, margin=(0, 10, 0, 0), stylesheets=[stylesheet])
 
+        row_widget = pn.Row(qualifier_select, operator_select, initial_input,
+                            color_picker, minus_btn,
+                            sizing_mode="stretch_width", margin=(2, 0, 2, 0))
+
+        VALUE_IDX = 2  # position of the value widget inside row_widget
+
         row_data = {
             'qualifier_select': qualifier_select,
-            'value_select': value_select,
+            'operator_select': operator_select,
+            'input_ref': current_input_ref,
             'color_picker': color_picker,
             'minus_btn': minus_btn,
-            'match_mode': 'exact',
-            'row_widget': pn.Row(qualifier_select, value_select, color_picker, minus_btn,
-                                 sizing_mode="stretch_width", margin=(2, 0, 2, 0))
+            'row_widget': row_widget,
         }
 
+        def _swap_value_widget(new_widget, is_panel):
+            row_widget[VALUE_IDX] = new_widget
+            current_input_ref['widget'] = new_widget
+            current_input_ref['is_panel'] = is_panel
+
+        def _apply_random_visibility():
+            use_random = (operator_select.value == "Use random colors")
+            current_input_ref['widget'].visible = not use_random
+            color_picker.visible = not use_random
+            # In random mode, the value widget and color picker are hidden;
+            # let the operator Select grow to fill the freed space. Revert to
+            # a fixed 50 px when any other operator is picked.
+            if use_random:
+                operator_select.sizing_mode = "stretch_width"
+            else:
+                operator_select.sizing_mode = "fixed"
+                operator_select.width = 50
+
+        def update_color_input_widget(col_name):
+            """Rebuild operator options and the value widget for the new column type."""
+            col_info = annotation_meta.get(col_name, {})
+            is_text = col_info.get('type') == 'text'
+            distinct = col_info.get('distinct_values', [])
+
+            # Swap operator options for the new type; preserve current operator
+            # if still valid, otherwise default back to "=".
+            new_ops = TEXT_OPS if is_text else NUMERIC_OPS
+            operator_select.options = new_ops
+            if operator_select.value not in new_ops:
+                operator_select.value = "="
+
+            new_widget, is_panel = _build_color_value_widget(
+                is_text, operator_select.value, distinct
+            )
+            _swap_value_widget(new_widget, is_panel)
+
+            # Respect random-mode visibility even after a qualifier swap.
+            _apply_random_visibility()
+
         def on_qualifier_change(attr, old, new):
-            distinct = annotation_meta.get(new, {}).get('distinct_values', [])
-            value_select.options = distinct
-            value_select.value = distinct[0] if distinct else ""
+            update_color_input_widget(new)
 
         qualifier_select.on_change('value', on_qualifier_change)
+
+        def on_operator_change(attr, old, new):
+            col_info = annotation_meta.get(qualifier_select.value, {})
+            is_text = col_info.get('type') == 'text'
+            use_random = (new == "Use random colors")
+
+            # For text columns, has/has not uses TextInput; everything else
+            # uses SearchableSelect. Only swap when the current widget doesn't
+            # already match, so user-typed values aren't clobbered needlessly.
+            if is_text and not use_random:
+                want_text_input = new in ("has", "has not")
+                cur = current_input_ref['widget']
+                if want_text_input and not isinstance(cur, TextInput):
+                    new_input, is_panel = _build_color_value_widget(True, new, [])
+                    _swap_value_widget(new_input, is_panel)
+                elif not want_text_input and not isinstance(cur, SearchableSelect):
+                    distinct = col_info.get('distinct_values', [])
+                    new_input, is_panel = _build_color_value_widget(True, new, distinct)
+                    _swap_value_widget(new_input, is_panel)
+
+            _apply_random_visibility()
+
+        operator_select.on_change('value', on_operator_change)
 
         def remove_row_callback(event):
             if row_data in custom_color_rows:
@@ -1662,29 +1791,32 @@ def create_layout(db_path):
             if new != "(none)" and new in color_templates:
                 for rule in color_templates[new]:
                     row_data = create_color_row()
+                    # Order matters: qualifier first (triggers widget rebuild),
+                    # then operator (may swap SearchableSelect ↔ TextInput),
+                    # then the value on whichever widget is now current.
                     row_data['qualifier_select'].value = rule['qualifier_name']
-                    # For template rules, the value may not be in the distinct values list
-                    # (e.g. pharokka substring keys like "tail"). Add it to options if needed.
-                    current_opts = list(row_data['value_select'].options)
-                    if rule['qualifier_value'] not in current_opts:
-                        row_data['value_select'].options = current_opts + [rule['qualifier_value']]
-                    row_data['value_select'].value = rule['qualifier_value']
-                    row_data['color_picker'].color = rule['color']
-                    row_data['match_mode'] = 'contains'
+                    row_data['operator_select'].value = rule['operator']
+                    if rule['operator'] != "Use random colors":
+                        widget = row_data['input_ref']['widget']
+                        if isinstance(widget, SearchableSelect):
+                            # Seed values (e.g. "dna, rna and nucleotide metabolism")
+                            # may not be in the current distinct list; append so
+                            # the Select can display them.
+                            opts = list(widget.options)
+                            if rule['qualifier_value'] not in opts:
+                                widget.options = opts + [rule['qualifier_value']]
+                        widget.value = rule['qualifier_value']
+                        row_data['color_picker'].color = rule['color']
                     custom_color_rows.append(row_data)
             rebuild_color_rows()
 
         template_select.on_change('value', on_template_change)
 
-    # Feature label dropdown - populated with distinct qualifier keys from Annotation_qualifier
+    # Feature label dropdown — same qualifier list the Filtering Annotations
+    # category and the coloring rules use, so every annotation attribute (KV
+    # keys + direct Contig_annotation columns) can be picked as the tooltip.
     feature_label_select = None
-    try:
-        label_keys = [row[0] for row in conn.execute(
-            'SELECT DISTINCT "Key" FROM Annotation_qualifier ORDER BY "Key"'
-        ).fetchall()]
-    except Exception:
-        label_keys = []
-
+    label_keys = color_qualifier_options
     if label_keys:
         feature_label_select = Select(
             title="Label features with:",
@@ -1796,7 +1928,7 @@ def create_layout(db_path):
             genome_children.append(plot_isoforms_cbg)
         # Color section
         if template_select is not None or color_qualifier_options:
-            color_label = Div(text="<b>Color features with:</b>")
+            color_label = Div(text="Color features with:")
             genome_children.append(color_label)
         if template_select is not None:
             genome_children.append(template_select)
@@ -1876,7 +2008,7 @@ def create_layout(db_path):
     ## Plotting parameters section
     separator_plotting_params = Div(text="", height=2, sizing_mode="stretch_width",
         styles={'background-color': '#333', 'margin-top': '10px', 'margin-bottom': '10px'})
-    plotting_params_title = Div(text="<b>Plotting parameters</b>", align="center")
+    plotting_params_title = Div(text="<span style='font-size: 1.2em;'><b>Plotting parameters</b></span>", align="center")
     plotting_params_header = row(plotting_params_title, sizing_mode="stretch_width", align="center")
 
     # Sample paramaters (only useful in All Samples view)

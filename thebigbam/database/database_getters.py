@@ -1,7 +1,7 @@
 import duckdb
 
 # Columns to exclude from annotation filtering UI (internal/metadata columns)
-ANNOTATION_EXCLUDED_COLUMNS = {'Contig_id', 'Start', 'End', 'Parent_annotation_id', 'Annotation_id', 'Segments', 'Nucleotide_sequence', 'Protein_sequence'}
+ANNOTATION_EXCLUDED_COLUMNS = {'Contig_id', 'Start', 'End', 'Parent_annotation_id', 'Annotation_id', 'Segments', 'Nucleotide_sequence', 'Protein_sequence', 'S_sites', 'N_sites'}
 
 
 def update_database_metadata(conn):
@@ -228,19 +228,19 @@ def get_filtering_metadata(db_path: str) -> dict:
             'source': 'Contig_annotation',
         }
 
-        if is_text:
-            try:
-                distinct = conn.execute(
-                    f'SELECT DISTINCT "{col_name}" FROM _tmp_Contig_annotation WHERE "{col_name}" IS NOT NULL ORDER BY "{col_name}"'
-                ).fetchall()
-                col_data['distinct_values'] = [row[0] for row in distinct]
-            except duckdb.Error:
-                col_data['distinct_values'] = []
-            if not col_data['distinct_values']:
-                continue
-        else:
-            if not ann_has_values.get(col_name, False):
-                continue
+        if not is_text and not ann_has_values.get(col_name, False):
+            continue
+
+        try:
+            distinct = conn.execute(
+                f'SELECT DISTINCT "{col_name}" FROM _tmp_Contig_annotation '
+                f'WHERE "{col_name}" IS NOT NULL ORDER BY "{col_name}"'
+            ).fetchall()
+            col_data['distinct_values'] = [row[0] for row in distinct]
+        except duckdb.Error:
+            col_data['distinct_values'] = []
+        if not col_data['distinct_values']:
+            continue
 
         annotations_columns[col_name] = col_data
 

@@ -1611,7 +1611,7 @@ fn create_core_tables(conn: &Connection, has_bam: bool) -> Result<()> {
     )
     .context("Failed to create Constants_for_plotting table")?;
 
-    // Color_templates table - named color schemes (e.g. pharokka, generic_features)
+    // Color_templates table - named color schemes (e.g. pharokka, generic)
     conn.execute(
         "CREATE TABLE Color_templates (
             Template_id INTEGER PRIMARY KEY,
@@ -1627,6 +1627,7 @@ fn create_core_tables(conn: &Connection, has_bam: bool) -> Result<()> {
             Rule_id INTEGER PRIMARY KEY,
             Template_id INTEGER NOT NULL REFERENCES Color_templates(Template_id),
             Qualifier_name TEXT NOT NULL,
+            Operator TEXT NOT NULL,
             Qualifier_value TEXT NOT NULL,
             Color TEXT NOT NULL
         )",
@@ -2087,39 +2088,40 @@ fn insert_annotations(conn: &Connection, annotations: &[FeatureAnnotation]) -> R
     )
     .context("Failed to insert constants")?;
 
-    // Always insert generic_features color template
+    // Always insert generic color template
     let mut template_id: i64 = 1;
     conn.execute(
-        "INSERT INTO Color_templates (Template_id, Template_name) VALUES (?, 'generic_features')",
+        "INSERT INTO Color_templates (Template_id, Template_name) VALUES (?, 'generic')",
         params![template_id],
     )
-    .context("Failed to insert generic_features template")?;
+    .context("Failed to insert generic template")?;
 
-    let generic_rules: Vec<(&str, &str, &str)> = vec![
-        ("Type", "gene", "#555555"),
-        ("Type", "mRNA", "#777777"),
-        ("Type", "CDS", "#cccccc"),
-        ("Type", "tRNA", "#66c2a5"),
-        ("Type", "tmRNA", "#99d8c9"),
-        ("Type", "rRNA", "#238b45"),
-        ("Type", "ncRNA", "#33a02c"),
-        ("Type", "precursor_RNA", "#a1d99b"),
-        ("Type", "misc_RNA", "#74c476"),
-        ("Type", "exon", "#fdae61"),
-        ("Type", "5'UTR", "#fee08b"),
-        ("Type", "3'UTR", "#f46d43"),
-        ("Type", "repeat_region", "#6a3d9a"),
-        ("Type", "mobile_element", "#cab2d6"),
-        ("Type", "misc_feature", "#3c5bfe"),
-        ("Type", "gap", "#e5049c"),
-        ("Type", "pseudogene", "#e31a1c"),
+    // (Qualifier_name, Operator, Qualifier_value, Color)
+    let generic_rules: Vec<(&str, &str, &str, &str)> = vec![
+        ("Type", "=", "gene", "#555555"),
+        ("Type", "=", "mRNA", "#777777"),
+        ("Type", "=", "CDS", "#cccccc"),
+        ("Type", "=", "tRNA", "#66c2a5"),
+        ("Type", "=", "tmRNA", "#99d8c9"),
+        ("Type", "=", "rRNA", "#238b45"),
+        ("Type", "=", "ncRNA", "#33a02c"),
+        ("Type", "=", "precursor_RNA", "#a1d99b"),
+        ("Type", "=", "misc_RNA", "#74c476"),
+        ("Type", "=", "exon", "#fdae61"),
+        ("Type", "=", "5'UTR", "#fee08b"),
+        ("Type", "=", "3'UTR", "#f46d43"),
+        ("Type", "=", "repeat_region", "#6a3d9a"),
+        ("Type", "=", "mobile_element", "#cab2d6"),
+        ("Type", "=", "misc_feature", "#3c5bfe"),
+        ("Type", "=", "gap", "#e5049c"),
+        ("Type", "=", "pseudogene", "#e31a1c"),
     ];
-    for (i, (qname, qvalue, color)) in generic_rules.iter().enumerate() {
+    for (i, (qname, op, qvalue, color)) in generic_rules.iter().enumerate() {
         conn.execute(
-            "INSERT INTO Color_rules (Rule_id, Template_id, Qualifier_name, Qualifier_value, Color) VALUES (?, ?, ?, ?, ?)",
-            params![i as i64 + 1, template_id, qname, qvalue, color],
+            "INSERT INTO Color_rules (Rule_id, Template_id, Qualifier_name, Operator, Qualifier_value, Color) VALUES (?, ?, ?, ?, ?, ?)",
+            params![i as i64 + 1, template_id, qname, op, qvalue, color],
         )
-        .context("Failed to insert generic_features color rule")?;
+        .context("Failed to insert generic color rule")?;
     }
 
     // Insert pharokka color template only if pharokka functions detected
@@ -2131,24 +2133,25 @@ fn insert_annotations(conn: &Connection, annotations: &[FeatureAnnotation]) -> R
         )
         .context("Failed to insert pharokka template")?;
 
-        let pharokka_rules: Vec<(&str, &str, &str)> = vec![
-            ("function", "vfdb_card", "#FF0000"),
-            ("function", "unknown function", "#AAAAAA"),
-            ("function", "other", "#4deeea"),
-            ("function", "tail", "#74ee15"),
-            ("function", "transcription regulation", "#ffe700"),
-            ("function", "dna, rna and nucleotide metabolism", "#f000ff"),
-            ("function", "lysis", "#001eff"),
-            ("function", "moron, auxiliary metabolic gene and host takeover", "#8900ff"),
-            ("function", "integration and excision", "#E0B0FF"),
-            ("function", "head and packaging", "#ff008d"),
-            ("function", "connector", "#5A5A5A"),
+        // (Qualifier_name, Operator, Qualifier_value, Color)
+        let pharokka_rules: Vec<(&str, &str, &str, &str)> = vec![
+            ("function", "=", "vfdb_card", "#FF0000"),
+            ("function", "=", "unknown function", "#AAAAAA"),
+            ("function", "=", "other", "#4deeea"),
+            ("function", "=", "tail", "#74ee15"),
+            ("function", "=", "transcription regulation", "#ffe700"),
+            ("function", "=", "dna, rna and nucleotide metabolism", "#f000ff"),
+            ("function", "=", "lysis", "#001eff"),
+            ("function", "=", "moron, auxiliary metabolic gene and host takeover", "#8900ff"),
+            ("function", "=", "integration and excision", "#E0B0FF"),
+            ("function", "=", "head and packaging", "#ff008d"),
+            ("function", "=", "connector", "#5A5A5A"),
         ];
         let rule_offset = generic_rules.len() as i64;
-        for (i, (qname, qvalue, color)) in pharokka_rules.iter().enumerate() {
+        for (i, (qname, op, qvalue, color)) in pharokka_rules.iter().enumerate() {
             conn.execute(
-                "INSERT INTO Color_rules (Rule_id, Template_id, Qualifier_name, Qualifier_value, Color) VALUES (?, ?, ?, ?, ?)",
-                params![i as i64 + 1 + rule_offset, template_id, qname, qvalue, color],
+                "INSERT INTO Color_rules (Rule_id, Template_id, Qualifier_name, Operator, Qualifier_value, Color) VALUES (?, ?, ?, ?, ?, ?)",
+                params![i as i64 + 1 + rule_offset, template_id, qname, op, qvalue, color],
             )
             .context("Failed to insert pharokka color rule")?;
         }
