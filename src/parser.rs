@@ -506,6 +506,12 @@ pub fn parse_gff3(
     let mut features_data: Vec<(String, String, i64, i64, i64, HashMap<String, String>)> =
         Vec::new();
 
+    // State for parsing embedded ##FASTA section (GFF3 spec)
+    let mut fasta_records: Vec<(String, Vec<u8>)> = Vec::new();
+    let mut in_fasta = false;
+    let mut current_fasta_name: Option<String> = None;
+    let mut current_fasta_seq: Vec<u8> = Vec::new();
+
     for (line_num, line_result) in reader.lines().enumerate() {
         let line = line_result.context(format!("Failed to read line {}", line_num + 1))?;
         let line = line.trim();
@@ -526,12 +532,32 @@ pub fn parse_gff3(
                         sequence_regions.insert(seqid, end);
                     }
                 }
+            } else if line.starts_with("##FASTA") {
+                in_fasta = true;
             }
             continue;
         }
 
         // Skip comment lines
         if line.starts_with('#') {
+            continue;
+        }
+
+        // Parse embedded FASTA data (after ##FASTA directive)
+        if in_fasta {
+            if line.starts_with('>') {
+                if let Some(name) = current_fasta_name.take() {
+                    if !current_fasta_seq.is_empty() {
+                        fasta_records.push((name, current_fasta_seq.clone()));
+                    }
+                }
+                let header = &line[1..];
+                let name = header.split_whitespace().next().unwrap_or("").to_string();
+                current_fasta_name = Some(name);
+                current_fasta_seq.clear();
+            } else if !line.is_empty() {
+                current_fasta_seq.extend_from_slice(line.as_bytes());
+            }
             continue;
         }
 
@@ -582,6 +608,13 @@ pub fn parse_gff3(
         features_data.push((seqid, feature_type, start, end, strand, attrs));
     }
 
+    // Flush last embedded FASTA record
+    if let Some(name) = current_fasta_name {
+        if !current_fasta_seq.is_empty() {
+            fasta_records.push((name, current_fasta_seq));
+        }
+    }
+
     // Build contig list with proper ordering
     let mut contig_names: Vec<String> = sequence_regions
         .keys()
@@ -610,8 +643,27 @@ pub fn parse_gff3(
         contigs.push(ContigInfo {
             name: name.clone(),
             length,
-            sequence: None, // GFF3 doesn't contain sequence data
+            sequence: None, // Filled from ##FASTA section below if present
         });
+    }
+
+    // Merge embedded FASTA sequences into contigs
+    for (name, seq) in &fasta_records {
+        if let Some(contig) = contigs.iter_mut().find(|c| c.name == *name) {
+            contig.sequence = Some(seq.clone());
+        } else {
+            // FASTA record has no matching features — add as new contig
+            let contig_id = (contigs.len() + 1) as i64;
+            contig_id_map.insert(name.clone(), contig_id);
+            contigs.push(ContigInfo {
+                name: name.clone(),
+                length: seq.len(),
+                sequence: Some(seq.clone()),
+            });
+        }
+    }
+    if !fasta_records.is_empty() {
+        eprintln!("Parsed {} sequences from embedded ##FASTA section", fasta_records.len());
     }
 
     // Normalize qualifiers on every row so ID/Parent lookups and downstream

@@ -323,18 +323,30 @@ fn detect_all_sample_circularities(
 
 /// Merge sequences from a FASTA file into existing contig info.
 /// For each FASTA record, finds matching contig by name and sets contig.sequence.
-fn merge_sequences_from_fasta(contigs: &mut [ContigInfo], fasta_path: &Path) -> Result<()> {
+/// Contigs present in the FASTA but not in the annotation are added automatically
+/// so they still get coverage tracking (they just won't have annotations).
+fn merge_sequences_from_fasta(contigs: &mut Vec<ContigInfo>, fasta_path: &Path) -> Result<()> {
     let records = crate::parser::parse_fasta(fasta_path)?;
     let mut matched = 0usize;
+    let mut added = 0usize;
     for (name, seq) in &records {
         if let Some(contig) = contigs.iter_mut().find(|c| c.name == *name) {
             contig.sequence = Some(seq.clone());
             matched += 1;
         } else {
-            eprintln!("Warning: FASTA sequence '{}' has no matching contig", name);
+            contigs.push(ContigInfo {
+                name: name.clone(),
+                length: seq.len(),
+                sequence: Some(seq.clone()),
+            });
+            added += 1;
         }
     }
-    eprintln!("Merged sequences for {}/{} contigs from FASTA", matched, contigs.len());
+    if added > 0 {
+        contigs.sort_by(|a, b| a.name.cmp(&b.name));
+        eprintln!("Added {} contigs from FASTA that had no annotations", added);
+    }
+    eprintln!("Merged sequences for {}/{} contigs from FASTA", matched + added, contigs.len());
     Ok(())
 }
 

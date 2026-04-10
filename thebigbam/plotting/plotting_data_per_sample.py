@@ -11,49 +11,6 @@ from dna_features_viewer import BiopythonTranslator
 
 ### Custom translator for coloring and labeling features (with DNAFeaturesViewer python library)
 # Define function-to-color mapping
-# Use the color scheme from pharokka
-PHAROKKA_CDS_COLORS = {
-    "vfdb_card": "#FF0000",
-    "unknown function": "#AAAAAA",
-    "other": "#4deeea",
-    "tail": "#74ee15",
-    "transcription regulation": "#ffe700",
-    "dna, rna and nucleotide metabolism": "#f000ff",
-    "lysis": "#001eff",
-    "moron, auxiliary metabolic gene and host takeover": "#8900ff",
-    "integration and excision": "#E0B0FF",
-    "head and packaging": "#ff008d",
-    "connector": "#5A5A5A",
-}
-
-# From https://github.com/oschwengers/bakta/blob/d6443639958750c3bece5822e84978271d1a4dc7/bakta/plot.py#L40
-TYPE_COLORS = {
-    # grey for protein-coding genes
-    'gene': '#555555',
-    'mRNA': "#777777",
-    'CDS': '#cccccc',
-    # green for RNA genes
-    'tRNA': '#66c2a5',
-    'tmRNA': '#99d8c9',
-    'rRNA': '#238b45',
-    'ncRNA': '#33a02c',
-    'precursor_RNA': '#a1d99b',
-    'misc_RNA': '#74c476',
-    # orange for regulatory / gene structure
-    'exon': '#fdae61',
-    "5'UTR": '#fee08b',
-    "3'UTR": '#f46d43',
-    # purple for genome architecture & mobility
-    'repeat_region': '#6a3d9a',
-    'mobile_element': '#cab2d6',
-    # other features
-    'misc_feature': '#3c5bfe',
-    'gap': '#e5049c',
-    'pseudogene': "#e31a1c"
-    # features not listed here will get black color by default
-}
-
-
 def _normalize_segments(segments, fallback_start, fallback_end):
     """Return list of (start, end) 1-based inclusive tuples in genomic order.
 
@@ -122,41 +79,12 @@ class CustomTranslator(BiopythonTranslator):
     _seen_unknown_types = set()
 
     def compute_feature_color(self, feature):
-        # Custom user-defined color takes highest priority
+        # Custom user-defined color (from coloring rules / templates) takes priority
         custom_color = feature.qualifiers.get("_custom_color")
         if custom_color:
             return custom_color
-
-        type_feature = feature.type
-
-        if type_feature == "CDS":
-            use_phage_colors = feature.qualifiers.get("use_phage_colors", False)
-
-            # Use phage colors if checkbox is checked
-            if use_phage_colors:
-                # Get the function field safely
-                function = feature.qualifiers.get("function")
-                if isinstance(function, list):  # Biopython often stores qualifiers as lists
-                    function = function[0] if function else None
-
-                if not isinstance(function, str):  # Missing or wrong type
-                    return "#cccccc"
-
-                function = function.lower()
-
-                for key, color in PHAROKKA_CDS_COLORS.items():
-                    if key in function:
-                        return color
-
-            return "#cccccc"
-
-        else:
-            if type_feature not in TYPE_COLORS:
-                if type_feature not in CustomTranslator._seen_unknown_types:
-                    print("Unknown type of feature:", type_feature, flush=True)
-                    CustomTranslator._seen_unknown_types.add(type_feature)
-                return "#000000"
-            return TYPE_COLORS.get(type_feature, "#cccccc")
+        # Default fallback: grey for CDS, black for other types
+        return "#cccccc" if feature.type == "CDS" else "#000000"
 
     def compute_feature_label(self, feature):
         return None  # fallback to None if missing or invalid
@@ -177,22 +105,34 @@ def get_contig_info(cur, contig_name):
         raise ValueError(f"Contig not found: {contig_name}")
     return row
 
-def make_bokeh_genemap(conn, contig_id, locus_name, locus_size, subplot_size, shared_xrange, xstart=None, xend=None, feature_types=None, use_phage_colors=False, plot_isoforms=True, feature_label_key=None, custom_colors=None):
+def make_bokeh_genemap(conn, contig_id, locus_name, locus_size, subplot_size, shared_xrange, xstart=None, xend=None, feature_types=None, plot_isoforms=True, feature_label_key=None, custom_colors=None):
     cur = conn.cursor()
 
     # Build position filter clause for annotations
     position_filter = ""
     params = [contig_id]
     if xstart is not None and xend is not None:
-        position_filter = " AND \"End\" >= ? AND \"Start\" <= ?"
+        position_filter = ' AND ca."End" >= ? AND ca."Start" <= ?'
         params.extend([xstart, xend])
 
     # Build feature type filter
     type_filter = ""
     if feature_types:
         placeholders = ','.join('?' * len(feature_types))
-        type_filter = f' AND "Type" IN ({placeholders})'
+        type_filter = f' AND ca."Type" IN ({placeholders})'
         params.extend(feature_types)
+
+    # Product/Function/Locus_tag live in the Annotation_qualifier KV table.
+    # LEFT JOIN once per key to expose them alongside the structural columns.
+    base_select = (
+        'SELECT ca.Annotation_id, ca."Start", ca."End", ca.Strand, ca."Type", '
+        'pq.Value AS Product, fq.Value AS Function, lq.Value AS Locus_tag '
+        'FROM Contig_annotation_core ca '
+        'LEFT JOIN Annotation_qualifier pq ON pq.Annotation_id = ca.Annotation_id AND pq."Key" = \'product\' '
+        'LEFT JOIN Annotation_qualifier fq ON fq.Annotation_id = ca.Annotation_id AND fq."Key" = \'function\' '
+        'LEFT JOIN Annotation_qualifier lq ON lq.Annotation_id = ca.Annotation_id AND lq."Key" = \'locus_tag\' '
+        'WHERE ca.Contig_id=?'
+    )
 
     # When plot_isoforms is False, filter to show only the main isoform per
     # (locus_tag, Type) pair. For spliced eukaryotic annotations this returns
@@ -200,10 +140,10 @@ def make_bokeh_genemap(conn, contig_id, locus_name, locus_size, subplot_size, sh
     # Parent_annotation_id. Features without locus_tag always display
     # (Main_isoform is NULL for them).
     if not plot_isoforms:
-        isoform_filter = " AND (Locus_tag IS NULL OR Main_isoform = true)"
-        query = f'SELECT Annotation_id, "Start", "End", Strand, "Type", Product, "Function", Locus_tag FROM Contig_annotation WHERE Contig_id=?{position_filter}{type_filter}{isoform_filter}'
+        isoform_filter = ' AND (lq.Value IS NULL OR ca.Main_isoform = true)'
+        query = f'{base_select}{position_filter}{type_filter}{isoform_filter}'
     else:
-        query = f'SELECT Annotation_id, "Start", "End", Strand, "Type", Product, "Function", Locus_tag FROM Contig_annotation WHERE Contig_id=?{position_filter}{type_filter}'
+        query = f'{base_select}{position_filter}{type_filter}'
 
     cur.execute(query, tuple(params))
     seq_ann_rows = cur.fetchall()
@@ -230,12 +170,11 @@ def make_bokeh_genemap(conn, contig_id, locus_name, locus_size, subplot_size, sh
 
         ann_ids = [r[0] for r in seq_ann_rows]
         placeholders = ','.join('?' * len(ann_ids))
-        # Column index map for direct columns in seq_ann_rows
-        direct_col_idx = {
-            'Product': 5, 'Function': 6, 'Locus_tag': 7,
-            'product': 5, 'function': 6, 'locus_tag': 7,
-            'Type': 4, 'type': 4,
-        }
+        # Column index map for direct columns in seq_ann_rows.
+        # Type lives on Contig_annotation_core (not in Annotation_qualifier),
+        # so it needs the direct-column fallback. product/function/locus_tag
+        # are fetched via KV query above.
+        direct_col_idx = {'Type': 4, 'type': 4}
         for qkey, rules in rules_by_key.items():
             # Query KV table for this qualifier key
             kv_map = {}
@@ -249,6 +188,9 @@ def make_bokeh_genemap(conn, contig_id, locus_name, locus_size, subplot_size, sh
             except Exception:
                 pass
             for rule in rules:
+                match_mode = rule.get('match_mode', 'exact')
+                rule_val = rule['value']
+                rule_val_lower = rule_val.lower() if isinstance(rule_val, str) else rule_val
                 for seq_row in seq_ann_rows:
                     aid = seq_row[0]
                     if aid in custom_color_map:
@@ -258,8 +200,14 @@ def make_bokeh_genemap(conn, contig_id, locus_name, locus_size, subplot_size, sh
                         col_idx = direct_col_idx.get(qkey)
                         if col_idx is not None:
                             val = seq_row[col_idx]
-                    if val and val == rule['value']:
-                        custom_color_map[aid] = rule['color']
+                    if not val:
+                        continue
+                    if match_mode == 'contains':
+                        if isinstance(val, str) and rule_val_lower in val.lower():
+                            custom_color_map[aid] = rule['color']
+                    else:
+                        if val == rule_val:
+                            custom_color_map[aid] = rule['color']
 
     sequence_annotations = []
     for ann_id, start, end, strand, ftype, product, function, locus_tag in seq_ann_rows:
@@ -275,7 +223,6 @@ def make_bokeh_genemap(conn, contig_id, locus_name, locus_size, subplot_size, sh
             qualifiers['function'] = function
         if locus_tag:
             qualifiers['locus_tag'] = locus_tag
-        qualifiers['use_phage_colors'] = use_phage_colors
         if custom_color_map and ann_id in custom_color_map:
             qualifiers['_custom_color'] = custom_color_map[ann_id]
         # Set tooltip key and value
@@ -665,14 +612,18 @@ def make_bokeh_translated_sequence_subplot(conn, contig_name, xstart, xend, heig
             return None
         contig_id = row[0]
 
-        # Query CDS rows that overlap the visible window (main isoform only)
+        # Query CDS rows that overlap the visible window (main isoform only).
+        # Product/Locus_tag live in Annotation_qualifier; LEFT JOIN each key.
         cur.execute("""
-            SELECT Start, "End", Strand, Nucleotide_sequence, Protein_sequence, Product, Segments
-            FROM Contig_annotation
-            WHERE Contig_id = ? AND Type = 'CDS'
-              AND Protein_sequence IS NOT NULL
-              AND "End" >= ? AND Start <= ?
-              AND (Locus_tag IS NULL OR Main_isoform = true)
+            SELECT ca.Start, ca."End", ca.Strand, ca.Nucleotide_sequence, ca.Protein_sequence,
+                   pq.Value AS Product, ca.Segments
+            FROM Contig_annotation ca
+            LEFT JOIN Annotation_qualifier pq ON pq.Annotation_id = ca.Annotation_id AND pq."Key" = 'product'
+            LEFT JOIN Annotation_qualifier lq ON lq.Annotation_id = ca.Annotation_id AND lq."Key" = 'locus_tag'
+            WHERE ca.Contig_id = ? AND ca.Type = 'CDS'
+              AND ca.Protein_sequence IS NOT NULL
+              AND ca."End" >= ? AND ca.Start <= ?
+              AND (lq.Value IS NULL OR ca.Main_isoform = true)
         """, (contig_id, xstart, xend))
         cds_rows = cur.fetchall()
 
@@ -1595,7 +1546,7 @@ def parse_requested_features(list_features):
 
 
 ### Function to generate the bokeh plot
-def generate_bokeh_plot_per_sample(conn, list_features, contig_name, sample_name, xstart=None, xend=None, subplot_size=100, genbank_path=None, feature_types=None, use_phage_colors=False, plot_isoforms=True, plot_sequence=False, plot_translated_sequence=False, same_y_scale=False, genemap_size=None, sequence_size=None, translated_sequence_size=None, max_base_resolution=None, max_genemap_window=None, max_sequence_window=None, min_relative_value=0.0, feature_label_key=None, custom_colors=None):
+def generate_bokeh_plot_per_sample(conn, list_features, contig_name, sample_name, xstart=None, xend=None, subplot_size=100, genbank_path=None, feature_types=None, plot_isoforms=True, plot_sequence=False, plot_translated_sequence=False, same_y_scale=False, genemap_size=None, sequence_size=None, translated_sequence_size=None, max_base_resolution=None, max_genemap_window=None, max_sequence_window=None, min_relative_value=0.0, feature_label_key=None, custom_colors=None):
     """Generate a Bokeh plot for a single sample."""
     cur = conn.cursor()
 
@@ -1616,7 +1567,7 @@ def generate_bokeh_plot_per_sample(conn, list_features, contig_name, sample_name
             conn, contig_id, locus_name, locus_size,
             genemap_size if genemap_size is not None else subplot_size,
             shared_xrange, xstart, xend,
-            feature_types=feature_types, use_phage_colors=use_phage_colors, plot_isoforms=plot_isoforms,
+            feature_types=feature_types, plot_isoforms=plot_isoforms,
             feature_label_key=feature_label_key, custom_colors=custom_colors
         )
 

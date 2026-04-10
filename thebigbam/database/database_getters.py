@@ -1,7 +1,7 @@
 import duckdb
 
 # Columns to exclude from annotation filtering UI (internal/metadata columns)
-ANNOTATION_EXCLUDED_COLUMNS = {'Contig_id', 'Start', 'End', 'Strand', 'Main_isoform', 'Parent_annotation_id', 'Locus_tag', 'Annotation_id', 'Segments'}
+ANNOTATION_EXCLUDED_COLUMNS = {'Contig_id', 'Start', 'End', 'Parent_annotation_id', 'Annotation_id', 'Segments', 'Nucleotide_sequence', 'Protein_sequence'}
 
 
 def update_database_metadata(conn):

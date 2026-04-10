@@ -1076,7 +1076,10 @@ fn calculate_terminase_distance(
 
     // Query terminase gene annotations for this contig
     let mut stmt = conn.prepare(
-        "SELECT \"Start\", \"End\" FROM Contig_annotation WHERE Contig_id = ? AND Product LIKE '%terminase%'"
+        "SELECT ca.\"Start\", ca.\"End\"
+         FROM Contig_annotation_core ca
+         JOIN Annotation_qualifier aq ON aq.Annotation_id = ca.Annotation_id
+         WHERE ca.Contig_id = ? AND aq.\"Key\" = 'product' AND aq.\"Value\" LIKE '%terminase%'"
     ).ok()?;
 
     let terminase_genes: Vec<(i32, i32)> = stmt
@@ -1547,26 +1550,19 @@ fn create_core_tables(conn: &Connection, has_bam: bool) -> Result<()> {
         "CREATE VIEW Contig_annotation AS
          SELECT ca.Annotation_id, ca.Contig_id, ca.\"Start\", ca.\"End\", ca.Strand, ca.\"Type\",
             ca.Main_isoform, ca.Parent_annotation_id,
-            MAX(CASE WHEN aq.\"Key\" = 'product' THEN aq.\"Value\" END) AS Product,
-            MAX(CASE WHEN aq.\"Key\" = 'function' THEN aq.\"Value\" END) AS \"Function\",
-            MAX(CASE WHEN aq.\"Key\" = 'locus_tag' THEN aq.\"Value\" END) AS Locus_tag,
-            MAX(CASE WHEN aq.\"Key\" = 'gene' THEN aq.\"Value\" END) AS Gene,
-            MAX(aseq.Nucleotide_sequence) AS Nucleotide_sequence,
-            MAX(aseq.Protein_sequence) AS Protein_sequence,
-            MAX(aseq.S_sites) AS S_sites,
-            MAX(aseq.N_sites) AS N_sites,
-            seg.Segments AS Segments
+            aseq.Nucleotide_sequence,
+            aseq.Protein_sequence,
+            aseq.S_sites,
+            aseq.N_sites,
+            seg.Segments
          FROM Contig_annotation_core ca
-         LEFT JOIN Annotation_qualifier aq ON ca.Annotation_id = aq.Annotation_id
          LEFT JOIN Annotation_sequence aseq ON ca.Annotation_id = aseq.Annotation_id
          LEFT JOIN (
             SELECT Annotation_id,
                    list({'start': Start_segment, 'end': End_segment} ORDER BY Segment_index) AS Segments
             FROM Annotation_segments
             GROUP BY Annotation_id
-         ) seg ON ca.Annotation_id = seg.Annotation_id
-         GROUP BY ca.Annotation_id, ca.Contig_id, ca.\"Start\", ca.\"End\", ca.Strand, ca.\"Type\",
-                  ca.Main_isoform, ca.Parent_annotation_id, seg.Segments",
+         ) seg ON ca.Annotation_id = seg.Annotation_id",
         [],
     )
     .context("Failed to create Contig_annotation view")?;
@@ -1614,6 +1610,29 @@ fn create_core_tables(conn: &Connection, has_bam: bool) -> Result<()> {
         [],
     )
     .context("Failed to create Constants_for_plotting table")?;
+
+    // Color_templates table - named color schemes (e.g. pharokka, generic_features)
+    conn.execute(
+        "CREATE TABLE Color_templates (
+            Template_id INTEGER PRIMARY KEY,
+            Template_name TEXT UNIQUE NOT NULL
+        )",
+        [],
+    )
+    .context("Failed to create Color_templates table")?;
+
+    // Color_rules table - individual coloring rules belonging to a template
+    conn.execute(
+        "CREATE TABLE Color_rules (
+            Rule_id INTEGER PRIMARY KEY,
+            Template_id INTEGER NOT NULL REFERENCES Color_templates(Template_id),
+            Qualifier_name TEXT NOT NULL,
+            Qualifier_value TEXT NOT NULL,
+            Color TEXT NOT NULL
+        )",
+        [],
+    )
+    .context("Failed to create Color_rules table")?;
 
     // Database_metadata table - tracks how the database was created/modified
     conn.execute(
@@ -2063,10 +2082,77 @@ fn insert_annotations(conn: &Connection, annotations: &[FeatureAnnotation]) -> R
 
     // Insert constants into Constants_for_plotting table
     conn.execute(
-        "INSERT INTO Constants_for_plotting (Constant, Status) VALUES ('pharokka', ?), ('isoforms', ?)",
-        params![has_pharokka_function, has_isoforms],
+        "INSERT INTO Constants_for_plotting (Constant, Status) VALUES ('isoforms', ?)",
+        params![has_isoforms],
     )
     .context("Failed to insert constants")?;
+
+    // Always insert generic_features color template
+    let mut template_id: i64 = 1;
+    conn.execute(
+        "INSERT INTO Color_templates (Template_id, Template_name) VALUES (?, 'generic_features')",
+        params![template_id],
+    )
+    .context("Failed to insert generic_features template")?;
+
+    let generic_rules: Vec<(&str, &str, &str)> = vec![
+        ("Type", "gene", "#555555"),
+        ("Type", "mRNA", "#777777"),
+        ("Type", "CDS", "#cccccc"),
+        ("Type", "tRNA", "#66c2a5"),
+        ("Type", "tmRNA", "#99d8c9"),
+        ("Type", "rRNA", "#238b45"),
+        ("Type", "ncRNA", "#33a02c"),
+        ("Type", "precursor_RNA", "#a1d99b"),
+        ("Type", "misc_RNA", "#74c476"),
+        ("Type", "exon", "#fdae61"),
+        ("Type", "5'UTR", "#fee08b"),
+        ("Type", "3'UTR", "#f46d43"),
+        ("Type", "repeat_region", "#6a3d9a"),
+        ("Type", "mobile_element", "#cab2d6"),
+        ("Type", "misc_feature", "#3c5bfe"),
+        ("Type", "gap", "#e5049c"),
+        ("Type", "pseudogene", "#e31a1c"),
+    ];
+    for (i, (qname, qvalue, color)) in generic_rules.iter().enumerate() {
+        conn.execute(
+            "INSERT INTO Color_rules (Rule_id, Template_id, Qualifier_name, Qualifier_value, Color) VALUES (?, ?, ?, ?, ?)",
+            params![i as i64 + 1, template_id, qname, qvalue, color],
+        )
+        .context("Failed to insert generic_features color rule")?;
+    }
+
+    // Insert pharokka color template only if pharokka functions detected
+    if has_pharokka_function {
+        template_id = 2;
+        conn.execute(
+            "INSERT INTO Color_templates (Template_id, Template_name) VALUES (?, 'pharokka')",
+            params![template_id],
+        )
+        .context("Failed to insert pharokka template")?;
+
+        let pharokka_rules: Vec<(&str, &str, &str)> = vec![
+            ("function", "vfdb_card", "#FF0000"),
+            ("function", "unknown function", "#AAAAAA"),
+            ("function", "other", "#4deeea"),
+            ("function", "tail", "#74ee15"),
+            ("function", "transcription regulation", "#ffe700"),
+            ("function", "dna, rna and nucleotide metabolism", "#f000ff"),
+            ("function", "lysis", "#001eff"),
+            ("function", "moron, auxiliary metabolic gene and host takeover", "#8900ff"),
+            ("function", "integration and excision", "#E0B0FF"),
+            ("function", "head and packaging", "#ff008d"),
+            ("function", "connector", "#5A5A5A"),
+        ];
+        let rule_offset = generic_rules.len() as i64;
+        for (i, (qname, qvalue, color)) in pharokka_rules.iter().enumerate() {
+            conn.execute(
+                "INSERT INTO Color_rules (Rule_id, Template_id, Qualifier_name, Qualifier_value, Color) VALUES (?, ?, ?, ?, ?)",
+                params![i as i64 + 1 + rule_offset, template_id, qname, qvalue, color],
+            )
+            .context("Failed to insert pharokka color rule")?;
+        }
+    }
 
     Ok(())
 }

@@ -598,7 +598,6 @@ def create_layout(db_path):
             # Gene map is shown if at least one feature type is selected in the multichoice
             selected_feature_types = feature_type_multichoice.value if feature_type_multichoice is not None else None
             genbank_path = db_path if (selected_feature_types and len(selected_feature_types) > 0) else None
-            use_phage_colors = (0 in phage_colors_cbg.active) if (phage_colors_cbg is not None and genbank_path) else False
             plot_isoforms = (0 in plot_isoforms_cbg.active) if (plot_isoforms_cbg is not None and genbank_path) else True
             feature_label_key = feature_label_select.value if feature_label_select is not None else None
 
@@ -609,7 +608,10 @@ def create_layout(db_path):
                 val = row_data['value_select'].value
                 color = row_data['color_picker'].color
                 if key and val and color:
-                    custom_colors.append({'qualifier_key': key, 'value': val, 'color': color})
+                    custom_colors.append({
+                        'qualifier_key': key, 'value': val, 'color': color,
+                        'match_mode': row_data.get('match_mode', 'exact')
+                    })
 
             # Select the correct widget set based on current view
             active_variables_widgets = widgets['variables_widgets_all'] if is_all else widgets['variables_widgets_one']
@@ -733,7 +735,7 @@ def create_layout(db_path):
                 grid = generate_bokeh_plot_all_samples(
                     conn, selected_var, contig, xstart=xstart, xend=xend, genbank_path=genbank_path,
                     genome_features=genome_features if genome_features else None, allowed_samples=set(filtered_samples),
-                    feature_types=selected_feature_types, use_phage_colors=use_phage_colors, plot_sequence=plot_sequence,
+                    feature_types=selected_feature_types, plot_sequence=plot_sequence,
                     plot_translated_sequence=plot_translated_sequence, same_y_scale=same_y_scale, subplot_size=subplot_size, genemap_size=genemap_size,
                     sequence_size=sequence_size, translated_sequence_size=translated_sequence_size, order_by_column=order_by, max_base_resolution=max_binning,
                     max_genemap_window=max_genemap_window, min_relative_value=min_coverage_freq,
@@ -760,7 +762,7 @@ def create_layout(db_path):
                     requested_features = [f for f in requested_features if f != "Gene map"]
                 grid = generate_bokeh_plot_per_sample(
                     conn, requested_features, contig, sample, xstart=xstart, xend=xend, genbank_path=genbank_path,
-                    feature_types=selected_feature_types, use_phage_colors=use_phage_colors, plot_isoforms=plot_isoforms,
+                    feature_types=selected_feature_types, plot_isoforms=plot_isoforms,
                     plot_sequence=plot_sequence, plot_translated_sequence=plot_translated_sequence,
                     same_y_scale=False, subplot_size=subplot_size, genemap_size=genemap_size,
                     sequence_size=sequence_size, translated_sequence_size=translated_sequence_size, max_base_resolution=max_binning,
@@ -1548,18 +1550,29 @@ def create_layout(db_path):
             stylesheets=[multichoice_stylesheet]
         )
 
-    # Phage color scheme checkbox - only show if database has CDS features with PHAROKKA functions
-    phage_colors_cbg = None
-    cur = conn.cursor()
-    result = cur.execute(
-        "SELECT Status FROM Constants_for_plotting WHERE Constant = 'pharokka'"
-    ).fetchone()
-    has_pharokka_functions = result[0] if result else False
+    # Load color templates from database
+    color_templates = {}  # {template_name: [{qualifier_name, qualifier_value, color}, ...]}
+    try:
+        template_rows = conn.execute(
+            "SELECT t.Template_name, r.Qualifier_name, r.Qualifier_value, r.Color "
+            "FROM Color_templates t JOIN Color_rules r ON t.Template_id = r.Template_id "
+            "ORDER BY t.Template_name, r.Rule_id"
+        ).fetchall()
+        for tname, qname, qvalue, color in template_rows:
+            color_templates.setdefault(tname, []).append({
+                'qualifier_name': qname, 'qualifier_value': qvalue, 'color': color
+            })
+    except Exception:
+        pass
 
-    if has_pharokka_functions:
-        phage_colors_cbg = CheckboxGroup(
-            labels=["Use phage color scheme for CDS"],
-            active=[]
+    template_select = None
+    if color_templates:
+        template_options = ["(none)"] + list(color_templates.keys())
+        template_select = Select(
+            title="Use template:",
+            value="(none)",
+            options=template_options,
+            sizing_mode="stretch_width"
         )
 
     # Build qualifier key options for custom color rows (reuse Annotations filtering metadata)
@@ -1610,6 +1623,7 @@ def create_layout(db_path):
             'value_select': value_select,
             'color_picker': color_picker,
             'minus_btn': minus_btn,
+            'match_mode': 'exact',
             'row_widget': pn.Row(qualifier_select, value_select, color_picker, minus_btn,
                                  sizing_mode="stretch_width", margin=(2, 0, 2, 0))
         }
@@ -1640,6 +1654,27 @@ def create_layout(db_path):
         rebuild_color_rows()
 
     add_color_btn.on_click(add_color_callback)
+
+    # Template selection callback - populates color rows from template rules
+    if template_select is not None:
+        def on_template_change(attr, old, new):
+            custom_color_rows.clear()
+            if new != "(none)" and new in color_templates:
+                for rule in color_templates[new]:
+                    row_data = create_color_row()
+                    row_data['qualifier_select'].value = rule['qualifier_name']
+                    # For template rules, the value may not be in the distinct values list
+                    # (e.g. pharokka substring keys like "tail"). Add it to options if needed.
+                    current_opts = list(row_data['value_select'].options)
+                    if rule['qualifier_value'] not in current_opts:
+                        row_data['value_select'].options = current_opts + [rule['qualifier_value']]
+                    row_data['value_select'].value = rule['qualifier_value']
+                    row_data['color_picker'].color = rule['color']
+                    row_data['match_mode'] = 'contains'
+                    custom_color_rows.append(row_data)
+            rebuild_color_rows()
+
+        template_select.on_change('value', on_template_change)
 
     # Feature label dropdown - populated with distinct qualifier keys from Annotation_qualifier
     feature_label_select = None
@@ -1760,11 +1795,11 @@ def create_layout(db_path):
         if plot_isoforms_cbg is not None:
             genome_children.append(plot_isoforms_cbg)
         # Color section
-        if phage_colors_cbg is not None or color_qualifier_options:
-            color_label = Div(text="Color features with:")
+        if template_select is not None or color_qualifier_options:
+            color_label = Div(text="<b>Color features with:</b>")
             genome_children.append(color_label)
-        if phage_colors_cbg is not None:
-            genome_children.append(phage_colors_cbg)
+        if template_select is not None:
+            genome_children.append(template_select)
         if color_qualifier_options:
             genome_children.append(custom_color_column)
         if feature_label_select is not None:
