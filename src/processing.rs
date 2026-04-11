@@ -1844,12 +1844,23 @@ fn process_samples_parallel(
     let is_tty_writer = is_tty;
     let total_writer = total;
 
+    // Open timing log incrementally so data is available even if calculate crashes
+    let timing_file = if config.enable_timing {
+        match open_timing_log(output_db, config.threads, total) {
+            Ok(f) => Some(f),
+            Err(e) => { eprintln!("Warning: could not open timing log: {}", e); None }
+        }
+    } else {
+        None
+    };
+    let timing_threads = config.threads;
+
     // Spawn dedicated writer thread
-    let enable_timing_writer = config.enable_timing;
     let writer_handle = thread::spawn(move || -> Result<(usize, std::time::Duration, Vec<SampleTimings>)> {
         let write_start = std::time::Instant::now();
         let mut written_count = 0usize;
         let mut all_timings: Vec<SampleTimings> = Vec::new();
+        let mut timing_file = timing_file;
 
         // Receive and write samples as they arrive
         for result in rx {
@@ -1894,12 +1905,13 @@ fn process_samples_parallel(
             }
             write_pb_clone.inc(1);
 
-            // Collect per-sample timings (fill in DB write duration)
-            if enable_timing_writer {
-                if let Some(mut t) = result.timings {
-                    t.db_write = sample_write_start.elapsed();
-                    all_timings.push(t);
+            // Write per-sample timings incrementally to the log file
+            if let Some(mut t) = result.timings {
+                t.db_write = sample_write_start.elapsed();
+                if let Some(ref mut f) = timing_file {
+                    let _ = write_sample_timing(f, &t, timing_threads);
                 }
+                all_timings.push(t);
             }
         }
 
@@ -1980,10 +1992,16 @@ fn process_samples_parallel(
     let elapsed = start_time.elapsed();
     let failed = failed_count.load(Ordering::SeqCst);
 
-    // Write timing log if enabled
+    // Append grand totals to the timing log
     if config.enable_timing && !all_timings.is_empty() {
-        if let Err(e) = write_timing_log(output_db, &all_timings, elapsed, config.threads) {
-            eprintln!("Warning: failed to write timing log: {}", e);
+        let log_path = timing_log_path(output_db);
+        match fs::OpenOptions::new().append(true).open(&log_path) {
+            Ok(mut f) => {
+                if let Err(e) = finish_timing_log(&mut f, &all_timings, elapsed) {
+                    eprintln!("Warning: failed to write timing totals: {}", e);
+                }
+            }
+            Err(e) => eprintln!("Warning: could not reopen timing log: {}", e),
         }
     }
 
@@ -2034,6 +2052,16 @@ fn process_samples_sequential(
     let mut writing_time_total = std::time::Duration::ZERO;
     let mut all_timings: Vec<SampleTimings> = Vec::new();
 
+    // Open timing log incrementally so data is available even if calculate crashes
+    let mut timing_file = if config.enable_timing {
+        match open_timing_log(output_db, config.threads, total) {
+            Ok(f) => Some(f),
+            Err(e) => { eprintln!("Warning: could not open timing log: {}", e); None }
+        }
+    } else {
+        None
+    };
+
     for bam_path in bam_files {
         let sample_start = std::time::Instant::now();
 
@@ -2073,10 +2101,13 @@ fn process_samples_sequential(
 
                 writing_time_total += write_start.elapsed();
 
-                // Collect per-sample timings
+                // Write per-sample timings incrementally to the log file
                 if let Some(ref mut t) = timings {
                     t.db_write = write_start.elapsed();
                     t.total = sample_start.elapsed();
+                    if let Some(ref mut f) = timing_file {
+                        let _ = write_sample_timing(f, t, config.threads);
+                    }
                     all_timings.push(t.clone());
                 }
 
@@ -2109,10 +2140,12 @@ fn process_samples_sequential(
         eprintln!("Done ({:.2}s)", start_time.elapsed().as_secs_f64());
     }
 
-    // Write timing log if enabled
+    // Append grand totals to the timing log
     if config.enable_timing && !all_timings.is_empty() {
-        if let Err(e) = write_timing_log(output_db, &all_timings, start_time.elapsed(), config.threads) {
-            eprintln!("Warning: failed to write timing log: {}", e);
+        if let Some(ref mut f) = timing_file {
+            if let Err(e) = finish_timing_log(f, &all_timings, start_time.elapsed()) {
+                eprintln!("Warning: failed to write timing totals: {}", e);
+            }
         }
     }
 
@@ -2129,18 +2162,17 @@ fn ns_to_s(ns: u64) -> f64 {
     ns as f64 / 1e9
 }
 
-fn write_timing_log(
-    output_db: &Path,
-    timings: &[SampleTimings],
-    total_wall: std::time::Duration,
-    threads: usize,
-) -> Result<()> {
+fn timing_log_path(output_db: &Path) -> PathBuf {
+    let mut p = output_db.as_os_str().to_owned();
+    p.push(".timings.log");
+    PathBuf::from(p)
+}
+
+/// Open the timing log and write the header. Returns the open file handle
+/// so callers can append per-sample sections as they finish.
+fn open_timing_log(output_db: &Path, threads: usize, n_samples: usize) -> Result<fs::File> {
     use std::io::Write;
-    let log_path = {
-        let mut p = output_db.as_os_str().to_owned();
-        p.push(".timings.log");
-        PathBuf::from(p)
-    };
+    let log_path = timing_log_path(output_db);
     let mut f = fs::File::create(&log_path)
         .with_context(|| format!("Failed to create timing log: {}", log_path.display()))?;
 
@@ -2148,37 +2180,50 @@ fn write_timing_log(
     writeln!(f, "theBIGbam calculate -- timing report")?;
     writeln!(f, "Output DB    : {}", output_db.display())?;
     writeln!(f, "Threads      : {}", threads)?;
-    writeln!(f, "Samples      : {}", timings.len())?;
-    writeln!(f, "Total wall   : {:>10.2} s", total_wall.as_secs_f64())?;
+    writeln!(f, "Samples      : {}", n_samples)?;
     writeln!(f, "=============================================================\n")?;
 
-    for t in timings {
-        writeln!(f, "Sample: {}", t.sample_name)?;
-        writeln!(f, "  BAM path             : {}", t.bam_path)?;
-        writeln!(f, "  Contigs in BAM       : {}", t.n_contigs_in_bam)?;
-        writeln!(f, "  Contigs processed    : {}", t.n_contigs_processed)?;
-        writeln!(f, "  Total reads          : {}", t.total_reads)?;
-        writeln!(f, "  ---- Wall-clock phases ----")?;
-        writeln!(f, "  Header read          : {:>10.3} s", t.header_read.as_secs_f64())?;
-        writeln!(f, "  Total read count     : {:>10.3} s", t.total_read_count.as_secs_f64())?;
-        writeln!(f, "  Build lookups        : {:>10.3} s", t.build_lookups.as_secs_f64())?;
-        writeln!(f, "  Par-iter wall        : {:>10.3} s", t.par_iter_wall.as_secs_f64())?;
-        writeln!(f, "  Merge contig results : {:>10.3} s", t.merge_results.as_secs_f64())?;
-        writeln!(f, "  DB write             : {:>10.3} s", t.db_write.as_secs_f64())?;
-        writeln!(f, "  TOTAL per sample     : {:>10.3} s", t.total.as_secs_f64())?;
-        writeln!(f, "  ---- Par-iter sub-phase sums (CPU-seconds across threads) ----")?;
-        writeln!(f, "  BAM reader open      : {:>10.3} s", ns_to_s(t.bam_open_ns))?;
-        writeln!(f, "  Header + name lookup : {:>10.3} s", ns_to_s(t.header_lookup_ns))?;
-        writeln!(f, "  CDS index build      : {:>10.3} s", ns_to_s(t.cds_index_ns))?;
-        writeln!(f, "  process_contig_stream: {:>10.3} s", ns_to_s(t.streaming_ns))?;
-        writeln!(f, "  Feature calculation  : {:>10.3} s", ns_to_s(t.feature_calc_ns))?;
-        let sub_sum_ns = t.bam_open_ns + t.header_lookup_ns + t.cds_index_ns
-                       + t.streaming_ns + t.feature_calc_ns;
-        writeln!(f, "  (sum of above)       : {:>10.3} s  ({}x threads -> wall ~ {:.1} s)",
-                 ns_to_s(sub_sum_ns), threads, ns_to_s(sub_sum_ns) / threads as f64)?;
-        writeln!(f)?;
-    }
+    eprintln!("Timing log: {}", log_path.display());
+    Ok(f)
+}
 
+/// Append one sample's timing breakdown to an already-open timing log.
+fn write_sample_timing(f: &mut fs::File, t: &SampleTimings, threads: usize) -> Result<()> {
+    use std::io::Write;
+    writeln!(f, "Sample: {}", t.sample_name)?;
+    writeln!(f, "  BAM path             : {}", t.bam_path)?;
+    writeln!(f, "  Contigs in BAM       : {}", t.n_contigs_in_bam)?;
+    writeln!(f, "  Contigs processed    : {}", t.n_contigs_processed)?;
+    writeln!(f, "  Total reads          : {}", t.total_reads)?;
+    writeln!(f, "  ---- Wall-clock phases ----")?;
+    writeln!(f, "  Header read          : {:>10.3} s", t.header_read.as_secs_f64())?;
+    writeln!(f, "  Total read count     : {:>10.3} s", t.total_read_count.as_secs_f64())?;
+    writeln!(f, "  Build lookups        : {:>10.3} s", t.build_lookups.as_secs_f64())?;
+    writeln!(f, "  Par-iter wall        : {:>10.3} s", t.par_iter_wall.as_secs_f64())?;
+    writeln!(f, "  Merge contig results : {:>10.3} s", t.merge_results.as_secs_f64())?;
+    writeln!(f, "  DB write             : {:>10.3} s", t.db_write.as_secs_f64())?;
+    writeln!(f, "  TOTAL per sample     : {:>10.3} s", t.total.as_secs_f64())?;
+    writeln!(f, "  ---- Par-iter sub-phase sums (CPU-seconds across threads) ----")?;
+    writeln!(f, "  BAM reader open      : {:>10.3} s", ns_to_s(t.bam_open_ns))?;
+    writeln!(f, "  Header + name lookup : {:>10.3} s", ns_to_s(t.header_lookup_ns))?;
+    writeln!(f, "  CDS index build      : {:>10.3} s", ns_to_s(t.cds_index_ns))?;
+    writeln!(f, "  process_contig_stream: {:>10.3} s", ns_to_s(t.streaming_ns))?;
+    writeln!(f, "  Feature calculation  : {:>10.3} s", ns_to_s(t.feature_calc_ns))?;
+    let sub_sum_ns = t.bam_open_ns + t.header_lookup_ns + t.cds_index_ns
+                   + t.streaming_ns + t.feature_calc_ns;
+    writeln!(f, "  (sum of above)       : {:>10.3} s  ({}x threads -> wall ~ {:.1} s)",
+             ns_to_s(sub_sum_ns), threads, ns_to_s(sub_sum_ns) / threads as f64)?;
+    writeln!(f)?;
+    Ok(())
+}
+
+/// Append grand totals to the timing log and close it.
+fn finish_timing_log(
+    f: &mut fs::File,
+    timings: &[SampleTimings],
+    total_wall: std::time::Duration,
+) -> Result<()> {
+    use std::io::Write;
     writeln!(f, "=============================================================")?;
     writeln!(f, "GRAND TOTALS")?;
     writeln!(f, "=============================================================")?;
@@ -2202,8 +2247,6 @@ fn write_timing_log(
     writeln!(f, "  CDS index build      : {:>10.3} s", sum_ns(|t| t.cds_index_ns))?;
     writeln!(f, "  process_contig_stream: {:>10.3} s", sum_ns(|t| t.streaming_ns))?;
     writeln!(f, "  Feature calculation  : {:>10.3} s", sum_ns(|t| t.feature_calc_ns))?;
-
-    eprintln!("Timing log written to {}", log_path.display());
     Ok(())
 }
 
