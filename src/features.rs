@@ -454,15 +454,14 @@ pub struct CdsIndex {
 }
 
 impl CdsIndex {
-    /// Build a CDS index from annotations for a specific contig.
-    pub fn from_annotations(annotations: &[FeatureAnnotation], contig_id: i64) -> Self {
+    /// Build a CDS index from an already-filtered per-contig annotation slice.
+    /// The caller is responsible for pre-grouping annotations by contig_id
+    /// (typically via a `HashMap<i64, Vec<&FeatureAnnotation>>` built once
+    /// per sample), which avoids an O(n_annotations) linear scan per contig.
+    pub fn from_contig_annotations(annotations: &[&FeatureAnnotation]) -> Self {
         let mut intervals: Vec<CdsInterval> = annotations
             .iter()
-            .filter(|a| {
-                a.contig_id == contig_id
-                    && a.feature_type == "CDS"
-                    && a.nucleotide_sequence.is_some()
-            })
+            .filter(|a| a.feature_type == "CDS" && a.nucleotide_sequence.is_some())
             .map(|a| CdsInterval {
                 start: a.start,
                 end: a.end,

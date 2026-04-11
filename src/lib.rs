@@ -79,7 +79,7 @@ mod python {
     ///         - "samples_failed": int
     ///         - "total_time": float (seconds)
     #[pyfunction]
-    #[pyo3(signature = (genbank_path, bam_files, output_db, modules, threads, sequencing_type=None, min_aligned_fraction=50.0, min_coverage_depth=0.0, curve_ratio=10.0, bar_ratio=10.0, create_indexes=true, assembly_path="", extend_db="", min_occurrences=2))]
+    #[pyo3(signature = (genbank_path, bam_files, output_db, modules, threads, sequencing_type=None, min_aligned_fraction=50.0, min_coverage_depth=0.0, curve_ratio=10.0, bar_ratio=10.0, create_indexes=true, assembly_path="", extend_db="", min_occurrences=2, enable_timing=false))]
     fn process_all_samples<'py>(
         py: Python<'py>,
         genbank_path: &str,
@@ -96,6 +96,7 @@ mod python {
         assembly_path: &str,
         extend_db: &str,
         min_occurrences: u32,
+        enable_timing: bool,
     ) -> PyResult<Bound<'py, PyDict>> {
         use crate::gc_content::GCParams;
         use crate::processing::{run_all_samples, ProcessConfig};
@@ -115,6 +116,7 @@ mod python {
             phagetermini_config: PhageTerminiConfig::default(),
             gc_params: GCParams::default(),
             min_occurrences,
+            enable_timing,
         };
 
         // Convert string paths to PathBuf

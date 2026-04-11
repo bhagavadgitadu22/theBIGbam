@@ -11,7 +11,7 @@ except ImportError:
     _rust = None
 
 
-def calculating_all_features_parallel(list_modules, bam_files, output_db, min_aligned_fraction, min_coverage_depth, curve_ratio, bar_ratio, n_sample_cores=None, sequencing_type=None, genbank_path=None, assembly_path=None, extend_db=None, min_occurrences=2):
+def calculating_all_features_parallel(list_modules, bam_files, output_db, min_aligned_fraction, min_coverage_depth, curve_ratio, bar_ratio, n_sample_cores=None, sequencing_type=None, genbank_path=None, assembly_path=None, extend_db=None, min_occurrences=2, enable_timing=False):
     """Process all BAM files in parallel using Rust bindings."""
     if not HAS_RUST:
         sys.exit("ERROR: Rust bindings (thebigbam_rs) are required but not available. Please install them first.")
@@ -37,6 +37,7 @@ def calculating_all_features_parallel(list_modules, bam_files, output_db, min_al
             assembly_path=assembly_path if assembly_path else "",
             extend_db=extend_db if extend_db else "",
             min_occurrences=int(min_occurrences),
+            enable_timing=enable_timing,
         )
     except Exception as e:
         print(f"ERROR: Rust processing failed: {e}", flush=True)
@@ -61,6 +62,7 @@ def add_calculate_args(parser):
     parser.add_argument('--coverage_percentage', type=float, default=10, help='Compressing ratio for features depending on coverage: only values above this %% of the local coverage are kept (default: 10%%)')
     parser.add_argument('--min_occurrences', type=int, default=2, help='Minimum absolute event count for sparse features (default: 2). Position kept only if value > coverage × coverage_percentage AND value > min_occurrences.')
     parser.add_argument('--extend', action='store_true', help='Extend an existing database with new samples (and optionally new contigs)')
+    parser.add_argument('--time', action='store_true', default=False, help=argparse.SUPPRESS)
 
 # CLI names → internal module names (stored in DB/Rust)
 MODULE_ALIASES = {
@@ -194,6 +196,7 @@ def run_calculate_args(args):
         assembly_path=assembly_path,
         extend_db=output_db if is_extending else None,
         min_occurrences=args.min_occurrences,
+        enable_timing=getattr(args, 'time', False),
     )
 
 

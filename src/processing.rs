@@ -17,7 +17,7 @@ use rust_htslib::htslib;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::sync_channel;
 use std::thread;
 
@@ -60,6 +60,9 @@ pub struct ProcessConfig {
     /// `value > coverage × bar_ratio AND value > min_occurrences`.
     /// Default: 2.
     pub min_occurrences: u32,
+    /// When true, record per-sample phase timings and write a timing log
+    /// alongside the output database. Hidden CLI flag (--time).
+    pub enable_timing: bool,
 }
 
 impl ProcessConfig {
@@ -82,6 +85,52 @@ pub struct ProcessResult {
     pub total_time_secs: f64,
     pub processing_time_secs: f64,
     pub writing_time_secs: f64,
+}
+
+/// Per-sample timing breakdown populated when ProcessConfig::enable_timing is set.
+#[derive(Default, Clone)]
+pub struct SampleTimings {
+    pub sample_name: String,
+    pub bam_path: String,
+    pub n_contigs_in_bam: usize,
+    pub n_contigs_processed: usize,
+    pub total_reads: u64,
+    // Single-threaded phases inside process_sample (wall-clock).
+    pub header_read: std::time::Duration,
+    pub total_read_count: std::time::Duration,
+    pub build_lookups: std::time::Duration,
+    pub par_iter_wall: std::time::Duration,
+    pub merge_results: std::time::Duration,
+    // Per-contig sub-phase sums inside par_iter (nanoseconds, summed across threads).
+    pub bam_open_ns: u64,
+    pub header_lookup_ns: u64,
+    pub cds_index_ns: u64,
+    pub streaming_ns: u64,
+    pub feature_calc_ns: u64,
+    // Filled by the sample-level caller, not process_sample itself.
+    pub db_write: std::time::Duration,
+    pub total: std::time::Duration,
+}
+
+/// Thread-safe accumulators for per-contig sub-phase timings inside the par_iter.
+struct TimingAccum {
+    bam_open_ns: AtomicU64,
+    header_lookup_ns: AtomicU64,
+    cds_index_ns: AtomicU64,
+    streaming_ns: AtomicU64,
+    feature_calc_ns: AtomicU64,
+}
+
+impl TimingAccum {
+    fn new() -> Self {
+        Self {
+            bam_open_ns: AtomicU64::new(0),
+            header_lookup_ns: AtomicU64::new(0),
+            cds_index_ns: AtomicU64::new(0),
+            streaming_ns: AtomicU64::new(0),
+            feature_calc_ns: AtomicU64::new(0),
+        }
+    }
 }
 
 /// Check if a BAM file is missing MD tags by sampling first few reads.
@@ -1128,7 +1177,7 @@ pub fn process_sample(
     is_circular: bool,
     repeats: &[RepeatsData],
     annotations: &[crate::types::FeatureAnnotation],
-) -> Result<(Vec<(String, String, crate::blob::EncodedBlob)>, Vec<PresenceData>, Vec<PackagingData>, Vec<MisassemblyData>, Vec<MicrodiversityData>, Vec<SideMisassemblyData>, Vec<TopologyData>, String, SequencingType, u64, u64, bool)> {
+) -> Result<(Vec<(String, String, crate::blob::EncodedBlob)>, Vec<PresenceData>, Vec<PackagingData>, Vec<MisassemblyData>, Vec<MicrodiversityData>, Vec<SideMisassemblyData>, Vec<TopologyData>, String, SequencingType, u64, u64, bool, Option<SampleTimings>)> {
     let sample_name = bam_path
         .file_stem()
         .unwrap_or_default()
@@ -1136,6 +1185,16 @@ pub fn process_sample(
         .replace("_with_MD", "");
 
     let flags = ModuleFlags::from_modules(modules);
+
+    let time_on = config.enable_timing;
+    let mut st = if time_on { Some(SampleTimings::default()) } else { None };
+    if let Some(s) = st.as_mut() {
+        s.sample_name = sample_name.clone();
+        s.bam_path = bam_path.display().to_string();
+    }
+
+    // --- Phase: header_read ---
+    let t0 = if time_on { Some(std::time::Instant::now()) } else { None };
 
     // Get number of reference sequences using temporary reader
     let temp_bam = IndexedReader::from_path(bam_path)
@@ -1145,49 +1204,106 @@ pub fn process_sample(
 
     // Determine sequencing type: use provided value or auto-detect from this BAM file
     let seq_type = match config.sequencing_type {
-        Some(st) => st,
+        Some(stype) => stype,
         None => detect_sequencing_type(bam_path)
             .with_context(|| format!("Failed to detect sequencing type from {}", bam_path.display()))?,
     };
 
+    if let (Some(s), Some(t)) = (st.as_mut(), t0) {
+        s.header_read = t.elapsed();
+        s.n_contigs_in_bam = n_refs as usize;
+    }
+
+    // --- Phase: total_read_count ---
+    let t0 = if time_on { Some(std::time::Instant::now()) } else { None };
+
     // Get total read count from BAM index (fast, no iteration)
     let total_reads = get_total_read_count(bam_path)?;
+
+    if let (Some(s), Some(t)) = (st.as_mut(), t0) {
+        s.total_read_count = t.elapsed();
+        s.total_reads = total_reads;
+    }
+
+    // --- Phase: build_lookups ---
+    let t0 = if time_on { Some(std::time::Instant::now()) } else { None };
+
+    // Build name -> index lookup once; avoids O(n_refs * n_contigs) linear scans
+    // in the per-contig par_iter below (critical for projects with ~500k contigs).
+    let contig_by_name: HashMap<&str, usize> = contigs
+        .iter()
+        .enumerate()
+        .map(|(idx, c)| (c.name.as_str(), idx))
+        .collect();
+
+    // Pre-group annotations by contig_id once (only when mapping_metrics is on).
+    // Avoids the O(n_annotations) linear filter inside CdsIndex::from_annotations
+    // on every contig. For ~500k contigs x ~15M annotations this is a ~500k-fold
+    // reduction in comparisons.
+    let annos_by_contig: HashMap<i64, Vec<&FeatureAnnotation>> = if flags.mapping_metrics
+        && !annotations.is_empty()
+    {
+        let mut map: HashMap<i64, Vec<&FeatureAnnotation>> = HashMap::new();
+        for a in annotations.iter() {
+            map.entry(a.contig_id).or_default().push(a);
+        }
+        map
+    } else {
+        HashMap::new()
+    };
+
+    if let (Some(s), Some(t)) = (st.as_mut(), t0) {
+        s.build_lookups = t.elapsed();
+    }
+
+    // --- Phase: par_iter ---
+    let accum = if time_on { Some(TimingAccum::new()) } else { None };
+    let accum_ref = accum.as_ref();
+    let t_par = if time_on { Some(std::time::Instant::now()) } else { None };
 
     // Process contigs in parallel - each gets its own BAM reader
     // This is critical for samples with many contigs (e.g., 50,000 contigs with 1 sample)
     let results: Vec<_> = (0..n_refs)
         .into_par_iter()
         .filter_map(|tid| {
-            // Each thread gets its own BAM reader
+            // Sub-phase: BAM reader open
+            let ts = accum_ref.map(|_| std::time::Instant::now());
             let mut bam = IndexedReader::from_path(bam_path).ok()?;
-            // Use 1 decompression thread per reader to avoid I/O contention
-            // Total decompression threads = config.threads (one per parallel contig)
             bam.set_threads(1).ok()?;
-
-            // Extract header info before mutable borrow
-            let ref_name = std::str::from_utf8(bam.header().tid2name(tid)).ok()?.to_string();
-            let bam_length = bam.header().target_len(tid).unwrap_or(0) as usize;
-            // SAM-spec circular BAMs already have the real LN in the header
-            let ref_length = bam_length;
-
-            // Skip if contig not in GenBank list
-            let contig_info = contigs.iter().find(|c| c.name == ref_name);
-            if contig_info.is_none() {
-                return None;
+            if let (Some(a), Some(t)) = (accum_ref, ts) {
+                a.bam_open_ns.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
             }
 
-            // Build CDS index for this contig (for codon analysis)
-            let contig_idx = contigs.iter().position(|c| c.name == ref_name)?;
+            // Sub-phase: header + name lookup
+            let ts = accum_ref.map(|_| std::time::Instant::now());
+            let ref_name = std::str::from_utf8(bam.header().tid2name(tid)).ok()?.to_string();
+            let bam_length = bam.header().target_len(tid).unwrap_or(0) as usize;
+            let ref_length = bam_length;
+            let contig_idx = *contig_by_name.get(ref_name.as_str())?;
             let contig_id = (contig_idx + 1) as i64;
-            let cds_index = if flags.mapping_metrics && !annotations.is_empty() {
-                let idx = CdsIndex::from_annotations(annotations, contig_id);
-                if idx.is_empty() { None } else { Some(idx) }
+            if let (Some(a), Some(t)) = (accum_ref, ts) {
+                a.header_lookup_ns.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
+            }
+
+            // Sub-phase: CDS index build
+            let ts = accum_ref.map(|_| std::time::Instant::now());
+            let cds_index = if flags.mapping_metrics {
+                match annos_by_contig.get(&contig_id) {
+                    Some(slice) if !slice.is_empty() => {
+                        let idx = CdsIndex::from_contig_annotations(slice);
+                        if idx.is_empty() { None } else { Some(idx) }
+                    }
+                    _ => None,
+                }
             } else {
                 None
             };
+            if let (Some(a), Some(t)) = (accum_ref, ts) {
+                a.cds_index_ns.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
+            }
 
-            // Process contig using streaming - single pass over reads
-            // Early coverage check happens inside process_contig_streaming
+            // Sub-phase: process_contig_streaming
+            let ts = accum_ref.map(|_| std::time::Instant::now());
             let (mut arrays, coverage_pct, primary_count) = match process_contig_streaming(&mut bam, &ref_name, ref_length, seq_type, flags, is_circular, config.min_aligned_fraction, config.phagetermini_config.min_clipping_length) {
                 Ok(Some(result)) => result,
                 Ok(None) => return None,
@@ -1196,8 +1312,9 @@ pub fn process_sample(
                     return None;
                 }
             };
-
-            // Coverage already checked and returned from process_contig_streaming
+            if let (Some(a), Some(t)) = (accum_ref, ts) {
+                a.streaming_ns.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
+            }
 
             // Early-exit: skip contigs with low mean coverage depth (only when threshold > 0)
             let coverage_mean = arrays.coverage_mean() as f32;
@@ -1205,7 +1322,8 @@ pub fn process_sample(
                 return None;
             }
 
-            // Calculate features for this contig
+            // Sub-phase: feature calculation
+            let ts = accum_ref.map(|_| std::time::Instant::now());
             let mut feature_blobs: Vec<(String, String, crate::blob::EncodedBlob)> = Vec::new();
             let (packaging_info, metrics_info) = add_features_from_arrays(&mut arrays, &ref_name, ref_length, config, is_circular, seq_type, flags, primary_count, repeats, cds_index.as_ref(), &mut feature_blobs);
             let coverage_median = arrays.coverage_median() as f32;
@@ -1260,9 +1378,21 @@ pub fn process_sample(
                 coverage_trimmed_mean,
             };
 
+            if let (Some(a), Some(t)) = (accum_ref, ts) {
+                a.feature_calc_ns.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
+            }
+
             Some((feature_blobs, presence, packaging_info, metrics_info, primary_count))
         })
         .collect();
+
+    if let (Some(s), Some(t)) = (st.as_mut(), t_par) {
+        s.par_iter_wall = t.elapsed();
+        s.n_contigs_processed = results.len();
+    }
+
+    // --- Phase: merge_results ---
+    let t0 = if time_on { Some(std::time::Instant::now()) } else { None };
 
     // Merge results from all contigs
     let mut all_feature_blobs: Vec<(String, String, crate::blob::EncodedBlob)> = Vec::new();
@@ -1289,7 +1419,18 @@ pub fn process_sample(
         }
     }
 
-    Ok((all_feature_blobs, all_presences, all_packaging, all_misassembly, all_microdiversity, all_side_misassembly, all_topology, sample_name, seq_type, total_reads, mapped_reads, is_circular))
+    if let (Some(s), Some(t)) = (st.as_mut(), t0) {
+        s.merge_results = t.elapsed();
+        if let Some(a) = accum.as_ref() {
+            s.bam_open_ns = a.bam_open_ns.load(Ordering::Relaxed);
+            s.header_lookup_ns = a.header_lookup_ns.load(Ordering::Relaxed);
+            s.cds_index_ns = a.cds_index_ns.load(Ordering::Relaxed);
+            s.streaming_ns = a.streaming_ns.load(Ordering::Relaxed);
+            s.feature_calc_ns = a.feature_calc_ns.load(Ordering::Relaxed);
+        }
+    }
+
+    Ok((all_feature_blobs, all_presences, all_packaging, all_misassembly, all_microdiversity, all_side_misassembly, all_topology, sample_name, seq_type, total_reads, mapped_reads, is_circular, st))
 }
 
 /// Extract contig information from BAM file headers.
@@ -1599,7 +1740,7 @@ pub fn run_all_samples(
     eprintln!("\n### Processing {} samples with {} threads", bam_files.len(), config.threads);
     eprintln!("Modules: {}\n", modules.join(", "));
 
-    let result = process_samples_parallel(&bam_files, &contigs, modules, config, &circularity_map, db_writer, &repeats, &annotations)?;
+    let result = process_samples_parallel(&bam_files, &contigs, modules, config, &circularity_map, db_writer, &repeats, &annotations, output_db)?;
 
     print_summary(&result, output_db);
 
@@ -1621,6 +1762,7 @@ struct SampleResult {
     microdiversity: Vec<MicrodiversityData>,
     side_misassembly: Vec<SideMisassemblyData>,
     topology: Vec<TopologyData>,
+    timings: Option<SampleTimings>,
 }
 
 fn process_samples_parallel(
@@ -1632,6 +1774,7 @@ fn process_samples_parallel(
     db_writer: DbWriter,
     repeats: &[RepeatsData],
     annotations: &[crate::types::FeatureAnnotation],
+    output_db: &Path,
 ) -> Result<ProcessResult> {
     let total = bam_files.len();
     let is_tty = atty::is(Stream::Stderr);
@@ -1643,7 +1786,7 @@ fn process_samples_parallel(
     //   outer sample parallelism causes all samples to progress simultaneously
     //   without any completing. Sequential ensures samples finish one-by-one.
     if config.threads == 1 || contigs.len() >= 500 {
-        return process_samples_sequential(bam_files, contigs, modules, config, circularity_map, db_writer, is_tty, repeats, annotations);
+        return process_samples_sequential(bam_files, contigs, modules, config, circularity_map, db_writer, is_tty, repeats, annotations, output_db);
     }
 
     // Adaptive channel size based on memory pressure from contig count
@@ -1702,9 +1845,11 @@ fn process_samples_parallel(
     let total_writer = total;
 
     // Spawn dedicated writer thread
-    let writer_handle = thread::spawn(move || -> Result<(usize, std::time::Duration)> {
+    let enable_timing_writer = config.enable_timing;
+    let writer_handle = thread::spawn(move || -> Result<(usize, std::time::Duration, Vec<SampleTimings>)> {
         let write_start = std::time::Instant::now();
         let mut written_count = 0usize;
+        let mut all_timings: Vec<SampleTimings> = Vec::new();
 
         // Receive and write samples as they arrive
         for result in rx {
@@ -1723,6 +1868,7 @@ fn process_samples_parallel(
             }
 
             // Write all data for this sample
+            let sample_write_start = std::time::Instant::now();
             if let Err(e) = db_writer.write_sample_data(
                 &result.sample_name,
                 &result.presences,
@@ -1747,13 +1893,21 @@ fn process_samples_parallel(
                 }
             }
             write_pb_clone.inc(1);
+
+            // Collect per-sample timings (fill in DB write duration)
+            if enable_timing_writer {
+                if let Some(mut t) = result.timings {
+                    t.db_write = sample_write_start.elapsed();
+                    all_timings.push(t);
+                }
+            }
         }
 
         // Finalize database
         db_writer.finalize()?;
         write_pb_clone.finish();
 
-        Ok((written_count, write_start.elapsed()))
+        Ok((written_count, write_start.elapsed(), all_timings))
     });
 
     // Process samples in parallel, sending to channel immediately
@@ -1763,8 +1917,12 @@ fn process_samples_parallel(
 
         let sample_circular = circularity_map.get(bam_path).copied().unwrap_or(false);
         match process_sample(bam_path, contigs, modules, config, sample_circular, repeats, annotations) {
-            Ok((feature_blobs, presences, packaging, misassembly, microdiversity, side_misassembly, topology, sample_name, sequencing_type, total_reads, mapped_reads, is_circular)) => {
+            Ok((feature_blobs, presences, packaging, misassembly, microdiversity, side_misassembly, topology, sample_name, sequencing_type, total_reads, mapped_reads, is_circular, mut timings)) => {
                 let sample_time = sample_start.elapsed().as_secs_f64();
+                // Fill the total processing time (DB write will be added by writer thread)
+                if let Some(ref mut t) = timings {
+                    t.total = sample_start.elapsed();
+                }
                 completed_count.fetch_add(1, Ordering::SeqCst);
                 let msg = format!("{} ({:.2}s)", sample_name, sample_time);
                 process_pb.set_message(msg.clone());
@@ -1787,6 +1945,7 @@ fn process_samples_parallel(
                     microdiversity,
                     side_misassembly,
                     topology,
+                    timings,
                 });
             }
             Err(e) => {
@@ -1811,7 +1970,7 @@ fn process_samples_parallel(
     let processing_time = start_time.elapsed();
 
     // Wait for writer thread to finish
-    let (written_count, writing_time) = writer_handle
+    let (written_count, writing_time, all_timings) = writer_handle
         .join()
         .map_err(|_| anyhow::anyhow!("Writer thread panicked"))??;
 
@@ -1820,6 +1979,13 @@ fn process_samples_parallel(
 
     let elapsed = start_time.elapsed();
     let failed = failed_count.load(Ordering::SeqCst);
+
+    // Write timing log if enabled
+    if config.enable_timing && !all_timings.is_empty() {
+        if let Err(e) = write_timing_log(output_db, &all_timings, elapsed, config.threads) {
+            eprintln!("Warning: failed to write timing log: {}", e);
+        }
+    }
 
     Ok(ProcessResult {
         samples_processed: written_count,
@@ -1842,6 +2008,7 @@ fn process_samples_sequential(
     is_tty: bool,
     repeats: &[RepeatsData],
     annotations: &[crate::types::FeatureAnnotation],
+    output_db: &Path,
 ) -> Result<ProcessResult> {
     let total = bam_files.len();
     let start_time = std::time::Instant::now();
@@ -1865,13 +2032,14 @@ fn process_samples_sequential(
     let mut failed = 0usize;
     let mut processing_time_total = std::time::Duration::ZERO;
     let mut writing_time_total = std::time::Duration::ZERO;
+    let mut all_timings: Vec<SampleTimings> = Vec::new();
 
     for bam_path in bam_files {
         let sample_start = std::time::Instant::now();
 
         let sample_circular = circularity_map.get(bam_path).copied().unwrap_or(false);
         match process_sample(bam_path, contigs, modules, config, sample_circular, repeats, annotations) {
-            Ok((feature_blobs, presences, packaging, misassembly, microdiversity, side_misassembly, topology, sample_name, sequencing_type, total_reads, mapped_reads, is_circular)) => {
+            Ok((feature_blobs, presences, packaging, misassembly, microdiversity, side_misassembly, topology, sample_name, sequencing_type, total_reads, mapped_reads, is_circular, mut timings)) => {
                 let process_elapsed = sample_start.elapsed();
                 processing_time_total += process_elapsed;
 
@@ -1905,6 +2073,13 @@ fn process_samples_sequential(
 
                 writing_time_total += write_start.elapsed();
 
+                // Collect per-sample timings
+                if let Some(ref mut t) = timings {
+                    t.db_write = write_start.elapsed();
+                    t.total = sample_start.elapsed();
+                    all_timings.push(t.clone());
+                }
+
                 let total_sample_time = sample_start.elapsed().as_secs_f64();
                 let msg = format!("{} ({:.2}s)", sample_name, total_sample_time);
                 pb.set_message(msg.clone());
@@ -1934,6 +2109,13 @@ fn process_samples_sequential(
         eprintln!("Done ({:.2}s)", start_time.elapsed().as_secs_f64());
     }
 
+    // Write timing log if enabled
+    if config.enable_timing && !all_timings.is_empty() {
+        if let Err(e) = write_timing_log(output_db, &all_timings, start_time.elapsed(), config.threads) {
+            eprintln!("Warning: failed to write timing log: {}", e);
+        }
+    }
+
     Ok(ProcessResult {
         samples_processed: processed,
         samples_failed: failed,
@@ -1941,6 +2123,88 @@ fn process_samples_sequential(
         processing_time_secs: processing_time_total.as_secs_f64(),
         writing_time_secs: writing_time_total.as_secs_f64(),
     })
+}
+
+fn ns_to_s(ns: u64) -> f64 {
+    ns as f64 / 1e9
+}
+
+fn write_timing_log(
+    output_db: &Path,
+    timings: &[SampleTimings],
+    total_wall: std::time::Duration,
+    threads: usize,
+) -> Result<()> {
+    use std::io::Write;
+    let log_path = {
+        let mut p = output_db.as_os_str().to_owned();
+        p.push(".timings.log");
+        PathBuf::from(p)
+    };
+    let mut f = fs::File::create(&log_path)
+        .with_context(|| format!("Failed to create timing log: {}", log_path.display()))?;
+
+    writeln!(f, "=============================================================")?;
+    writeln!(f, "theBIGbam calculate -- timing report")?;
+    writeln!(f, "Output DB    : {}", output_db.display())?;
+    writeln!(f, "Threads      : {}", threads)?;
+    writeln!(f, "Samples      : {}", timings.len())?;
+    writeln!(f, "Total wall   : {:>10.2} s", total_wall.as_secs_f64())?;
+    writeln!(f, "=============================================================\n")?;
+
+    for t in timings {
+        writeln!(f, "Sample: {}", t.sample_name)?;
+        writeln!(f, "  BAM path             : {}", t.bam_path)?;
+        writeln!(f, "  Contigs in BAM       : {}", t.n_contigs_in_bam)?;
+        writeln!(f, "  Contigs processed    : {}", t.n_contigs_processed)?;
+        writeln!(f, "  Total reads          : {}", t.total_reads)?;
+        writeln!(f, "  ---- Wall-clock phases ----")?;
+        writeln!(f, "  Header read          : {:>10.3} s", t.header_read.as_secs_f64())?;
+        writeln!(f, "  Total read count     : {:>10.3} s", t.total_read_count.as_secs_f64())?;
+        writeln!(f, "  Build lookups        : {:>10.3} s", t.build_lookups.as_secs_f64())?;
+        writeln!(f, "  Par-iter wall        : {:>10.3} s", t.par_iter_wall.as_secs_f64())?;
+        writeln!(f, "  Merge contig results : {:>10.3} s", t.merge_results.as_secs_f64())?;
+        writeln!(f, "  DB write             : {:>10.3} s", t.db_write.as_secs_f64())?;
+        writeln!(f, "  TOTAL per sample     : {:>10.3} s", t.total.as_secs_f64())?;
+        writeln!(f, "  ---- Par-iter sub-phase sums (CPU-seconds across threads) ----")?;
+        writeln!(f, "  BAM reader open      : {:>10.3} s", ns_to_s(t.bam_open_ns))?;
+        writeln!(f, "  Header + name lookup : {:>10.3} s", ns_to_s(t.header_lookup_ns))?;
+        writeln!(f, "  CDS index build      : {:>10.3} s", ns_to_s(t.cds_index_ns))?;
+        writeln!(f, "  process_contig_stream: {:>10.3} s", ns_to_s(t.streaming_ns))?;
+        writeln!(f, "  Feature calculation  : {:>10.3} s", ns_to_s(t.feature_calc_ns))?;
+        let sub_sum_ns = t.bam_open_ns + t.header_lookup_ns + t.cds_index_ns
+                       + t.streaming_ns + t.feature_calc_ns;
+        writeln!(f, "  (sum of above)       : {:>10.3} s  ({}x threads -> wall ~ {:.1} s)",
+                 ns_to_s(sub_sum_ns), threads, ns_to_s(sub_sum_ns) / threads as f64)?;
+        writeln!(f)?;
+    }
+
+    writeln!(f, "=============================================================")?;
+    writeln!(f, "GRAND TOTALS")?;
+    writeln!(f, "=============================================================")?;
+    let sum_dur = |g: fn(&SampleTimings) -> std::time::Duration| -> f64 {
+        timings.iter().map(|t| g(t).as_secs_f64()).sum()
+    };
+    let sum_ns = |g: fn(&SampleTimings) -> u64| -> f64 {
+        timings.iter().map(|t| ns_to_s(g(t))).sum()
+    };
+    writeln!(f, "  Header read          : {:>10.3} s", sum_dur(|t| t.header_read))?;
+    writeln!(f, "  Total read count     : {:>10.3} s", sum_dur(|t| t.total_read_count))?;
+    writeln!(f, "  Build lookups        : {:>10.3} s", sum_dur(|t| t.build_lookups))?;
+    writeln!(f, "  Par-iter wall        : {:>10.3} s", sum_dur(|t| t.par_iter_wall))?;
+    writeln!(f, "  Merge contig results : {:>10.3} s", sum_dur(|t| t.merge_results))?;
+    writeln!(f, "  DB write             : {:>10.3} s", sum_dur(|t| t.db_write))?;
+    writeln!(f, "  Total per-sample sum : {:>10.3} s", sum_dur(|t| t.total))?;
+    writeln!(f, "  Wall-clock (calc)    : {:>10.3} s", total_wall.as_secs_f64())?;
+    writeln!(f, "  ---- Par-iter sub-phase sums ----")?;
+    writeln!(f, "  BAM reader open      : {:>10.3} s", sum_ns(|t| t.bam_open_ns))?;
+    writeln!(f, "  Header + name lookup : {:>10.3} s", sum_ns(|t| t.header_lookup_ns))?;
+    writeln!(f, "  CDS index build      : {:>10.3} s", sum_ns(|t| t.cds_index_ns))?;
+    writeln!(f, "  process_contig_stream: {:>10.3} s", sum_ns(|t| t.streaming_ns))?;
+    writeln!(f, "  Feature calculation  : {:>10.3} s", sum_ns(|t| t.feature_calc_ns))?;
+
+    eprintln!("Timing log written to {}", log_path.display());
+    Ok(())
 }
 
 fn print_summary(result: &ProcessResult, output_db: &Path) {
