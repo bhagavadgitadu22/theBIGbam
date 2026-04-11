@@ -139,9 +139,9 @@ class CustomTranslator(BiopythonTranslator):
     def compute_feature_html(self, feature):
         tooltip_key = feature.qualifiers.get("_tooltip_key", "product")
         value = feature.qualifiers.get(tooltip_key)
-        # Compare against None explicitly so numeric 0 and empty-ish values
-        # from fields like S_sites / N_sites still display instead of falling
-        # back to the feature type.
+        # Compare against None explicitly so numeric 0 and other falsy-but-
+        # meaningful values (e.g. Main_isoform=False) still render instead of
+        # falling back to the feature type.
         if value is not None and value != "":
             return str(value)
         return feature.type

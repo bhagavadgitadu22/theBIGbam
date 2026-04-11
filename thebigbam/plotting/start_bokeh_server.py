@@ -756,7 +756,7 @@ def create_layout(db_path):
                 grid = generate_bokeh_plot_all_samples(
                     conn, selected_var, contig, xstart=xstart, xend=xend, genbank_path=genbank_path,
                     genome_features=genome_features if genome_features else None, allowed_samples=set(filtered_samples),
-                    feature_types=selected_feature_types, plot_sequence=plot_sequence,
+                    feature_types=selected_feature_types, plot_isoforms=plot_isoforms, plot_sequence=plot_sequence,
                     plot_translated_sequence=plot_translated_sequence, same_y_scale=same_y_scale, subplot_size=subplot_size, genemap_size=genemap_size,
                     sequence_size=sequence_size, translated_sequence_size=translated_sequence_size, order_by_column=order_by, max_base_resolution=max_binning,
                     max_genemap_window=max_genemap_window, min_relative_value=min_coverage_freq,
@@ -1421,18 +1421,11 @@ def create_layout(db_path):
     orig_contigs = list(widgets['contigs'])
     orig_samples = list(widgets['samples'])
 
-    # Create Contigs section header
-    contig_toggle_btn = Button(label="▼", width=20, height=20, button_type="primary", align="center", margin=0, stylesheets=[toggle_stylesheet])
-    contig_toggle_btn.styles = {'padding': '0px', 'line-height': '20px'}
+    # Create Contigs section header — no outer collapse; the inner
+    # "Genomic annotations" and "Other genomic features" subsections each
+    # have their own toggle below.
     contig_title = Div(text="<b>Contigs</b>", align="center")
-    contig_header = row(contig_toggle_btn, contig_title, sizing_mode="stretch_width", align="center", margin=(0, 0, 0, 0))
-    above_contig_children = []
-    
-    above_contig_content = column(
-        *above_contig_children,
-        visible=True, sizing_mode="stretch_width", margin=(0, 0, 0, 0)
-    )
-    contig_toggle_btn.on_click(make_toggle_callback(contig_toggle_btn, above_contig_content))
+    contig_header = row(contig_title, sizing_mode="stretch_width", align="center", margin=(0, 0, 0, 0))
 
     def on_contig_change(event):
         if global_toggle_lock['locked']:
@@ -1591,7 +1584,7 @@ def create_layout(db_path):
     if color_templates:
         template_options = ["(none)"] + list(color_templates.keys())
         template_select = Select(
-            title="Use template:",
+            title="Use a color template:",
             value="(none)",
             options=template_options,
             sizing_mode="stretch_width"
@@ -1819,10 +1812,11 @@ def create_layout(db_path):
     label_keys = color_qualifier_options
     if label_keys:
         feature_label_select = Select(
-            title="Label features with:",
+            title="Label annotations with:",
             value="product" if "product" in label_keys else label_keys[0],
             options=label_keys,
-            sizing_mode="stretch_width"
+            sizing_mode="stretch_width",
+            margin=(5, 5, 5, 5),
         )
 
     # Plot isoforms checkbox - only show if at least one locus_tag appears more than once
@@ -1907,44 +1901,145 @@ def create_layout(db_path):
         translated_sequence_row = row(translated_sequence_cbg, sizing_mode="stretch_width")
 
     if feature_type_multichoice is not None or combined_features_cbg is not None:
-        # Build simple Genome section header (no collapse needed - Contigs section handles that)
-        genome_title = Div(text="<b>Other genomic features to plot:</b>", align="center")
+        # --- Subsection 1: "Genomic annotations to plot" (collapsible) ---
+        # Covers the feature type multichoice, isoform toggle, and both
+        # sequence/translated-sequence rows. Coloring and labelling widgets
+        # live in the separate "Customise genomic annotations" subsection.
+        annotations_toggle_btn = Button(label="▶", width=20, height=20,
+                                        button_type="primary", align="center",
+                                        margin=0, stylesheets=[toggle_stylesheet])
+        annotations_toggle_btn.styles = {'padding': '0px', 'line-height': '20px'}
+        annotations_title = Div(text="Genomic annotations to plot", align="center")
+        annotations_header = row(annotations_toggle_btn, annotations_title,
+                                 sizing_mode="stretch_width", align="center")
+
+        annotations_children = []
+        if feature_type_multichoice is not None:
+            annotations_children.append(feature_type_multichoice)
+        if plot_isoforms_cbg is not None:
+            annotations_children.append(plot_isoforms_cbg)
+        if sequence_row is not None:
+            annotations_children.append(sequence_row)
+        if translated_sequence_row is not None:
+            annotations_children.append(translated_sequence_row)
+        annotations_content = pn.Column(*annotations_children, visible=False,
+                                        sizing_mode="stretch_width",
+                                        margin=(0, 0, 0, 0))
+        annotations_toggle_btn.on_click(
+            make_toggle_callback(annotations_toggle_btn, annotations_content))
+
+        # --- Subsection 2: "Customise genomic annotations" (collapsible) ---
+        # Independent sibling of the annotations-to-plot section. Bundles
+        # the coloring rules (template + custom color rows) and the label
+        # dropdown. Starts collapsed.
+        customise_header = None
+        customise_content = None
+        has_customise = (
+            template_select is not None
+            or color_qualifier_options
+            or feature_label_select is not None
+        )
+        if has_customise:
+            customise_toggle_btn = Button(label="▶", width=20, height=20,
+                                          button_type="primary", align="center",
+                                          margin=0, stylesheets=[toggle_stylesheet])
+            customise_toggle_btn.styles = {'padding': '0px', 'line-height': '20px'}
+            customise_title = Div(text="Customise genomic annotations", align="center")
+            customise_header = row(customise_toggle_btn, customise_title,
+                                   sizing_mode="stretch_width", align="center")
+
+            customise_children = []
+            if feature_label_select is not None:
+                customise_children.append(feature_label_select)
+            if template_select is not None or color_qualifier_options:
+                customise_children.append(Div(text="Color annotations with:"))
+            if color_qualifier_options:
+                customise_children.append(custom_color_column)
+            if template_select is not None:
+                customise_children.append(template_select)
+            customise_content = pn.Column(*customise_children, visible=False,
+                                          sizing_mode="stretch_width",
+                                          margin=(0, 0, 0, 0))
+            customise_toggle_btn.on_click(
+                make_toggle_callback(customise_toggle_btn, customise_content))
+
+        # --- Subsection 3: "Other genomic features to plot" (collapsible) ---
+        other_features_toggle_btn = Button(label="▶", width=20, height=20,
+                                           button_type="primary", align="center",
+                                           margin=0, stylesheets=[toggle_stylesheet])
+        other_features_toggle_btn.styles = {'padding': '0px', 'line-height': '20px'}
+        # Master checkbox whose label doubles as the section title — same
+        # pattern Variables modules use (CheckboxGroup with [module_name]).
+        # Toggling it checks/unchecks every feature in combined_features_cbg
+        # at once; bidirectional sync is wired below.
+        genome_master_cbg = CheckboxGroup(labels=["Other genomic features to plot"], active=[])
 
         genome_help_tooltip = widgets['helps_widgets'][genome_index_one] if genome_index_one is not None else None
         if genome_help_tooltip is not None:
-            help_btn = HelpButton(tooltip=genome_help_tooltip, width=20, height=20, align="center", button_type="light", stylesheets=[toggle_stylesheet])
-            genome_hdr = row(genome_title, help_btn, sizing_mode="stretch_width", align="center")
+            help_btn = HelpButton(tooltip=genome_help_tooltip, width=20, height=20,
+                                  align="center", button_type="light",
+                                  stylesheets=[toggle_stylesheet])
+            other_features_header = row(other_features_toggle_btn, genome_master_cbg, help_btn,
+                                        sizing_mode="stretch_width", align="center")
         else:
-            genome_hdr = genome_title
+            other_features_header = row(other_features_toggle_btn, genome_master_cbg,
+                                        sizing_mode="stretch_width", align="center")
 
-        # Build genome section
-        genome_children = []
-        # Title above multichoice
-        annotations_title = Div(text="<b>Genomic annotations to plot:</b>")
-        genome_children.append(annotations_title)
-        if feature_type_multichoice is not None:
-            genome_children.append(feature_type_multichoice)
-        if plot_isoforms_cbg is not None:
-            genome_children.append(plot_isoforms_cbg)
-        # Color section
-        if template_select is not None or color_qualifier_options:
-            color_label = Div(text="Color features with:")
-            genome_children.append(color_label)
-        if template_select is not None:
-            genome_children.append(template_select)
-        if color_qualifier_options:
-            genome_children.append(custom_color_column)
-        if feature_label_select is not None:
-            genome_children.append(feature_label_select)
-        if sequence_row is not None:
-            genome_children.append(sequence_row)
-        if translated_sequence_row is not None:
-            genome_children.append(translated_sequence_row)
-        genome_children.append(genome_hdr)
+        other_features_content = None
         if combined_features_cbg is not None:
             combined_features_cbg.visible = True
-            genome_children.append(combined_features_cbg)
-        genome_section = pn.Column(*genome_children, visible=True, sizing_mode="stretch_width", margin=(0, 0, 0, 0))
+            other_features_content = pn.Column(combined_features_cbg, visible=False,
+                                               sizing_mode="stretch_width",
+                                               margin=(0, 0, 0, 0))
+            other_features_toggle_btn.on_click(
+                make_toggle_callback(other_features_toggle_btn, other_features_content))
+
+            # Bidirectional sync: master ⇄ individual feature toggles.
+            # Mirrors make_module_callback / make_variable_callback used by
+            # the Variables subsections at ~line 2025.
+            genome_master_lock = {"locked": False}
+
+            def _on_genome_master_change(attr, old, new):
+                if genome_master_lock["locked"] or global_toggle_lock.get("locked", False):
+                    return
+                genome_master_lock["locked"] = True
+                try:
+                    master_on = 0 in genome_master_cbg.active
+                    if master_on:
+                        combined_features_cbg.active = list(range(len(combined_features_cbg.labels)))
+                    else:
+                        combined_features_cbg.active = []
+                finally:
+                    genome_master_lock["locked"] = False
+
+            def _on_combined_features_change(attr, old, new):
+                if genome_master_lock["locked"] or global_toggle_lock.get("locked", False):
+                    return
+                total = len(combined_features_cbg.labels)
+                active_count = len(combined_features_cbg.active)
+                genome_master_lock["locked"] = True
+                try:
+                    if total > 0 and active_count == total:
+                        genome_master_cbg.active = [0]
+                    else:
+                        genome_master_cbg.active = []
+                finally:
+                    genome_master_lock["locked"] = False
+
+            genome_master_cbg.on_change("active", _on_genome_master_change)
+            combined_features_cbg.on_change("active", _on_combined_features_change)
+
+        # Assemble the full genome section from the independent collapsibles.
+        genome_section_children = [annotations_header, annotations_content]
+        if customise_header is not None:
+            genome_section_children.append(customise_header)
+            if customise_content is not None:
+                genome_section_children.append(customise_content)
+        genome_section_children.append(other_features_header)
+        if other_features_content is not None:
+            genome_section_children.append(other_features_content)
+        genome_section = pn.Column(*genome_section_children, visible=True,
+                                   sizing_mode="stretch_width", margin=(0, 0, 0, 0))
 
     if genome_section is not None:
         below_contig_children = list(below_contig_children) + [genome_section]
@@ -1959,7 +2054,6 @@ def create_layout(db_path):
         *below_contig_children,
         visible=True, sizing_mode="stretch_width", margin=(0, 0, 0, 0)
     )
-    contig_toggle_btn.on_click(make_toggle_callback(contig_toggle_btn, below_contig_content))
 
     # Initialize position inputs if contig is pre-filled
     if widgets['contig_select'].value and widgets['contig_select'].value in widgets['contig_lengths']:
@@ -2268,7 +2362,7 @@ def create_layout(db_path):
     # When no samples: hide views toggle, samples section, and variables section
     if widgets['has_samples']:
         controls_children = [logo, views, separator_filtering, filtering_header, filtering_content,
-                             separator_contigs, contig_header, above_contig_content, widgets['contig_select'], below_contig_content,
+                             separator_contigs, contig_header, widgets['contig_select'], below_contig_content,
                              separator_samples, sample_title, above_sample_content, widgets['sample_select'],
                              separator_variables,
                              variables_section_one,  # One Sample view (with module checkboxes)
@@ -2279,7 +2373,7 @@ def create_layout(db_path):
     else:
         # No samples: simplified UI with Filtering, Contigs, Plotting parameters, and Apply button
         controls_children = [logo, filtering_header, filtering_content,
-                             separator_contigs, contig_header, above_contig_content, widgets['contig_select'], below_contig_content,
+                             separator_contigs, contig_header, widgets['contig_select'], below_contig_content,
                              separator_plotting_params, plotting_params_header, plotting_params_content,
                              buttons_row]
         placeholder_text = "<i>No plot yet. Select one contig and click Apply to view the genome annotation.</i>"
