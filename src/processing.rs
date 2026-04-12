@@ -1739,9 +1739,22 @@ pub fn run_all_samples(
         HashMap::new()
     };
 
+    // Open timing log early so pre-sample phases (autoblast, GC) are captured
+    let mut timing_file: Option<fs::File> = if config.enable_timing {
+        match open_timing_log(output_db, config.threads, bam_files.len()) {
+            Ok(f) => Some(f),
+            Err(e) => { eprintln!("Warning: could not open timing log: {}", e); None }
+        }
+    } else {
+        None
+    };
+
     // 6. If sequences available, run autoblast with rayon (only for new contigs in extend mode)
     let blast_contigs = &new_contigs_for_blast;
     let has_sequences = blast_contigs.iter().any(|c| c.sequence.is_some());
+    let n_contigs_with_seq = blast_contigs.iter().filter(|c| c.sequence.is_some()).count();
+
+    let t_autoblast = if config.enable_timing { Some(std::time::Instant::now()) } else { None };
     let repeats = if has_sequences {
         let reps = run_autoblast(blast_contigs, config.threads)?;
         db_writer.write_repeats(&reps)?;
@@ -1749,8 +1762,10 @@ pub fn run_all_samples(
     } else {
         Vec::new()
     };
+    let autoblast_secs = t_autoblast.map(|t| t.elapsed().as_secs_f64()).unwrap_or(0.0);
 
     // 7. Compute and write GC content and GC skew from sequence data (only for new contigs)
+    let t_gc = if config.enable_timing { Some(std::time::Instant::now()) } else { None };
     let gc_data: Vec<GCContentData> = blast_contigs
         .iter()
         .filter_map(|contig| {
@@ -1774,6 +1789,17 @@ pub fn run_all_samples(
         db_writer.write_gc_skew(&gc_data)?;
         db_writer.update_contig_gc_stats(&gc_data)?;
     }
+    let gc_secs = t_gc.map(|t| t.elapsed().as_secs_f64()).unwrap_or(0.0);
+
+    // Write pre-sample timing block
+    if let Some(ref mut f) = timing_file {
+        use std::io::Write;
+        let _ = writeln!(f, "=== Pre-sample phases ===");
+        let _ = writeln!(f, "  Contigs with sequence: {}", n_contigs_with_seq);
+        let _ = writeln!(f, "  Autoblast            : {:>10.3} s", autoblast_secs);
+        let _ = writeln!(f, "  GC content + skew    : {:>10.3} s", gc_secs);
+        let _ = writeln!(f);
+    }
 
     // If no BAM files provided, skip sample processing (genbank-only mode)
     if bam_files.is_empty() {
@@ -1795,7 +1821,7 @@ pub fn run_all_samples(
     eprintln!("\n### Processing {} samples with {} threads", bam_files.len(), config.threads);
     eprintln!("Modules: {}\n", modules.join(", "));
 
-    let result = process_samples_parallel(&bam_files, &contigs, modules, config, &circularity_map, db_writer, &repeats, &annotations, output_db)?;
+    let result = process_samples_parallel(&bam_files, &contigs, modules, config, &circularity_map, db_writer, &repeats, &annotations, output_db, timing_file, autoblast_secs, gc_secs)?;
 
     print_summary(&result, output_db);
 
@@ -1830,6 +1856,9 @@ fn process_samples_parallel(
     repeats: &[RepeatsData],
     annotations: &[crate::types::FeatureAnnotation],
     output_db: &Path,
+    timing_file: Option<fs::File>,
+    autoblast_secs: f64,
+    gc_secs: f64,
 ) -> Result<ProcessResult> {
     let total = bam_files.len();
     let is_tty = atty::is(Stream::Stderr);
@@ -1841,7 +1870,7 @@ fn process_samples_parallel(
     //   outer sample parallelism causes all samples to progress simultaneously
     //   without any completing. Sequential ensures samples finish one-by-one.
     if config.threads == 1 || contigs.len() >= 500 {
-        return process_samples_sequential(bam_files, contigs, modules, config, circularity_map, db_writer, is_tty, repeats, annotations, output_db);
+        return process_samples_sequential(bam_files, contigs, modules, config, circularity_map, db_writer, is_tty, repeats, annotations, output_db, timing_file, autoblast_secs, gc_secs);
     }
 
     // Adaptive channel size based on memory pressure from contig count
@@ -1899,15 +1928,6 @@ fn process_samples_parallel(
     let is_tty_writer = is_tty;
     let total_writer = total;
 
-    // Open timing log incrementally so data is available even if calculate crashes
-    let timing_file = if config.enable_timing {
-        match open_timing_log(output_db, config.threads, total) {
-            Ok(f) => Some(f),
-            Err(e) => { eprintln!("Warning: could not open timing log: {}", e); None }
-        }
-    } else {
-        None
-    };
     let timing_threads = config.threads;
 
     // Spawn dedicated writer thread
@@ -2052,7 +2072,7 @@ fn process_samples_parallel(
         let log_path = timing_log_path(output_db);
         match fs::OpenOptions::new().append(true).open(&log_path) {
             Ok(mut f) => {
-                if let Err(e) = finish_timing_log(&mut f, &all_timings, elapsed) {
+                if let Err(e) = finish_timing_log(&mut f, &all_timings, elapsed, autoblast_secs, gc_secs) {
                     eprintln!("Warning: failed to write timing totals: {}", e);
                 }
             }
@@ -2081,7 +2101,10 @@ fn process_samples_sequential(
     is_tty: bool,
     repeats: &[RepeatsData],
     annotations: &[crate::types::FeatureAnnotation],
-    output_db: &Path,
+    _output_db: &Path,
+    timing_file: Option<fs::File>,
+    autoblast_secs: f64,
+    gc_secs: f64,
 ) -> Result<ProcessResult> {
     let total = bam_files.len();
     let start_time = std::time::Instant::now();
@@ -2106,16 +2129,7 @@ fn process_samples_sequential(
     let mut processing_time_total = std::time::Duration::ZERO;
     let mut writing_time_total = std::time::Duration::ZERO;
     let mut all_timings: Vec<SampleTimings> = Vec::new();
-
-    // Open timing log incrementally so data is available even if calculate crashes
-    let mut timing_file = if config.enable_timing {
-        match open_timing_log(output_db, config.threads, total) {
-            Ok(f) => Some(f),
-            Err(e) => { eprintln!("Warning: could not open timing log: {}", e); None }
-        }
-    } else {
-        None
-    };
+    let mut timing_file = timing_file;
 
     for bam_path in bam_files {
         let sample_start = std::time::Instant::now();
@@ -2198,7 +2212,7 @@ fn process_samples_sequential(
     // Append grand totals to the timing log
     if config.enable_timing && !all_timings.is_empty() {
         if let Some(ref mut f) = timing_file {
-            if let Err(e) = finish_timing_log(f, &all_timings, start_time.elapsed()) {
+            if let Err(e) = finish_timing_log(f, &all_timings, start_time.elapsed(), autoblast_secs, gc_secs) {
                 eprintln!("Warning: failed to write timing totals: {}", e);
             }
         }
@@ -2281,11 +2295,17 @@ fn finish_timing_log(
     f: &mut fs::File,
     timings: &[SampleTimings],
     total_wall: std::time::Duration,
+    autoblast_secs: f64,
+    gc_secs: f64,
 ) -> Result<()> {
     use std::io::Write;
     writeln!(f, "=============================================================")?;
     writeln!(f, "GRAND TOTALS")?;
     writeln!(f, "=============================================================")?;
+    writeln!(f, "  ---- Pre-sample phases ----")?;
+    writeln!(f, "  Autoblast            : {:>10.3} s", autoblast_secs)?;
+    writeln!(f, "  GC content + skew    : {:>10.3} s", gc_secs)?;
+    writeln!(f, "  ---- Per-sample phases ----")?;
     let sum_dur = |g: fn(&SampleTimings) -> std::time::Duration| -> f64 {
         timings.iter().map(|t| g(t).as_secs_f64()).sum()
     };
