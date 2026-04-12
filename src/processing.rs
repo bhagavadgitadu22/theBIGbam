@@ -21,7 +21,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::sync_channel;
 use std::thread;
 
-use crate::bam_reader::{detect_sequencing_type, get_total_read_count, process_contig_streaming};
+use crate::bam_reader::{detect_sequencing_type, get_total_read_count, process_contig_streaming, BamPhaseTimings};
 use crate::compress::{
     Run,
     add_compressed_feature_with_stats,
@@ -99,14 +99,21 @@ pub struct SampleTimings {
     pub header_read: std::time::Duration,
     pub total_read_count: std::time::Duration,
     pub build_lookups: std::time::Duration,
+    pub filter_tids: std::time::Duration,
     pub par_iter_wall: std::time::Duration,
     pub merge_results: std::time::Duration,
     // Per-contig sub-phase sums inside par_iter (nanoseconds, summed across threads).
+    // bam_open_ns now counts map_init calls (~once per rayon worker chunk),
+    // not once per contig.
     pub bam_open_ns: u64,
-    pub header_lookup_ns: u64,
     pub cds_index_ns: u64,
     pub streaming_ns: u64,
     pub feature_calc_ns: u64,
+    // Breakdown of streaming_ns (see BamPhaseTimings in bam_reader.rs).
+    pub stream_fetch_seek_ns: u64,
+    pub stream_records_ns: u64,
+    pub stream_process_read_ns: u64,
+    pub stream_finalize_ns: u64,
     // Filled by the sample-level caller, not process_sample itself.
     pub db_write: std::time::Duration,
     pub total: std::time::Duration,
@@ -115,20 +122,26 @@ pub struct SampleTimings {
 /// Thread-safe accumulators for per-contig sub-phase timings inside the par_iter.
 struct TimingAccum {
     bam_open_ns: AtomicU64,
-    header_lookup_ns: AtomicU64,
     cds_index_ns: AtomicU64,
     streaming_ns: AtomicU64,
     feature_calc_ns: AtomicU64,
+    stream_fetch_seek_ns: AtomicU64,
+    stream_records_ns: AtomicU64,
+    stream_process_read_ns: AtomicU64,
+    stream_finalize_ns: AtomicU64,
 }
 
 impl TimingAccum {
     fn new() -> Self {
         Self {
             bam_open_ns: AtomicU64::new(0),
-            header_lookup_ns: AtomicU64::new(0),
             cds_index_ns: AtomicU64::new(0),
             streaming_ns: AtomicU64::new(0),
             feature_calc_ns: AtomicU64::new(0),
+            stream_fetch_seek_ns: AtomicU64::new(0),
+            stream_records_ns: AtomicU64::new(0),
+            stream_process_read_ns: AtomicU64::new(0),
+            stream_finalize_ns: AtomicU64::new(0),
         }
     }
 }
@@ -1196,11 +1209,12 @@ pub fn process_sample(
     // --- Phase: header_read ---
     let t0 = if time_on { Some(std::time::Instant::now()) } else { None };
 
-    // Get number of reference sequences using temporary reader
+    // Open the BAM once in the single-threaded prelude. We keep it alive through
+    // the pre-filter phase below so the par_iter never needs to re-read the
+    // header — a reopen costs ~50-200 ms for BAMs with many references.
     let temp_bam = IndexedReader::from_path(bam_path)
         .with_context(|| format!("Failed to open indexed BAM: {}", bam_path.display()))?;
     let n_refs = temp_bam.header().target_count();
-    drop(temp_bam);
 
     // Determine sequencing type: use provided value or auto-detect from this BAM file
     let seq_type = match config.sequencing_type {
@@ -1256,134 +1270,172 @@ pub fn process_sample(
         s.build_lookups = t.elapsed();
     }
 
+    // --- Phase: filter_tids (single-threaded) ---
+    // Walk the BAM header once and materialise only the tids whose reference
+    // name is also a known contig. This spares the par_iter from opening the
+    // BAM for thousands of references we'd immediately discard.
+    let t_filter = if time_on { Some(std::time::Instant::now()) } else { None };
+    let jobs: Vec<(u32, i64, String, usize)> = (0..n_refs)
+        .filter_map(|tid| {
+            let ref_name = std::str::from_utf8(temp_bam.header().tid2name(tid)).ok()?;
+            let contig_idx = contig_by_name.get(ref_name)?;
+            let ref_length = temp_bam.header().target_len(tid).unwrap_or(0) as usize;
+            Some((tid, (*contig_idx + 1) as i64, ref_name.to_string(), ref_length))
+        })
+        .collect();
+    drop(temp_bam);
+    if let (Some(s), Some(t)) = (st.as_mut(), t_filter) {
+        s.filter_tids = t.elapsed();
+    }
+
     // --- Phase: par_iter ---
     let accum = if time_on { Some(TimingAccum::new()) } else { None };
     let accum_ref = accum.as_ref();
     let t_par = if time_on { Some(std::time::Instant::now()) } else { None };
 
-    // Process contigs in parallel - each gets its own BAM reader
-    // This is critical for samples with many contigs (e.g., 50,000 contigs with 1 sample)
-    let results: Vec<_> = (0..n_refs)
-        .into_par_iter()
-        .filter_map(|tid| {
-            // Sub-phase: BAM reader open
-            let ts = accum_ref.map(|_| std::time::Instant::now());
-            let mut bam = IndexedReader::from_path(bam_path).ok()?;
-            bam.set_threads(1).ok()?;
-            if let (Some(a), Some(t)) = (accum_ref, ts) {
-                a.bam_open_ns.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
-            }
-
-            // Sub-phase: header + name lookup
-            let ts = accum_ref.map(|_| std::time::Instant::now());
-            let ref_name = std::str::from_utf8(bam.header().tid2name(tid)).ok()?.to_string();
-            let bam_length = bam.header().target_len(tid).unwrap_or(0) as usize;
-            let ref_length = bam_length;
-            let contig_idx = *contig_by_name.get(ref_name.as_str())?;
-            let contig_id = (contig_idx + 1) as i64;
-            if let (Some(a), Some(t)) = (accum_ref, ts) {
-                a.header_lookup_ns.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
-            }
-
-            // Sub-phase: CDS index build
-            let ts = accum_ref.map(|_| std::time::Instant::now());
-            let cds_index = if flags.mapping_metrics {
-                match annos_by_contig.get(&contig_id) {
-                    Some(slice) if !slice.is_empty() => {
-                        let idx = CdsIndex::from_contig_annotations(slice);
-                        if idx.is_empty() { None } else { Some(idx) }
-                    }
-                    _ => None,
+    // Each rayon worker chunk opens the BAM once via map_init and reuses it
+    // across all of its jobs — the reader repositions cheaply on each fetch().
+    // For a 362k-reference BAM this collapses ~362k opens to ~tens.
+    let results: Vec<_> = jobs
+        .par_iter()
+        .map_init(
+            || {
+                let ts = accum_ref.map(|_| std::time::Instant::now());
+                let reader = IndexedReader::from_path(bam_path)
+                    .ok()
+                    .and_then(|mut b| b.set_threads(1).ok().map(|_| b));
+                if let (Some(a), Some(t)) = (accum_ref, ts) {
+                    a.bam_open_ns.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
                 }
-            } else {
-                None
-            };
-            if let (Some(a), Some(t)) = (accum_ref, ts) {
-                a.cds_index_ns.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
-            }
+                reader
+            },
+            |bam_opt, (tid, contig_id, ref_name, ref_length)| {
+                let bam = bam_opt.as_mut()?;
+                let tid = *tid;
+                let contig_id = *contig_id;
+                let ref_length = *ref_length;
 
-            // Sub-phase: process_contig_streaming
-            let ts = accum_ref.map(|_| std::time::Instant::now());
-            let (mut arrays, coverage_pct, primary_count) = match process_contig_streaming(&mut bam, &ref_name, ref_length, seq_type, flags, is_circular, config.min_aligned_fraction, config.phagetermini_config.min_clipping_length) {
-                Ok(Some(result)) => result,
-                Ok(None) => return None,
-                Err(e) => {
-                    eprintln!("Error processing contig {} in {}: {}", ref_name, bam_path.display(), e);
+                // Sub-phase: CDS index build
+                let ts = accum_ref.map(|_| std::time::Instant::now());
+                let cds_index = if flags.mapping_metrics {
+                    match annos_by_contig.get(&contig_id) {
+                        Some(slice) if !slice.is_empty() => {
+                            let idx = CdsIndex::from_contig_annotations(slice);
+                            if idx.is_empty() { None } else { Some(idx) }
+                        }
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
+                if let (Some(a), Some(t)) = (accum_ref, ts) {
+                    a.cds_index_ns.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                }
+
+                // Sub-phase: process_contig_streaming
+                let ts = accum_ref.map(|_| std::time::Instant::now());
+                let mut phase_t: Option<BamPhaseTimings> = accum_ref.map(|_| BamPhaseTimings::default());
+                let (mut arrays, coverage_pct, primary_count) = match process_contig_streaming(bam, tid, ref_name, ref_length, seq_type, flags, is_circular, config.min_aligned_fraction, config.phagetermini_config.min_clipping_length, &mut phase_t) {
+                    Ok(Some(result)) => result,
+                    Ok(None) => {
+                        // Flush phase_timings even on early-return so coverage-filtered
+                        // contigs still show up in the log.
+                        if let (Some(a), Some(pt)) = (accum_ref, phase_t.as_ref()) {
+                            a.stream_fetch_seek_ns.fetch_add(pt.fetch_seek_ns, Ordering::Relaxed);
+                            a.stream_records_ns.fetch_add(pt.records_ns, Ordering::Relaxed);
+                            a.stream_process_read_ns.fetch_add(pt.process_read_ns, Ordering::Relaxed);
+                            a.stream_finalize_ns.fetch_add(pt.finalize_ns, Ordering::Relaxed);
+                        }
+                        if let (Some(a), Some(t)) = (accum_ref, ts) {
+                            a.streaming_ns.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                        }
+                        return None;
+                    }
+                    Err(e) => {
+                        eprintln!("Error processing contig {} in {}: {}", ref_name, bam_path.display(), e);
+                        return None;
+                    }
+                };
+                if let (Some(a), Some(pt)) = (accum_ref, phase_t.as_ref()) {
+                    a.stream_fetch_seek_ns.fetch_add(pt.fetch_seek_ns, Ordering::Relaxed);
+                    a.stream_records_ns.fetch_add(pt.records_ns, Ordering::Relaxed);
+                    a.stream_process_read_ns.fetch_add(pt.process_read_ns, Ordering::Relaxed);
+                    a.stream_finalize_ns.fetch_add(pt.finalize_ns, Ordering::Relaxed);
+                }
+                if let (Some(a), Some(t)) = (accum_ref, ts) {
+                    a.streaming_ns.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                }
+
+                // Early-exit: skip contigs with low mean coverage depth (only when threshold > 0)
+                let coverage_mean = arrays.coverage_mean() as f32;
+                if config.min_coverage_depth > 0.0 && (coverage_mean as f64) < config.min_coverage_depth {
                     return None;
                 }
-            };
-            if let (Some(a), Some(t)) = (accum_ref, ts) {
-                a.streaming_ns.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
-            }
 
-            // Early-exit: skip contigs with low mean coverage depth (only when threshold > 0)
-            let coverage_mean = arrays.coverage_mean() as f32;
-            if config.min_coverage_depth > 0.0 && (coverage_mean as f64) < config.min_coverage_depth {
-                return None;
-            }
+                // Sub-phase: feature calculation
+                let ts = accum_ref.map(|_| std::time::Instant::now());
+                let mut feature_blobs: Vec<(String, String, crate::blob::EncodedBlob)> = Vec::new();
+                let (packaging_info, metrics_info) = add_features_from_arrays(&mut arrays, ref_name, ref_length, config, is_circular, seq_type, flags, primary_count, repeats, cds_index.as_ref(), &mut feature_blobs);
+                let coverage_median = arrays.coverage_median() as f32;
+                let coverage_trimmed_mean = arrays.coverage_trimmed_mean(0.05) as f32;
 
-            // Sub-phase: feature calculation
-            let ts = accum_ref.map(|_| std::time::Instant::now());
-            let mut feature_blobs: Vec<(String, String, crate::blob::EncodedBlob)> = Vec::new();
-            let (packaging_info, metrics_info) = add_features_from_arrays(&mut arrays, &ref_name, ref_length, config, is_circular, seq_type, flags, primary_count, repeats, cds_index.as_ref(), &mut feature_blobs);
-            let coverage_median = arrays.coverage_median() as f32;
-            let coverage_trimmed_mean = arrays.coverage_trimmed_mean(0.05) as f32;
+                // Above expected aligned fraction: exact_af >= (1 - e^(-0.883 × coverage_mean)) × 100
+                let above_expected = coverage_pct >= (1.0 - (-0.883 * coverage_mean as f64).exp()) * 100.0;
 
-            // Above expected aligned fraction: exact_af >= (1 - e^(-0.883 × coverage_mean)) × 100
-            let above_expected = coverage_pct >= (1.0 - (-0.883 * coverage_mean as f64).exp()) * 100.0;
+                // Calculate coverage variation using Fano factor style normalization
+                let coverage_relative_coverage_roughness = if arrays.primary_reads.len() > 1 && coverage_mean > 0.0 {
+                    let n = arrays.primary_reads.len();
+                    let mean_cov = coverage_mean as f64;
+                    let sum_squared_diff: f64 = arrays.primary_reads
+                        .windows(2)
+                        .map(|w| {
+                            let diff = w[1] as f64 - w[0] as f64;
+                            diff * diff
+                        })
+                        .sum::<f64>() / (n - 1) as f64;
+                    let root_diff = sum_squared_diff.sqrt() / mean_cov;
+                    (root_diff * 1000000.0) as f32
+                } else {
+                    0.0
+                };
 
-            // Calculate coverage variation using Fano factor style normalization
-            let coverage_relative_coverage_roughness = if arrays.primary_reads.len() > 1 && coverage_mean > 0.0 {
-                let n = arrays.primary_reads.len();
-                let mean_cov = coverage_mean as f64;
-                let sum_squared_diff: f64 = arrays.primary_reads
-                    .windows(2)
-                    .map(|w| {
-                        let diff = w[1] as f64 - w[0] as f64;
-                        diff * diff
-                    })
-                    .sum::<f64>() / (n - 1) as f64;
-                let root_diff = sum_squared_diff.sqrt() / mean_cov;
-                (root_diff * 1000000.0) as f32
-            } else {
-                0.0
-            };
+                // Coverage SD: Coefficient of Variation (CV) = std_dev / mean
+                let coverage_coefficient_of_variation = if arrays.primary_reads.len() > 0 && coverage_mean > 0.0 {
+                    let mean_cov = coverage_mean as f64;
+                    let n = arrays.primary_reads.len() as f64;
+                    let variance: f64 = arrays.primary_reads
+                        .iter()
+                        .map(|&x| {
+                            let diff = x as f64 - mean_cov;
+                            diff * diff
+                        })
+                        .sum::<f64>() / n;
+                    let cv = variance.sqrt() / mean_cov;
+                    (cv * 1_000_000.0) as f32
+                } else {
+                    0.0
+                };
 
-            // Coverage SD: Coefficient of Variation (CV) = std_dev / mean
-            let coverage_coefficient_of_variation = if arrays.primary_reads.len() > 0 && coverage_mean > 0.0 {
-                let mean_cov = coverage_mean as f64;
-                let n = arrays.primary_reads.len() as f64;
-                let variance: f64 = arrays.primary_reads
-                    .iter()
-                    .map(|&x| {
-                        let diff = x as f64 - mean_cov;
-                        diff * diff
-                    })
-                    .sum::<f64>() / n;
-                let cv = variance.sqrt() / mean_cov;
-                (cv * 1_000_000.0) as f32
-            } else {
-                0.0
-            };
+                let presence = PresenceData {
+                    contig_name: ref_name.clone(),
+                    coverage_pct: coverage_pct as f32,
+                    above_expected_aligned_fraction: above_expected,
+                    read_count: primary_count,
+                    coverage_relative_coverage_roughness,
+                    coverage_coefficient_of_variation,
+                    coverage_mean,
+                    coverage_median,
+                    coverage_trimmed_mean,
+                };
 
-            let presence = PresenceData {
-                contig_name: ref_name.clone(),
-                coverage_pct: coverage_pct as f32,
-                above_expected_aligned_fraction: above_expected,
-                read_count: primary_count,
-                coverage_relative_coverage_roughness,
-                coverage_coefficient_of_variation,
-                coverage_mean,
-                coverage_median,
-                coverage_trimmed_mean,
-            };
+                if let (Some(a), Some(t)) = (accum_ref, ts) {
+                    a.feature_calc_ns.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                }
 
-            if let (Some(a), Some(t)) = (accum_ref, ts) {
-                a.feature_calc_ns.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
-            }
-
-            Some((feature_blobs, presence, packaging_info, metrics_info, primary_count))
-        })
+                Some((feature_blobs, presence, packaging_info, metrics_info, primary_count))
+            },
+        )
+        .filter_map(|x| x)
         .collect();
 
     if let (Some(s), Some(t)) = (st.as_mut(), t_par) {
@@ -1423,10 +1475,13 @@ pub fn process_sample(
         s.merge_results = t.elapsed();
         if let Some(a) = accum.as_ref() {
             s.bam_open_ns = a.bam_open_ns.load(Ordering::Relaxed);
-            s.header_lookup_ns = a.header_lookup_ns.load(Ordering::Relaxed);
             s.cds_index_ns = a.cds_index_ns.load(Ordering::Relaxed);
             s.streaming_ns = a.streaming_ns.load(Ordering::Relaxed);
             s.feature_calc_ns = a.feature_calc_ns.load(Ordering::Relaxed);
+            s.stream_fetch_seek_ns = a.stream_fetch_seek_ns.load(Ordering::Relaxed);
+            s.stream_records_ns = a.stream_records_ns.load(Ordering::Relaxed);
+            s.stream_process_read_ns = a.stream_process_read_ns.load(Ordering::Relaxed);
+            s.stream_finalize_ns = a.stream_finalize_ns.load(Ordering::Relaxed);
         }
     }
 
@@ -2199,17 +2254,21 @@ fn write_sample_timing(f: &mut fs::File, t: &SampleTimings, threads: usize) -> R
     writeln!(f, "  Header read          : {:>10.3} s", t.header_read.as_secs_f64())?;
     writeln!(f, "  Total read count     : {:>10.3} s", t.total_read_count.as_secs_f64())?;
     writeln!(f, "  Build lookups        : {:>10.3} s", t.build_lookups.as_secs_f64())?;
+    writeln!(f, "  Filter tids (pre-par): {:>10.3} s", t.filter_tids.as_secs_f64())?;
     writeln!(f, "  Par-iter wall        : {:>10.3} s", t.par_iter_wall.as_secs_f64())?;
     writeln!(f, "  Merge contig results : {:>10.3} s", t.merge_results.as_secs_f64())?;
     writeln!(f, "  DB write             : {:>10.3} s", t.db_write.as_secs_f64())?;
     writeln!(f, "  TOTAL per sample     : {:>10.3} s", t.total.as_secs_f64())?;
     writeln!(f, "  ---- Par-iter sub-phase sums (CPU-seconds across threads) ----")?;
     writeln!(f, "  BAM reader open      : {:>10.3} s", ns_to_s(t.bam_open_ns))?;
-    writeln!(f, "  Header + name lookup : {:>10.3} s", ns_to_s(t.header_lookup_ns))?;
     writeln!(f, "  CDS index build      : {:>10.3} s", ns_to_s(t.cds_index_ns))?;
     writeln!(f, "  process_contig_stream: {:>10.3} s", ns_to_s(t.streaming_ns))?;
+    writeln!(f, "    . fetch seek       : {:>10.3} s", ns_to_s(t.stream_fetch_seek_ns))?;
+    writeln!(f, "    . record loop (htslib+prep): {:>10.3} s", ns_to_s(t.stream_records_ns))?;
+    writeln!(f, "    . process_read     : {:>10.3} s", ns_to_s(t.stream_process_read_ns))?;
+    writeln!(f, "    . finalize+cov     : {:>10.3} s", ns_to_s(t.stream_finalize_ns))?;
     writeln!(f, "  Feature calculation  : {:>10.3} s", ns_to_s(t.feature_calc_ns))?;
-    let sub_sum_ns = t.bam_open_ns + t.header_lookup_ns + t.cds_index_ns
+    let sub_sum_ns = t.bam_open_ns + t.cds_index_ns
                    + t.streaming_ns + t.feature_calc_ns;
     writeln!(f, "  (sum of above)       : {:>10.3} s  ({}x threads -> wall ~ {:.1} s)",
              ns_to_s(sub_sum_ns), threads, ns_to_s(sub_sum_ns) / threads as f64)?;
@@ -2236,6 +2295,7 @@ fn finish_timing_log(
     writeln!(f, "  Header read          : {:>10.3} s", sum_dur(|t| t.header_read))?;
     writeln!(f, "  Total read count     : {:>10.3} s", sum_dur(|t| t.total_read_count))?;
     writeln!(f, "  Build lookups        : {:>10.3} s", sum_dur(|t| t.build_lookups))?;
+    writeln!(f, "  Filter tids (pre-par): {:>10.3} s", sum_dur(|t| t.filter_tids))?;
     writeln!(f, "  Par-iter wall        : {:>10.3} s", sum_dur(|t| t.par_iter_wall))?;
     writeln!(f, "  Merge contig results : {:>10.3} s", sum_dur(|t| t.merge_results))?;
     writeln!(f, "  DB write             : {:>10.3} s", sum_dur(|t| t.db_write))?;
@@ -2243,9 +2303,12 @@ fn finish_timing_log(
     writeln!(f, "  Wall-clock (calc)    : {:>10.3} s", total_wall.as_secs_f64())?;
     writeln!(f, "  ---- Par-iter sub-phase sums ----")?;
     writeln!(f, "  BAM reader open      : {:>10.3} s", sum_ns(|t| t.bam_open_ns))?;
-    writeln!(f, "  Header + name lookup : {:>10.3} s", sum_ns(|t| t.header_lookup_ns))?;
     writeln!(f, "  CDS index build      : {:>10.3} s", sum_ns(|t| t.cds_index_ns))?;
     writeln!(f, "  process_contig_stream: {:>10.3} s", sum_ns(|t| t.streaming_ns))?;
+    writeln!(f, "    . fetch seek       : {:>10.3} s", sum_ns(|t| t.stream_fetch_seek_ns))?;
+    writeln!(f, "    . record loop (htslib+prep): {:>10.3} s", sum_ns(|t| t.stream_records_ns))?;
+    writeln!(f, "    . process_read     : {:>10.3} s", sum_ns(|t| t.stream_process_read_ns))?;
+    writeln!(f, "    . finalize+cov     : {:>10.3} s", sum_ns(|t| t.stream_finalize_ns))?;
     writeln!(f, "  Feature calculation  : {:>10.3} s", sum_ns(|t| t.feature_calc_ns))?;
     Ok(())
 }

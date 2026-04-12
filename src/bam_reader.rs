@@ -22,6 +22,21 @@ const LONG_READ_LENGTH_THRESHOLD: usize = 1000;
 /// We only need to check a few reads - they should all be the same type.
 const SEQUENCING_TYPE_SAMPLE_SIZE: usize = 100;
 
+/// Per-contig timing breakdown for `process_contig_streaming`.
+/// Populated only when the caller passes `Some(&mut _)`.
+#[derive(Default, Clone, Debug)]
+pub struct BamPhaseTimings {
+    /// `bam.fetch(...)` — BAM index seek cost.
+    pub fetch_seek_ns: u64,
+    /// Record-loop wall minus the time spent inside `process_read`. This is
+    /// htslib record decoding + our per-record filtering (cigar/md/seq).
+    pub records_ns: u64,
+    /// Cumulative time inside `process_read(...)` — our feature-array work.
+    pub process_read_ns: u64,
+    /// Post-loop: `coverage_percentage()` + `finalize_strands()` (if phagetermini).
+    pub finalize_ns: u64,
+}
+
 // ============================================================================
 // Sequencing Type Detection
 // ============================================================================
@@ -80,6 +95,7 @@ pub fn detect_sequencing_type(bam_path: &Path) -> Result<SequencingType> {
 /// Returns (FeatureArrays, coverage_pct, primary_count) or None if contig has no reads.
 pub fn process_contig_streaming(
     bam: &mut bam::IndexedReader,
+    tid: u32,
     contig_name: &str,
     ref_length: usize,
     seq_type: SequencingType,
@@ -87,18 +103,20 @@ pub fn process_contig_streaming(
     circular: bool,
     min_aligned_fraction: f64,
     min_clipping_length: u32,
+    phase_timings: &mut Option<BamPhaseTimings>,
 ) -> Result<Option<(FeatureArrays, f64, u64)>> {
-    // -------------------------------------------------------------------------
-    // Step 1: Check if this contig exists in the BAM file
-    // -------------------------------------------------------------------------
-    // BAM files have a header listing all reference sequences. If our contig
-    // isn't in the header, there are no reads for it.
-    if bam.header().tid(contig_name.as_bytes()).is_none() {
-        return Ok(None);
-    }
+    let time_on = phase_timings.is_some();
 
-    bam.fetch((contig_name, 0, ref_length as i64))
+    // Fetch by tid directly — skips the name→tid hash lookup (and, crucially,
+    // the lazy O(n_refs) hash-table build the first time any name lookup runs
+    // on a freshly opened reader). Callers pre-validate the tid against the
+    // BAM header, so no existence check is needed here.
+    let t_fetch = if time_on { Some(std::time::Instant::now()) } else { None };
+    bam.fetch(bam::FetchDefinition::Region(tid as i32, 0, ref_length as i64))
         .with_context(|| format!("Failed to fetch reads for contig: {}", contig_name))?;
+    if let (Some(pt), Some(t)) = (phase_timings.as_mut(), t_fetch) {
+        pt.fetch_seek_ns = t.elapsed().as_nanos() as u64;
+    }
 
     let mut arrays = FeatureArrays::new(ref_length);
     let need_md = flags.needs_md();
@@ -107,6 +125,11 @@ pub fn process_contig_streaming(
     let mut cigar_buf: Vec<(u32, u32)> = Vec::with_capacity(16);
     let mut seq_buf: Vec<u8> = Vec::with_capacity(256);
     let need_seq = flags.mapping_metrics;
+
+    // Sum of time spent strictly inside process_read(). Subtracted from total
+    // loop wall below to yield records_ns (decode + per-record filtering).
+    let mut process_read_ns: u64 = 0;
+    let t_loop = if time_on { Some(std::time::Instant::now()) } else { None };
 
     for result in bam.records() {
         let record = match result {
@@ -272,6 +295,7 @@ pub fn process_contig_streaming(
             }
         }
 
+        let t_pr = if time_on { Some(std::time::Instant::now()) } else { None };
         process_read(
             &mut arrays,
             record.pos(),
@@ -294,6 +318,17 @@ pub fn process_contig_streaming(
             circular,
             min_clipping_length,
         );
+        if let Some(t) = t_pr {
+            process_read_ns += t.elapsed().as_nanos() as u64;
+        }
+    }
+
+    // Flush loop timings before any early return — records_ns = (total loop
+    // wall) − (time inside process_read).
+    if let (Some(pt), Some(t)) = (phase_timings.as_mut(), t_loop) {
+        let total_ns = t.elapsed().as_nanos() as u64;
+        pt.records_ns = total_ns.saturating_sub(process_read_ns);
+        pt.process_read_ns = process_read_ns;
     }
 
     if !has_reads {
@@ -305,8 +340,12 @@ pub fn process_contig_streaming(
     // 1. finalize_strands() (phagetermini-specific, expensive)
     // 2. All feature compression in the caller (very expensive)
     // 3. Database writes
+    let t_fin = if time_on { Some(std::time::Instant::now()) } else { None };
     let coverage_pct = arrays.coverage_percentage();
     if coverage_pct < min_aligned_fraction {
+        if let (Some(pt), Some(t)) = (phase_timings.as_mut(), t_fin) {
+            pt.finalize_ns = t.elapsed().as_nanos() as u64;
+        }
         return Ok(None);
     }
 
@@ -315,6 +354,9 @@ pub fn process_contig_streaming(
     // Only needed for phagetermini; other features are already finalized
     if flags.phagetermini {
         arrays.finalize_strands(seq_type);
+    }
+    if let (Some(pt), Some(t)) = (phase_timings.as_mut(), t_fin) {
+        pt.finalize_ns = t.elapsed().as_nanos() as u64;
     }
 
     Ok(Some((arrays, coverage_pct, primary_count)))
