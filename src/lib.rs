@@ -26,6 +26,7 @@ pub mod compress;
 pub mod db;
 pub mod features;
 pub mod gc_content;
+pub mod mag_blob;
 pub mod parser;
 pub mod processing;
 pub mod processing_completeness;
@@ -79,7 +80,7 @@ mod python {
     ///         - "samples_failed": int
     ///         - "total_time": float (seconds)
     #[pyfunction]
-    #[pyo3(signature = (genbank_path, bam_files, output_db, modules, threads, sequencing_type=None, min_aligned_fraction=50.0, min_coverage_depth=0.0, curve_ratio=10.0, bar_ratio=10.0, create_indexes=true, assembly_path="", extend_db="", min_occurrences=2, enable_timing=false))]
+    #[pyo3(signature = (genbank_path, bam_files, output_db, modules, threads, sequencing_type=None, min_aligned_fraction=50.0, min_coverage_depth=0.0, curve_ratio=10.0, bar_ratio=10.0, create_indexes=true, assembly_path="", extend_db="", min_occurrences=2, enable_timing=false, view="contig", mag_manifest=vec![]))]
     fn process_all_samples<'py>(
         py: Python<'py>,
         genbank_path: &str,
@@ -97,14 +98,32 @@ mod python {
         extend_db: &str,
         min_occurrences: u32,
         enable_timing: bool,
+        view: &str,
+        mag_manifest: Vec<(String, String, String)>,
     ) -> PyResult<Bound<'py, PyDict>> {
         use crate::gc_content::GCParams;
-        use crate::processing::{run_all_samples, ProcessConfig};
+        use crate::processing::{run_all_samples, MagInput, ProcessConfig, ViewMode};
         use crate::processing_phage_packaging::PhageTerminiConfig;
         use std::path::PathBuf;
 
         // Parse sequencing type: Some(type) if user provided valid value, None for per-sample auto-detection
         let seq_type = sequencing_type.and_then(|s| ProcessConfig::parse_sequencing_type(s));
+
+        let view_mode = ViewMode::from_str(view);
+        let mag_manifest: Vec<MagInput> = mag_manifest
+            .into_iter()
+            .map(|(name, gb, asm)| MagInput {
+                name,
+                gb_path: if gb.is_empty() { None } else { Some(PathBuf::from(gb)) },
+                asm_path: if asm.is_empty() { None } else { Some(PathBuf::from(asm)) },
+            })
+            .collect();
+
+        if view_mode == ViewMode::Mag && mag_manifest.is_empty() {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "view='mag' requires a non-empty mag_manifest",
+            ));
+        }
 
         let config = ProcessConfig {
             threads,
@@ -117,6 +136,9 @@ mod python {
             gc_params: GCParams::default(),
             min_occurrences,
             enable_timing,
+            view_mode,
+            mag_manifest,
+            contig_drops_counter: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         };
 
         // Convert string paths to PathBuf

@@ -26,6 +26,7 @@ dependencies = [
     "pysam>=0.20",
     "dna-features-viewer>=1.0",
     "duckdb>=1.0",
+    "zstandard>=0.19",
 ]
 
 [project.urls]

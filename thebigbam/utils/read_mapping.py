@@ -50,6 +50,10 @@ def add_mapping_per_sample_args(parser):
     parser.add_argument('--keep-unmapped', action='store_true', help='Keep unmapped reads in the output BAM (default: discard them)')
     parser.add_argument('--minimap2-params', dest='minimap2_params', default=None, help='Extra parameters for minimap2 (e.g., --minimap2-params "--secondary=no -N5")')
     parser.add_argument('--bwa-params', dest='bwa_params', default=None, help='Extra parameters for bwa-mem2 (e.g., --bwa-params "-M -B6")')
+    parser.add_argument('--min-read-percent-identity', type=float, default=0.0, dest='min_read_percent_identity',
+        help='Exclude reads by overall percent identity e.g. 95 for 95%%. [default: 0 (disabled)]')
+    parser.add_argument('--min-read-aligned-percent', type=float, default=0.0, dest='min_read_aligned_percent',
+        help='Exclude reads by percent aligned bases e.g. 95 means 95%% of the read\'s bases must be aligned. [default: 0 (disabled)]')
 
 def run_mapping_per_sample(args):
     _validate_read_inputs(args)
@@ -73,6 +77,8 @@ def run_mapping_per_sample(args):
         interleaved=interleaved,
         minimap2_params=minimap2_params,
         bwa_params=bwa_params,
+        min_read_percent_identity=getattr(args, 'min_read_percent_identity', 0.0),
+        min_read_aligned_percent=getattr(args, 'min_read_aligned_percent', 0.0),
     ) or 0
 
 def _get_version() -> str:
@@ -126,7 +132,9 @@ def _inject_bam_headers(bam_path: Path, circular: bool, threads: int, command_li
 def map_with_mapper(threads: int, assembly_file: Path, mapper: str, read1: Optional[Path],
                       read2: Optional[Path], output_file: Path, circular: bool = False,
                       keep_unmapped: bool = False, interleaved: Optional[Path] = None,
-                      minimap2_params: Optional[str] = None, bwa_params: Optional[str] = None) -> None:
+                      minimap2_params: Optional[str] = None, bwa_params: Optional[str] = None,
+                      min_read_percent_identity: float = 0.0,
+                      min_read_aligned_percent: float = 0.0) -> None:
     """Run mapper + samtools pipeline and produce final indexed BAM at `output_file`."""
 
     # Executable check based on mapper
@@ -207,10 +215,19 @@ def map_with_mapper(threads: int, assembly_file: Path, mapper: str, read1: Optio
 
         sorted_bam = Path(tempfile.mkstemp(prefix=output_file.stem + "_sorted_", suffix=".bam")[1])
 
-        # Pipe: mapper | samtools view -bS -F 4 | samtools sort -o sorted_bam
+        # Build optional per-read quality filter expression for samtools view -e
+        _exprs = []
+        if min_read_percent_identity > 0.0:
+            _exprs.append(f"(qlen-[NM])*100/qlen>={min_read_percent_identity}")
+        if min_read_aligned_percent > 0.0:
+            _exprs.append(f"(qlen-sclen)*100/qlen>={min_read_aligned_percent}")
+
+        # Pipe: mapper | samtools view -bS -F 4 [-e EXPR] | samtools sort -o sorted_bam
         view_cmd = ["samtools", "view", "-@", str(threads), "-bS", "-"]
         if not keep_unmapped:
             view_cmd[-1:-1] = ["-F", "4"]
+        if _exprs:
+            view_cmd[-1:-1] = ["-e", " && ".join(_exprs)]
         sort_cmd = ["samtools", "sort", "-@", str(threads), "-o", str(sorted_bam), "-"]
         print("COMMAND_MAP:", " ".join(mapper_cmd), flush=True)
         print("COMMAND_VIEW:", " ".join(view_cmd), flush=True)

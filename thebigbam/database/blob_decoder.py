@@ -117,6 +117,7 @@ def _parse_header(blob):
         "has_stats": bool(flags_byte & 0x02),
         "has_sequence": bool(flags_byte & 0x04),
         "has_codons": bool(flags_byte & 0x08),
+        "has_partner": bool(flags_byte & 0x10),
         "scale_code": scale_code,
         "scale_divisor": SCALE_DIVISORS.get(scale_code, 1),
         "num_zoom_levels": num_zoom_levels,
@@ -245,7 +246,7 @@ def is_sparse_zoom_blob(zoom_blob_bytes):
 
 
 
-def _decode_chunk_metadata(meta_data, event_count, has_stats, has_sequence, has_codons):
+def _decode_chunk_metadata(meta_data, event_count, has_stats, has_sequence, has_codons, has_partner=False):
     """Decode sparse metadata from raw decompressed bytes (same format as full BLOB metadata)."""
     result = {}
     pos = 0
@@ -283,6 +284,10 @@ def _decode_chunk_metadata(meta_data, event_count, has_stats, has_sequence, has_
         result["codon_category"] = [CODON_CATEGORIES.get(cat_bytes[i]) for i in range(n)]
         result["codon_change"] = [CODON_TABLE[codon_id_bytes[i]] if codon_id_bytes[i] < 64 else None for i in range(n)]
         result["aa_change"] = [AMINO_ACID_TABLE[aa_id_bytes[i]] if aa_id_bytes[i] < 21 else None for i in range(n)]
+
+    if has_partner:
+        result["partner_contig_id"] = np.frombuffer(meta_data[pos:pos + n * 4], dtype="<i4").copy()
+        pos += n * 4
 
     return result
 
@@ -340,10 +345,11 @@ def decode_raw_sparse_chunks(chunk_rows, scale_divisor, chunk_size=CHUNK_SIZE):
                 has_stats = bool(flags_byte & 0x02)
                 has_seq = bool(flags_byte & 0x04)
                 has_codons = bool(flags_byte & 0x08)
+                has_partner = bool(flags_byte & 0x10)
                 meta_size = struct.unpack_from("<I", raw_bytes, off)[0]
                 off += 4
                 meta_data = _zstd_decompress(raw_bytes[off:off + meta_size])
-                chunk_meta = _decode_chunk_metadata(meta_data, event_count, has_stats, has_seq, has_codons)
+                chunk_meta = _decode_chunk_metadata(meta_data, event_count, has_stats, has_seq, has_codons, has_partner)
                 for key, val in chunk_meta.items():
                     if key not in all_meta:
                         all_meta[key] = []
@@ -442,6 +448,11 @@ def _decode_sparse_metadata(blob, header, event_count):
         result["codon_category"] = categories
         result["codon_change"] = codons
         result["aa_change"] = amino_acids
+
+    # Partner contig_id: n × i32 little-endian (-1 = no partner)
+    if header.get("has_partner"):
+        result["partner_contig_id"] = np.frombuffer(meta_data[pos:pos + n * 4], dtype="<i4").copy()
+        pos += n * 4
 
     return result
 
@@ -772,17 +783,20 @@ def get_blob_header(blob_bytes):
 # Feature ID Mapping (read from DB Variable table)
 # ============================================================================
 
-# Contig_blob feature IDs (stored in Feature_id column)
-# These are a separate ID space with fixed values assigned in Rust.
-_CONTIG_BLOB_IDS = {
-    1: "gc_content",
-    2: "gc_skew",
-    3: "direct_repeat_count",
-    4: "inverted_repeat_count",
-    5: "direct_repeat_identity",
-    6: "inverted_repeat_identity",
-}
-_CONTIG_BLOB_NAMES = {v: k for k, v in _CONTIG_BLOB_IDS.items()}
+# Feature names whose blobs live in Contig_blob (per-contig scope) rather than
+# Feature_blob (per-sample scope). Names are stable — they match VARIABLES.name
+# in src/types.rs — so this set is safe to hardcode. The numeric Feature_id is
+# resolved at runtime via feature_name_to_id(name, conn) from the Variable table.
+_CONTIG_BLOB_FEATURES = frozenset({
+    "direct_repeat_count",
+    "inverted_repeat_count",
+    "direct_repeat_identity",
+    "inverted_repeat_identity",
+    "hit_count_within_mag",
+    "hit_identity_within_mag",
+    "gc_content",
+    "gc_skew",
+})
 
 
 def feature_name_to_id(name, conn):
@@ -797,8 +811,8 @@ def feature_name_to_id(name, conn):
     return row[0] if row else None
 
 
-def contig_blob_name_to_id(name):
-    """Convert contig feature name to Contig_blob feature_id."""
-    return _CONTIG_BLOB_NAMES.get(name)
+def is_contig_blob_feature(name):
+    """True if `name` is stored in Contig_blob (per-contig) rather than Feature_blob (per-sample)."""
+    return name in _CONTIG_BLOB_FEATURES
 
 

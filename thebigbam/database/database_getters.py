@@ -24,6 +24,194 @@ def update_database_metadata(conn):
     conn.execute("UPDATE Database_metadata SET Value = ? WHERE Key = 'Tool_version_used_for_last_modification'", [tool_version])
 
 
+def get_view_mode(conn):
+    """Return 'mag' or 'contig'. Defaults to 'contig' for legacy DBs."""
+    try:
+        row = conn.execute("SELECT Value FROM Database_metadata WHERE Key = 'View_mode'").fetchone()
+        if row and row[0]:
+            return row[0]
+    except duckdb.Error:
+        pass
+    return 'contig'
+
+
+def is_mag_mode(conn):
+    return get_view_mode(conn) == 'mag'
+
+
+def list_mags(conn):
+    """Return list of MAG names (alphabetically sorted)."""
+    try:
+        rows = conn.execute("SELECT MAG_name FROM MAG ORDER BY MAG_name").fetchall()
+    except duckdb.Error:
+        return []
+    return [r[0] for r in rows]
+
+
+def get_mag_metadata(conn, mag_name):
+    """Return a dict of column_name → value for the given MAG, or None if not found."""
+    try:
+        row = conn.execute(
+            "SELECT * FROM MAG WHERE MAG_name = ?", [mag_name]
+        ).fetchone()
+        if row is None:
+            return None
+        cols = [d[0] for d in conn.description]
+        return dict(zip(cols, row))
+    except duckdb.Error:
+        return None
+
+
+def get_mag_contigs(conn, mag_name):
+    """Return list of (contig_name, contig_length, cumulative_offset) for contigs
+    in the MAG, ordered longest-first. Offset is read straight from
+    MAG_contigs_association.Offset_in_MAG (written at ingest time).
+    """
+    try:
+        rows = conn.execute(
+            "SELECT c.Contig_name, c.Contig_length, mca.Offset_in_MAG "
+            "FROM MAG_contigs_association mca "
+            "JOIN MAG mg ON mg.MAG_id = mca.MAG_id "
+            "JOIN Contig c ON c.Contig_id = mca.Contig_id "
+            "WHERE mg.MAG_name = ? "
+            "ORDER BY mca.Offset_in_MAG ASC",
+            [mag_name],
+        ).fetchall()
+    except duckdb.Error:
+        return []
+    return [(name, int(length), int(offset)) for name, length, offset in rows]
+
+
+def list_mag_samples(conn, mag_name):
+    """Samples that have any Coverage row on at least one contig of the given MAG."""
+    try:
+        rows = conn.execute(
+            "SELECT DISTINCT s.Sample_name "
+            "FROM Coverage cov "
+            "JOIN Sample s ON s.Sample_id = cov.Sample_id "
+            "JOIN MAG_contigs_association mca ON mca.Contig_id = cov.Contig_id "
+            "JOIN MAG mg ON mg.MAG_id = mca.MAG_id "
+            "WHERE mg.MAG_name = ? "
+            "ORDER BY s.Sample_name",
+            [mag_name],
+        ).fetchall()
+    except duckdb.Error:
+        return []
+    return [r[0] for r in rows]
+
+
+def get_mag_id(conn, mag_name):
+    """Return MAG_id for the given MAG name, or None if not found."""
+    try:
+        row = conn.execute(
+            "SELECT MAG_id FROM MAG WHERE MAG_name = ?", [mag_name]
+        ).fetchone()
+    except duckdb.Error:
+        return None
+    return int(row[0]) if row else None
+
+
+def _feature_id_for(conn, feature_name):
+    """Look up Variable_id for a feature name."""
+    try:
+        row = conn.execute(
+            "SELECT Variable_id FROM Variable WHERE Variable_name = ?", [feature_name]
+        ).fetchone()
+    except duckdb.Error:
+        return None
+    return int(row[0]) if row else None
+
+
+def get_mag_feature_zoom(cur, mag_id, sample_id, feature_name):
+    """Zoom blob bytes for one (MAG, Sample, Feature), or None."""
+    fid = _feature_id_for(cur, feature_name)
+    if fid is None:
+        return None
+    try:
+        row = cur.execute(
+            "SELECT Zoom_data FROM MAG_blob "
+            "WHERE MAG_id = ? AND Sample_id = ? AND Feature_id = ?",
+            [mag_id, sample_id, fid],
+        ).fetchone()
+    except duckdb.Error:
+        return None
+    return bytes(row[0]) if row else None
+
+
+def get_mag_feature_chunks(cur, mag_id, sample_id, feature_name, chunk_lo, chunk_hi):
+    """Return [(chunk_idx, bytes)] for Chunk_idx in [chunk_lo, chunk_hi]."""
+    fid = _feature_id_for(cur, feature_name)
+    if fid is None:
+        return []
+    try:
+        rows = cur.execute(
+            "SELECT Chunk_idx, Data FROM MAG_blob_chunk "
+            "WHERE MAG_id = ? AND Sample_id = ? AND Feature_id = ? "
+            "AND Chunk_idx BETWEEN ? AND ? "
+            "ORDER BY Chunk_idx",
+            [mag_id, sample_id, fid, chunk_lo, chunk_hi],
+        ).fetchall()
+    except duckdb.Error:
+        return []
+    return [(int(idx), bytes(data)) for idx, data in rows]
+
+
+def get_mag_contig_zoom(cur, mag_id, feature_name):
+    """Zoom blob bytes for one (MAG, Feature) in MAG_contig_blob, or None."""
+    fid = _feature_id_for(cur, feature_name)
+    if fid is None:
+        return None
+    try:
+        row = cur.execute(
+            "SELECT Zoom_data FROM MAG_contig_blob "
+            "WHERE MAG_id = ? AND Feature_id = ?",
+            [mag_id, fid],
+        ).fetchone()
+    except duckdb.Error:
+        return None
+    return bytes(row[0]) if row else None
+
+
+def get_mag_contig_chunks(cur, mag_id, feature_name, chunk_lo, chunk_hi):
+    """Return [(chunk_idx, bytes)] for Chunk_idx in [chunk_lo, chunk_hi]."""
+    fid = _feature_id_for(cur, feature_name)
+    if fid is None:
+        return []
+    try:
+        rows = cur.execute(
+            "SELECT Chunk_idx, Data FROM MAG_contig_blob_chunk "
+            "WHERE MAG_id = ? AND Feature_id = ? "
+            "AND Chunk_idx BETWEEN ? AND ? "
+            "ORDER BY Chunk_idx",
+            [mag_id, fid, chunk_lo, chunk_hi],
+        ).fetchall()
+    except duckdb.Error:
+        return []
+    return [(int(idx), bytes(data)) for idx, data in rows]
+
+
+def get_mag_contig_map(conn):
+    """Return (mag_to_contigs, contig_to_mag). Empty dicts when not MAG-mode."""
+    if not is_mag_mode(conn):
+        return {}, {}
+    try:
+        rows = conn.execute(
+            "SELECT mg.MAG_name, c.Contig_name, c.Contig_length "
+            "FROM MAG_contigs_association mca "
+            "JOIN MAG mg ON mg.MAG_id = mca.MAG_id "
+            "JOIN Contig c ON c.Contig_id = mca.Contig_id "
+            "ORDER BY mg.MAG_name, c.Contig_length DESC, c.Contig_id ASC"
+        ).fetchall()
+    except duckdb.Error:
+        return {}, {}
+    mag_to_contigs = {}
+    contig_to_mag = {}
+    for mag_name, contig_name, _length in rows:
+        mag_to_contigs.setdefault(mag_name, []).append(contig_name)
+        contig_to_mag[contig_name] = mag_name
+    return mag_to_contigs, contig_to_mag
+
+
 def get_filtering_metadata(db_path: str) -> dict:
     """
     Get column metadata for Filtering2 UI.
@@ -42,6 +230,7 @@ def get_filtering_metadata(db_path: str) -> dict:
     }
     """
     conn = duckdb.connect(db_path, read_only=True)
+    has_mags = is_mag_mode(conn)
 
     # Define category mappings
     category_config = {
@@ -78,6 +267,26 @@ def get_filtering_metadata(db_path: str) -> dict:
             'exclude': ['Contig_name', 'Sample_name']
         }
     }
+
+    if has_mags:
+        category_config.update({
+            'MAG': {
+                'source': 'MAG',
+                'exclude': ['MAG_id']
+            },
+            'MAG coverage': {
+                'source': 'Explicit_coverage_per_MAG',
+                'exclude': ['MAG_name', 'Sample_name']
+            },
+            'MAG misassembly': {
+                'source': 'Explicit_misassembly_per_MAG',
+                'exclude': ['MAG_name', 'Sample_name']
+            },
+            'MAG microdiversity': {
+                'source': 'Explicit_microdiversity_per_MAG',
+                'exclude': ['MAG_name', 'Sample_name']
+            },
+        })
 
     # Text type names in DuckDB
     text_types = {'VARCHAR', 'TEXT', 'STRING'}
@@ -370,8 +579,15 @@ SAMPLE_INTERNAL_COLUMNS = {
 }
 
 CONTIG_INTERNAL_COLUMNS = {
-    'Contig_id', 'Contig_name', 'Contig_length',
-    'Duplication_percentage', 'GC_mean', 'GC_sd', 'GC_skew_amplitude', 'Positive_GC_skew_windows_percentage',
+    'Contig_id', 'Contig_name', 'Contig_length', 'Duplication_percentage', 
+    'GC_mean', 'GC_sd', 'GC_skew_amplitude', 'Positive_GC_skew_windows_percentage',
+    'Number_of_samples',
+}
+
+MAG_INTERNAL_COLUMNS = {
+    'MAG_id', 'MAG_name', 'MAG_length', 'Number_of_contigs', 'N50', 'Duplication_percentage', 
+    'GC_mean', 'GC_sd', 'GC_skew_amplitude', 'Positive_GC_skew_windows_percentage',
+    'Number_of_samples',
 }
 
 
@@ -441,6 +657,44 @@ def remove_contig_metadata(db_path, colname):
     update_database_metadata(conn)
     conn.close()
     print(f"Removed column '{colname}' from Contig table.")
+
+
+def list_mag_metadata(db_path):
+    """Print user-added column names on the MAG table."""
+    conn = duckdb.connect(db_path, read_only=True)
+    if conn.execute("SELECT 1 FROM information_schema.tables WHERE table_name = 'MAG'").fetchone() is None:
+        conn.close()
+        print("No MAG table in database (not in MAG mode).")
+        return
+    cols = [r[0] for r in conn.execute("DESCRIBE MAG").fetchall()]
+    conn.close()
+    user_cols = [c for c in cols if c not in MAG_INTERNAL_COLUMNS]
+    if not user_cols:
+        print("No user-added metadata columns on MAG table.")
+    else:
+        for c in user_cols:
+            print(c)
+
+
+def remove_mag_metadata(db_path, colname):
+    """Remove a user-added column from the MAG table."""
+    if colname in MAG_INTERNAL_COLUMNS:
+        print(f"Error: '{colname}' is a built-in column and cannot be removed.")
+        return
+    conn = duckdb.connect(db_path)
+    if conn.execute("SELECT 1 FROM information_schema.tables WHERE table_name = 'MAG'").fetchone() is None:
+        conn.close()
+        print("No MAG table in database (not in MAG mode).")
+        return
+    cols = [r[0] for r in conn.execute("DESCRIBE MAG").fetchall()]
+    if colname not in cols:
+        conn.close()
+        print(f"Error: column '{colname}' not found in MAG table.")
+        return
+    conn.execute(f'ALTER TABLE MAG DROP COLUMN "{colname}"')
+    update_database_metadata(conn)
+    conn.close()
+    print(f"Removed column '{colname}' from MAG table.")
 
 
 def _table_exists(conn, table_name):

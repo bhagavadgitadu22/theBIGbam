@@ -10,9 +10,9 @@ from bokeh.models import Div, InlineStyleSheet, Tooltip
 from bokeh.models.widgets import CheckboxGroup, HelpButton, Button, RadioButtonGroup, CheckboxButtonGroup, Select, TextInput, Spinner, MultiChoice, ColorPicker
 
 # Import the plotting function from the repo
-from .plotting_data_per_sample import generate_bokeh_plot_per_sample
+from .plotting_data_per_sample import generate_bokeh_plot_per_sample, generate_bokeh_plot_mag_view
 from .plotting_data_all_samples import generate_bokeh_plot_all_samples
-from ..database.database_getters import get_filtering_metadata, ANNOTATION_EXCLUDED_COLUMNS
+from ..database.database_getters import get_filtering_metadata, ANNOTATION_EXCLUDED_COLUMNS, is_mag_mode, get_mag_contig_map
 from .searchable_select import SearchableSelect
 
 def build_controls(conn):
@@ -23,12 +23,47 @@ def build_controls(conn):
     cur.execute("SELECT Type_name FROM Annotated_types ORDER BY Frequency DESC")
     annotation_types = [r[0] for r in cur.fetchall()]
 
+    # Detect MAG mode
+    has_mags = is_mag_mode(conn)
+    mag_to_contigs, contig_to_mag = get_mag_contig_map(conn)
+    mags = sorted(mag_to_contigs.keys())
+
+    # Widget Selector for MAGs (visible only in MAG-mode databases)
+    mag_select = SearchableSelect(
+        value=mags[0] if len(mags) == 1 else "",
+        options=mags,
+        placeholder="Type to search MAGs...",
+        sizing_mode="stretch_width",
+        margin=(0, 5, 0, 5),
+        visible=has_mags,
+    )
+
+    # View toggle (MAG / Contig). Only relevant in MAG-mode databases.
+    view_radio = RadioButtonGroup(
+        labels=["MAG view", "Contig view"],
+        active=1,
+        visible=has_mags,
+        sizing_mode="stretch_width",
+        margin=(0, 5, 10, 5),
+    )
+
     # Widget Selector for Contigs (autocomplete with max 20 suggestions)
     cur.execute("SELECT Contig_name, Contig_length FROM Contig ORDER BY Contig_name")
     rows = cur.fetchall()
     contigs = [r[0] for r in rows]
     contig_lengths = {r[0]: r[1] for r in rows}  # Dictionary mapping contig_name -> length
-    
+
+    # Pre-compute MAG-space offsets: {mag_name: {contig_name: cumulative_offset}}
+    # Contigs are in longest-first order (matching get_mag_contigs / mag_to_contigs order).
+    mag_to_contig_offsets = {}
+    for _mag_name, _contigs in mag_to_contigs.items():
+        off = 0
+        d = {}
+        for c in _contigs:
+            d[c] = off
+            off += contig_lengths.get(c, 0)
+        mag_to_contig_offsets[_mag_name] = d
+
     # If only one contig in database, pre-fill the field
     contig_select = SearchableSelect(
         value=contigs[0] if len(contigs) == 1 else "",
@@ -70,6 +105,14 @@ def build_controls(conn):
         for contig_name, sample_name in cur.fetchall():
             sample_to_contigs.setdefault(sample_name, set()).add(contig_name)
             contig_to_samples.setdefault(contig_name, set()).add(sample_name)
+
+    # Pre-compute MAG→samples mapping: a sample belongs to a MAG if any member contig has coverage
+    mag_to_samples = {}
+    for _mag_name, _mag_contigs in mag_to_contigs.items():
+        _s = set()
+        for _c in _mag_contigs:
+            _s |= contig_to_samples.get(_c, set())
+        mag_to_samples[_mag_name] = _s
 
     # Get variables that have data (their feature table exists)
     cur.execute("SELECT DISTINCT Feature_table_name FROM Variable")
@@ -156,8 +199,16 @@ def build_controls(conn):
     widgets = {
         'sample_select': sample_select,
         'contig_select': contig_select,
+        'mag_select': mag_select,
+        'view_radio': view_radio,
         'sample_to_contigs': sample_to_contigs,
         'contig_to_samples': contig_to_samples,
+        'mag_to_contigs': mag_to_contigs,
+        'contig_to_mag': contig_to_mag,
+        'mag_to_samples': mag_to_samples,
+        'mag_to_contig_offsets': mag_to_contig_offsets,
+        'mags': mags,
+        'has_mags': has_mags,
         'module_names': module_names,
         'module_widgets_one': module_widgets_one,
         'helps_widgets': helps_widgets,
@@ -230,16 +281,23 @@ def create_layout(db_path):
 
         # Source table mapping from filtering_metadata
         source_table_map = {
+            'MAG': 'MAG',
             'Contig': 'Contig',
-            'Sample': 'Sample',
             'Annotations': 'Contig_annotation',
+            'Sample': 'Sample',
+            'MAG Coverage': 'Explicit_coverage_per_MAG',
+            'MAG misassembly': 'Explicit_misassembly_per_MAG',
+            'MAG microdiversity': 'Explicit_microdiversity_per_MAG',
             'Coverage': 'Explicit_coverage',
             'Misassembly': 'Explicit_misassembly',
             'Microdiversity': 'Explicit_microdiversity',
             'Side misassembly': 'Explicit_side_misassembly',
             'Topology': 'Explicit_topology',
-            'Termini': 'Explicit_phage_mechanisms'
+            'Termini': 'Explicit_phage_mechanisms',
         }
+        # Categories that yield (MAG_name, Sample_name) pairs (or MAG-only) —
+        # expanded to (Contig_name, Sample_name) via MAG_contigs_association.
+        mag_categories = {'MAG', 'MAG Coverage', 'MAG misassembly', 'MAG microdiversity'}
 
         def get_pairs_for_condition(category, column_name, operator, value):
             """Query database for contig/sample pairs matching a single condition."""
@@ -345,6 +403,37 @@ def create_layout(db_path):
                     LEFT JOIN Contig c ON p.Contig_id = c.Contig_id
                     WHERE s."{column_name}" {operator} ?
                 '''
+            elif category == 'MAG':
+                # MAG table — expand to all member contigs × samples present on them
+                if has_samples:
+                    query = f'''
+                        SELECT DISTINCT c.Contig_name, s.Sample_name
+                        FROM MAG mg
+                        JOIN MAG_contigs_association mca ON mca.MAG_id = mg.MAG_id
+                        JOIN Contig c ON c.Contig_id = mca.Contig_id
+                        LEFT JOIN Coverage p ON c.Contig_id = p.Contig_id
+                        LEFT JOIN Sample s ON p.Sample_id = s.Sample_id
+                        WHERE mg."{column_name}" {operator} ?
+                    '''
+                else:
+                    query = f'''
+                        SELECT DISTINCT c.Contig_name, NULL
+                        FROM MAG mg
+                        JOIN MAG_contigs_association mca ON mca.MAG_id = mg.MAG_id
+                        JOIN Contig c ON c.Contig_id = mca.Contig_id
+                        WHERE mg."{column_name}" {operator} ?
+                    '''
+            elif category in mag_categories:
+                # Explicit_*_per_MAG views — row grain is (MAG_name, Sample_name);
+                # expand to member contigs via MAG_contigs_association.
+                query = f'''
+                    SELECT DISTINCT c.Contig_name, v.Sample_name
+                    FROM {source} v
+                    JOIN MAG mg ON mg.MAG_name = v.MAG_name
+                    JOIN MAG_contigs_association mca ON mca.MAG_id = mg.MAG_id
+                    JOIN Contig c ON c.Contig_id = mca.Contig_id
+                    WHERE v."{column_name}" {operator} ?
+                '''
             else:
                 # Tables with both Contig_name and Sample_name (views)
                 query = f'''
@@ -442,49 +531,118 @@ def create_layout(db_path):
     
     def refresh_contig_options_unlocked():
         """Core logic — does NOT check the lock."""
-        # Apply presence filter only if a sample is selected (One Sample view)
-        if views.active == 0 and widgets['sample_select'].value:
-            sel_sample = widgets['sample_select'].value
-            allowed = widgets['sample_to_contigs'].get(sel_sample, set())
-            completions = [c for c in orig_contigs if c in allowed]
-        else:
-            completions = list(orig_contigs)
+        if widgets['has_mags']:
+            # MAG mode: contig list is a child of the selected MAG, not of the sample.
+            sel_mag = widgets['mag_select'].value
+            if sel_mag and sel_mag in widgets['mag_to_contigs']:
+                completions = list(widgets['mag_to_contigs'][sel_mag])
+            else:
+                completions = list(orig_contigs)
 
-        # Apply Filtering2 query builder filters
-        filtered_pairs = get_filtering_filtered_pairs()
-        if filtered_pairs is not None:
+            # Apply Filtering query builder filters (MAG mode)
+            filtered_pairs = get_filtering_filtered_pairs()
+            if filtered_pairs is not None:
+                if views.active == 0 and widgets['sample_select'].value:
+                    sel_sample = widgets['sample_select'].value
+                    allowed_contigs = {pair[0] for pair in filtered_pairs if pair[1] == sel_sample}
+                else:
+                    allowed_contigs = {pair[0] for pair in filtered_pairs}
+                completions = [c for c in completions if c in allowed_contigs]
+        else:
+            # Contig mode: filter contigs by selected sample (ONE SAMPLE view).
             if views.active == 0 and widgets['sample_select'].value:
                 sel_sample = widgets['sample_select'].value
-                allowed_contigs = {pair[0] for pair in filtered_pairs if pair[1] == sel_sample}
+                allowed = widgets['sample_to_contigs'].get(sel_sample, set())
+                completions = [c for c in orig_contigs if c in allowed]
             else:
-                allowed_contigs = {pair[0] for pair in filtered_pairs}
-            completions = [c for c in completions if c in allowed_contigs]
+                completions = list(orig_contigs)
+
+            # Apply Filtering query builder filters (contig mode)
+            filtered_pairs = get_filtering_filtered_pairs()
+            if filtered_pairs is not None:
+                if views.active == 0 and widgets['sample_select'].value:
+                    sel_sample = widgets['sample_select'].value
+                    allowed_contigs = {pair[0] for pair in filtered_pairs if pair[1] == sel_sample}
+                else:
+                    allowed_contigs = {pair[0] for pair in filtered_pairs}
+                completions = [c for c in completions if c in allowed_contigs]
 
         update_widget_completions(widgets['contig_select'], completions)
 
     def refresh_sample_options_unlocked():
         """Core logic — does NOT check the lock."""
-        # Apply presence filter only if a contig is selected (One Sample view)
-        if views.active == 0 and widgets['contig_select'].value:
-            sel_contig = widgets['contig_select'].value
-            allowed = widgets['contig_to_samples'].get(sel_contig, set())
-            completions = [s for s in orig_samples if s in allowed]
-        else:
-            completions = list(orig_samples)
+        if widgets['has_mags']:
+            # MAG mode: filter samples by selected MAG.
+            sel_mag = widgets['mag_select'].value
+            if views.active == 0 and sel_mag and sel_mag in widgets['mag_to_samples']:
+                allowed = widgets['mag_to_samples'][sel_mag]
+                completions = [s for s in orig_samples if s in allowed]
+            else:
+                completions = list(orig_samples)
 
-        # Apply Filtering2 query builder filters
-        filtered_pairs = get_filtering_filtered_pairs()
-        if filtered_pairs is not None:
+            # Apply Filtering query builder filters (MAG mode)
+            filtered_pairs = get_filtering_filtered_pairs()
+            if filtered_pairs is not None:
+                if views.active == 0 and widgets['contig_select'].value:
+                    sel_contig = widgets['contig_select'].value
+                    allowed_samples = {pair[1] for pair in filtered_pairs if pair[0] == sel_contig}
+                else:
+                    allowed_samples = {pair[1] for pair in filtered_pairs}
+                completions = [s for s in completions if s in allowed_samples]
+        else:
+            # Contig mode: filter samples by selected contig (ONE SAMPLE view).
             if views.active == 0 and widgets['contig_select'].value:
                 sel_contig = widgets['contig_select'].value
-                allowed_samples = {pair[1] for pair in filtered_pairs if pair[0] == sel_contig}
+                allowed = widgets['contig_to_samples'].get(sel_contig, set())
+                completions = [s for s in orig_samples if s in allowed]
             else:
-                allowed_samples = {pair[1] for pair in filtered_pairs}
-            completions = [s for s in completions if s in allowed_samples]
+                completions = list(orig_samples)
+
+            # Apply Filtering query builder filters (contig mode)
+            filtered_pairs = get_filtering_filtered_pairs()
+            if filtered_pairs is not None:
+                if views.active == 0 and widgets['contig_select'].value:
+                    sel_contig = widgets['contig_select'].value
+                    allowed_samples = {pair[1] for pair in filtered_pairs if pair[0] == sel_contig}
+                else:
+                    allowed_samples = {pair[1] for pair in filtered_pairs}
+                completions = [s for s in completions if s in allowed_samples]
         update_widget_completions(widgets['sample_select'], completions)
 
+    def refresh_mag_options_unlocked():
+        """Recompute MAG dropdown based on selected sample (ONE SAMPLE view).
+        A MAG is valid iff at least one of its member contigs has coverage for that sample.
+        Only meaningful in MAG-mode DBs; no-op otherwise.
+        """
+        if not widgets['has_mags']:
+            return
+        mag_to_contigs = widgets['mag_to_contigs']
+        sel_sample = widgets['sample_select'].value
+        if views.active == 0 and sel_sample:
+            valid_contigs = widgets['sample_to_contigs'].get(sel_sample, set())
+            completions = [
+                m for m in sorted(mag_to_contigs.keys())
+                if any(c in valid_contigs for c in mag_to_contigs[m])
+            ]
+        else:
+            completions = sorted(mag_to_contigs.keys())
+
+        # Apply Filtering query builder filters: keep a MAG only if at least
+        # one of its member contigs survives the filter.
+        filtered_pairs = get_filtering_filtered_pairs()
+        if filtered_pairs is not None:
+            if views.active == 0 and sel_sample:
+                allowed_contigs = {pair[0] for pair in filtered_pairs if pair[1] == sel_sample}
+            else:
+                allowed_contigs = {pair[0] for pair in filtered_pairs}
+            completions = [
+                m for m in completions
+                if any(c in allowed_contigs for c in mag_to_contigs[m])
+            ]
+        update_widget_completions(widgets['mag_select'], completions)
+
     def update_section_titles():
-        """Update Filtering, Contigs, and Samples section titles with current counts."""
+        """Update Filtering, Contigs, Samples, and MAGs section titles with current counts."""
         filtered_contigs = set(widgets['contig_select'].options) - {""}
         filtered_samples = set(widgets['sample_select'].options) - {""}
 
@@ -511,6 +669,9 @@ def create_layout(db_path):
         filtering_title.text = f"<span style='font-size: 1.2em;'><b>Filtering</b></span> ({presences_count} contig/sample pairs)"
         contig_title.text = f"<span style='font-size: 1.2em;'><b>Contigs</b></span> ({contigs_count} available)"
         sample_title.text = f"<span style='font-size: 1.2em;'><b>Samples</b></span> ({samples_count} available)"
+        if widgets['has_mags']:
+            mags_count = len(set(widgets['mag_select'].options) - {""})
+            mag_title.text = f"<span style='font-size: 1.2em;'><b>MAGs</b></span> ({mags_count} available)"
 
     ## Views function
     # Enforce single-variable selection when in "All samples" view
@@ -580,6 +741,7 @@ def create_layout(db_path):
             refresh_contig_options_unlocked()
             if not is_all:
                 refresh_sample_options_unlocked()
+            refresh_mag_options_unlocked()
         finally:
             global_toggle_lock['locked'] = False
         update_section_titles()
@@ -637,10 +799,148 @@ def create_layout(db_path):
             # Select the correct widget set based on current view
             active_variables_widgets = widgets['variables_widgets_all'] if is_all else widgets['variables_widgets_one']
 
+            # Read display/sizing parameters (needed by both MAG view and Contig view paths)
+            max_genemap_window = int(max_genemap_window_input.value)
+            same_y_scale = (0 in same_y_scale_cbg.active)
+            subplot_size = int(subplot_height_input.value)
+            genemap_size = int(genemap_height_input.value)
+            sequence_size = int(sequence_height_input.value)
+            translated_sequence_size = int(translated_sequence_height_input.value)
+            max_binning = int(max_binning_window_input.value)
+            min_coverage_freq = float(min_coverage_freq_input.value)
+
             # Parse and validate position inputs
             xstart = None
             xend = None
-            
+
+            # --- MAG view early path (runs instead of the contig-based path below) ---
+            is_mag_view = widgets['has_mags'] and widgets['view_radio'].active == 0
+            if is_mag_view:
+                active_mag = widgets['mag_select'].value
+                if not active_mag:
+                    peruse_button.visible = False
+                    main_placeholder.objects = [pn.pane.HTML("<pre>Error: Please select a MAG.</pre>")]
+                    return
+
+                # Parse position inputs (None → use full MAG extent inside plotting function)
+                try:
+                    xstart = int(from_position_input.value) if from_position_input.value.strip() else 1
+                    xend = int(to_position_input.value) if to_position_input.value.strip() else None
+                except ValueError:
+                    peruse_button.visible = False
+                    main_placeholder.objects = [pn.pane.HTML("<pre>Error: Invalid position range - positions must be integers.</pre>")]
+                    return
+
+                if xend is not None and xstart >= xend:
+                    peruse_button.visible = False
+                    main_placeholder.objects = [pn.pane.HTML("<pre>Error: Invalid position range - start must be less than end.</pre>")]
+                    return
+
+                mag_window = (xend - xstart) if xend is not None else float('inf')
+                plot_genemap = mag_window <= max_genemap_window
+
+                # Collect requested features
+                if is_all:
+                    # ALL SAMPLES mode: pick one sample-level variable (same logic as contig-view all-samples)
+                    selected_var = None
+                    for cbg in active_variables_widgets:
+                        if cbg.active and selected_var is None:
+                            selected_var = cbg.labels[cbg.active[-1]]
+                    mag_requested_features = []
+                    if combined_features_cbg is not None:
+                        for idx in combined_features_cbg.active:
+                            mag_requested_features.append(combined_features_cbg.labels[idx])
+                    if selected_var:
+                        mag_requested_features.append(selected_var)
+                    mag_requested_features = [f for f in mag_requested_features if f != "Gene map"]
+                    if not mag_requested_features:
+                        raise ValueError("In 'All samples' view you must select at least one variable.")
+                    # Compute filtered samples for this MAG (union across all its contigs)
+                    mag_contigs = widgets['mag_to_contigs'].get(active_mag, [])
+                    filtered_samples = [s for s in orig_samples
+                                        if any(s in widgets['contig_to_samples'].get(c, set()) for c in mag_contigs)]
+                    filtering_pairs = get_filtering_filtered_pairs()
+                    if filtering_pairs is not None:
+                        allowed_s = {pair[1] for pair in filtering_pairs}
+                        filtered_samples = [s for s in filtered_samples if s in allowed_s]
+                    mag_allowed_samples = set(filtered_samples)
+                else:
+                    # ONE SAMPLE mode: collect all selected features (same logic as the One-sample Contig path below)
+                    mag_requested_features = []
+                    if combined_features_cbg is not None:
+                        for idx in combined_features_cbg.active:
+                            mag_requested_features.append(combined_features_cbg.labels[idx])
+                    for cbg in active_variables_widgets:
+                        for idx in cbg.active:
+                            mag_requested_features.append(cbg.labels[idx])
+                    # Gene map is handled via genbank_path, not as a feature name
+                    mag_requested_features = [f for f in mag_requested_features if f != "Gene map"]
+                    mag_allowed_samples = None
+
+                print(f"[start_bokeh_server] MAG view: mag={active_mag}, is_all={is_all}, sample={sample}, features={mag_requested_features}", flush=True)
+
+                # Preserve x-range when re-plotting same MAG/sample/range
+                mag_preserve_xrange = (
+                    current_plot_state['shared_xrange'] is not None
+                    and current_plot_state['contig'] == active_mag
+                    and current_plot_state['is_all'] == is_all
+                    and (is_all or current_plot_state['sample'] == sample)
+                    and current_plot_state['data_xstart'] == xstart
+                    and current_plot_state['data_xend'] == xend
+                )
+                if mag_preserve_xrange:
+                    mag_prev_xstart = current_plot_state['shared_xrange'].start
+                    mag_prev_xend = current_plot_state['shared_xrange'].end
+
+                grid = generate_bokeh_plot_mag_view(
+                    conn, mag_requested_features, active_mag, sample,
+                    xstart=xstart, xend=xend,
+                    genbank_path=genbank_path if plot_genemap else None,
+                    feature_types=selected_feature_types, plot_isoforms=plot_isoforms,
+                    same_y_scale=same_y_scale, subplot_size=subplot_size,
+                    genemap_size=genemap_size, sequence_size=sequence_size,
+                    max_base_resolution=max_binning,
+                    max_genemap_window=max_genemap_window,
+                    min_relative_value=min_coverage_freq,
+                    feature_label_key=feature_label_key,
+                    custom_colors=custom_colors if custom_colors else None,
+                    is_all=is_all,
+                    allowed_samples=mag_allowed_samples,
+                )
+
+                new_xrange = _get_shared_xrange(grid)
+                if mag_preserve_xrange and new_xrange is not None:
+                    new_xrange.start = mag_prev_xstart
+                    new_xrange.end = mag_prev_xend
+
+                current_plot_state['contig'] = active_mag
+                current_plot_state['sample'] = sample
+                current_plot_state['is_all'] = is_all
+                current_plot_state['shared_xrange'] = new_xrange
+                current_plot_state['data_xstart'] = xstart
+                current_plot_state['data_xend'] = xend
+
+                if new_xrange is not None:
+                    def _sync_from_mag(attr, old, new_val):
+                        from_position_input.value = str(int(new_val))
+                    def _sync_to_mag(attr, old, new_val):
+                        to_position_input.value = str(int(new_val))
+                    new_xrange.on_change('start', _sync_from_mag)
+                    new_xrange.on_change('end', _sync_to_mag)
+
+                toolbar_row = pn.Row(
+                    pn.Spacer(sizing_mode="stretch_width"),
+                    peruse_button, download_mag_metrics_button, download_data_button,
+                    margin=(0, 0, 5, 0)
+                )
+                peruse_button.visible = True
+                download_mag_metrics_button.visible = bool(has_samples)
+                download_data_button.visible = True
+                command_hint_pane.visible = False
+                main_placeholder.objects = [pn.Column(toolbar_row, command_hint_pane, grid, sizing_mode="stretch_both")]
+                return
+            # --- end of MAG view early path ---
+
             # Validate contig is selected
             if not contig:
                 peruse_button.visible = False
@@ -667,7 +967,6 @@ def create_layout(db_path):
 
             # Only plot genome map if window is <= threshold from spinner
             plot_genemap = True
-            max_genemap_window = int(max_genemap_window_input.value)
             if (xend - xstart) > max_genemap_window:
                 plot_genemap = False
                 print(f"Warning: Genome map will not be plotted for regions larger than {max_genemap_window} bp.", flush=True)
@@ -689,17 +988,6 @@ def create_layout(db_path):
                     plot_translated_sequence = True
                 else:
                     print(f"Warning: Translated sequence will not be plotted for regions larger than {max_seq_window} bp.", flush=True)
-
-            # Check whether to use same y scale for all subplots
-            same_y_scale = (0 in same_y_scale_cbg.active)
-
-            # Read subplot height from spinner
-            subplot_size = int(subplot_height_input.value)
-            genemap_size = int(genemap_height_input.value)
-            sequence_size = int(sequence_height_input.value)
-            translated_sequence_size = int(translated_sequence_height_input.value)
-            max_binning = int(max_binning_window_input.value)
-            min_coverage_freq = float(min_coverage_freq_input.value)
 
             # Check whether to preserve x-range from previous plot
             preserve_xrange = (
@@ -781,6 +1069,8 @@ def create_layout(db_path):
                 # Remove "Gene map" from requested_features if window too large
                 if not plot_genemap and requested_features:
                     requested_features = [f for f in requested_features if f != "Gene map"]
+                # MAG view is handled by the early path above; MAG track is never shown in Contig view.
+                active_mag = None
                 grid = generate_bokeh_plot_per_sample(
                     conn, requested_features, contig, sample, xstart=xstart, xend=xend, genbank_path=genbank_path,
                     feature_types=selected_feature_types, plot_isoforms=plot_isoforms,
@@ -791,7 +1081,8 @@ def create_layout(db_path):
                     max_sequence_window=int(max_sequence_window_input.value),
                     min_relative_value=min_coverage_freq,
                     feature_label_key=feature_label_key,
-                    custom_colors=custom_colors if custom_colors else None
+                    custom_colors=custom_colors if custom_colors else None,
+                    mag_name=active_mag
                 )
 
             # Restore preserved x-range and update state
@@ -823,20 +1114,17 @@ def create_layout(db_path):
             toolbar_row = pn.Row(
                 pn.Spacer(sizing_mode="stretch_width"),  # Push buttons to right
                 peruse_button,
-                download_contig_button,
+                download_mag_metrics_button,
                 download_metrics_button,
                 download_data_button,
                 margin=(0, 0, 5, 0)
             )
             # Show buttons when plot exists (but some are hidden in 0-sample mode)
-            download_contig_button.visible = True  # Always show download contig button
             peruse_button.visible = True  # Always show — contig summary available even without samples
             download_data_button.visible = True  # Always show — contig features available even without samples
-            if has_samples:
-                download_metrics_button.visible = True
-            else:
-                download_metrics_button.visible = False
-            
+            download_metrics_button.visible = bool(has_samples)
+            download_mag_metrics_button.visible = bool(has_samples and widgets['has_mags'])
+
             # Hide any previous command hint when plot is refreshed
             command_hint_pane.visible = False
 
@@ -845,8 +1133,8 @@ def create_layout(db_path):
 
         except Exception as e:
             peruse_button.visible = False
-            download_contig_button.visible = False
             download_metrics_button.visible = False
+            download_mag_metrics_button.visible = False
             download_data_button.visible = False
             tb = traceback.format_exc()
             print(f"[start_bokeh_server] Exception: {tb}", flush=True)
@@ -856,15 +1144,29 @@ def create_layout(db_path):
     def peruse_clicked():
         """Generate and open summary tables in a new browser window."""
         from .perusing_data import generate_and_open_peruse_html
-        
-        contig = widgets['contig_select'].value
-        has_samples = widgets['has_samples']
 
-        # Check if contig is selected
+        is_mag_view = widgets['has_mags'] and widgets['view_radio'].active == 0
+
+        if is_mag_view:
+            # MAG view: show MAG characs + sample characs + MAG metrics
+            mag = widgets['mag_select'].value
+            if not mag:
+                print("[start_bokeh_server] Peruse: No MAG selected", flush=True)
+                return
+            sample = widgets['sample_select'].value
+            sample_names = [sample] if sample else []
+            generate_and_open_peruse_html(conn, None, sample_names, mag_name=mag, is_mag_view=True)
+            return
+
+        # Contig view
+        contig = widgets['contig_select'].value
         if not contig:
             print("[start_bokeh_server] Peruse: No contig selected", flush=True)
             return
 
+        parent_mag = widgets['contig_to_mag'].get(contig)
+
+        has_samples = widgets['has_samples']
         if not has_samples:
             sample_names = []
         else:
@@ -893,13 +1195,13 @@ def create_layout(db_path):
                 sample_names = [sample]
 
         # Generate and open HTML in new window
-        generate_and_open_peruse_html(conn, contig, sample_names)
+        generate_and_open_peruse_html(conn, contig, sample_names, mag_name=parent_mag, is_mag_view=False)
 
     ## Download functionality using Panel FileDownload widgets
     import io
 
     # Store references to download widgets (created later, after widgets dict exists)
-    download_widgets = {'contig': None, 'metrics': None, 'data': None}
+    download_widgets = {'contig_metrics': None, 'mag_metrics': None, 'data': None}
 
     # Track current plot state for x-range preservation across APPLY clicks
     current_plot_state = {
@@ -920,30 +1222,13 @@ def create_layout(db_path):
                     return child.x_range
         return None
 
-    def make_contig_download_callback():
-        """Create callback for contig summary download."""
-        from .downloading_data import download_contig_summary_csv
-        
-        contig = widgets['contig_select'].value
-        if not contig:
-            print("[start_bokeh_server] Download: No contig selected", flush=True)
-            return io.StringIO("")
-        
-        csv_content = download_contig_summary_csv(db_path, contig)
-        if csv_content:
-            safe_contig = "".join(c if c.isalnum() or c in "-_" else "_" for c in contig)
-            if download_widgets['contig']:
-                download_widgets['contig'].filename = f"{safe_contig}_contig_summary.csv"
-            return io.StringIO(csv_content)
-        return io.StringIO("")
+    def make_contig_metrics_download_callback():
+        """Create callback for contig metrics download (contig-level metrics across samples)."""
+        from .downloading_data import download_contig_metrics_csv
 
-    def make_metrics_download_callback():
-        """Create callback for metrics summary download."""
-        from .downloading_data import download_metrics_summary_csv
-        
         contig = widgets['contig_select'].value
         if not contig:
-            print("[start_bokeh_server] Download metrics: No contig selected", flush=True)
+            print("[start_bokeh_server] Download contig metrics: No contig selected", flush=True)
             return io.StringIO("")
 
         is_all = (views.active == 1)
@@ -956,26 +1241,56 @@ def create_layout(db_path):
                 filtered_samples = [s for s in filtered_samples if s in allowed_samples]
 
             if not filtered_samples:
-                print("[start_bokeh_server] Download metrics: No samples match filters", flush=True)
+                print("[start_bokeh_server] Download contig metrics: No samples match filters", flush=True)
                 return io.StringIO("")
 
             sample_names = filtered_samples
             safe_contig = "".join(c if c.isalnum() or c in "-_" else "_" for c in contig)
-            if download_widgets['metrics']:
-                download_widgets['metrics'].filename = f"{safe_contig}_in_all_samples_metrics.csv"
+            if download_widgets['contig_metrics']:
+                download_widgets['contig_metrics'].filename = f"{safe_contig}_in_all_samples_contig_metrics.csv"
         else:
             sample = widgets['sample_select'].value
             if not sample:
-                print("[start_bokeh_server] Download metrics: No sample selected", flush=True)
+                print("[start_bokeh_server] Download contig metrics: No sample selected", flush=True)
                 return io.StringIO("")
             sample_names = [sample]
             safe_contig = "".join(c if c.isalnum() or c in "-_" else "_" for c in contig)
             safe_sample = "".join(c if c.isalnum() or c in "-_" else "_" for c in sample)
-            if download_widgets['metrics']:
-                download_widgets['metrics'].filename = f"{safe_contig}_in_{safe_sample}_metrics.csv"
+            if download_widgets['contig_metrics']:
+                download_widgets['contig_metrics'].filename = f"{safe_contig}_in_{safe_sample}_contig_metrics.csv"
 
-        csv_content = download_metrics_summary_csv(db_path, contig, sample_names)
+        csv_content = download_contig_metrics_csv(db_path, contig, sample_names)
         if csv_content:
+            return io.StringIO(csv_content)
+        return io.StringIO("")
+
+    def make_mag_metrics_download_callback():
+        """Create callback for MAG metrics download (MAG-level metrics from Explicit_*_per_MAG views)."""
+        from .downloading_data import download_mag_metrics_csv
+
+        is_mag_view = widgets['has_mags'] and widgets['view_radio'].active == 0
+        if is_mag_view:
+            mag = widgets['mag_select'].value
+        else:
+            contig = widgets['contig_select'].value
+            mag = widgets['contig_to_mag'].get(contig) if contig else None
+
+        if not mag:
+            print("[start_bokeh_server] Download MAG metrics: No MAG selected/found", flush=True)
+            return io.StringIO("")
+
+        sample = widgets['sample_select'].value
+        sample_names = [sample] if sample else []
+
+        csv_content = download_mag_metrics_csv(db_path, mag, sample_names)
+        if csv_content:
+            safe_mag = "".join(c if c.isalnum() or c in "-_" else "_" for c in mag)
+            if download_widgets['mag_metrics']:
+                if sample_names:
+                    safe_sample = "".join(c if c.isalnum() or c in "-_" else "_" for c in sample_names[0])
+                    download_widgets['mag_metrics'].filename = f"{safe_mag}_in_{safe_sample}_mag_metrics.csv"
+                else:
+                    download_widgets['mag_metrics'].filename = f"{safe_mag}_mag_metrics.csv"
             return io.StringIO(csv_content)
         return io.StringIO("")
 
@@ -1004,6 +1319,7 @@ def create_layout(db_path):
     with open(pink_buttons_css_path) as f:
         pink_buttons_css_text = f.read()
     pink_buttons_stylesheet = InlineStyleSheet(css=pink_buttons_css_text)
+    widgets['view_radio'].stylesheets = [pink_buttons_stylesheet]
 
     # Separate stylesheet for toggle buttons (minimal styling)
     toggle_css_path = os.path.join(static_path, "toggle_styles.css")
@@ -1031,7 +1347,21 @@ def create_layout(db_path):
     ## Build Filtering section (dynamic query builder with AND/OR logic)
     filtering_toggle_btn = Button(label="▼", width=20, height=20, button_type="primary", align="center", margin=0, stylesheets=[toggle_stylesheet])
     filtering_title = Div(text="<b>Filtering</b>", align="center")
-    filtering_header = row(filtering_toggle_btn, filtering_title, sizing_mode="stretch_width", align="center")
+    _filter_help_tooltip = Tooltip(
+        content=(
+            'Filtering rows are independent from each other. '
+            'For example, "Number of samples" is based on the total number of presences '
+            'of a genome in the database, and is not recomputed based on the other filtering rows'
+        ),
+        position="right",
+    )
+    _filter_help_btn = HelpButton(
+        tooltip=_filter_help_tooltip,
+        width=20, height=20, align="center",
+        button_type="light",
+        stylesheets=[toggle_stylesheet],
+    )
+    filtering_header = row(filtering_toggle_btn, filtering_title, _filter_help_btn, sizing_mode="stretch_width", align="center")
 
     # Cache filtering metadata once when document loads
     filtering_metadata = get_filtering_metadata(db_path)
@@ -1061,6 +1391,7 @@ def create_layout(db_path):
         try:
             refresh_contig_options_unlocked()
             refresh_sample_options_unlocked()
+            refresh_mag_options_unlocked()
         finally:
             global_toggle_lock['locked'] = False
         update_section_titles()
@@ -1409,7 +1740,14 @@ def create_layout(db_path):
             return
         global_toggle_lock['locked'] = True
         try:
-            refresh_contig_options_unlocked()
+            if widgets['has_mags']:
+                # MAG mode: sample → MAGs → contigs chain.
+                # Filter MAGs first (may clear an invalid MAG selection),
+                # then update contig list based on the (now-current) MAG value.
+                refresh_mag_options_unlocked()
+                refresh_contig_options_unlocked()
+            else:
+                refresh_contig_options_unlocked()
         finally:
             global_toggle_lock['locked'] = False
         update_section_titles()
@@ -1420,6 +1758,15 @@ def create_layout(db_path):
     # Keep original full lists so we can restore when filters are off
     orig_contigs = list(widgets['contigs'])
     orig_samples = list(widgets['samples'])
+
+    # MAGs section header (visible only in MAG-mode databases)
+    mag_title = Div(
+        text=f"<span style='font-size: 1.2em;'><b>MAGs</b></span> ({len(widgets['mags'])} available)",
+        align="center",
+        visible=widgets['has_mags'],
+    )
+    mag_header = row(mag_title, sizing_mode="stretch_width", align="center", margin=(0, 0, 0, 0), visible=widgets['has_mags'])
+    separator_mags = Div(text="", height=2, sizing_mode="stretch_width", styles={'background-color': '#333', 'margin-top': '10px', 'margin-bottom': '10px'}, visible=widgets['has_mags'])
 
     # Create Contigs section header — no outer collapse; the inner
     # "Genomic annotations" and "Other genomic features" subsections each
@@ -1433,12 +1780,24 @@ def create_layout(db_path):
         new = event.new
         global_toggle_lock['locked'] = True
         try:
-            refresh_sample_options_unlocked()
+            # In MAG mode the sample filter is driven by the MAG, not the contig directly.
+            # on_contig_sync_mag will fire next and update the MAG + refresh samples.
+            if not widgets['has_mags']:
+                refresh_sample_options_unlocked()
         finally:
             global_toggle_lock['locked'] = False
         update_section_titles()
         # Update position inputs when contig changes
-        if new and new in widgets['contig_lengths']:
+        if widgets['has_mags'] and widgets['view_radio'].active == 0:
+            # MAG view: zoom From/To to the selected contig's range in MAG space
+            selected_mag = widgets['mag_select'].value
+            offsets = widgets['mag_to_contig_offsets'].get(selected_mag, {})
+            if new and selected_mag and new in offsets:
+                off = offsets[new]
+                c_len = widgets['contig_lengths'].get(new, 0)
+                from_position_input.value = str(off + 1)
+                to_position_input.value = str(off + c_len)
+        elif new and new in widgets['contig_lengths']:
             from_position_input.value = "1"
             to_position_input.value = str(widgets['contig_lengths'][new])
         else:
@@ -1446,6 +1805,91 @@ def create_layout(db_path):
             to_position_input.value = ""
     
     widgets['contig_select'].param.watch(on_contig_change, 'value')
+
+    # MAG cross-filter callbacks (only attached when DB is MAG-mode)
+    if widgets['has_mags']:
+        def on_mag_change(event):
+            if global_toggle_lock['locked']:
+                return
+            new = event.new
+            global_toggle_lock['locked'] = True
+            try:
+                # Contigs: children of selected MAG
+                refresh_contig_options_unlocked()
+                # Samples: filter to those containing this MAG
+                refresh_sample_options_unlocked()
+            finally:
+                global_toggle_lock['locked'] = False
+            update_section_titles()
+            # In MAG view: set From/To to the full new MAG length
+            if widgets['view_radio'].active == 0 and new:
+                total = sum(
+                    widgets['contig_lengths'].get(c, 0)
+                    for c in widgets['mag_to_contigs'].get(new, [])
+                )
+                from_position_input.value = "1"
+                to_position_input.value = str(total)
+
+        widgets['mag_select'].param.watch(on_mag_change, 'value')
+
+        # When contig changes, auto-select its parent MAG (user may clear to override),
+        # then refresh sample list for that MAG.
+        def on_contig_sync_mag(event):
+            if global_toggle_lock['locked']:
+                return
+            contig_to_mag = widgets['contig_to_mag']
+            new = event.new
+            mag_select = widgets['mag_select']
+            if new and new in contig_to_mag:
+                parent = contig_to_mag[new]
+                changed_mag = (mag_select.value != parent)
+                global_toggle_lock['locked'] = True
+                try:
+                    if changed_mag:
+                        mag_select.value = parent
+                    # Refresh samples for the (possibly new) parent MAG
+                    refresh_sample_options_unlocked()
+                finally:
+                    global_toggle_lock['locked'] = False
+                if changed_mag:
+                    update_section_titles()
+            elif not new:
+                # Contig cleared: restore full sample list in MAG mode
+                global_toggle_lock['locked'] = True
+                try:
+                    refresh_sample_options_unlocked()
+                finally:
+                    global_toggle_lock['locked'] = False
+                update_section_titles()
+
+        widgets['contig_select'].param.watch(on_contig_sync_mag, 'value')
+
+        def on_view_change(attr, old, new):
+            is_mag_view = (new == 0)
+            if is_mag_view:
+                selected_mag = widgets['mag_select'].value
+                selected_contig = widgets['contig_select'].value
+                offsets = widgets['mag_to_contig_offsets'].get(selected_mag, {})
+                if selected_mag and selected_contig and selected_contig in offsets:
+                    # Contig already selected: zoom to its range in MAG space
+                    off = offsets[selected_contig]
+                    c_len = widgets['contig_lengths'].get(selected_contig, 0)
+                    from_position_input.value = str(off + 1)
+                    to_position_input.value = str(off + c_len)
+                elif selected_mag:
+                    total = sum(
+                        widgets['contig_lengths'].get(c, 0)
+                        for c in widgets['mag_to_contigs'].get(selected_mag, [])
+                    )
+                    from_position_input.value = "1"
+                    to_position_input.value = str(total)
+            else:
+                selected_contig = widgets['contig_select'].value
+                if selected_contig and selected_contig in widgets['contig_lengths']:
+                    from_position_input.value = "1"
+                    to_position_input.value = str(widgets['contig_lengths'][selected_contig])
+
+        widgets['view_radio'].on_change('active', on_view_change)
 
 
     ## Build Variables section - TWO SEPARATE SECTIONS for each view
@@ -1861,7 +2305,19 @@ def create_layout(db_path):
     
     def reset_position_inputs():
         from_position_input.value = "1"
-        if widgets['contig_select'].value and widgets['contig_select'].value in widgets['contig_lengths']:
+        if widgets['has_mags'] and widgets['view_radio'].active == 0:
+            # MAG view: clear contig selection and show full MAG extent
+            widgets['contig_select'].value = ""
+            selected_mag = widgets['mag_select'].value
+            if selected_mag:
+                total = sum(
+                    widgets['contig_lengths'].get(c, 0)
+                    for c in widgets['mag_to_contigs'].get(selected_mag, [])
+                )
+                to_position_input.value = str(total)
+            else:
+                to_position_input.value = ""
+        elif widgets['contig_select'].value and widgets['contig_select'].value in widgets['contig_lengths']:
             to_position_input.value = str(widgets['contig_lengths'][widgets['contig_select'].value])
         else:
             to_position_input.value = ""
@@ -1951,15 +2407,15 @@ def create_layout(db_path):
             customise_children = []
             if feature_label_select is not None:
                 customise_children.append(feature_label_select)
+            if template_select is not None:
+                customise_children.append(template_select)
             if template_select is not None or color_qualifier_options:
                 customise_children.append(Div(text="Color annotations with:"))
             if color_qualifier_options:
                 customise_children.append(custom_color_column)
-            if template_select is not None:
-                customise_children.append(template_select)
             customise_content = pn.Column(*customise_children, visible=False,
                                           sizing_mode="stretch_width",
-                                          margin=(0, 0, 0, 0))
+                                          margin=(0, 0, 5, 0))
             customise_toggle_btn.on_click(
                 make_toggle_callback(customise_toggle_btn, customise_content))
 
@@ -2207,27 +2663,27 @@ def create_layout(db_path):
     )
     peruse_button.on_click(lambda event: peruse_clicked())
 
-    # Download contig summary - Panel FileDownload widget
-    download_contig_button = pn.widgets.FileDownload(
-        callback=make_contig_download_callback,
-        filename="contig_summary.csv",
-        label="DOWNLOAD CONTIG SUMMARY",
-        button_type="primary",
-        height=30,
-        visible=False
-    )
-    download_widgets['contig'] = download_contig_button
-
-    # Download metrics summary - Panel FileDownload widget
+    # Download contig metrics - Panel FileDownload widget (contig view only)
     download_metrics_button = pn.widgets.FileDownload(
-        callback=make_metrics_download_callback,
-        filename="metrics_summary.csv",
-        label="DOWNLOAD METRICS SUMMARY",
+        callback=make_contig_metrics_download_callback,
+        filename="contig_metrics.csv",
+        label="DOWNLOAD CONTIG METRICS",
         button_type="primary",
         height=30,
         visible=False
     )
-    download_widgets['metrics'] = download_metrics_button
+    download_widgets['contig_metrics'] = download_metrics_button
+
+    # Download MAG metrics - Panel FileDownload widget (both MAG and contig views)
+    download_mag_metrics_button = pn.widgets.FileDownload(
+        callback=make_mag_metrics_download_callback,
+        filename="mag_metrics.csv",
+        label="DOWNLOAD MAG METRICS",
+        button_type="primary",
+        height=30,
+        visible=False,
+    )
+    download_widgets['mag_metrics'] = download_mag_metrics_button
 
     # Download data — show CLI command hint instead of generating huge CSV in browser
     # Hidden pane to display the inspect command (shown on click, hidden on next APPLY)
@@ -2240,38 +2696,18 @@ def create_layout(db_path):
             command_hint_pane.visible = False
             return
 
-        contig = widgets['contig_select'].value
-        if not contig:
-            command_hint_pane.object = '<div style="color:#c00;padding:6px">No contig selected.</div>'
-            command_hint_pane.visible = True
-            return
-
+        is_mag_view = widgets['has_mags'] and widgets['view_radio'].active == 0
         is_all = (views.active == 1) if widgets['has_samples'] else False
         has_samples = widgets['has_samples']
-        contig_length = widgets['contig_lengths'].get(contig, 0)
-
-        # Determine region
-        try:
-            xstart = int(from_position_input.value) if from_position_input.value.strip() else 1
-            xend = int(to_position_input.value) if to_position_input.value.strip() else contig_length
-        except ValueError:
-            xstart = 1
-            xend = contig_length
-        region_arg = ""
-        if xstart > 1 or xend < contig_length:
-            region_arg = f" --region {xstart}-{xend}"
 
         # Collect active feature subplots → variable names
         active_vars = widgets['variables_widgets_all'] if is_all else widgets['variables_widgets_one']
         feature_names = []
-        # Contig-level features from combined_features_cbg
         if combined_features_cbg is not None:
             for idx in combined_features_cbg.active:
                 subplot = combined_features_cbg.labels[idx]
                 feature_names.extend(_subplot_to_varnames.get(subplot, [subplot]))
-        # Sample-level features from module checkboxes
         if is_all:
-            # All-samples view: only one variable selected
             for cbg in active_vars:
                 if cbg.active:
                     subplot = cbg.labels[cbg.active[-1]]
@@ -2288,37 +2724,91 @@ def create_layout(db_path):
             command_hint_pane.visible = True
             return
 
-        # Determine samples
-        sample_arg = ""
-        if has_samples:
-            if is_all:
-                filtered_samples = [s for s in orig_samples if s in widgets['contig_to_samples'].get(contig, set())]
-                filtering_pairs = get_filtering_filtered_pairs()
-                if filtering_pairs is not None:
-                    allowed = {pair[1] for pair in filtering_pairs}
-                    filtered_samples = [s for s in filtered_samples if s in allowed]
-                if filtered_samples:
-                    sample_arg = f" --sample {','.join(filtered_samples)}"
-            else:
+        from thebigbam.database.blob_decoder import is_contig_blob_feature
+
+        # --- MAG view: generate --mag command ---
+        if is_mag_view:
+            mag = widgets['mag_select'].value
+            if not mag:
+                command_hint_pane.object = '<div style="color:#c00;padding:6px">No MAG selected.</div>'
+                command_hint_pane.visible = True
+                return
+
+            # Region (position inputs apply to the MAG layout, not a contig position)
+            try:
+                xstart = int(from_position_input.value) if from_position_input.value.strip() else None
+                xend = int(to_position_input.value) if to_position_input.value.strip() else None
+            except ValueError:
+                xstart = xend = None
+            region_arg = f" --region {xstart}-{xend}" if (xstart is not None and xend is not None) else ""
+
+            sample_arg = ""
+            if has_samples:
                 sample = widgets['sample_select'].value
                 if sample:
                     sample_arg = f" --sample {sample}"
 
-        # Separate contig-level features (no --sample needed) from sample-level features
-        from thebigbam.database.blob_decoder import contig_blob_name_to_id
-        contig_features = [f for f in feature_names if contig_blob_name_to_id(f) is not None]
-        sample_features = [f for f in feature_names if contig_blob_name_to_id(f) is None]
+            contig_features = [f for f in feature_names if is_contig_blob_feature(f)]
+            sample_features = [f for f in feature_names if not is_contig_blob_feature(f)]
 
-        commands = []
-        if contig_features:
-            cmd = f"thebigbam inspect -d {db_path} --contig {contig} --feature {','.join(contig_features)}{region_arg} > output.tsv"
-            commands.append(cmd)
-        if sample_features and sample_arg:
-            cmd = f"thebigbam inspect -d {db_path} --contig {contig}{sample_arg} --feature {','.join(sample_features)}{region_arg} > output.tsv"
-            commands.append(cmd)
-        elif sample_features and not sample_arg:
-            cmd = f"thebigbam inspect -d {db_path} --contig {contig} --sample &lt;SAMPLE&gt; --feature {','.join(sample_features)}{region_arg} > output.tsv"
-            commands.append(cmd)
+            commands = []
+            if contig_features:
+                cmd = f"thebigbam inspect -d {db_path} --mag {mag} --feature {','.join(contig_features)}{region_arg} > output.tsv"
+                commands.append(cmd)
+            if sample_features and sample_arg:
+                cmd = f"thebigbam inspect -d {db_path} --mag {mag}{sample_arg} --feature {','.join(sample_features)}{region_arg} > output.tsv"
+                commands.append(cmd)
+            elif sample_features and not sample_arg:
+                cmd = f"thebigbam inspect -d {db_path} --mag {mag} --sample &lt;SAMPLE&gt; --feature {','.join(sample_features)}{region_arg} > output.tsv"
+                commands.append(cmd)
+
+        # --- Contig view: generate --contig command ---
+        else:
+            contig = widgets['contig_select'].value
+            if not contig:
+                command_hint_pane.object = '<div style="color:#c00;padding:6px">No contig selected.</div>'
+                command_hint_pane.visible = True
+                return
+
+            contig_length = widgets['contig_lengths'].get(contig, 0)
+            try:
+                xstart = int(from_position_input.value) if from_position_input.value.strip() else 1
+                xend = int(to_position_input.value) if to_position_input.value.strip() else contig_length
+            except ValueError:
+                xstart = 1
+                xend = contig_length
+            region_arg = ""
+            if xstart > 1 or xend < contig_length:
+                region_arg = f" --region {xstart}-{xend}"
+
+            sample_arg = ""
+            if has_samples:
+                if is_all:
+                    filtered_samples = [s for s in orig_samples if s in widgets['contig_to_samples'].get(contig, set())]
+                    filtering_pairs = get_filtering_filtered_pairs()
+                    if filtering_pairs is not None:
+                        allowed = {pair[1] for pair in filtering_pairs}
+                        filtered_samples = [s for s in filtered_samples if s in allowed]
+                    if filtered_samples:
+                        sample_arg = f" --sample {','.join(filtered_samples)}"
+                else:
+                    sample = widgets['sample_select'].value
+                    if sample:
+                        sample_arg = f" --sample {sample}"
+
+            contig_features = [f for f in feature_names if is_contig_blob_feature(f)]
+            sample_features = [f for f in feature_names if not is_contig_blob_feature(f)]
+
+            commands = []
+            if contig_features:
+                cmd = f"thebigbam inspect -d {db_path} --contig {contig} --feature {','.join(contig_features)}{region_arg} > output.tsv"
+                commands.append(cmd)
+            if sample_features and sample_arg:
+                cmd = f"thebigbam inspect -d {db_path} --contig {contig}{sample_arg} --feature {','.join(sample_features)}{region_arg} > output.tsv"
+                commands.append(cmd)
+            elif sample_features and not sample_arg:
+                cmd = f"thebigbam inspect -d {db_path} --contig {contig} --sample &lt;SAMPLE&gt; --feature {','.join(sample_features)}{region_arg} > output.tsv"
+                commands.append(cmd)
 
         cmd_html = "".join(
             f'<pre style="background:#1a1a2e;color:#e0e0e0;padding:8px 12px;border-radius:4px;'
@@ -2362,6 +2852,7 @@ def create_layout(db_path):
     # When no samples: hide views toggle, samples section, and variables section
     if widgets['has_samples']:
         controls_children = [logo, views, separator_filtering, filtering_header, filtering_content,
+                             separator_mags, mag_header, widgets['view_radio'], widgets['mag_select'],
                              separator_contigs, contig_header, widgets['contig_select'], below_contig_content,
                              separator_samples, sample_title, above_sample_content, widgets['sample_select'],
                              separator_variables,
@@ -2373,6 +2864,7 @@ def create_layout(db_path):
     else:
         # No samples: simplified UI with Filtering, Contigs, Plotting parameters, and Apply button
         controls_children = [logo, filtering_header, filtering_content,
+                             separator_mags, mag_header, widgets['view_radio'], widgets['mag_select'],
                              separator_contigs, contig_header, widgets['contig_select'], below_contig_content,
                              separator_plotting_params, plotting_params_header, plotting_params_content,
                              buttons_row]
@@ -2383,11 +2875,12 @@ def create_layout(db_path):
     peruse_button.visible = False  # Initially hidden
     main_placeholder = pn.Column(
         pn.pane.HTML(placeholder_text),
-        sizing_mode="stretch_both"
+        sizing_mode="stretch_both",
+        css_classes=["main-right"],
     )
 
     # Wrap everything in a Flex container
-    layout = pn.Row(controls_column, main_placeholder, sizing_mode="stretch_both")
+    layout = pn.Row(controls_column, main_placeholder, sizing_mode="stretch_both", css_classes=["main-layout"])
     layout.stylesheets = [stylesheet]
 
     return layout

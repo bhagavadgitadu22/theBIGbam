@@ -58,7 +58,7 @@ def generate_bokeh_plot_all_samples(conn, variable, contig_name, xstart=None, xe
             # Query Sample table for the ordering column values
             sample_id_placeholders = ",".join(["?"] * len(sample_ids))
             cur.execute(
-                f'SELECT Sample_id, "{order_by_column}" FROM Sample WHERE Sample_id IN ({sample_id_placeholders}) ORDER BY "{order_by_column}"',
+                f'SELECT Sample_id, "{order_by_column}" FROM Sample WHERE Sample_id IN ({sample_id_placeholders}) ORDER BY "{order_by_column}" ASC NULLS LAST',
                 sample_ids
             )
             ordered_rows = cur.fetchall()

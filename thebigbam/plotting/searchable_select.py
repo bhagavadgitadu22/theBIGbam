@@ -20,7 +20,7 @@ class SearchableSelect(JSComponent):
     ]
 
     _esm = """
-    import TomSelect from "https://esm.sh/tom-select@2.4.1";
+    import TomSelect from "https://cdn.jsdelivr.net/npm/tom-select@2.4.1/+esm";
 
     export function render({ model }) {
         const container = document.createElement('div');
@@ -49,8 +49,11 @@ class SearchableSelect(JSComponent):
         model.on('options', () => {
             const currentVal = model.value;
             allOptions = model.options.map(o => ({value: o, text: o}));
+            // Rebuild options: clear render cache, repopulate, then sync UI
             ts.clearOptions();
             ts.addOptions(allOptions);
+            ts.refreshItems();
+            ts.refreshOptions(false);  // false = don't open dropdown
             // Restore the current value if still valid
             if (currentVal && model.options.includes(currentVal)) {
                 ts.setValue(currentVal, true);

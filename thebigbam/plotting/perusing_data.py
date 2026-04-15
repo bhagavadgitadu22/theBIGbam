@@ -1,93 +1,348 @@
-## Function to generate HTML and open in new browser window
-def generate_and_open_peruse_html(conn, contig_name, sample_names):
-    """Generate HTML summary and open in new browser window.
-    
+## Decode maps for integer-encoded DB columns (applied before display)
+_CONTIG_DECODE = {
+    "Duplication_percentage": lambda v: round(v / 10.0, 1),
+    "GC_sd": lambda v: round(v / 100.0, 2),
+    "GC_skew_amplitude": lambda v: round(v / 100.0, 2),
+    "Positive_GC_skew_windows_percentage": lambda v: round(v / 10.0, 1),
+}
+
+_MAG_DECODE = {
+    "Duplication_percentage": lambda v: round(v / 10.0, 1),
+    "GC_sd": lambda v: round(v / 100.0, 2),
+    "GC_skew_amplitude": lambda v: round(v / 100.0, 2),
+    "Positive_GC_skew_windows_percentage": lambda v: round(v / 10.0, 1),
+}
+
+
+## Helper to build an HTML table from query rows with optional column filtering and decoding
+def _build_row_table_html(rows, col_names, skip_cols=(), decode_map=None):
+    if not rows:
+        return ""
+    decode_map = decode_map or {}
+    skip_set = set(skip_cols)
+    display_cols = [c for c in col_names if c not in skip_set]
+    if not display_cols:
+        return ""
+    head_cells = "".join(
+        f"<th style='border: 1px solid #ddd; padding: 8px; text-align: left;'>{c}</th>"
+        for c in display_cols
+    )
+    body_rows = ""
+    for row in rows:
+        row_dict = dict(zip(col_names, row))
+        body_rows += "<tr>" + "".join(
+            "<td style='border: 1px solid #ddd; padding: 8px;'>"
+            + ("" if row_dict[c] is None else str(
+                decode_map[c](row_dict[c]) if c in decode_map and row_dict[c] is not None else row_dict[c]
+            ))
+            + "</td>"
+            for c in display_cols
+        ) + "</tr>"
+    return (
+        "<table style='border-collapse: collapse; margin-bottom: 20px; "
+        "background-color: white; border-radius: 5px; width: 100%;'>"
+        f"<thead><tr style='background-color: #f0f0f0;'>{head_cells}</tr></thead>"
+        f"<tbody>{body_rows}</tbody>"
+        "</table>"
+    )
+
+
+## Build MAG-level metrics summary (per-MAG per-sample from Explicit_*_per_MAG views)
+def build_mag_summary_data(conn, mag_name, sample_names):
+    """Query MAG-level metric views and return HTML content list.
+
     Args:
         conn: DuckDB connection
-        contig_name: Name of the contig
+        mag_name: Name of the MAG
         sample_names: List of sample names to include
-        
+
+    Returns:
+        List of HTML strings (section headers + tables)
+    """
+    coverage_cols = {
+        "Aligned_fraction_percentage": "Aligned fraction (%)",
+        "Above_expected_aligned_fraction": "Above expected AF",
+        "Read_count": "Read count",
+        "Coverage_mean": "Coverage mean",
+        "Coverage_median": "Coverage median",
+        "Coverage_trimmed_mean": "Coverage trimmed mean",
+        "RPKM": "RPKM",
+        "TPM": "TPM",
+        "Coverage_coefficient_of_variation": "Coverage coeff. of variation",
+        "Relative_coverage_roughness": "Relative coverage roughness",
+    }
+    misassembly_cols = {
+        "Mismatches_per_100kbp": "Mismatches (per 100kbp)",
+        "Deletions_per_100kbp": "Deletions (per 100kbp)",
+        "Insertions_per_100kbp": "Insertions (per 100kbp)",
+        "Clippings_per_100kbp": "Clippings (per 100kbp)",
+        "Collapse_bp": "Collapse (bp)",
+        "Collapse_per_100kbp": "Collapse (per 100kbp)",
+        "Expansion_bp": "Expansion (bp)",
+        "Expansion_per_100kbp": "Expansion (per 100kbp)",
+    }
+    microdiversity_cols = {
+        "Micro_Mismatches_per_100kbp": "Mismatches (per 100kbp)",
+        "Micro_Deletions_per_100kbp": "Deletions (per 100kbp)",
+        "Micro_Insertions_per_100kbp": "Insertions (per 100kbp)",
+        "Micro_Clippings_per_100kbp": "Clippings (per 100kbp)",
+        "Microdiverse_bp_on_reads": "Microdiverse bp (reads)",
+        "Microdiverse_bp_per_100kbp_on_reads": "Microdiverse bp/100kbp (reads)",
+        "Microdiverse_bp_on_reference": "Microdiverse bp (reference)",
+        "Microdiverse_bp_per_100kbp_on_reference": "Microdiverse bp/100kbp (reference)",
+    }
+
+    if not sample_names:
+        return []
+
+    cur = conn.cursor()
+
+    # Check which views exist
+    view_col_map = [
+        ('Explicit_coverage_per_MAG', coverage_cols),
+        ('Explicit_misassembly_per_MAG', misassembly_cols),
+        ('Explicit_microdiversity_per_MAG', microdiversity_cols),
+    ]
+    for view_name, col_dict in view_col_map:
+        try:
+            cur.execute(f"SELECT 1 FROM {view_name} LIMIT 0")
+        except Exception:
+            col_dict.clear()
+
+    n = len(sample_names)
+    sample_idx = {name: i for i, name in enumerate(sample_names)}
+    placeholders = ','.join(['?'] * n)
+
+    # Microdiversity SQL columns differ from dict keys (prefixed with Micro_)
+    microdiversity_sql_map = {
+        "Micro_Mismatches_per_100kbp": "Mismatches_per_100kbp",
+        "Micro_Deletions_per_100kbp": "Deletions_per_100kbp",
+        "Micro_Insertions_per_100kbp": "Insertions_per_100kbp",
+        "Micro_Clippings_per_100kbp": "Clippings_per_100kbp",
+    }
+
+    all_cols = coverage_cols | misassembly_cols | microdiversity_cols
+    data = {"Sample": list(sample_names)}
+    for col in all_cols:
+        data[col] = [None] * n
+
+    def query_mag_view(view_name, col_dict, sql_col_map=None):
+        try:
+            if sql_col_map:
+                cols_str = ", ".join(sql_col_map.get(k, k) for k in col_dict.keys())
+            else:
+                cols_str = ", ".join(col_dict.keys())
+            cur.execute(
+                f"SELECT Sample_name, {cols_str} FROM {view_name} "
+                f"WHERE MAG_name = ? AND Sample_name IN ({placeholders})",
+                [mag_name] + list(sample_names),
+            )
+            for row in cur.fetchall():
+                sample_name, *values = row
+                idx = sample_idx.get(sample_name)
+                if idx is None:
+                    continue
+                for value_col, cell in zip(col_dict.keys(), values):
+                    data[value_col][idx] = cell
+        except Exception:
+            pass
+
+    query_mag_view("Explicit_coverage_per_MAG", coverage_cols)
+    query_mag_view("Explicit_misassembly_per_MAG", misassembly_cols)
+    query_mag_view("Explicit_microdiversity_per_MAG", microdiversity_cols, sql_col_map=microdiversity_sql_map)
+
+    content = []
+    coverage_table = generate_summary_table_html(data, coverage_cols)
+    if coverage_table:
+        content.append("<b>Coverage:</b>")
+        content.append(coverage_table)
+
+    misassembly_table = generate_summary_table_html(data, misassembly_cols)
+    if misassembly_table:
+        content.append("<b>Misassembly:</b>")
+        content.append(misassembly_table)
+
+    microdiversity_table = generate_summary_table_html(data, microdiversity_cols)
+    if microdiversity_table:
+        content.append("<b>Microdiversity:</b>")
+        content.append(microdiversity_table)
+
+    return content
+
+
+## Function to generate HTML and open in new browser window
+def generate_and_open_peruse_html(conn, contig_name, sample_names, *, mag_name=None, is_mag_view=False):
+    """Generate HTML summary and open in new browser window.
+
+    Args:
+        conn: DuckDB connection
+        contig_name: Name of the contig (None when is_mag_view=True)
+        sample_names: List of sample names to include
+        mag_name: Name of the parent MAG (optional; also used as subject in MAG view)
+        is_mag_view: When True, show MAG-level summary instead of contig-level
+
     Returns:
         True if successful, False otherwise
     """
     import tempfile
     import webbrowser
-    
+
     try:
-        # Get contig info
         cur = conn.cursor()
-        cur.execute("SELECT Contig_length, Duplication_percentage, GC_mean, GC_sd, GC_skew_amplitude, Positive_GC_skew_windows_percentage FROM Contig WHERE Contig_name = ?", (contig_name,))
-        result = cur.fetchone()
-        contig_length = result[0] if result else "unknown"
-        contig_duplication = round(result[1] / 10.0, 1) if result and result[1] is not None else "unknown"
-        gc_mean = result[2] if result and result[2] is not None else "N/A"
-        # GC_sd and GC_skew_amplitude are stored as int × 100, decode them
-        gc_sd = round(result[3] / 100.0, 2) if result and result[3] is not None else "N/A"
-        gc_skew_amplitude = result[4] / 100.0 if result and result[4] is not None else "N/A"
-        gc_skew_percent_positive = round(result[5] / 10.0, 1) if result and result[5] is not None else "N/A"
 
-        # Build data
-        content = build_summary_data(conn, contig_name, sample_names)
+        # --- MAG view: show MAG characs + sample characs + MAG metrics ---
+        if is_mag_view:
+            subject = mag_name or ""
 
-        # Build contig features table HTML
-        contig_table_html = f"""
-        <table style="border-collapse: collapse; margin-bottom: 20px; background-color: white; border-radius: 5px; width: 100%;">
-            <thead>
-                <tr style="background-color: #f0f0f0;">
-                    <th style="border: 1px solid #ddd; padding: 8px; text-align: left;">Contig</th>
-                    <th style="border: 1px solid #ddd; padding: 8px; text-align: left;">Contig length</th>
-                    <th style="border: 1px solid #ddd; padding: 8px; text-align: left;">Duplication (%)</th>
-                    <th style="border: 1px solid #ddd; padding: 8px; text-align: left;">GC mean</th>
-                    <th style="border: 1px solid #ddd; padding: 8px; text-align: left;">GC sd</th>
-                    <th style="border: 1px solid #ddd; padding: 8px; text-align: left;">GC skew amplitude</th>
-                    <th style="border: 1px solid #ddd; padding: 8px; text-align: left;">% positive GC skew</th>
-                </tr>
-            </thead>
-            <tbody>
-                <tr>
-                    <td style="border: 1px solid #ddd; padding: 8px;">{contig_name}</td>
-                    <td style="border: 1px solid #ddd; padding: 8px;">{contig_length}</td>
-                    <td style="border: 1px solid #ddd; padding: 8px;">{contig_duplication}</td>
-                    <td style="border: 1px solid #ddd; padding: 8px;">{gc_mean}</td>
-                    <td style="border: 1px solid #ddd; padding: 8px;">{gc_sd}</td>
-                    <td style="border: 1px solid #ddd; padding: 8px;">{gc_skew_amplitude}</td>
-                    <td style="border: 1px solid #ddd; padding: 8px;">{gc_skew_percent_positive}</td>
-                </tr>
-            </tbody>
-        </table>
-        """
+            mag_table_html = ""
+            try:
+                cur.execute("SELECT * FROM MAG WHERE MAG_name = ?", (subject,))
+                mag_row = cur.fetchone()
+                mag_col_names = [d[0] for d in cur.description]
+                if mag_row:
+                    mag_table_html = _build_row_table_html(
+                        [mag_row], mag_col_names,
+                        skip_cols=("MAG_id",),
+                        decode_map=_MAG_DECODE,
+                    )
+            except Exception:
+                pass
 
-        # Generate HTML for new window
-        html_parts = [
-            "<!DOCTYPE html>",
-            "<html>",
-            "<head>",
-            "<meta charset='utf-8'>",
-            f"<title>theBIGbam - {contig_name} Summary</title>",
-            "<style>",
-            "body { font-family: Arial, sans-serif; margin: 20px; background-color: #f5f5f5; }",
-            "h2, h3 { color: #333; }",
-            "b { display: block; margin-top: 15px; margin-bottom: 5px; }",
-            "i { display: block; margin-bottom: 15px; font-size: 0.9em; color: #666; }",
-            "</style>",
-            "</head>",
-            "<body>",
-            f"<h2>{contig_name}</h2>",
-            contig_table_html,
-        ]
+            sample_table_html = ""
+            if sample_names:
+                try:
+                    placeholders = ",".join(["?"] * len(sample_names))
+                    cur.execute(
+                        f"SELECT * FROM Sample WHERE Sample_name IN ({placeholders}) ORDER BY Sample_name",
+                        list(sample_names),
+                    )
+                    sample_rows = cur.fetchall()
+                    sample_col_names = [d[0] for d in cur.description]
+                except Exception:
+                    sample_rows = []
+                    sample_col_names = []
+                if sample_rows:
+                    sample_table_html = (
+                        "<h3>Samples</h3>"
+                        + _build_row_table_html(sample_rows, sample_col_names, skip_cols=("Sample_id",))
+                    )
 
-        # Add metrics summary if sample data is available
-        if content and len(content) > 0:
-            html_parts.append("<h3>Metrics summary:</h3>")
-            for item in content:
-                html_parts.append(item)
-        
-        html_parts.extend([
-            "</body>",
-            "</html>"
-        ])
-        
-        html_content = "\n".join(html_parts)
+            mag_metrics = build_mag_summary_data(conn, subject, sample_names)
+
+            html_parts = [
+                "<!DOCTYPE html>", "<html>", "<head>",
+                "<meta charset='utf-8'>",
+                f"<title>theBIGbam - {subject} Summary</title>",
+                "<style>",
+                "body { font-family: Arial, sans-serif; margin: 20px; background-color: #f5f5f5; }",
+                "h2, h3 { color: #333; }",
+                "b { display: block; margin-top: 15px; margin-bottom: 5px; }",
+                "i { display: block; margin-bottom: 15px; font-size: 0.9em; color: #666; }",
+                "</style>", "</head>", "<body>",
+                f"<h2>{subject}</h2>",
+                mag_table_html,
+                sample_table_html,
+            ]
+            if mag_metrics:
+                html_parts.append("<h3>MAG metrics:</h3>")
+                html_parts.extend(mag_metrics)
+            html_parts.extend(["</body>", "</html>"])
+            html_content = "\n".join(html_parts)
+
+        # --- Contig view: contig characs + parent MAG characs + sample characs + MAG metrics + contig metrics ---
+        else:
+            # Contig table — dynamic columns, skip internal ID
+            contig_table_html = ""
+            try:
+                cur.execute("SELECT * FROM Contig WHERE Contig_name = ?", (contig_name,))
+                contig_row = cur.fetchone()
+                contig_col_names = [d[0] for d in cur.description]
+                contig_table_html = _build_row_table_html(
+                    [contig_row] if contig_row else [],
+                    contig_col_names,
+                    skip_cols=("Contig_id",),
+                    decode_map=_CONTIG_DECODE,
+                )
+            except Exception:
+                pass
+
+            # Contig metrics
+            contig_content = build_summary_data(conn, contig_name, sample_names)
+
+            # MAG table (only when DB is MAG-mode and contig has a parent MAG)
+            mag_table_html = ""
+            resolved_mag_name = mag_name
+            try:
+                cur.execute(
+                    "SELECT mg.* FROM MAG mg "
+                    "JOIN MAG_contigs_association mca ON mca.MAG_id = mg.MAG_id "
+                    "JOIN Contig c ON c.Contig_id = mca.Contig_id "
+                    "WHERE c.Contig_name = ?",
+                    (contig_name,),
+                )
+                mag_row = cur.fetchone()
+                mag_col_names = [d[0] for d in cur.description]
+                if mag_row:
+                    mag_dict = dict(zip(mag_col_names, mag_row))
+                    resolved_mag_name = mag_dict.get("MAG_name", mag_name)
+                    mag_table_html = _build_row_table_html(
+                        [mag_row], mag_col_names,
+                        skip_cols=("MAG_id",),
+                        decode_map=_MAG_DECODE,
+                    )
+            except Exception:
+                pass
+
+            # Sample table
+            sample_table_html = ""
+            if sample_names:
+                try:
+                    placeholders = ",".join(["?"] * len(sample_names))
+                    cur.execute(
+                        f"SELECT * FROM Sample WHERE Sample_name IN ({placeholders}) ORDER BY Sample_name",
+                        list(sample_names),
+                    )
+                    sample_rows = cur.fetchall()
+                    sample_col_names = [d[0] for d in cur.description]
+                except Exception:
+                    sample_rows = []
+                    sample_col_names = []
+                if sample_rows:
+                    sample_table_html = (
+                        "<h3>Samples</h3>"
+                        + _build_row_table_html(sample_rows, sample_col_names, skip_cols=("Sample_id",))
+                    )
+
+            # MAG metrics (if parent MAG is known)
+            mag_metrics = []
+            if resolved_mag_name:
+                mag_metrics = build_mag_summary_data(conn, resolved_mag_name, sample_names)
+
+            html_parts = [
+                "<!DOCTYPE html>", "<html>", "<head>",
+                "<meta charset='utf-8'>",
+                f"<title>theBIGbam - {contig_name} Summary</title>",
+                "<style>",
+                "body { font-family: Arial, sans-serif; margin: 20px; background-color: #f5f5f5; }",
+                "h2, h3 { color: #333; }",
+                "b { display: block; margin-top: 15px; margin-bottom: 5px; }",
+                "i { display: block; margin-bottom: 15px; font-size: 0.9em; color: #666; }",
+                "</style>", "</head>", "<body>",
+                f"<h2>{contig_name}</h2>",
+                contig_table_html,
+            ]
+            if mag_table_html:
+                html_parts.append(f"<h3>Parent MAG ({resolved_mag_name})</h3>")
+                html_parts.append(mag_table_html)
+            html_parts.append(sample_table_html)
+            if mag_metrics:
+                html_parts.append("<h3>MAG metrics:</h3>")
+                html_parts.extend(mag_metrics)
+            if contig_content:
+                html_parts.append("<h3>Contig metrics:</h3>")
+                html_parts.extend(contig_content)
+            html_parts.extend(["</body>", "</html>"])
+            html_content = "\n".join(html_parts)
         
         # Write to temporary file and open in new window
         with tempfile.NamedTemporaryFile(mode='w', suffix='.html', delete=False, encoding='utf-8') as f:

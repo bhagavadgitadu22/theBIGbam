@@ -36,7 +36,7 @@ COLUMNS = [
     "gene_name",
     "contig_aligned_fraction",
     "gene_aligned_fraction",
-    "contig_coverage_median",
+    "contig_coverage_trimmed_mean",
     "gene_coverage_median",
     "coverage_ratio",
     "gene_secondary_coverage_median",
@@ -267,7 +267,7 @@ def process_sample(conn, sample_id, sample_name, contig_info, cov_map, af_map,
             continue
 
         contig_name, contig_length, _ = contig_info[contig_id]
-        contig_cov_med = cov_map[contig_id]
+        contig_cov_tmean = cov_map[contig_id]
         contig_af = af_map[contig_id]
 
         features = _load_all_features(
@@ -290,8 +290,8 @@ def process_sample(conn, sample_id, sample_name, contig_info, cov_map, af_map,
             gene_sec_med = float(np.median(features["secondary_reads"][s0:e0]))
 
             coverage_ratio = 0
-            if contig_cov_med is not None and contig_cov_med > 0:
-                coverage_ratio = round(gene_cov_med / contig_cov_med, 4)
+            if contig_cov_tmean is not None and contig_cov_tmean > 0:
+                coverage_ratio = round(gene_cov_med / contig_cov_tmean, 4)
 
             mm = _mismatch_stats(features["mismatches"], s0, e0)
             total_pos, total_prev = mm[0], mm[1]
@@ -314,7 +314,7 @@ def process_sample(conn, sample_id, sample_name, contig_info, cov_map, af_map,
                 gene_name,
                 contig_af,
                 gene_af,
-                contig_cov_med,
+                contig_cov_tmean,
                 gene_cov_med,
                 coverage_ratio,
                 gene_sec_med,
@@ -347,9 +347,9 @@ Output columns (one row per sample x CDS):
 - gene_name: stable identifier <contig_name>_tbb_<N>, numbered per contig by start position
 - contig_aligned_fraction: percentage of the contig covered by aligned reads (0-100)
 - gene_aligned_fraction: percentage of positions in the CDS covered by at least one primary read (0-100)
-- contig_coverage_median: median primary read depth across the whole contig
+- contig_coverage_trimmed_mean: trimmed mean primary read depth across the whole contig
 - gene_coverage_median: median primary read depth across the CDS
-- coverage_ratio: gene_coverage_median / contig_coverage_median
+- coverage_ratio: gene_coverage_median / contig_coverage_trimmed_mean
 - gene_secondary_coverage_median: median secondary (non-primary) read depth across the CDS
 - mismatches_positions: number of positions in the CDS with at least one mismatch
 - mismatches_prevalence: sum of per-position mismatch prevalences (count/coverage) across the CDS
@@ -385,7 +385,7 @@ def add_args(parser):
         "--min_coverage_depth",
         type=float,
         default=10,
-        help="Minimum median coverage depth to include a contig-sample pair (default: 10)",
+        help="Minimum trimmed mean coverage depth to include a contig-sample pair (default: 10)",
     )
 
 
@@ -487,11 +487,11 @@ def run(args):
                 qualifying = conn.execute(
                     """
                     SELECT Contig_id, Aligned_fraction_percentage / 10.0,
-                           Coverage_median / 10.0
+                           Coverage_trimmed_mean / 10.0
                     FROM Coverage
                     WHERE Sample_id = ?
                       AND Aligned_fraction_percentage >= ?
-                      AND Coverage_median >= ?
+                      AND Coverage_trimmed_mean >= ?
                     """,
                     [sample_id, af_threshold, cov_threshold],
                 ).fetchall()

@@ -18,7 +18,7 @@ from thebigbam.database.blob_decoder import (
     decode_zoom_standalone,
     decode_raw_chunks, decode_raw_sparse_chunks,
     get_scale_from_zoom_blob, is_sparse_zoom_blob,
-    feature_name_to_id, contig_blob_name_to_id,
+    feature_name_to_id, is_contig_blob_feature,
     CHUNK_SIZE, SCALE_DIVISORS, ZOOM_MAGIC,
 )
 
@@ -26,7 +26,9 @@ from thebigbam.database.blob_decoder import (
 def add_inspect_args(parser):
     parser.add_argument('-d', '--db', required=True, help='Path to DuckDB database')
     parser.add_argument('--feature', required=True, help='Feature name(s), comma-separated (e.g. mismatches,coverage,gc_content)')
-    parser.add_argument('--contig', required=True, help='Contig name(s), comma-separated')
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument('--contig', help='Contig name(s), comma-separated')
+    group.add_argument('--mag', help='MAG name(s), comma-separated (expands to all member contigs; adds MAG column to output)')
     parser.add_argument('--sample', default=None, help='Sample name(s), comma-separated (required for sample-level features, omit for contig-level)')
     parser.add_argument('--region', default=None, help='Genomic region to display (e.g. 1000-2000)')
     parser.add_argument('--zoom', type=int, default=None, choices=[0, 1, 2],
@@ -41,7 +43,6 @@ def run_inspect(args):
     conn = duckdb.connect(args.db, read_only=True)
 
     features = [f.strip() for f in args.feature.split(',')]
-    contigs = [c.strip() for c in args.contig.split(',')]
     samples = [s.strip() for s in args.sample.split(',')] if args.sample else []
 
     # Parse region filter
@@ -54,27 +55,112 @@ def run_inspect(args):
 
     zoom_bin_size = {0: 100, 1: 1000, 2: 10000}.get(args.zoom)
 
+    # Resolve contigs and MAG association
+    mag_of_contig = {}   # contig_name → mag_name (empty when using --contig)
+    contig_offsets = {}  # contig_name → Offset_in_MAG (0 when using --contig)
+    mags = [m.strip() for m in args.mag.split(',')] if args.mag else []
+    if args.mag:
+        # Expand MAG names → member contigs, recording the MAG association and offset
+        contigs = []
+        for mag_name in mags:
+            rows = conn.execute(
+                "SELECT c.Contig_name, mca.Offset_in_MAG FROM Contig c "
+                "JOIN MAG_contigs_association mca ON mca.Contig_id = c.Contig_id "
+                "JOIN MAG mg ON mg.MAG_id = mca.MAG_id "
+                "WHERE mg.MAG_name = ?",
+                [mag_name],
+            ).fetchall()
+            if not rows:
+                print(f"# ERROR: MAG '{mag_name}' not found or has no member contigs, skipping.", file=sys.stderr)
+                continue
+            for cn, offset in rows:
+                contigs.append(cn)
+                mag_of_contig[cn] = mag_name
+                contig_offsets[cn] = int(offset)
+    else:
+        contigs = [c.strip() for c in args.contig.split(',')]
+
     # Print header once (use buffer.write to avoid mixed text/binary buffering)
     if not args.header_only:
-        sys.stdout.buffer.write(b"contig\tsample\tfeature\tposition_start\tposition_end\tvalue\n")
+        if mag_of_contig:
+            sys.stdout.buffer.write(b"mag\tcontig\tsample\tfeature\tposition_start\tposition_end\tvalue\n")
+        else:
+            sys.stdout.buffer.write(b"contig\tsample\tfeature\tposition_start\tposition_end\tvalue\n")
+
+    # When using --mag with --zoom, query MAG-level zoom blobs directly.
+    # They are pre-computed in MAG-global coordinates — no per-contig offset needed.
+    if args.mag and zoom_bin_size is not None:
+        from thebigbam.database.database_getters import (
+            get_mag_id, get_mag_feature_zoom, get_mag_contig_zoom,
+        )
+        for mag_name in mags:
+            mag_id = get_mag_id(conn, mag_name)
+            if mag_id is None:
+                print(f"# ERROR: MAG '{mag_name}' not found, skipping.", file=sys.stderr)
+                continue
+            for feature_name in features:
+                if is_contig_blob_feature(feature_name):
+                    zoom_blob = get_mag_contig_zoom(conn, mag_id, feature_name)
+                    if zoom_blob is None:
+                        continue
+                    _print_zoom_rows(zoom_blob, zoom_bin_size, "-", "", feature_name,
+                                     region_start, region_end, mag_name=mag_name)
+                else:
+                    if not samples:
+                        print(f"# ERROR: '{feature_name}' is sample-level — --sample required, skipping.", file=sys.stderr)
+                        continue
+                    for sample_name in samples:
+                        s_row = conn.execute(
+                            "SELECT Sample_id FROM Sample WHERE Sample_name = ?", [sample_name]
+                        ).fetchone()
+                        if s_row is None:
+                            print(f"# ERROR: Sample '{sample_name}' not found, skipping.", file=sys.stderr)
+                            continue
+                        zoom_blob = get_mag_feature_zoom(conn, mag_id, s_row[0], feature_name)
+                        if zoom_blob is None:
+                            continue
+                        _print_zoom_rows(zoom_blob, zoom_bin_size, "-", sample_name, feature_name,
+                                         region_start, region_end, mag_name=mag_name)
+        conn.close()
+        return 0
 
     for contig_name in contigs:
-        row = conn.execute("SELECT Contig_id FROM Contig WHERE Contig_name = ?", [contig_name]).fetchone()
+        row = conn.execute(
+            "SELECT Contig_id, Contig_length FROM Contig WHERE Contig_name = ?", [contig_name]
+        ).fetchone()
         if row is None:
             print(f"# ERROR: Contig '{contig_name}' not found, skipping.", file=sys.stderr)
             continue
-        contig_id = row[0]
+        contig_id, contig_length = int(row[0]), int(row[1])
+        contig_mag = mag_of_contig.get(contig_name, "")
+        mag_offset = contig_offsets.get(contig_name, 0)
+
+        # Translate MAG-global region to contig-local coordinates
+        if region_start is not None and mag_offset > 0:
+            local_rs = region_start - mag_offset
+            local_re = region_end - mag_offset
+            # Skip this contig entirely if the region doesn't overlap it
+            if local_re < 1 or local_rs > contig_length:
+                continue
+            local_rs = max(1, local_rs)
+            local_re = min(contig_length, local_re)
+        else:
+            local_rs = region_start
+            local_re = region_end
 
         for feature_name in features:
-            contig_fid = contig_blob_name_to_id(feature_name)
-            sample_fid = feature_name_to_id(feature_name, conn)
+            fid = feature_name_to_id(feature_name, conn)
 
-            if contig_fid is not None:
+            if is_contig_blob_feature(feature_name):
+                if fid is None:
+                    print(f"# ERROR: Unknown feature '{feature_name}', skipping.", file=sys.stderr)
+                    continue
                 _inspect_contig_feature(
-                    conn, contig_id, contig_name, feature_name, contig_fid,
-                    region_start, region_end, zoom_bin_size, args.header_only,
+                    conn, contig_id, contig_name, feature_name, fid,
+                    local_rs, local_re, zoom_bin_size, args.header_only,
+                    mag_name=contig_mag, mag_offset=mag_offset,
                 )
-            elif sample_fid is not None:
+            elif fid is not None:
                 if not samples:
                     print(f"# ERROR: '{feature_name}' is sample-level — --sample required, skipping.", file=sys.stderr)
                     continue
@@ -86,8 +172,9 @@ def run_inspect(args):
                     sample_id = row[0]
                     _inspect_sample_feature(
                         conn, contig_id, contig_name, sample_name, sample_id,
-                        feature_name, sample_fid,
-                        region_start, region_end, zoom_bin_size, args.header_only,
+                        feature_name, fid,
+                        local_rs, local_re, zoom_bin_size, args.header_only,
+                        mag_name=contig_mag, mag_offset=mag_offset,
                     )
             else:
                 print(f"# ERROR: Unknown feature '{feature_name}', skipping.", file=sys.stderr)
@@ -97,7 +184,8 @@ def run_inspect(args):
 
 
 def _inspect_contig_feature(conn, contig_id, contig_name, feature_name, fid,
-                            region_start, region_end, zoom_bin_size, header_only):
+                            region_start, region_end, zoom_bin_size, header_only,
+                            mag_name="", mag_offset=0):
     """Inspect a contig-level feature from Contig_blob / Contig_blob_chunk."""
     row = conn.execute(
         "SELECT Zoom_data FROM Contig_blob WHERE Contig_id = ? AND Feature_id = ?",
@@ -112,7 +200,8 @@ def _inspect_contig_feature(conn, contig_id, contig_name, feature_name, fid,
         return
 
     if zoom_bin_size is not None:
-        _print_zoom_rows(zoom_blob, zoom_bin_size, contig_name, "", feature_name, region_start, region_end)
+        _print_zoom_rows(zoom_blob, zoom_bin_size, contig_name, "", feature_name, region_start, region_end,
+                         mag_name=mag_name, mag_offset=mag_offset)
         return
 
     scale_div = get_scale_from_zoom_blob(zoom_blob)
@@ -128,12 +217,14 @@ def _inspect_contig_feature(conn, contig_id, contig_name, feature_name, fid,
     if gc_window > 1:
         x_arr = x_arr * gc_window
 
-    _print_rows(contig_name, "", feature_name, x_arr, y_arr, region_start, region_end, window_size=gc_window)
+    _print_rows(contig_name, "", feature_name, x_arr, y_arr, region_start, region_end,
+                window_size=gc_window, mag_name=mag_name, mag_offset=mag_offset)
 
 
 def _inspect_sample_feature(conn, contig_id, contig_name, sample_name, sample_id,
                             feature_name, fid,
-                            region_start, region_end, zoom_bin_size, header_only):
+                            region_start, region_end, zoom_bin_size, header_only,
+                            mag_name="", mag_offset=0):
     """Inspect a sample-level feature from Feature_blob / Feature_blob_chunk."""
     row = conn.execute(
         "SELECT Zoom_data FROM Feature_blob WHERE Contig_id = ? AND Sample_id = ? AND Feature_id = ?",
@@ -148,7 +239,8 @@ def _inspect_sample_feature(conn, contig_id, contig_name, sample_name, sample_id
         return
 
     if zoom_bin_size is not None:
-        _print_zoom_rows(zoom_blob, zoom_bin_size, contig_name, sample_name, feature_name, region_start, region_end)
+        _print_zoom_rows(zoom_blob, zoom_bin_size, contig_name, sample_name, feature_name, region_start, region_end,
+                         mag_name=mag_name, mag_offset=mag_offset)
         return
 
     scale_div = get_scale_from_zoom_blob(zoom_blob)
@@ -162,7 +254,8 @@ def _inspect_sample_feature(conn, contig_id, contig_name, sample_name, sample_id
     else:
         data = decode_raw_chunks(chunk_rows, scale_div)
 
-    _print_rows(contig_name, sample_name, feature_name, data["x"], data["y"], region_start, region_end)
+    _print_rows(contig_name, sample_name, feature_name, data["x"], data["y"], region_start, region_end,
+                mag_name=mag_name, mag_offset=mag_offset)
 
 
 def _fetch_contig_chunks(conn, contig_id, fid, region_start, region_end, feature_name):
@@ -227,7 +320,7 @@ def _print_zoom_header(zoom_blob, contig_name, feature_name, sample_name=None):
 
 
 def _print_zoom_rows(zoom_blob, bin_size, contig_name, sample_name, feature_name,
-                     region_start, region_end):
+                     region_start, region_end, mag_name="", mag_offset=0):
     """Print zoom summary bins as RLE TSV rows."""
     data = decode_zoom_standalone(zoom_blob, bin_size)
     if data is None:
@@ -246,20 +339,23 @@ def _print_zoom_rows(zoom_blob, bin_size, contig_name, sample_name, feature_name
         return
 
     means = np.round(data["mean"], 4)
-    pos_starts = (bin_starts + 1).astype(np.int64)
-    pos_ends = (bin_ends + 1).astype(np.int64)
+    pos_starts = (bin_starts + 1 + mag_offset).astype(np.int64)
+    pos_ends = (bin_ends + 1 + mag_offset).astype(np.int64)
 
     # RLE: merge consecutive bins with same value
-    _write_rle(contig_name, sample_name, feature_name, pos_starts, pos_ends, means)
+    _write_rle(contig_name, sample_name, feature_name, pos_starts, pos_ends, means, mag_name=mag_name)
 
 
 def _print_rows(contig_name, sample_name, feature_name, x_arr, y_arr,
-                region_start, region_end, window_size=1):
+                region_start, region_end, window_size=1, mag_name="", mag_offset=0):
     """Apply region filter and print RLE TSV rows.
 
     Args:
         window_size: For windowed features (gc_content=500, gc_skew=1000),
                      each entry spans window_size bp. position_end = position_start + window_size - 1.
+        mag_name: MAG the contig belongs to (empty string when not using --mag mode).
+        mag_offset: Offset of this contig within the MAG (0 when not in MAG mode).
+                    Added to all output positions so they are in MAG-global coordinates.
     """
     if region_start is not None:
         mask = (x_arr >= (region_start - 1)) & (x_arr <= (region_end - 1))
@@ -271,13 +367,13 @@ def _print_rows(contig_name, sample_name, feature_name, x_arr, y_arr,
         return
 
     y_rounded = np.round(y_arr, 4)
-    pos_starts = (x_arr + 1).astype(np.int64)  # 0-based → 1-based
-    pos_ends = (x_arr + window_size).astype(np.int64)  # end of each window/position
+    pos_starts = (x_arr + 1 + mag_offset).astype(np.int64)  # 0-based → 1-based + MAG offset
+    pos_ends = (x_arr + window_size + mag_offset).astype(np.int64)  # end of each window/position
 
     # Find runs: same value AND consecutive entries (next start == prev end + 1)
     if n == 1:
         _write_rle(contig_name, sample_name, feature_name,
-                   pos_starts, pos_ends, y_rounded)
+                   pos_starts, pos_ends, y_rounded, mag_name=mag_name)
         return
 
     value_changes = np.diff(y_rounded) != 0
@@ -293,16 +389,20 @@ def _print_rows(contig_name, sample_name, feature_name, x_arr, y_arr,
     rle_pos_ends = pos_ends[run_ends]
     run_values = y_rounded[run_starts]
 
-    _write_rle(contig_name, sample_name, feature_name, rle_pos_starts, rle_pos_ends, run_values)
+    _write_rle(contig_name, sample_name, feature_name, rle_pos_starts, rle_pos_ends, run_values,
+               mag_name=mag_name)
 
 
-def _write_rle(contig_name, sample_name, feature_name, pos_starts, pos_ends, values):
+def _write_rle(contig_name, sample_name, feature_name, pos_starts, pos_ends, values, mag_name=""):
     """Write RLE rows to stdout in bulk."""
     n = len(pos_starts)
     if n == 0:
         return
 
-    prefix = f"{contig_name}\t{sample_name}\t{feature_name}\t"
+    if mag_name:
+        prefix = f"{mag_name}\t{contig_name}\t{sample_name}\t{feature_name}\t"
+    else:
+        prefix = f"{contig_name}\t{sample_name}\t{feature_name}\t"
     prefix_b = prefix.encode()
 
     # Format numeric columns with numpy, then prepend prefix

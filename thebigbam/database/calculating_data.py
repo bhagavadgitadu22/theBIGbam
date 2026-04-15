@@ -11,7 +11,7 @@ except ImportError:
     _rust = None
 
 
-def calculating_all_features_parallel(list_modules, bam_files, output_db, min_aligned_fraction, min_coverage_depth, curve_ratio, bar_ratio, n_sample_cores=None, sequencing_type=None, genbank_path=None, assembly_path=None, extend_db=None, min_occurrences=2, enable_timing=False):
+def calculating_all_features_parallel(list_modules, bam_files, output_db, min_aligned_fraction, min_coverage_depth, curve_ratio, bar_ratio, n_sample_cores=None, sequencing_type=None, genbank_path=None, assembly_path=None, extend_db=None, min_occurrences=2, enable_timing=False, view="contig", mag_manifest=None):
     """Process all BAM files in parallel using Rust bindings."""
     if not HAS_RUST:
         sys.exit("ERROR: Rust bindings (thebigbam_rs) are required but not available. Please install them first.")
@@ -20,6 +20,9 @@ def calculating_all_features_parallel(list_modules, bam_files, output_db, min_al
         n_sample_cores = max(1, cpu_count() - 1)
 
     print(f"Using Rust bindings to process {len(bam_files)} samples with rayon ({n_sample_cores} threads)...", flush=True)
+
+    if view == "mag":
+        print(f"View mode: MAG ({len(mag_manifest or [])} MAGs in manifest)", flush=True)
 
     try:
         result = _rust.process_all_samples(
@@ -38,6 +41,8 @@ def calculating_all_features_parallel(list_modules, bam_files, output_db, min_al
             extend_db=extend_db if extend_db else "",
             min_occurrences=int(min_occurrences),
             enable_timing=enable_timing,
+            view=view,
+            mag_manifest=list(mag_manifest or []),
         )
     except Exception as e:
         print(f"ERROR: Rust processing failed: {e}", flush=True)
@@ -51,18 +56,192 @@ def calculating_all_features_parallel(list_modules, bam_files, output_db, min_al
 
 def add_calculate_args(parser):
     parser.add_argument('-t', '--threads', type=int, default=4, help='Number of threads available (default: 4)')
-    parser.add_argument("-g", "--genbank", help="Path to annotation file: GenBank (.gbk, .gbff) or GFF3 (.gff) format. Required if no BAM files provided.")
+    parser.add_argument("-g", "--genbank", help="Path to annotation FILE or DIRECTORY: GenBank (.gbk, .gbff, .gb) or GFF3 (.gff, .gff3). With --view mag, a directory means one file per MAG (MAG name = filename stem). Required if no BAM files provided.")
     parser.add_argument("-b", "--bam_files", help="Path to bam file or directory containing mapping files (BAM format). Optional if genbank is provided.")
     parser.add_argument("-o", "--output", required=True, help="Output database file path (.db)")
     parser.add_argument("-m", "--modules", required=False, default=None, help="List of modules to compute (comma-separated). If not provided, all modules are computed. Options: coverage, misalignment, rna, longreads, pairedreads, termini")
-    parser.add_argument("-a", "--assembly", help="Path to assembly FASTA file (only needed for autoblast when genbank lacks sequence data)")
+    parser.add_argument("-a", "--assembly", help="Path to assembly FASTA FILE or DIRECTORY (.fa, .fasta, .fna). Needed for autoblast when genbank lacks sequence data. With --view mag, a directory means one file per MAG (MAG name = filename stem).")
+    parser.add_argument("--view", choices=["contig", "mag"], default="contig", help="Aggregation level: 'contig' (default) processes each contig independently; 'mag' groups contigs by MAG, requires at least one of -g / -a to be a directory of per-MAG files.")
     parser.add_argument('-s', '--sequencing_type', choices=['long', 'paired-short', 'single-short'], help='Sequencing type (long or short allowed)')
-    parser.add_argument("--min_aligned_fraction", type=int, default=50, help="Minimum alignment-length coverage proportion for contig inclusion (default: 50%%)")
-    parser.add_argument("--min_coverage_depth", type=int, default=0, help="Minimum mean coverage depth for contig inclusion (disabled by default, e.g. 5 to filter low-depth contigs)")
+    parser.add_argument("--min_aligned_fraction", type=int, default=50, help="Minimum alignment-length coverage proportion for inclusion (default: 50%%). In --view mag, the threshold is applied to the MAG aggregate (length-weighted across member contigs); failing MAGs drop all member contigs together.")
+    parser.add_argument("--min_coverage_depth", type=int, default=0, help="Minimum mean coverage depth for inclusion (disabled by default, e.g. 5 to filter low-depth contigs). In --view mag, the threshold is applied to the MAG aggregate (length-weighted across member contigs); failing MAGs drop all member contigs together.")
     parser.add_argument('--coverage_percentage', type=float, default=10, help='Compressing ratio for features depending on coverage: only values above this %% of the local coverage are kept (default: 10%%)')
     parser.add_argument('--min_occurrences', type=int, default=2, help='Minimum absolute event count for sparse features (default: 2). Position kept only if value > coverage × coverage_percentage AND value > min_occurrences.')
     parser.add_argument('--extend', action='store_true', help='Extend an existing database with new samples (and optionally new contigs)')
     parser.add_argument('--time', action='store_true', default=False, help=argparse.SUPPRESS)
+
+GENBANK_EXTS = ('.gbk', '.gbff', '.gb', '.genbank', '.gff', '.gff3')
+FASTA_EXTS = ('.fa', '.fasta', '.fna')
+
+
+def _scan_contig_names(path):
+    """Cheap header-only scan: return contig names from a GenBank/GFF/FASTA file."""
+    lower = path.lower()
+    names = []
+    if lower.endswith(('.gbk', '.gbff', '.gb', '.genbank')):
+        with open(path) as f:
+            for line in f:
+                if line.startswith('LOCUS'):
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        names.append(parts[1])
+    elif lower.endswith(('.gff', '.gff3')):
+        seq_region_seen = False
+        feature_seqids = []
+        seen_set = set()
+        with open(path) as f:
+            for line in f:
+                if line.startswith('##sequence-region'):
+                    seq_region_seen = True
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        names.append(parts[1])
+                elif line.startswith('#'):
+                    continue
+                elif line.strip():
+                    seqid = line.split('\t', 1)[0]
+                    if seqid and seqid not in seen_set:
+                        seen_set.add(seqid)
+                        feature_seqids.append(seqid)
+        if not seq_region_seen:
+            names = feature_seqids
+    elif lower.endswith(FASTA_EXTS):
+        with open(path) as f:
+            for line in f:
+                if line.startswith('>'):
+                    rest = line[1:].strip()
+                    if rest:
+                        names.append(rest.split()[0])
+    return names
+
+
+def resolve_mag_inputs(genbank_path, assembly_path, view):
+    """Resolve -g/-a inputs and build the MAG manifest.
+
+    Returns (genbank_files, assembly_files, mag_manifest).
+    mag_manifest is a list of (mag_name, gb_path_or_empty, asm_path_or_empty); empty when view=='contig'.
+    """
+    def _classify(p):
+        if not p:
+            return None
+        if os.path.isdir(p):
+            return "dir"
+        if os.path.isfile(p):
+            return "file"
+        return "missing"
+
+    def _list_dir(directory, exts):
+        return sorted(
+            os.path.join(directory, f) for f in os.listdir(directory)
+            if f.lower().endswith(exts)
+        )
+
+    gb_kind = _classify(genbank_path)
+    asm_kind = _classify(assembly_path)
+
+    if gb_kind == "missing":
+        sys.exit(f"ERROR: Annotation path not found: {genbank_path}")
+    if asm_kind == "missing":
+        sys.exit(f"ERROR: Assembly path not found: {assembly_path}")
+
+    if gb_kind == "file" and not genbank_path.lower().endswith(GENBANK_EXTS):
+        sys.exit(f"ERROR: Unsupported annotation file format. Supported extensions: {', '.join(GENBANK_EXTS)}")
+    if asm_kind == "file" and not assembly_path.lower().endswith(FASTA_EXTS):
+        sys.exit(f"ERROR: Unsupported assembly file format. Supported extensions: {', '.join(FASTA_EXTS)}")
+
+    is_dir_mode = (gb_kind == "dir") or (asm_kind == "dir")
+
+    if view == "mag" and not is_dir_mode:
+        sys.exit("ERROR: --view mag requires at least one of -g / -a to be a directory of per-MAG files.")
+
+    if view == "contig" and is_dir_mode:
+        print(
+            "WARNING: directory provided for -g/-a but --view is 'contig'; all contigs across the directory will be treated as a single pool. "
+            "Re-run with --view mag to enable MAG-level aggregation.",
+            file=sys.stderr, flush=True,
+        )
+
+    genbank_files = []
+    if gb_kind == "dir":
+        genbank_files = _list_dir(genbank_path, GENBANK_EXTS)
+        if not genbank_files:
+            sys.exit(f"ERROR: No annotation files (extensions {GENBANK_EXTS}) found in directory '{genbank_path}'.")
+    elif gb_kind == "file":
+        genbank_files = [genbank_path]
+
+    assembly_files = []
+    if asm_kind == "dir":
+        assembly_files = _list_dir(assembly_path, FASTA_EXTS)
+        if not assembly_files:
+            sys.exit(f"ERROR: No FASTA files (extensions {FASTA_EXTS}) found in directory '{assembly_path}'.")
+    elif asm_kind == "file":
+        assembly_files = [assembly_path]
+
+    mag_manifest = []
+    if view == "mag":
+        gb_by_stem = {Path(p).stem: p for p in genbank_files} if gb_kind == "dir" else {}
+        asm_by_stem = {Path(p).stem: p for p in assembly_files} if asm_kind == "dir" else {}
+
+        if gb_kind == "dir" and asm_kind == "dir":
+            stems = sorted(set(gb_by_stem) | set(asm_by_stem))
+        elif gb_kind == "dir":
+            stems = sorted(gb_by_stem)
+        else:
+            stems = sorted(asm_by_stem)
+
+        for stem in stems:
+            gb = gb_by_stem.get(stem, "") if gb_kind == "dir" else ""
+            asm = asm_by_stem.get(stem, "") if asm_kind == "dir" else ""
+            mag_manifest.append((stem, gb, asm))
+
+        if not mag_manifest:
+            sys.exit("ERROR: --view mag enabled but no per-MAG input files were found.")
+
+    return genbank_files, assembly_files, mag_manifest
+
+
+def validate_unique_contig_names(genbank_files, assembly_files, existing_contig_names=None):
+    """Hard-error if a contig name appears in more than one genbank file or more than one assembly file,
+    or collides with an existing-DB contig name (extend mode). Same name in one genbank and one
+    assembly file is allowed (matched annotation/sequence pair).
+    """
+    existing_contig_names = existing_contig_names or set()
+    issues = {}
+
+    for group_label, paths in (("genbank", genbank_files), ("assembly", assembly_files)):
+        per_path = []
+        for path in paths:
+            per_path.append((path, _scan_contig_names(path)))
+
+        occurrences = {}
+        for path, names in per_path:
+            for n in names:
+                occurrences.setdefault(n, []).append(path)
+        for name, files in occurrences.items():
+            if len(files) > 1:
+                for fp in files:
+                    issues.setdefault(name, []).append((group_label, fp))
+            if name in existing_contig_names:
+                issues.setdefault(name, []).append((group_label, files[0]))
+                issues.setdefault(name, []).append(("existing-db", "<existing database>"))
+
+    if issues:
+        lines = [
+            "ERROR: contig names must be globally unique across all input files.",
+            "The following contig names appear in multiple sources:",
+        ]
+        for name in sorted(issues):
+            seen = []
+            for entry in issues[name]:
+                if entry not in seen:
+                    seen.append(entry)
+            lines.append(f"  '{name}':")
+            for label, path in seen:
+                lines.append(f"    - {label}: {path}")
+        lines.append("")
+        lines.append("Rename the conflicting contigs in your input files and re-run.")
+        sys.exit("\n".join(lines))
+
 
 # CLI names → internal module names (stored in DB/Rust)
 MODULE_ALIASES = {
@@ -79,6 +258,7 @@ def run_calculate_args(args):
     genbank_path = getattr(args, 'genbank', None)
     assembly_path = getattr(args, 'assembly', None)
     is_extending = getattr(args, 'extend', False)
+    view = getattr(args, 'view', 'contig')
 
     # Handle optional bam_files
     bam_files = []
@@ -99,7 +279,11 @@ def run_calculate_args(args):
     if not bam_files:
         print("No BAM files provided. Will only populate contig-level data from GenBank.", flush=True)
 
+    # Resolve -g/-a as files or directories, build the MAG manifest, validate view-mode constraints.
+    genbank_files, assembly_files, mag_manifest = resolve_mag_inputs(genbank_path, assembly_path, view)
+
     output_db = args.output
+    existing_contig_names = set()
 
     # --- Extend mode validation ---
     if is_extending:
@@ -116,6 +300,11 @@ def run_calculate_args(args):
         existing_samples = set()
         if conn.execute("SELECT 1 FROM information_schema.tables WHERE table_name = 'Sample'").fetchone():
             existing_samples = {r[0] for r in conn.execute("SELECT Sample_name FROM Sample").fetchall()}
+
+        # Get existing contig names (used for cross-DB uniqueness check below)
+        existing_contig_names = set()
+        if conn.execute("SELECT 1 FROM information_schema.tables WHERE table_name = 'Contig'").fetchone():
+            existing_contig_names = {r[0] for r in conn.execute("SELECT Contig_name FROM Contig").fetchall()}
 
         # Detect modules from existing Variable table
         existing_modules = sorted({
@@ -176,17 +365,9 @@ def run_calculate_args(args):
     coverage_percentage = args.coverage_percentage
     n_cores = int(args.threads)
 
-    if genbank_path and not os.path.exists(genbank_path):
-        sys.exit(f"ERROR: Annotation file not found: {genbank_path}")
-
-    # Validate annotation file extension
-    if genbank_path:
-        valid_extensions = ('.gbk', '.gbff', '.gb', '.genbank', '.gff', '.gff3')
-        if not genbank_path.lower().endswith(valid_extensions):
-            sys.exit(f"ERROR: Unsupported annotation file format. Supported extensions: {', '.join(valid_extensions)}")
-
-    if assembly_path and not os.path.exists(assembly_path):
-        sys.exit(f"ERROR: Assembly file not found: {assembly_path}")
+    # Enforce global uniqueness of contig names across all input files (and against the existing
+    # DB in extend mode). Runs in both contig and MAG modes.
+    validate_unique_contig_names(genbank_files, assembly_files, existing_contig_names)
 
     print("\nCalculating values for all requested features from mapping files...", flush=True)
     calculating_all_features_parallel(
@@ -197,6 +378,8 @@ def run_calculate_args(args):
         extend_db=output_db if is_extending else None,
         min_occurrences=args.min_occurrences,
         enable_timing=getattr(args, 'time', False),
+        view=view,
+        mag_manifest=mag_manifest,
     )
 
 

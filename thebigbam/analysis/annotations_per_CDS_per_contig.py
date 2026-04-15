@@ -20,7 +20,7 @@ import numpy as np
 import duckdb
 
 from thebigbam.database.blob_decoder import (
-    contig_blob_name_to_id,
+    feature_name_to_id,
     decode_raw_chunks,
     get_scale_from_zoom_blob,
 )
@@ -41,7 +41,7 @@ FIXED_COLUMNS = [
 
 def _load_contig_gc(conn, contig_id, contig_length):
     """Decode GC content from Contig_blob for one contig. Returns full-length array."""
-    fid = contig_blob_name_to_id("gc_content")
+    fid = feature_name_to_id("gc_content", conn)
     zoom_row = conn.execute(
         "SELECT Zoom_data FROM Contig_blob WHERE Contig_id=? AND Feature_id=?",
         [contig_id, fid]
@@ -83,6 +83,19 @@ def add_args(parser):
 def run(args):
     """Entry point called by CLI dispatcher."""
     conn = duckdb.connect(args.db, read_only=True)
+
+    # Detect MAG mode and build contig→MAG map
+    from thebigbam.database.database_getters import is_mag_mode
+    mag_mode = is_mag_mode(conn)
+    contig_to_mag = {}
+    if mag_mode:
+        rows = conn.execute(
+            "SELECT c.Contig_name, mg.MAG_name "
+            "FROM Contig c "
+            "JOIN MAG_contigs_association mca ON mca.Contig_id = c.Contig_id "
+            "JOIN MAG mg ON mg.MAG_id = mca.MAG_id"
+        ).fetchall()
+        contig_to_mag = {cname: mname for cname, mname in rows}
 
     # Discover all qualifier keys used for CDS features
     qualifier_keys = [
@@ -150,7 +163,8 @@ def run(args):
         gene_names.append(f"{contig_name}_tbb_{counter[contig_id]}")
 
     # Write TSV
-    columns = FIXED_COLUMNS + qualifier_keys
+    columns = (["mag_name"] + FIXED_COLUMNS + qualifier_keys
+               if mag_mode else FIXED_COLUMNS + qualifier_keys)
 
     with open(args.output, "w", newline="") as f:
         writer = csv.writer(f, delimiter="\t")
@@ -181,6 +195,8 @@ def run(args):
 
             fixed = [contig_name, gene_names[i], start, end, gene_length,
                      strand, main_isoform, contig_gc, gene_gc]
+            if mag_mode:
+                fixed = [contig_to_mag.get(contig_name, "")] + fixed
             dynamic = [quals[ann_id].get(key, "") for key in qualifier_keys]
 
             writer.writerow(fixed + dynamic)

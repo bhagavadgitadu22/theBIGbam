@@ -268,13 +268,17 @@ pub struct VariableConfig {
 pub const VARIABLES: &[VariableConfig] = &[
     // Genome module - genomic properties
     // Repeat count subplot (button 1)
-    VariableConfig { name: "direct_repeat_count", subplot: "Repeat count", module: "Genome", module_order: 1, plot_type: PlotType::Curve, encoding: Encoding::Sparse, value_scale: ValueScale::Raw, color: "#c1121f", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Direct repeat count", help: Some("Direct repeats detected by self-BLAST (e.g., terminal repeats)") },
-    VariableConfig { name: "inverted_repeat_count", subplot: "Repeat count", module: "Genome", module_order: 1, plot_type: PlotType::Curve, encoding: Encoding::Sparse, value_scale: ValueScale::Raw, color: "#12C1B4", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Inverted repeat count", help: Some("Inverted repeats detected by self-BLAST (e.g., terminal repeats)") },
+    VariableConfig { name: "direct_repeat_count", subplot: "Repeat count", module: "Genome", module_order: 1, plot_type: PlotType::Curve, encoding: Encoding::Sparse, value_scale: ValueScale::Raw, color: "#c1121f", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Direct repeat count", help: Some("Direct and inverted repeats detected by self-BLAST (e.g., terminal repeats)") },
+    VariableConfig { name: "inverted_repeat_count", subplot: "Repeat count", module: "Genome", module_order: 1, plot_type: PlotType::Curve, encoding: Encoding::Sparse, value_scale: ValueScale::Raw, color: "#12C1B4", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Inverted repeat count", help: None },
     // Max repeat identity subplot (button 2)
-    VariableConfig { name: "direct_repeat_identity", subplot: "Max repeat identity", module: "Genome", module_order: 2, plot_type: PlotType::Curve, encoding: Encoding::Sparse, value_scale: ValueScale::Times100, color: "#c1121f", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Max direct repeat identity", help: Some("Direct repeats detected by self-BLAST (e.g., terminal repeats)") },
-    VariableConfig { name: "inverted_repeat_identity", subplot: "Max repeat identity", module: "Genome", module_order: 2, plot_type: PlotType::Curve, encoding: Encoding::Sparse, value_scale: ValueScale::Times100, color: "#12C1B4", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Max inverted repeat identity", help: Some("Inverted repeats detected by self-BLAST (e.g., terminal repeats)") },
-    VariableConfig { name: "gc_content", subplot: "GC content", module: "Genome", module_order: 3, plot_type: PlotType::Curve, encoding: Encoding::Dense, value_scale: ValueScale::Raw, color: "#693efe", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "GC content", help: None },
-    VariableConfig { name: "gc_skew", subplot: "GC skew", module: "Genome", module_order: 4, plot_type: PlotType::Curve, encoding: Encoding::Dense, value_scale: ValueScale::Raw, color: "#C8A2C8", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "GC skew", help: None },
+    VariableConfig { name: "direct_repeat_identity", subplot: "Max repeat identity", module: "Genome", module_order: 2, plot_type: PlotType::Curve, encoding: Encoding::Sparse, value_scale: ValueScale::Times100, color: "#c1121f", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Max direct repeat identity", help: None },
+    VariableConfig { name: "inverted_repeat_identity", subplot: "Max repeat identity", module: "Genome", module_order: 2, plot_type: PlotType::Curve, encoding: Encoding::Sparse, value_scale: ValueScale::Times100, color: "#12C1B4", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Max inverted repeat identity", help: None },
+    // Repeats inter-contigs
+    VariableConfig { name: "hit_count_within_mag", subplot: "Hit count", module: "Genome", module_order: 3, plot_type: PlotType::Curve, encoding: Encoding::Sparse, value_scale: ValueScale::Raw, color: "#8f95d3", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Hit count within MAG", help: None },
+    VariableConfig { name: "hit_identity_within_mag", subplot: "Max hit identity", module: "Genome", module_order: 4, plot_type: PlotType::Curve, encoding: Encoding::Sparse, value_scale: ValueScale::Times100, color: "#8f95d3", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Max hit identity within MAG", help: None },
+    // GC content and skew
+    VariableConfig { name: "gc_content", subplot: "GC content", module: "Genome", module_order: 5, plot_type: PlotType::Curve, encoding: Encoding::Dense, value_scale: ValueScale::Raw, color: "#693efe", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "GC content", help: None },
+    VariableConfig { name: "gc_skew", subplot: "GC skew", module: "Genome", module_order: 6, plot_type: PlotType::Curve, encoding: Encoding::Dense, value_scale: ValueScale::Times100, color: "#C8A2C8", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "GC skew", help: None },
 
     // Coverage module - basic read depth
     VariableConfig { name: "primary_reads", subplot: "Primary alignments", module: "Coverage", module_order: 1, plot_type: PlotType::Curve, encoding: Encoding::Dense, value_scale: ValueScale::Raw, color: "#333333", alpha: 0.8, fill_alpha: 0.4, size: 1.0, title: "Primary reads", help: None },
@@ -370,6 +374,30 @@ pub fn get_plot_type(feature: &str) -> PlotType {
         .find(|v| v.name == feature)
         .map(|v| v.plot_type)
         .unwrap_or(PlotType::Bars)
+}
+
+/// Get the encoding declared in `VARIABLES` for a feature.
+///
+/// Panics if the feature is not declared — missing entries are programmer
+/// errors (same contract as `feature_name_to_id` at call sites that
+/// `.expect`/`.unwrap` on the result).
+#[inline]
+pub fn get_encoding(feature: &str) -> Encoding {
+    VARIABLES
+        .iter()
+        .find(|v| v.name == feature)
+        .map(|v| v.encoding)
+        .unwrap_or_else(|| panic!("Missing VARIABLES entry for feature: {}", feature))
+}
+
+/// Get the value scale declared in `VARIABLES` for a feature.
+#[inline]
+pub fn get_value_scale(feature: &str) -> ValueScale {
+    VARIABLES
+        .iter()
+        .find(|v| v.name == feature)
+        .map(|v| v.value_scale)
+        .unwrap_or_else(|| panic!("Missing VARIABLES entry for feature: {}", feature))
 }
 
 /// Get the full variable configuration by name.

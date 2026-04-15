@@ -366,17 +366,26 @@ pub fn process_contig_streaming(
 // Read Count Statistics
 // ============================================================================
 
-/// Get total read count from BAM index (fast, no iteration needed).
-/// Returns total reads (mapped + unmapped) from index_stats().
-pub fn get_total_read_count(bam_path: &Path) -> Result<u64> {
+/// Get unmapped read count from BAM index (fast, no iteration needed).
+///
+/// Returns the number of unmapped records (sum of the `unmapped` field across
+/// all entries of `index_stats()`, including the tid=-1 entry for truly
+/// unmapped reads). Unmapped reads have no secondary/supplementary alignments,
+/// so one record == one distinct read.
+///
+/// The caller composes the true total as:
+///     total_reads = mapped_reads (primary only) + unmapped_reads
+/// which deduplicates multi-alignment mapped reads — unlike the BAM index's
+/// `mapped` column, which counts alignment records (primary + secondary +
+/// supplementary).
+pub fn get_unmapped_read_count(bam_path: &Path) -> Result<u64> {
     let mut bam = bam::IndexedReader::from_path(bam_path)
         .with_context(|| format!("Failed to open indexed BAM: {}", bam_path.display()))?;
 
     let stats = bam.index_stats()
         .with_context(|| format!("Failed to get index stats from: {}", bam_path.display()))?;
 
-    // Sum mapped + unmapped across all entries (including tid=-1 for unmapped)
-    let total: u64 = stats.iter().map(|(_, _, mapped, unmapped)| mapped + unmapped).sum();
+    let unmapped_total: u64 = stats.iter().map(|(_, _, _mapped, unmapped)| *unmapped).sum();
 
-    Ok(total)
+    Ok(unmapped_total)
 }

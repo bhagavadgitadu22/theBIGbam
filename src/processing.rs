@@ -18,10 +18,11 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::sync::mpsc::sync_channel;
 use std::thread;
 
-use crate::bam_reader::{detect_sequencing_type, get_total_read_count, process_contig_streaming, BamPhaseTimings};
+use crate::bam_reader::{detect_sequencing_type, get_unmapped_read_count, process_contig_streaming, BamPhaseTimings};
 use crate::compress::{
     Run,
     add_compressed_feature_with_stats,
@@ -39,6 +40,43 @@ use crate::processing_phage_packaging::{
     is_valid_terminal_repeat, DtrRegion, PeakArea, PhageTerminiConfig,
 };
 use crate::processing_completeness::compute_all_metrics;
+
+/// Aggregation level for the processing pipeline.
+///
+/// - `Contig` (default): each contig is processed and filtered independently.
+/// - `Mag`: contigs are grouped by MAG (one MAG per input file); filters and
+///   some metrics are evaluated at MAG level. See `MagInput` + `mag_manifest`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ViewMode {
+    Contig,
+    Mag,
+}
+
+impl ViewMode {
+    pub fn from_str(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "mag" => ViewMode::Mag,
+            _ => ViewMode::Contig,
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ViewMode::Contig => "contig",
+            ViewMode::Mag => "mag",
+        }
+    }
+}
+
+/// One entry in the MAG manifest: a MAG name plus the per-MAG files that define
+/// its contigs. Empty `gb_path` / `asm_path` means that side is absent for this
+/// MAG (e.g. a directory was supplied on only one of `-g` / `-a`).
+#[derive(Clone, Debug)]
+pub struct MagInput {
+    pub name: String,
+    pub gb_path: Option<PathBuf>,
+    pub asm_path: Option<PathBuf>,
+}
 
 /// Configuration for processing.
 #[derive(Clone)]
@@ -63,6 +101,18 @@ pub struct ProcessConfig {
     /// When true, record per-sample phase timings and write a timing log
     /// alongside the output database. Hidden CLI flag (--time).
     pub enable_timing: bool,
+    /// Aggregation level. `Contig` is the historical default.
+    pub view_mode: ViewMode,
+    /// Per-MAG input manifest. Empty in contig mode; one entry per MAG in MAG
+    /// mode. The Rust side treats this as the authoritative source of MAG
+    /// membership; `genbank_path` / `assembly_path` remain the original user
+    /// inputs (which may be directory strings in MAG mode).
+    pub mag_manifest: Vec<MagInput>,
+    /// Counter for (Contig, Sample) pairs dropped by the per-contig AF or coverage
+    /// thresholds in contig mode. Incremented inside `process_sample` workers;
+    /// a summary is printed at the end of `run_all_samples`.
+    #[doc(hidden)]
+    pub contig_drops_counter: Arc<AtomicUsize>,
 }
 
 impl ProcessConfig {
@@ -116,6 +166,7 @@ pub struct SampleTimings {
     pub stream_finalize_ns: u64,
     // Filled by the sample-level caller, not process_sample itself.
     pub db_write: std::time::Duration,
+    pub mag_aggregation_ns: u64,
     pub total: std::time::Duration,
 }
 
@@ -544,6 +595,128 @@ fn run_autoblast(contigs: &[ContigInfo], _threads: usize) -> Result<Vec<RepeatsD
     Ok(total)
 }
 
+/// Per-MAG inter-contig BLAST. Writes one FASTA per MAG containing all member contigs,
+/// runs blastn query=subject, and returns (repeats, inter_contig_hits).
+///
+/// - Intra-contig hits (qid == sid, not exact self-coordinates) → RepeatsData
+/// - Inter-contig hits (qid != sid) → (contig_name_1, contig_name_2, p1, p2, p1', p2', pident)
+///
+/// In MAG mode this REPLACES the per-contig self-BLAST: intra-contig hits emerge naturally
+/// from each MAG's all-vs-all blast output.
+fn run_mag_interblast(
+    contigs: &[ContigInfo],
+    mag_manifest: &[(String, Vec<String>)],
+) -> Result<(Vec<RepeatsData>, Vec<(String, String, i32, i32, i32, i32, f64)>)> {
+    match std::process::Command::new("blastn").arg("-version").output() {
+        Ok(output) if output.status.success() => {}
+        _ => {
+            eprintln!("Warning: blastn not found on PATH. Skipping MAG inter-contig BLAST.");
+            return Ok((Vec::new(), Vec::new()));
+        }
+    }
+
+    let name_to_contig: HashMap<&str, &ContigInfo> =
+        contigs.iter().map(|c| (c.name.as_str(), c)).collect();
+
+    eprintln!("\n### Running MAG inter-contig BLAST on {} MAGs...", mag_manifest.len());
+
+    let results: Vec<(Vec<RepeatsData>, Vec<(String, String, i32, i32, i32, i32, f64)>)> =
+        mag_manifest.par_iter().filter_map(|(mag_name, member_names)| {
+            let members: Vec<&ContigInfo> = member_names
+                .iter()
+                .filter_map(|n| name_to_contig.get(n.as_str()).copied())
+                .filter(|c| c.sequence.is_some())
+                .collect();
+            if members.is_empty() {
+                return None;
+            }
+
+            let mut temp_file = match tempfile::NamedTempFile::new() {
+                Ok(f) => f,
+                Err(e) => {
+                    eprintln!("Warning: temp file for MAG '{}': {}", mag_name, e);
+                    return None;
+                }
+            };
+            use std::io::Write;
+            for contig in &members {
+                if writeln!(temp_file, ">{}", contig.name).is_err() { return None; }
+                if let Some(seq) = contig.sequence.as_ref() {
+                    for chunk in seq.chunks(80) {
+                        if temp_file.write_all(chunk).is_err() { return None; }
+                        if writeln!(temp_file).is_err() { return None; }
+                    }
+                }
+            }
+            if temp_file.flush().is_err() { return None; }
+            let temp_path = temp_file.path().to_path_buf();
+
+            let output = match std::process::Command::new("blastn")
+                .arg("-query").arg(&temp_path)
+                .arg("-subject").arg(&temp_path)
+                .arg("-evalue").arg("1e-10")
+                .arg("-outfmt").arg("6")
+                .output()
+            {
+                Ok(o) => o,
+                Err(e) => {
+                    eprintln!("Warning: blastn failed for MAG '{}': {}", mag_name, e);
+                    return None;
+                }
+            };
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                eprintln!("Warning: blastn non-zero for MAG '{}': {}", mag_name, stderr);
+                return None;
+            }
+
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let mut repeats: Vec<RepeatsData> = Vec::new();
+            let mut inter: Vec<(String, String, i32, i32, i32, i32, f64)> = Vec::new();
+            for line in stdout.lines() {
+                let line = line.trim();
+                if line.is_empty() { continue; }
+                let f: Vec<&str> = line.split('\t').collect();
+                if f.len() < 10 { continue; }
+                let qid = f[0].to_string();
+                let sid = f[1].to_string();
+                let pident: f64 = f[2].parse().unwrap_or(0.0);
+                let qstart: i32 = f[6].parse().unwrap_or(0);
+                let qend:   i32 = f[7].parse().unwrap_or(0);
+                let sstart: i32 = f[8].parse().unwrap_or(0);
+                let send:   i32 = f[9].parse().unwrap_or(0);
+
+                if qid == sid {
+                    // Exact self coordinates → skip.
+                    if qstart == sstart && qend == send { continue; }
+                    let is_direct = (qstart < qend && sstart < send) || (qstart > qend && sstart > send);
+                    repeats.push(RepeatsData {
+                        contig_name: qid,
+                        position1: qstart, position2: qend,
+                        position1prime: sstart, position2prime: send,
+                        pident, is_direct,
+                    });
+                } else {
+                    inter.push((qid, sid, qstart, qend, sstart, send, pident));
+                }
+            }
+            Some((repeats, inter))
+        }).collect();
+
+    let mut all_repeats: Vec<RepeatsData> = Vec::new();
+    let mut all_inter: Vec<(String, String, i32, i32, i32, i32, f64)> = Vec::new();
+    for (r, i) in results {
+        all_repeats.extend(r);
+        all_inter.extend(i);
+    }
+    eprintln!(
+        "MAG BLAST: {} intra-contig repeat hits, {} inter-contig hits",
+        all_repeats.len(),
+        all_inter.len(),
+    );
+    Ok((all_repeats, all_inter))
+}
+
 /// Compute median of event lengths (0 for exact match, clip/insertion length for near-match)
 /// across all positions in an area. The event_lengths array already contains the correct
 /// values collected during BAM processing.
@@ -587,8 +760,9 @@ fn add_features_from_arrays(
     cds_index: Option<&CdsIndex>,
     blob_output: &mut Vec<(String, String, crate::blob::EncodedBlob)>,
 ) -> (Option<PackagingData>, Option<(MisassemblyData, MicrodiversityData, SideMisassemblyData, TopologyData)>) {
-    use crate::blob::{encode_dense_blob, encode_sparse_blob, EventMeta, MetadataFlags, ValueScale,
+    use crate::blob::{encode_dense_blob, encode_sparse_blob, EventMeta, MetadataFlags,
                        codon_category_to_id, codon_to_id, aa_to_id};
+    use crate::types::{get_encoding, get_value_scale, Encoding};
     let pt_config = config.phagetermini_config;
 
     // Build DTR regions from repeats for this contig (used for both merging and classification)
@@ -648,23 +822,29 @@ fn add_features_from_arrays(
 
         // primary_reads: raw i32
         let pr_i32: Vec<i32> = arrays.primary_reads.iter().map(|&x| x as i32).collect();
-        blob_output.push(("primary_reads".into(), cn.clone(), encode_dense_blob(&pr_i32, ValueScale::Raw, clen)));
+        debug_assert_eq!(get_encoding("primary_reads"), Encoding::Dense);
+        blob_output.push(("primary_reads".into(), cn.clone(), encode_dense_blob(&pr_i32, get_value_scale("primary_reads"), clen)));
 
         // plus/minus strand
         let pp_i32: Vec<i32> = arrays.primary_reads_plus_only.iter().map(|&x| x as i32).collect();
-        blob_output.push(("primary_reads_plus_only".into(), cn.clone(), encode_dense_blob(&pp_i32, ValueScale::Raw, clen)));
+        debug_assert_eq!(get_encoding("primary_reads_plus_only"), Encoding::Dense);
+        blob_output.push(("primary_reads_plus_only".into(), cn.clone(), encode_dense_blob(&pp_i32, get_value_scale("primary_reads_plus_only"), clen)));
         let pm_i32: Vec<i32> = arrays.primary_reads_minus_only.iter().map(|&x| x as i32).collect();
-        blob_output.push(("primary_reads_minus_only".into(), cn.clone(), encode_dense_blob(&pm_i32, ValueScale::Raw, clen)));
+        debug_assert_eq!(get_encoding("primary_reads_minus_only"), Encoding::Dense);
+        blob_output.push(("primary_reads_minus_only".into(), cn.clone(), encode_dense_blob(&pm_i32, get_value_scale("primary_reads_minus_only"), clen)));
 
         // secondary, supplementary
         let sec_i32: Vec<i32> = arrays.secondary_reads.iter().map(|&x| x as i32).collect();
-        blob_output.push(("secondary_reads".into(), cn.clone(), encode_dense_blob(&sec_i32, ValueScale::Raw, clen)));
+        debug_assert_eq!(get_encoding("secondary_reads"), Encoding::Dense);
+        blob_output.push(("secondary_reads".into(), cn.clone(), encode_dense_blob(&sec_i32, get_value_scale("secondary_reads"), clen)));
         let sup_i32: Vec<i32> = arrays.supplementary_reads.iter().map(|&x| x as i32).collect();
-        blob_output.push(("supplementary_reads".into(), cn.clone(), encode_dense_blob(&sup_i32, ValueScale::Raw, clen)));
+        debug_assert_eq!(get_encoding("supplementary_reads"), Encoding::Dense);
+        blob_output.push(("supplementary_reads".into(), cn.clone(), encode_dense_blob(&sup_i32, get_value_scale("supplementary_reads"), clen)));
 
         // MAPQ: stored as ×100 integer
         let mapq_i32: Vec<i32> = mapq_f64.iter().map(|&x| (x * 100.0).round() as i32).collect();
-        blob_output.push(("mapq".into(), cn.clone(), encode_dense_blob(&mapq_i32, ValueScale::Times100, clen)));
+        debug_assert_eq!(get_encoding("mapq"), Encoding::Dense);
+        blob_output.push(("mapq".into(), cn.clone(), encode_dense_blob(&mapq_i32, get_value_scale("mapq"), clen)));
     }
 
     // Assemblycheck features
@@ -780,17 +960,19 @@ fn add_features_from_arrays(
                 }
                 em
             }).collect();
-            let flags = MetadataFlags { sparse: true, has_stats: false, has_sequence: true, has_codons: true };
+            let flags = MetadataFlags { sparse: true, has_stats: false, has_sequence: true, has_codons: true, has_partner: false };
+            debug_assert_eq!(get_encoding("mismatches"), Encoding::Sparse);
             blob_output.push(("mismatches".into(), cn.clone(),
-                encode_sparse_blob(&pos, &vals, Some(&meta), flags, ValueScale::Times1000, clen)));
+                encode_sparse_blob(&pos, &vals, Some(&meta), flags, get_value_scale("mismatches"), clen)));
         }
 
         // deletions (value only)
         {
             let (pos, vals) = filter_sparse(&deletions_f64, &primary_reads_f64);
             let flags = MetadataFlags { sparse: true, ..Default::default() };
+            debug_assert_eq!(get_encoding("deletions"), Encoding::Sparse);
             blob_output.push(("deletions".into(), cn.clone(),
-                encode_sparse_blob(&pos, &vals, None, flags, ValueScale::Times1000, clen)));
+                encode_sparse_blob(&pos, &vals, None, flags, get_value_scale("deletions"), clen)));
         }
 
         // insertions (with stats + sequence)
@@ -810,9 +992,10 @@ fn add_features_from_arrays(
                 }
                 em
             }).collect();
-            let flags = MetadataFlags { sparse: true, has_stats: true, has_sequence: true, has_codons: false };
+            let flags = MetadataFlags { sparse: true, has_stats: true, has_sequence: true, has_codons: false, has_partner: false };
+            debug_assert_eq!(get_encoding("insertions"), Encoding::Sparse);
             blob_output.push(("insertions".into(), cn.clone(),
-                encode_sparse_blob(&pos, &vals, Some(&meta), flags, ValueScale::Times1000, clen)));
+                encode_sparse_blob(&pos, &vals, Some(&meta), flags, get_value_scale("insertions"), clen)));
         }
 
         // left_clippings (with stats + sequence)
@@ -846,9 +1029,10 @@ fn add_features_from_arrays(
                 }
                 em
             }).collect();
-            let flags = MetadataFlags { sparse: true, has_stats: true, has_sequence: true, has_codons: false };
+            let flags = MetadataFlags { sparse: true, has_stats: true, has_sequence: true, has_codons: false, has_partner: false };
+            debug_assert_eq!(get_encoding("left_clippings"), Encoding::Sparse);
             blob_output.push(("left_clippings".into(), cn.clone(),
-                encode_sparse_blob(&pos, &vals, Some(&meta), flags, ValueScale::Times1000, clen)));
+                encode_sparse_blob(&pos, &vals, Some(&meta), flags, get_value_scale("left_clippings"), clen)));
         }
 
         // right_clippings (with stats + sequence)
@@ -882,9 +1066,10 @@ fn add_features_from_arrays(
                 }
                 em
             }).collect();
-            let flags = MetadataFlags { sparse: true, has_stats: true, has_sequence: true, has_codons: false };
+            let flags = MetadataFlags { sparse: true, has_stats: true, has_sequence: true, has_codons: false, has_partner: false };
+            debug_assert_eq!(get_encoding("right_clippings"), Encoding::Sparse);
             blob_output.push(("right_clippings".into(), cn.clone(),
-                encode_sparse_blob(&pos, &vals, Some(&meta), flags, ValueScale::Times1000, clen)));
+                encode_sparse_blob(&pos, &vals, Some(&meta), flags, get_value_scale("right_clippings"), clen)));
         }
     }
 
@@ -902,8 +1087,9 @@ fn add_features_from_arrays(
             }
         }
         let flags = MetadataFlags { sparse: true, ..Default::default() };
+        debug_assert_eq!(get_encoding("splicings"), Encoding::Sparse);
         blob_output.push(("splicings".into(), cn.clone(),
-            encode_sparse_blob(&spl_pos, &spl_vals, None, flags, ValueScale::Raw, clen)));
+            encode_sparse_blob(&spl_pos, &spl_vals, None, flags, get_value_scale("splicings"), clen)));
     }
 
     // Paired-reads module
@@ -944,20 +1130,24 @@ fn add_features_from_arrays(
 
         let (pos, vals) = filter_sparse_pr(&non_inward_f64, &primary_reads_f64);
         let sp_flags = MetadataFlags { sparse: true, ..Default::default() };
+        debug_assert_eq!(get_encoding("non_inward_pairs"), Encoding::Sparse);
         blob_output.push(("non_inward_pairs".into(), cn.clone(),
-            encode_sparse_blob(&pos, &vals, None, sp_flags, ValueScale::Times1000, clen)));
+            encode_sparse_blob(&pos, &vals, None, sp_flags, get_value_scale("non_inward_pairs"), clen)));
 
         let (pos, vals) = filter_sparse_pr(&mate_unmapped_f64, &primary_reads_f64);
+        debug_assert_eq!(get_encoding("mate_not_mapped"), Encoding::Sparse);
         blob_output.push(("mate_not_mapped".into(), cn.clone(),
-            encode_sparse_blob(&pos, &vals, None, sp_flags, ValueScale::Times1000, clen)));
+            encode_sparse_blob(&pos, &vals, None, sp_flags, get_value_scale("mate_not_mapped"), clen)));
 
         let (pos, vals) = filter_sparse_pr(&mate_other_contig_f64, &primary_reads_f64);
+        debug_assert_eq!(get_encoding("mate_on_another_contig"), Encoding::Sparse);
         blob_output.push(("mate_on_another_contig".into(), cn.clone(),
-            encode_sparse_blob(&pos, &vals, None, sp_flags, ValueScale::Times1000, clen)));
+            encode_sparse_blob(&pos, &vals, None, sp_flags, get_value_scale("mate_on_another_contig"), clen)));
 
         // insert_sizes: dense curve
         let is_i32: Vec<i32> = values.iter().map(|&x| (x * 10.0).round() as i32).collect();
-        blob_output.push(("insert_sizes".into(), cn.clone(), encode_dense_blob(&is_i32, ValueScale::Times10, clen)));
+        debug_assert_eq!(get_encoding("insert_sizes"), Encoding::Dense);
+        blob_output.push(("insert_sizes".into(), cn.clone(), encode_dense_blob(&is_i32, get_value_scale("insert_sizes"), clen)));
     }
 
     // Long-reads module
@@ -973,7 +1163,8 @@ fn add_features_from_arrays(
         let clen = contig_length as u32;
         let cn = contig_name.to_string();
         let rl_i32: Vec<i32> = values.iter().map(|&x| (x * 10.0).round() as i32).collect();
-        blob_output.push(("read_lengths".into(), cn, encode_dense_blob(&rl_i32, ValueScale::Times10, clen)));
+        debug_assert_eq!(get_encoding("read_lengths"), Encoding::Dense);
+        blob_output.push(("read_lengths".into(), cn, encode_dense_blob(&rl_i32, get_value_scale("read_lengths"), clen)));
     }
 
     // Phagetermini features
@@ -1002,7 +1193,8 @@ fn add_features_from_arrays(
 
             // coverage_reduced: dense curve
             let cr_i32: Vec<i32> = arrays.coverage_reduced.iter().map(|&x| x as i32).collect();
-            blob_output.push(("coverage_reduced".into(), cn.clone(), encode_dense_blob(&cr_i32, ValueScale::Raw, clen)));
+            debug_assert_eq!(get_encoding("coverage_reduced"), Encoding::Dense);
+            blob_output.push(("coverage_reduced".into(), cn.clone(), encode_dense_blob(&cr_i32, get_value_scale("coverage_reduced"), clen)));
 
             // reads_starts: sparse with median + sequence
             let cov_reduced_f64: Vec<f64> = arrays.coverage_reduced.iter().map(|&x| x as f64).collect();
@@ -1028,9 +1220,10 @@ fn add_features_from_arrays(
                 }
                 em
             }).collect();
-            let pt_flags = MetadataFlags { sparse: true, has_stats: false, has_sequence: true, has_codons: false };
+            let pt_flags = MetadataFlags { sparse: true, has_stats: false, has_sequence: true, has_codons: false, has_partner: false };
+            debug_assert_eq!(get_encoding("reads_starts"), Encoding::Sparse);
             blob_output.push(("reads_starts".into(), cn.clone(),
-                encode_sparse_blob(&rs_pos, &rs_vals, Some(&rs_meta), pt_flags, ValueScale::Times1000, clen)));
+                encode_sparse_blob(&rs_pos, &rs_vals, Some(&rs_meta), pt_flags, get_value_scale("reads_starts"), clen)));
 
             // reads_ends: sparse with median + sequence
             let mut re_pos = Vec::new();
@@ -1055,8 +1248,9 @@ fn add_features_from_arrays(
                 }
                 em
             }).collect();
+            debug_assert_eq!(get_encoding("reads_ends"), Encoding::Sparse);
             blob_output.push(("reads_ends".into(), cn.clone(),
-                encode_sparse_blob(&re_pos, &re_vals, Some(&re_meta), pt_flags, ValueScale::Times1000, clen)));
+                encode_sparse_blob(&re_pos, &re_vals, Some(&re_meta), pt_flags, get_value_scale("reads_ends"), clen)));
         }
 
         // === STEP 2: Calculate aligned fraction and global metrics ===
@@ -1228,15 +1422,16 @@ pub fn process_sample(
         s.n_contigs_in_bam = n_refs as usize;
     }
 
-    // --- Phase: total_read_count ---
+    // --- Phase: unmapped_read_count ---
     let t0 = if time_on { Some(std::time::Instant::now()) } else { None };
 
-    // Get total read count from BAM index (fast, no iteration)
-    let total_reads = get_total_read_count(bam_path)?;
+    // Get unmapped read count from BAM index (fast, no iteration).
+    // Total reads (unique) is computed later as mapped_reads (primary only) + unmapped_reads,
+    // which dedupes multi-alignment reads — the index's `mapped` counts alignment records.
+    let unmapped_reads = get_unmapped_read_count(bam_path)?;
 
     if let (Some(s), Some(t)) = (st.as_mut(), t0) {
         s.total_read_count = t.elapsed();
-        s.total_reads = total_reads;
     }
 
     // --- Phase: build_lookups ---
@@ -1335,7 +1530,14 @@ pub fn process_sample(
                 // Sub-phase: process_contig_streaming
                 let ts = accum_ref.map(|_| std::time::Instant::now());
                 let mut phase_t: Option<BamPhaseTimings> = accum_ref.map(|_| BamPhaseTimings::default());
-                let (mut arrays, coverage_pct, primary_count) = match process_contig_streaming(bam, tid, ref_name, ref_length, seq_type, flags, is_circular, config.min_aligned_fraction, config.phagetermini_config.min_clipping_length, &mut phase_t) {
+                // In MAG mode, per-contig thresholds are disabled — the threshold is applied
+                // at the MAG aggregate level in a post-pass after every member contig is written.
+                let effective_min_af = if config.view_mode == ViewMode::Mag {
+                    0.0
+                } else {
+                    config.min_aligned_fraction
+                };
+                let (mut arrays, coverage_pct, primary_count) = match process_contig_streaming(bam, tid, ref_name, ref_length, seq_type, flags, is_circular, effective_min_af, config.phagetermini_config.min_clipping_length, &mut phase_t) {
                     Ok(Some(result)) => result,
                     Ok(None) => {
                         // Flush phase_timings even on early-return so coverage-filtered
@@ -1348,6 +1550,11 @@ pub fn process_sample(
                         }
                         if let (Some(a), Some(t)) = (accum_ref, ts) {
                             a.streaming_ns.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                        }
+                        // Count contig-mode drops (the inner streaming returned None because
+                        // the aligned-fraction threshold was exceeded).
+                        if config.view_mode == ViewMode::Contig && effective_min_af > 0.0 {
+                            config.contig_drops_counter.fetch_add(1, Ordering::Relaxed);
                         }
                         return None;
                     }
@@ -1366,9 +1573,14 @@ pub fn process_sample(
                     a.streaming_ns.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
                 }
 
-                // Early-exit: skip contigs with low mean coverage depth (only when threshold > 0)
+                // Early-exit: skip contigs with low mean coverage depth (only when threshold > 0).
+                // Disabled in MAG mode — enforced in a post-pass on the MAG aggregate.
                 let coverage_mean = arrays.coverage_mean() as f32;
-                if config.min_coverage_depth > 0.0 && (coverage_mean as f64) < config.min_coverage_depth {
+                if config.view_mode == ViewMode::Contig
+                    && config.min_coverage_depth > 0.0
+                    && (coverage_mean as f64) < config.min_coverage_depth
+                {
+                    config.contig_drops_counter.fetch_add(1, Ordering::Relaxed);
                     return None;
                 }
 
@@ -1471,8 +1683,12 @@ pub fn process_sample(
         }
     }
 
+    // Unique reads = primary mapped + unmapped (one count per distinct read).
+    let total_reads = mapped_reads + unmapped_reads;
+
     if let (Some(s), Some(t)) = (st.as_mut(), t0) {
         s.merge_results = t.elapsed();
+        s.total_reads = total_reads;
         if let Some(a) = accum.as_ref() {
             s.bam_open_ns = a.bam_open_ns.load(Ordering::Relaxed);
             s.cds_index_ns = a.cds_index_ns.load(Ordering::Relaxed);
@@ -1572,7 +1788,69 @@ pub fn run_all_samples(
         HashMap::new()
     };
 
-    let (mut contigs, mut annotations, contig_qualifiers) = if !has_genbank {
+    // In MAG mode, per-MAG membership (mag_name → member contig names) is collected during parsing.
+    let mut mag_contig_map: Vec<(String, Vec<String>)> = Vec::new();
+
+    let (mut contigs, mut annotations, contig_qualifiers) = if config.view_mode == ViewMode::Mag {
+        // Parse each MAG's annotation and/or FASTA file individually. Contig names have
+        // already been validated as globally unique by the Python side.
+        let mut all_contigs: Vec<ContigInfo> = Vec::new();
+        let mut all_annotations: Vec<FeatureAnnotation> = Vec::new();
+        let mut all_quals: Vec<(i64, HashMap<String, String>)> = Vec::new();
+
+        for mag in &config.mag_manifest {
+            let mut member_names: Vec<String> = Vec::new();
+
+            if let Some(gb) = &mag.gb_path {
+                let (mag_contigs, mag_anns, mag_quals) = parse_annotations(gb)?;
+                // Remap parser-local contig_ids to their global position in all_contigs.
+                let base_global = all_contigs.len() as i64;
+                for (local_idx, c) in mag_contigs.iter().enumerate() {
+                    member_names.push(c.name.clone());
+                    // Annotations/qualifiers reference parser-local ids 1..=N; shift by base_global.
+                    let _ = local_idx;
+                }
+                for mut ann in mag_anns {
+                    ann.contig_id += base_global;
+                    all_annotations.push(ann);
+                }
+                for (qid, qmap) in mag_quals {
+                    all_quals.push((qid + base_global, qmap));
+                }
+                all_contigs.extend(mag_contigs);
+            }
+
+            if let Some(asm) = &mag.asm_path {
+                // Merge FASTA sequences into the contigs that came from gb, or create new
+                // contigs if there was no gb for this MAG.
+                if mag.gb_path.is_some() {
+                    // member_names already populated; just merge sequences.
+                    let fasta_records = crate::parser::parse_fasta(asm)?;
+                    for (name, seq) in fasta_records {
+                        if let Some(existing) = all_contigs.iter_mut().find(|c| c.name == name) {
+                            if existing.sequence.is_none() {
+                                existing.sequence = Some(seq);
+                            }
+                        }
+                    }
+                } else {
+                    let fasta_records = crate::parser::parse_fasta(asm)?;
+                    for (name, seq) in fasta_records {
+                        member_names.push(name.clone());
+                        all_contigs.push(ContigInfo {
+                            name,
+                            length: seq.len(),
+                            sequence: Some(seq),
+                        });
+                    }
+                }
+            }
+
+            mag_contig_map.push((mag.name.clone(), member_names));
+        }
+
+        (all_contigs, all_annotations, all_quals)
+    } else if !has_genbank {
         eprintln!("No GenBank file provided - extracting contigs from BAM headers");
         let contigs = extract_contigs_from_bams(bam_files, &preliminary_map)?;
         eprintln!("Found {} contigs from BAM files", contigs.len());
@@ -1588,8 +1866,13 @@ pub fn run_all_samples(
 
     eprintln!("Found {} BAM files", bam_files.len());
 
-    // 3. If assembly_path provided, parse FASTA and merge sequences into contigs
-    if !assembly_path.as_os_str().is_empty() && assembly_path.exists() {
+    // 3. If assembly_path provided, parse FASTA and merge sequences into contigs.
+    //    Skipped in MAG mode — sequences are already merged per-MAG above — and
+    //    guarded with is_file() so a stray directory path can never reach parse_fasta.
+    if config.view_mode != ViewMode::Mag
+        && !assembly_path.as_os_str().is_empty()
+        && assembly_path.is_file()
+    {
         eprintln!("\n### Merging sequences from assembly FASTA...");
         merge_sequences_from_fasta(&mut contigs, assembly_path)?;
     }
@@ -1611,6 +1894,27 @@ pub fn run_all_samples(
         // Read existing contig names from the database
         let existing_conn = duckdb::Connection::open(extend_db)
             .with_context(|| format!("Failed to open existing database: {}", extend_db.display()))?;
+
+        // View_mode compatibility check: reject cross-mode extends early.
+        let existing_view_mode: String = existing_conn
+            .query_row(
+                "SELECT Value FROM Database_metadata WHERE Key = 'View_mode'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap_or_else(|_| "contig".to_string());
+        let existing_is_mag = existing_view_mode == "mag";
+        let new_is_mag = config.view_mode == ViewMode::Mag;
+        if existing_is_mag && !new_is_mag {
+            return Err(anyhow::anyhow!(
+                "existing database was built in MAG mode; --extend requires --view mag and at least one of -g / -a to be a directory of per-MAG files"
+            ));
+        }
+        if !existing_is_mag && new_is_mag {
+            return Err(anyhow::anyhow!(
+                "cannot switch a contig-mode database to MAG mode; rebuild from scratch"
+            ));
+        }
 
         let mut existing_contig_names: HashSet<String> = HashSet::new();
         let mut existing_contigs: Vec<ContigInfo> = Vec::new();
@@ -1721,13 +2025,21 @@ pub fn run_all_samples(
         (writer, new_contigs)
     } else {
         let new_contigs_for_blast = contigs.clone();
-        let writer = DbWriter::create(output_db, &contigs, &annotations, &contig_qualifiers, !bam_files.is_empty())?;
+        let writer = DbWriter::create(
+            output_db,
+            &contigs,
+            &annotations,
+            &contig_qualifiers,
+            !bam_files.is_empty(),
+            config.view_mode == ViewMode::Mag,
+        )?;
         writer.write_metadata(
             modules,
             config.min_aligned_fraction,
             config.min_coverage_depth,
             config.curve_ratio,
             config.bar_ratio,
+            config.view_mode.as_str(),
         )?;
         (writer, new_contigs_for_blast)
     };
@@ -1749,16 +2061,44 @@ pub fn run_all_samples(
         None
     };
 
-    // 6. If sequences available, run autoblast with rayon (only for new contigs in extend mode)
+    // 6. If sequences available, run autoblast with rayon (only for new contigs in extend mode).
+    // In MAG mode, a per-MAG inter-contig BLAST runs instead: its intra-contig hits populate
+    // the repeat tables (replacing the per-contig self-BLAST) and inter-contig hits go to
+    // Contig_blast_hits. Per-contig self-BLAST is skipped in MAG mode to avoid duplication.
     let blast_contigs = &new_contigs_for_blast;
     let has_sequences = blast_contigs.iter().any(|c| c.sequence.is_some());
     let n_contigs_with_seq = blast_contigs.iter().filter(|c| c.sequence.is_some()).count();
 
     let t_autoblast = if config.enable_timing { Some(std::time::Instant::now()) } else { None };
     let repeats = if has_sequences {
-        let reps = run_autoblast(blast_contigs, config.threads)?;
-        db_writer.write_repeats(&reps)?;
-        reps
+        if config.view_mode == ViewMode::Mag {
+            // Filter mag_contig_map to MAGs whose members are in blast_contigs (handles extend mode).
+            let blast_names: HashSet<&str> = blast_contigs.iter().map(|c| c.name.as_str()).collect();
+            let filtered_manifest: Vec<(String, Vec<String>)> = mag_contig_map
+                .iter()
+                .map(|(mn, members)| {
+                    let kept: Vec<String> = members.iter()
+                        .filter(|n| blast_names.contains(n.as_str()))
+                        .cloned()
+                        .collect();
+                    (mn.clone(), kept)
+                })
+                .filter(|(_, m)| !m.is_empty())
+                .collect();
+            let (reps, inter) = run_mag_interblast(blast_contigs, &filtered_manifest)?;
+            db_writer.write_repeats(&reps)?;
+            let written = db_writer.write_contig_blast_hits(&inter)?;
+            if written > 0 {
+                eprintln!("Wrote {} inter-contig BLAST hits", written);
+                // Fan out to per-position Contig_blob features used by the viz tooltip.
+                db_writer.write_mag_hit_features()?;
+            }
+            reps
+        } else {
+            let reps = run_autoblast(blast_contigs, config.threads)?;
+            db_writer.write_repeats(&reps)?;
+            reps
+        }
     } else {
         Vec::new()
     };
@@ -1791,6 +2131,30 @@ pub fn run_all_samples(
     }
     let gc_secs = t_gc.map(|t| t.elapsed().as_secs_f64()).unwrap_or(0.0);
 
+    // Convert repeat detections into per-contig blobs. Hoisted out of finalize
+    // so MAG_contig_blob aggregation below sees these as inputs.
+    db_writer.convert_repeat_blobs()?;
+
+    // Write MAG rows after per-contig GC/duplication stats are finalized.
+    if config.view_mode == ViewMode::Mag && !mag_contig_map.is_empty() {
+        eprintln!("\n### Writing {} MAGs ({} associations)...",
+            mag_contig_map.len(),
+            mag_contig_map.iter().map(|(_, v)| v.len()).sum::<usize>(),
+        );
+        db_writer.write_mags(&mag_contig_map)?;
+    }
+
+    // Aggregate per-contig blobs into MAG-scale blobs once. Sample-independent.
+    let mag_contig_blob_secs = if config.view_mode == ViewMode::Mag {
+        let t = std::time::Instant::now();
+        crate::mag_blob::build_mag_contig_blobs_all(&db_writer)?;
+        let secs = t.elapsed().as_secs_f64();
+        if config.enable_timing {
+            eprintln!("MAG contig-blob aggregation: {:.3} s", secs);
+        }
+        secs
+    } else { 0.0 };
+
     // Write pre-sample timing block
     if let Some(ref mut f) = timing_file {
         use std::io::Write;
@@ -1798,6 +2162,7 @@ pub fn run_all_samples(
         let _ = writeln!(f, "  Contigs with sequence: {}", n_contigs_with_seq);
         let _ = writeln!(f, "  Autoblast            : {:>10.3} s", autoblast_secs);
         let _ = writeln!(f, "  GC content + skew    : {:>10.3} s", gc_secs);
+        let _ = writeln!(f, "  MAG contig blobs     : {:>10.3} s", mag_contig_blob_secs);
         let _ = writeln!(f);
     }
 
@@ -1937,24 +2302,31 @@ fn process_samples_parallel(
         let mut all_timings: Vec<SampleTimings> = Vec::new();
         let mut timing_file = timing_file;
 
+        // Build the contig→MAG lookup once. Empty in non-MAG mode.
+        let mag_lookup = crate::mag_blob::build_mag_lookup(&db_writer)?;
+
         // Receive and write samples as they arrive
         for result in rx {
             written_count += 1;
 
             // Insert sample
-            if let Err(e) = db_writer.insert_sample(&result.sample_name, result.sequencing_type.as_str(), result.total_reads, result.mapped_reads, result.is_circular) {
-                eprintln!("\nError inserting sample {}: {}", result.sample_name, e);
-                let msg = format!("ERR: {}", result.sample_name);
-                write_pb_clone.set_message(msg.clone());
-                write_pb_clone.inc(1);
-                if !is_tty_writer {
-                    eprintln!("Writing:    [{}/{}] {}", written_count, total_writer, msg);
+            let sample_id = match db_writer.insert_sample(&result.sample_name, result.sequencing_type.as_str(), result.total_reads, result.mapped_reads, result.is_circular) {
+                Ok(id) => id,
+                Err(e) => {
+                    eprintln!("\nError inserting sample {}: {}", result.sample_name, e);
+                    let msg = format!("ERR: {}", result.sample_name);
+                    write_pb_clone.set_message(msg.clone());
+                    write_pb_clone.inc(1);
+                    if !is_tty_writer {
+                        eprintln!("Writing:    [{}/{}] {}", written_count, total_writer, msg);
+                    }
+                    continue;
                 }
-                continue;
-            }
+            };
 
             // Write all data for this sample
             let sample_write_start = std::time::Instant::now();
+            let mut mag_agg_ns: u64 = 0;
             if let Err(e) = db_writer.write_sample_data(
                 &result.sample_name,
                 &result.presences,
@@ -1973,6 +2345,16 @@ fn process_samples_parallel(
                     eprintln!("Writing:    [{}/{}] {}", written_count, total_writer, msg);
                 }
             } else {
+                // Per-sample MAG-blob aggregation (no-op when not in MAG mode).
+                if !mag_lookup.is_empty() {
+                    let mag_t = std::time::Instant::now();
+                    if let Err(e) = crate::mag_blob::build_mag_blobs_for_sample(
+                        &db_writer, sample_id, &result.feature_blobs, &mag_lookup,
+                    ) {
+                        eprintln!("\nError aggregating MAG blobs for {}: {}", result.sample_name, e);
+                    }
+                    mag_agg_ns = mag_t.elapsed().as_nanos() as u64;
+                }
                 write_pb_clone.set_message(result.sample_name.clone());
                 if !is_tty_writer {
                     eprintln!("Writing:    [{}/{}] {}", written_count, total_writer, result.sample_name);
@@ -1983,6 +2365,7 @@ fn process_samples_parallel(
             // Write per-sample timings incrementally to the log file
             if let Some(mut t) = result.timings {
                 t.db_write = sample_write_start.elapsed();
+                t.mag_aggregation_ns = mag_agg_ns;
                 if let Some(ref mut f) = timing_file {
                     let _ = write_sample_timing(f, &t, timing_threads);
                 }
@@ -2131,6 +2514,8 @@ fn process_samples_sequential(
     let mut all_timings: Vec<SampleTimings> = Vec::new();
     let mut timing_file = timing_file;
 
+    let mag_lookup = crate::mag_blob::build_mag_lookup(&db_writer)?;
+
     for bam_path in bam_files {
         let sample_start = std::time::Instant::now();
 
@@ -2143,14 +2528,18 @@ fn process_samples_sequential(
                 let write_start = std::time::Instant::now();
 
                 // Insert sample
-                if let Err(e) = db_writer.insert_sample(&sample_name, sequencing_type.as_str(), total_reads, mapped_reads, is_circular) {
-                    eprintln!("\nError inserting sample {}: {}", sample_name, e);
-                    failed += 1;
-                    pb.inc(1);
-                    continue;
-                }
+                let sample_id = match db_writer.insert_sample(&sample_name, sequencing_type.as_str(), total_reads, mapped_reads, is_circular) {
+                    Ok(id) => id,
+                    Err(e) => {
+                        eprintln!("\nError inserting sample {}: {}", sample_name, e);
+                        failed += 1;
+                        pb.inc(1);
+                        continue;
+                    }
+                };
 
                 // Write sample data
+                let mut mag_agg_ns: u64 = 0;
                 if let Err(e) = db_writer.write_sample_data(
                     &sample_name,
                     &presences,
@@ -2165,6 +2554,15 @@ fn process_samples_sequential(
                     eprintln!("\nError writing data for {}: {}", sample_name, e);
                     failed += 1;
                 } else {
+                    if !mag_lookup.is_empty() {
+                        let mag_t = std::time::Instant::now();
+                        if let Err(e) = crate::mag_blob::build_mag_blobs_for_sample(
+                            &db_writer, sample_id, &feature_blobs, &mag_lookup,
+                        ) {
+                            eprintln!("\nError aggregating MAG blobs for {}: {}", sample_name, e);
+                        }
+                        mag_agg_ns = mag_t.elapsed().as_nanos() as u64;
+                    }
                     processed += 1;
                 }
 
@@ -2173,6 +2571,7 @@ fn process_samples_sequential(
                 // Write per-sample timings incrementally to the log file
                 if let Some(ref mut t) = timings {
                     t.db_write = write_start.elapsed();
+                    t.mag_aggregation_ns = mag_agg_ns;
                     t.total = sample_start.elapsed();
                     if let Some(ref mut f) = timing_file {
                         let _ = write_sample_timing(f, t, config.threads);
@@ -2199,6 +2598,20 @@ fn process_samples_sequential(
                     eprintln!("{}", msg);
                 }
             }
+        }
+    }
+
+    // MAG-level threshold post-pass (MAG mode only).
+    if config.view_mode == ViewMode::Mag {
+        let dropped = db_writer
+            .enforce_mag_thresholds(config.min_aligned_fraction, config.min_coverage_depth)?;
+        if dropped > 0 {
+            eprintln!("### Dropped {} (MAG, Sample) groups that failed thresholds", dropped);
+        }
+    } else {
+        let dropped = config.contig_drops_counter.load(Ordering::Relaxed);
+        if dropped > 0 {
+            eprintln!("### Dropped {} (Contig, Sample) pairs that failed thresholds", dropped);
         }
     }
 
@@ -2272,6 +2685,7 @@ fn write_sample_timing(f: &mut fs::File, t: &SampleTimings, threads: usize) -> R
     writeln!(f, "  Par-iter wall        : {:>10.3} s", t.par_iter_wall.as_secs_f64())?;
     writeln!(f, "  Merge contig results : {:>10.3} s", t.merge_results.as_secs_f64())?;
     writeln!(f, "  DB write             : {:>10.3} s", t.db_write.as_secs_f64())?;
+    writeln!(f, "  MAG aggregation      : {:>10.3} s", ns_to_s(t.mag_aggregation_ns))?;
     writeln!(f, "  TOTAL per sample     : {:>10.3} s", t.total.as_secs_f64())?;
     writeln!(f, "  ---- Par-iter sub-phase sums (CPU-seconds across threads) ----")?;
     writeln!(f, "  BAM reader open      : {:>10.3} s", ns_to_s(t.bam_open_ns))?;
@@ -2319,6 +2733,7 @@ fn finish_timing_log(
     writeln!(f, "  Par-iter wall        : {:>10.3} s", sum_dur(|t| t.par_iter_wall))?;
     writeln!(f, "  Merge contig results : {:>10.3} s", sum_dur(|t| t.merge_results))?;
     writeln!(f, "  DB write             : {:>10.3} s", sum_dur(|t| t.db_write))?;
+    writeln!(f, "  MAG aggregation      : {:>10.3} s", sum_ns(|t| t.mag_aggregation_ns))?;
     writeln!(f, "  Total per-sample sum : {:>10.3} s", sum_dur(|t| t.total))?;
     writeln!(f, "  Wall-clock (calc)    : {:>10.3} s", total_wall.as_secs_f64())?;
     writeln!(f, "  ---- Par-iter sub-phase sums ----")?;

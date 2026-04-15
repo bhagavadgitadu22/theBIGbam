@@ -3,7 +3,7 @@ import sys
 
 # Import command modules so we can share arg definitions and run functions
 from thebigbam.utils import (
-    read_mapping, add_sample_metadata, add_contig_metadata,
+    read_mapping, add_sample_metadata, add_contig_metadata, add_mag_metadata,
 )
 from thebigbam.database import add_variable, calculating_data, export_data, inspect_blob
 from thebigbam.plotting import start_bokeh_server
@@ -32,18 +32,21 @@ SCRIPTS = {
 
     'add-sample-metadata': "Add sample metadata from CSV as new columns in Sample table",
     'add-contig-metadata': "Add contig metadata from CSV as new columns in Contig table",
+    'add-mag-metadata': "Add MAG metadata from CSV as new columns in MAG table",
     'add-variable': "Add an external variable from CSV to DB",
 
     'remove-sample': 'Remove a sample and all its data from DB',
     'remove-contig': 'Remove a contig and all its data from DB',
     'remove-sample-metadata': 'Remove a user-added metadata column from Sample table',
     'remove-contig-metadata': 'Remove a user-added metadata column from Contig table',
+    'remove-mag-metadata': 'Remove a user-added metadata column from MAG table',
     'remove-variable': "Remove a Custom variable from DB",
 
     'list-samples': 'List samples from DB',
     'list-contigs': 'List contigs from DB',
     'list-sample-metadata': 'List user-added metadata columns on Sample table',
     'list-contig-metadata': 'List user-added metadata columns on Contig table',
+    'list-mag-metadata': 'List user-added metadata columns on MAG table',
     'list-variables': 'List variables and metadata from DB',
 
     'inspect': 'List values taken by a feature in a given contig-sample pair (decode and display BLOB contents)',
@@ -74,6 +77,9 @@ def build_argparser():
     sp = sub.add_parser('add-contig-metadata', help=SCRIPTS['add-contig-metadata'])
     add_contig_metadata.add_add_contig_metadata_args(sp)
 
+    sp = sub.add_parser('add-mag-metadata', help=SCRIPTS['add-mag-metadata'])
+    add_mag_metadata.add_add_mag_metadata_args(sp)
+
     sp = sub.add_parser('add-variable', help=SCRIPTS['add-variable'])
     add_variable.add_add_variable_args(sp)
 
@@ -94,6 +100,10 @@ def build_argparser():
     sp.add_argument('-d', '--db', required=True)
     sp.add_argument('--colname', required=True, help='Name of the column to remove')
 
+    sp = sub.add_parser('remove-mag-metadata', help=SCRIPTS['remove-mag-metadata'])
+    sp.add_argument('-d', '--db', required=True)
+    sp.add_argument('--colname', required=True, help='Name of the column to remove')
+
     sp = sub.add_parser('remove-variable', help=SCRIPTS['remove-variable'])
     add_variable.add_remove_variable_args(sp)
 
@@ -108,6 +118,9 @@ def build_argparser():
     sp.add_argument('-d', '--db', required=True)
 
     sp = sub.add_parser('list-contig-metadata', help=SCRIPTS['list-contig-metadata'])
+    sp.add_argument('-d', '--db', required=True)
+
+    sp = sub.add_parser('list-mag-metadata', help=SCRIPTS['list-mag-metadata'])
     sp.add_argument('-d', '--db', required=True)
 
     sp = sub.add_parser('list-variables', help=SCRIPTS['list-variables'])
@@ -161,7 +174,10 @@ def main(argv=None):
 
     if args.cmd == 'add-contig-metadata':
         return add_contig_metadata.run_add_contig_metadata(args)
-    
+
+    if args.cmd == 'add-mag-metadata':
+        return add_mag_metadata.run_add_mag_metadata(args)
+
     if args.cmd == 'add-variable':
         return add_variable.run_add_variable(args)
 
@@ -182,6 +198,15 @@ def main(argv=None):
             return 0
         except Exception as e:
             print(f"Error removing contig metadata: {e}")
+            return 2
+
+    if args.cmd == 'remove-mag-metadata':
+        try:
+            from thebigbam.database import database_getters
+            database_getters.remove_mag_metadata(args.db, args.colname)
+            return 0
+        except Exception as e:
+            print(f"Error removing MAG metadata: {e}")
             return 2
 
     if args.cmd == 'remove-sample':
@@ -240,6 +265,15 @@ def main(argv=None):
             return 0
         except Exception as e:
             print(f"Error listing contig metadata: {e}")
+            return 2
+
+    if args.cmd == 'list-mag-metadata':
+        try:
+            from thebigbam.database import database_getters
+            database_getters.list_mag_metadata(args.db)
+            return 0
+        except Exception as e:
+            print(f"Error listing MAG metadata: {e}")
             return 2
 
     if args.cmd == 'inspect':

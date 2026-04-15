@@ -31,12 +31,22 @@ use crate::types::{feature_name_to_id, ContigInfo, FeatureAnnotation, PackagingD
 pub struct DbWriter {
     conn: Mutex<Connection>,
     has_bam: bool,
+    /// True when the pipeline is running in MAG view; gates creation of MAG
+    /// tables, per-MAG explicit views, and the inter-contig blast-hits table.
+    is_mag_mode: bool,
     contig_name_to_id: HashMap<String, i64>,
     sample_name_to_id: Mutex<HashMap<String, i64>>,
     next_sample_id: Mutex<i64>,
 }
 
 impl DbWriter {
+    /// Expose the underlying connection to sibling modules (e.g. `mag_blob`)
+    /// that need to both read existing blob data and append MAG-scale blobs
+    /// under a single lock.
+    pub(crate) fn lock_conn(&self) -> Result<std::sync::MutexGuard<'_, Connection>> {
+        self.conn.lock().map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))
+    }
+
     /// Create a new database and return a writer for sequential sample insertion.
     pub fn create(
         db_path: &Path,
@@ -44,6 +54,7 @@ impl DbWriter {
         annotations: &[FeatureAnnotation],
         contig_qualifiers: &[(i64, HashMap<String, String>)],
         has_bam: bool,
+        is_mag_mode: bool,
     ) -> Result<Self> {
         // Remove existing database if present
         let _ = std::fs::remove_file(db_path);
@@ -52,7 +63,7 @@ impl DbWriter {
             .with_context(|| format!("Failed to create database: {}", db_path.display()))?;
 
         // Create tables
-        create_core_tables(&conn, has_bam)?;
+        create_core_tables(&conn, has_bam, is_mag_mode)?;
         create_variable_tables(&conn)?;
 
         // Insert contigs
@@ -83,6 +94,7 @@ impl DbWriter {
         Ok(Self {
             conn: Mutex::new(conn),
             has_bam,
+            is_mag_mode,
             contig_name_to_id,
             sample_name_to_id: Mutex::new(HashMap::new()),
             next_sample_id: Mutex::new(1),
@@ -99,6 +111,18 @@ impl DbWriter {
     ) -> Result<Self> {
         let conn = Connection::open(db_path)
             .with_context(|| format!("Failed to open database: {}", db_path.display()))?;
+
+        // Read view_mode from existing metadata (defaults to 'contig' for legacy DBs).
+        let is_mag_mode = {
+            let mut stmt = conn.prepare(
+                "SELECT Value FROM Database_metadata WHERE Key = 'View_mode'",
+            )?;
+            let mut rows = stmt.query([])?;
+            match rows.next()? {
+                Some(r) => r.get::<_, String>(0).unwrap_or_else(|_| "contig".to_string()) == "mag",
+                None => false,
+            }
+        };
 
         // Read existing contig name -> id mapping
         let mut contig_name_to_id: HashMap<String, i64> = HashMap::new();
@@ -205,10 +229,17 @@ impl DbWriter {
         Ok(Self {
             conn: Mutex::new(conn),
             has_bam,
+            is_mag_mode,
             contig_name_to_id,
             sample_name_to_id: Mutex::new(sample_name_to_id),
             next_sample_id: Mutex::new(max_sample_id + 1),
         })
+    }
+
+    /// Returns whether this database is in MAG view mode (derived from the
+    /// `View_mode` metadata row on open, or from the create-time flag).
+    pub fn is_mag_mode(&self) -> bool {
+        self.is_mag_mode
     }
 
     /// Insert a sample and return its ID.
@@ -557,6 +588,95 @@ impl DbWriter {
         Ok(())
     }
 
+    /// Write MAG-scale sample-feature BLOBs (MAG_blob + MAG_blob_chunk).
+    pub fn write_mag_blobs(
+        &self,
+        conn: &Connection,
+        mag_id: i64,
+        sample_id: i64,
+        blobs: &[(String, crate::blob::EncodedBlob)],
+    ) -> Result<()> {
+        if blobs.is_empty() { return Ok(()); }
+
+        let mut appender = conn.appender("MAG_blob")
+            .context("Failed to create MAG_blob appender")?;
+        let mut chunk_appender = conn.appender("MAG_blob_chunk")
+            .context("Failed to create MAG_blob_chunk appender")?;
+
+        for (feature_name, encoded) in blobs {
+            if encoded.zoom.is_empty() { continue; }
+            let fid = match feature_name_to_id(feature_name) { Some(v) => v, None => continue };
+            appender.append_row(params![mag_id, sample_id, fid as i32, encoded.zoom.as_slice()])?;
+            for (chunk_idx, chunk_data) in encoded.chunks.iter().enumerate() {
+                chunk_appender.append_row(params![
+                    mag_id, sample_id, fid as i32, chunk_idx as i32, chunk_data.as_slice()
+                ])?;
+            }
+        }
+
+        appender.flush().context("Failed to flush MAG_blob appender")?;
+        chunk_appender.flush().context("Failed to flush MAG_blob_chunk appender")?;
+        Ok(())
+    }
+
+    /// Write MAG-scale contig-level feature BLOBs (MAG_contig_blob + MAG_contig_blob_chunk).
+    pub fn write_mag_contig_blobs(
+        &self,
+        conn: &Connection,
+        mag_id: i64,
+        blobs: &[(String, crate::blob::EncodedBlob)],
+    ) -> Result<()> {
+        if blobs.is_empty() { return Ok(()); }
+
+        let mut appender = conn.appender("MAG_contig_blob")
+            .context("Failed to create MAG_contig_blob appender")?;
+        let mut chunk_appender = conn.appender("MAG_contig_blob_chunk")
+            .context("Failed to create MAG_contig_blob_chunk appender")?;
+
+        for (feature_name, encoded) in blobs {
+            if encoded.zoom.is_empty() { continue; }
+            let fid = match feature_name_to_id(feature_name) { Some(v) => v, None => continue };
+            appender.append_row(params![mag_id, fid as i32, encoded.zoom.as_slice()])?;
+            for (chunk_idx, chunk_data) in encoded.chunks.iter().enumerate() {
+                chunk_appender.append_row(params![
+                    mag_id, fid as i32, chunk_idx as i32, chunk_data.as_slice()
+                ])?;
+            }
+        }
+
+        appender.flush().context("Failed to flush MAG_contig_blob appender")?;
+        chunk_appender.flush().context("Failed to flush MAG_contig_blob_chunk appender")?;
+        Ok(())
+    }
+
+    /// Write one MAG-level coverage summary row, recomputed from raw
+    /// per-position data (see `mag_blob::compute_mag_coverage_stats`).
+    pub fn write_mag_coverage(
+        &self,
+        conn: &Connection,
+        mag_id: i64,
+        sample_id: i64,
+        s: &crate::mag_blob::MagCoverageStats,
+    ) -> Result<()> {
+        let mut appender = conn.appender("MAG_coverage")
+            .context("Failed to create MAG_coverage appender")?;
+        appender.append_row(params![
+            mag_id,
+            sample_id,
+            s.mag_length as i64,
+            s.aligned_fraction_pct_x10,
+            s.above_expected,
+            s.read_count as i64,
+            s.coverage_mean_x10,
+            s.coverage_median_x10,
+            s.coverage_trimmed_mean_x10,
+            s.coverage_cv_x1e6,
+            s.coverage_roughness_x1e6,
+        ])?;
+        appender.flush().context("Failed to flush MAG_coverage appender")?;
+        Ok(())
+    }
+
     /// Write repeats data to the database (both direct and inverted).
     /// This is called once during database creation (not per-sample).
     pub fn write_repeats(&self, repeats: &[RepeatsData]) -> Result<()> {
@@ -706,7 +826,7 @@ impl DbWriter {
     /// Stores raw window-level GC percentages as dense BLOBs (one value per 500bp window).
     /// This is called once during database creation (not per-sample).
     pub fn write_gc_content(&self, gc_data: &[GCContentData]) -> Result<()> {
-        use crate::blob::{encode_contig_dense_blob, ValueScale};
+        use crate::blob::encode_contig_dense_blob;
 
         if gc_data.is_empty() {
             return Ok(());
@@ -718,7 +838,8 @@ impl DbWriter {
         let mut chunk_appender = conn.appender("Contig_blob_chunk")
             .context("Failed to create Contig_blob_chunk appender")?;
 
-        const GC_CONTENT_FEATURE_ID: i16 = 1;
+        let gc_content_feature_id = feature_name_to_id("gc_content")
+            .ok_or_else(|| anyhow::anyhow!("Missing VARIABLES entry: gc_content"))?;
         const GC_WINDOW_SIZE: u32 = 500; // Standard GC content window size
 
         for data in gc_data {
@@ -734,21 +855,22 @@ impl DbWriter {
                 let contig_length = (values.len() as u32) * GC_WINDOW_SIZE;
 
                 // Encode as dense BLOB (array index is window number)
+                debug_assert_eq!(crate::types::get_encoding("gc_content"), crate::types::Encoding::Dense);
                 let encoded = encode_contig_dense_blob(
                     &values,
-                    ValueScale::Raw,
+                    crate::types::get_value_scale("gc_content"),
                     contig_length,
                     GC_WINDOW_SIZE,
                 );
 
                 appender.append_row(params![
                     contig_id,
-                    GC_CONTENT_FEATURE_ID,
+                    gc_content_feature_id,
                     encoded.zoom
                 ])?;
                 for (chunk_idx, chunk_data) in encoded.chunks.iter().enumerate() {
                     chunk_appender.append_row(params![
-                        contig_id, GC_CONTENT_FEATURE_ID, chunk_idx as i16, chunk_data.as_slice()
+                        contig_id, gc_content_feature_id, chunk_idx as i16, chunk_data.as_slice()
                     ])?;
                 }
             }
@@ -764,7 +886,7 @@ impl DbWriter {
     /// Stores raw window-level GC skew values as dense BLOBs (one value per 1000bp window).
     /// This is called once during database creation (not per-sample).
     pub fn write_gc_skew(&self, gc_data: &[GCContentData]) -> Result<()> {
-        use crate::blob::{encode_contig_dense_blob, ValueScale};
+        use crate::blob::encode_contig_dense_blob;
 
         if gc_data.is_empty() {
             return Ok(());
@@ -776,7 +898,8 @@ impl DbWriter {
         let mut chunk_appender = conn.appender("Contig_blob_chunk")
             .context("Failed to create Contig_blob_chunk appender")?;
 
-        const GC_SKEW_FEATURE_ID: i16 = 2;
+        let gc_skew_feature_id = feature_name_to_id("gc_skew")
+            .ok_or_else(|| anyhow::anyhow!("Missing VARIABLES entry: gc_skew"))?;
         const GC_SKEW_WINDOW_SIZE: u32 = 1000; // Standard GC skew window size
 
         for data in gc_data {
@@ -793,21 +916,22 @@ impl DbWriter {
 
                 // Encode as dense BLOB (array index is window number)
                 // Values are stored as integer ×100 (e.g. -40 = -0.40), use Times100 scale
+                debug_assert_eq!(crate::types::get_encoding("gc_skew"), crate::types::Encoding::Dense);
                 let encoded = encode_contig_dense_blob(
                     &values,
-                    ValueScale::Times100,
+                    crate::types::get_value_scale("gc_skew"),
                     contig_length,
                     GC_SKEW_WINDOW_SIZE,
                 );
 
                 appender.append_row(params![
                     contig_id,
-                    GC_SKEW_FEATURE_ID,
+                    gc_skew_feature_id,
                     encoded.zoom
                 ])?;
                 for (chunk_idx, chunk_data) in encoded.chunks.iter().enumerate() {
                     chunk_appender.append_row(params![
-                        contig_id, GC_SKEW_FEATURE_ID, chunk_idx as i16, chunk_data.as_slice()
+                        contig_id, gc_skew_feature_id, chunk_idx as i16, chunk_data.as_slice()
                     ])?;
                 }
             }
@@ -819,32 +943,182 @@ impl DbWriter {
         Ok(())
     }
 
+    /// Build the four materialized repeat tables, encode them into Contig_blob,
+    /// and drop the materialized intermediates. Idempotent only inasmuch as the
+    /// materialized tables are dropped at the end — calling twice will fail
+    /// because Contig_directRepeats is consumed but Contig_blob rows are
+    /// upsert-only. Intended to run once, in pre-sample setup, after
+    /// `write_repeats` but before the per-sample loop, so MAG-scale aggregation
+    /// can read repeat data from `Contig_blob` like everything else.
+    pub fn convert_repeat_blobs(&self) -> Result<()> {
+        let conn = self.lock_conn()?;
+        Self::build_materialized_repeat_tables(&conn)?;
+        Self::write_repeat_features_to_blob_static(&conn)?;
+        for table in &[
+            "Contig_direct_repeat_count", "Contig_inverted_repeat_count",
+            "Contig_direct_repeat_identity", "Contig_inverted_repeat_identity",
+        ] {
+            conn.execute(&format!("DROP TABLE IF EXISTS {}", table), [])
+                .with_context(|| format!("Failed to drop intermediate table {}", table))?;
+        }
+        Ok(())
+    }
+
+    /// Build the four CTAS aggregates over `Contig_directRepeats` /
+    /// `Contig_invertedRepeats`. Used by `convert_repeat_blobs`.
+    fn build_materialized_repeat_tables(conn: &Connection) -> Result<()> {
+        // Optimized repeat count tables using event-based running sum.
+        conn.execute(
+            "CREATE TABLE Contig_direct_repeat_count AS
+            WITH events AS (
+                SELECT Contig_id, LEAST(Position1, Position2) AS pos, 1 AS delta
+                FROM Contig_directRepeats
+                UNION ALL
+                SELECT Contig_id, GREATEST(Position1, Position2) + 1 AS pos, -1 AS delta
+                FROM Contig_directRepeats
+            ),
+            grouped AS (
+                SELECT Contig_id, pos, SUM(delta) AS net FROM events GROUP BY Contig_id, pos
+            ),
+            running AS (
+                SELECT Contig_id, pos,
+                       SUM(net) OVER (PARTITION BY Contig_id ORDER BY pos) AS count,
+                       LEAD(pos) OVER (PARTITION BY Contig_id ORDER BY pos) AS next_pos
+                FROM grouped
+            )
+            SELECT Contig_id, pos AS First_position, next_pos - 1 AS Last_position, count AS Value
+            FROM running WHERE next_pos IS NOT NULL AND count > 0",
+            [],
+        )
+        .context("Failed to create Contig_direct_repeat_count table")?;
+
+        conn.execute(
+            "CREATE TABLE Contig_inverted_repeat_count AS
+            WITH events AS (
+                SELECT Contig_id, LEAST(Position1, Position2) AS pos, 1 AS delta
+                FROM Contig_invertedRepeats
+                UNION ALL
+                SELECT Contig_id, GREATEST(Position1, Position2) + 1 AS pos, -1 AS delta
+                FROM Contig_invertedRepeats
+            ),
+            grouped AS (
+                SELECT Contig_id, pos, SUM(delta) AS net FROM events GROUP BY Contig_id, pos
+            ),
+            running AS (
+                SELECT Contig_id, pos,
+                       SUM(net) OVER (PARTITION BY Contig_id ORDER BY pos) AS count,
+                       LEAD(pos) OVER (PARTITION BY Contig_id ORDER BY pos) AS next_pos
+                FROM grouped
+            )
+            SELECT Contig_id, pos AS First_position, next_pos - 1 AS Last_position, count AS Value
+            FROM running WHERE next_pos IS NOT NULL AND count > 0",
+            [],
+        )
+        .context("Failed to create Contig_inverted_repeat_count table")?;
+
+        conn.execute(
+            "CREATE TABLE Contig_direct_repeat_identity AS
+            WITH boundaries AS (
+                SELECT Contig_id, LEAST(Position1, Position2) AS pos FROM Contig_directRepeats
+                UNION
+                SELECT Contig_id, GREATEST(Position1, Position2) + 1 AS pos FROM Contig_directRepeats
+            ),
+            segments AS (
+                SELECT Contig_id, pos AS seg_start,
+                       LEAD(pos) OVER (PARTITION BY Contig_id ORDER BY pos) - 1 AS seg_end
+                FROM boundaries
+            )
+            SELECT s.Contig_id, s.seg_start AS First_position, s.seg_end AS Last_position,
+                   MAX(r.Pident) / 100.0 AS Value,
+                   arg_max(LEAST(r.Position1prime, r.Position2prime),    r.Pident) AS Partner_start,
+                   arg_max(GREATEST(r.Position1prime, r.Position2prime), r.Pident) AS Partner_end
+            FROM segments s
+            JOIN Contig_directRepeats r ON r.Contig_id = s.Contig_id
+              AND LEAST(r.Position1, r.Position2) <= s.seg_end
+              AND GREATEST(r.Position1, r.Position2) >= s.seg_start
+            WHERE s.seg_end IS NOT NULL
+            GROUP BY s.Contig_id, s.seg_start, s.seg_end",
+            [],
+        )
+        .context("Failed to create Contig_direct_repeat_identity table")?;
+
+        conn.execute(
+            "CREATE TABLE Contig_inverted_repeat_identity AS
+            WITH boundaries AS (
+                SELECT Contig_id, LEAST(Position1, Position2) AS pos FROM Contig_invertedRepeats
+                UNION
+                SELECT Contig_id, GREATEST(Position1, Position2) + 1 AS pos FROM Contig_invertedRepeats
+            ),
+            segments AS (
+                SELECT Contig_id, pos AS seg_start,
+                       LEAD(pos) OVER (PARTITION BY Contig_id ORDER BY pos) - 1 AS seg_end
+                FROM boundaries
+            )
+            SELECT s.Contig_id, s.seg_start AS First_position, s.seg_end AS Last_position,
+                   MAX(r.Pident) / 100.0 AS Value,
+                   arg_max(LEAST(r.Position1prime, r.Position2prime),    r.Pident) AS Partner_start,
+                   arg_max(GREATEST(r.Position1prime, r.Position2prime), r.Pident) AS Partner_end
+            FROM segments s
+            JOIN Contig_invertedRepeats r ON r.Contig_id = s.Contig_id
+              AND LEAST(r.Position1, r.Position2) <= s.seg_end
+              AND GREATEST(r.Position1, r.Position2) >= s.seg_start
+            WHERE s.seg_end IS NOT NULL
+            GROUP BY s.Contig_id, s.seg_start, s.seg_end",
+            [],
+        )
+        .context("Failed to create Contig_inverted_repeat_identity table")?;
+
+        Ok(())
+    }
+
     /// Write repeat count and identity features to Contig_blob table from materialized tables.
-    /// Converts RLE segments into dense per-bp arrays, then encodes as dense contig BLOBs.
-    /// Delta+zstd compression handles constant-value runs very efficiently.
+    /// Emits sparse BLOBs with two events per RLE segment (seg_start and seg_end both at the
+    /// segment's plateau value) so a plateau renders correctly through the anchor-insertion
+    /// logic. Identity features carry `EventMeta.partner` = partner position (from the
+    /// max-Pident repeat) on the first event of each segment.
     fn write_repeat_features_to_blob_static(conn: &Connection) -> Result<()> {
-        use crate::blob::{encode_dense_blob, ValueScale};
+        use crate::blob::{encode_sparse_blob, EventMeta, MetadataFlags};
+        use crate::types::{get_encoding, get_value_scale, Encoding};
 
-        // Feature IDs for repeat features
-        const DIRECT_REPEAT_COUNT_ID: i16 = 3;
-        const INVERTED_REPEAT_COUNT_ID: i16 = 4;
-        const DIRECT_REPEAT_IDENTITY_ID: i16 = 5;
-        const INVERTED_REPEAT_IDENTITY_ID: i16 = 6;
+        // Resolve feature IDs from VARIABLES so they stay in sync with types.rs
+        // and can't collide with other features like hit_count_within_mag (id 5)
+        // and hit_identity_within_mag (id 6).
+        let direct_repeat_count_id = feature_name_to_id("direct_repeat_count")
+            .ok_or_else(|| anyhow::anyhow!("Missing VARIABLES entry: direct_repeat_count"))?;
+        let inverted_repeat_count_id = feature_name_to_id("inverted_repeat_count")
+            .ok_or_else(|| anyhow::anyhow!("Missing VARIABLES entry: inverted_repeat_count"))?;
+        let direct_repeat_identity_id = feature_name_to_id("direct_repeat_identity")
+            .ok_or_else(|| anyhow::anyhow!("Missing VARIABLES entry: direct_repeat_identity"))?;
+        let inverted_repeat_identity_id = feature_name_to_id("inverted_repeat_identity")
+            .ok_or_else(|| anyhow::anyhow!("Missing VARIABLES entry: inverted_repeat_identity"))?;
 
-        // List of (table_name, feature_id) to process
-        let tables = vec![
-            ("Contig_direct_repeat_count", DIRECT_REPEAT_COUNT_ID),
-            ("Contig_inverted_repeat_count", INVERTED_REPEAT_COUNT_ID),
-            ("Contig_direct_repeat_identity", DIRECT_REPEAT_IDENTITY_ID),
-            ("Contig_inverted_repeat_identity", INVERTED_REPEAT_IDENTITY_ID),
+        // (feature_name, table_name, feature_id, is_identity)
+        let tables: Vec<(&str, &str, i16, bool)> = vec![
+            ("direct_repeat_count", "Contig_direct_repeat_count", direct_repeat_count_id, false),
+            ("inverted_repeat_count", "Contig_inverted_repeat_count", inverted_repeat_count_id, false),
+            ("direct_repeat_identity", "Contig_direct_repeat_identity", direct_repeat_identity_id, true),
+            ("inverted_repeat_identity", "Contig_inverted_repeat_identity", inverted_repeat_identity_id, true),
         ];
+
+        // Get contig length map once (shared across tables).
+        let mut contig_lengths: HashMap<i64, u32> = HashMap::new();
+        {
+            let mut stmt = conn.prepare("SELECT Contig_id, Contig_length FROM Contig")?;
+            let rows = stmt.query_map([], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, i32>(1)?))
+            })?;
+            for row in rows {
+                let (contig_id, length) = row?;
+                contig_lengths.insert(contig_id, length as u32);
+            }
+        }
 
         let mut appender = conn.appender("Contig_blob")
             .context("Failed to create Contig_blob appender")?;
         let mut chunk_appender = conn.appender("Contig_blob_chunk")
             .context("Failed to create Contig_blob_chunk appender")?;
 
-        for (table_name, feature_id) in tables {
+        for (feature_name, table_name, feature_id, is_identity) in tables {
             // Check if table exists (it might not if there are no repeats)
             let table_exists: bool = conn.query_row(
                 "SELECT COUNT(*) > 0 FROM information_schema.tables WHERE table_name = ?",
@@ -857,26 +1131,17 @@ impl DbWriter {
                 continue;
             }
 
-            // Identity features store 0.0-1.0 values → scale ×100 for integer storage
-            let is_identity = feature_id == DIRECT_REPEAT_IDENTITY_ID
-                           || feature_id == INVERTED_REPEAT_IDENTITY_ID;
-            let scale = if is_identity { ValueScale::Times100 } else { ValueScale::Raw };
+            debug_assert_eq!(get_encoding(feature_name), Encoding::Sparse);
+            let scale = get_value_scale(feature_name);
 
-            // Get contig length map
-            let mut contig_lengths: HashMap<i64, u32> = HashMap::new();
-            {
-                let mut stmt = conn.prepare("SELECT Contig_id, Contig_length FROM Contig")?;
-                let rows = stmt.query_map([], |row| {
-                    Ok((row.get::<_, i64>(0)?, row.get::<_, i32>(1)?))
-                })?;
-                for row in rows {
-                    let (contig_id, length) = row?;
-                    contig_lengths.insert(contig_id, length as u32);
-                }
-            }
-
-            // Read RLE segments from the materialized table
-            let query = format!("SELECT Contig_id, First_position, Last_position, Value FROM {} ORDER BY Contig_id, First_position", table_name);
+            // Read RLE segments from the materialized table.
+            // Identity tables carry Partner_start / Partner_end columns (positions within
+            // the contig of the partner copy of the max-Pident repeat covering the segment).
+            let query = if is_identity {
+                format!("SELECT Contig_id, First_position, Last_position, Value, Partner_start, Partner_end FROM {} ORDER BY Contig_id, First_position", table_name)
+            } else {
+                format!("SELECT Contig_id, First_position, Last_position, Value FROM {} ORDER BY Contig_id, First_position", table_name)
+            };
             let mut stmt = conn.prepare(&query)?;
             let rows = stmt.query_map([], |row| {
                 Ok((
@@ -884,33 +1149,72 @@ impl DbWriter {
                     row.get::<_, i32>(1)?,    // First_position
                     row.get::<_, i32>(2)?,    // Last_position
                     row.get::<_, f64>(3)?,    // Value
+                    if is_identity { row.get::<_, Option<i32>>(4)? } else { None }, // Partner_start
+                    if is_identity { row.get::<_, Option<i32>>(5)? } else { None }, // Partner_end
                 ))
             })?;
 
-            // Collect all segments grouped by contig, then encode each as dense blob
-            let mut contig_segments: HashMap<i64, Vec<(i32, i32, f64)>> = HashMap::new();
-
+            // (first_pos, last_pos, value, partner_start, partner_end)
+            let mut contig_segments: HashMap<i64, Vec<(i32, i32, f64, Option<i32>, Option<i32>)>> = HashMap::new();
             for row in rows {
-                let (contig_id, first_pos, last_pos, value) = row?;
-                contig_segments.entry(contig_id).or_default().push((first_pos, last_pos, value));
+                let (contig_id, first_pos, last_pos, value, partner_start, partner_end) = row?;
+                contig_segments.entry(contig_id).or_default().push((first_pos, last_pos, value, partner_start, partner_end));
             }
+
+            let flags = MetadataFlags {
+                sparse: true,
+                has_partner: is_identity,
+                ..MetadataFlags::default()
+            };
 
             for (contig_id, segments) in &contig_segments {
                 let contig_length = *contig_lengths.get(contig_id).unwrap_or(&0);
                 if contig_length == 0 || segments.is_empty() {
                     continue;
                 }
-                // Build dense per-bp array (zeros, then fill RLE runs)
-                let mut dense = vec![0i32; contig_length as usize];
-                for &(first_pos, last_pos, value) in segments {
-                    let v = if is_identity { (value * 100.0) as i32 } else { value as i32 };
-                    let start = (first_pos as usize).min(dense.len());
-                    let end = ((last_pos + 1) as usize).min(dense.len());
-                    for pos in start..end {
-                        dense[pos] = v;
+
+                // Emit two events per segment (seg_start, seg_end), same value, so the
+                // anchor-insertion logic in the plotting layer renders a plateau when
+                // paired with the same-y no-anchor rule.
+                let mut positions: Vec<u32> = Vec::with_capacity(segments.len() * 2);
+                let mut values: Vec<i32> = Vec::with_capacity(segments.len() * 2);
+                let mut meta: Vec<EventMeta> = if is_identity {
+                    Vec::with_capacity(segments.len() * 2)
+                } else {
+                    Vec::new()
+                };
+
+                for &(first_pos, last_pos, value, partner_start, partner_end) in segments {
+                    if first_pos < 0 || last_pos < first_pos {
+                        continue;
+                    }
+                    let v = if is_identity { (value * 100.0).round() as i32 } else { value as i32 };
+                    let s = (first_pos as u32).min(contig_length.saturating_sub(1));
+                    let e = (last_pos as u32).min(contig_length.saturating_sub(1));
+
+                    positions.push(s);
+                    values.push(v);
+                    if is_identity {
+                        meta.push(EventMeta { partner: partner_start, ..Default::default() });
+                    }
+
+                    if e > s {
+                        positions.push(e);
+                        values.push(v);
+                        if is_identity {
+                            // seg_start carries partner_start, seg_end carries partner_end so
+                            // the plotting layer can pair them into a "start-end" tooltip range.
+                            meta.push(EventMeta { partner: partner_end, ..Default::default() });
+                        }
                     }
                 }
-                let encoded = encode_dense_blob(&dense, scale, contig_length);
+
+                if positions.is_empty() {
+                    continue;
+                }
+
+                let meta_ref = if is_identity { Some(meta.as_slice()) } else { None };
+                let encoded = encode_sparse_blob(&positions, &values, meta_ref, flags, scale, contig_length);
                 appender.append_row(params![*contig_id, feature_id, encoded.zoom])?;
                 for (chunk_idx, chunk_data) in encoded.chunks.iter().enumerate() {
                     chunk_appender.append_row(params![
@@ -946,6 +1250,399 @@ impl DbWriter {
         Ok(())
     }
 
+    /// Write MAG rows and MAG_contigs_association rows.
+    ///
+    /// `mags` is a slice of (mag_name, member_contig_names). Aggregates are computed
+    /// by length-weighted mean over the member contigs (means for rates, SUM for
+    /// counts). Run AFTER per-contig GC stats and Duplication_percentage have been
+    /// written. Associations are persisted in descending contig-length order within
+    /// each MAG — downstream visualization relies on this ordering.
+    pub fn write_mags(&self, mags: &[(String, Vec<String>)]) -> Result<()> {
+        if mags.is_empty() {
+            return Ok(());
+        }
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
+
+        // Support extend mode: new MAG ids start past the existing max (0 if empty).
+        let existing_max: i64 = conn
+            .query_row("SELECT COALESCE(MAX(MAG_id), 0) FROM MAG", [], |r| r.get(0))
+            .unwrap_or(0);
+        let existing_names: HashSet<String> = {
+            let mut stmt = conn.prepare("SELECT MAG_name FROM MAG")?;
+            let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+            rows.collect::<std::result::Result<HashSet<_>, _>>()?
+        };
+
+        let tx = conn.unchecked_transaction()?;
+
+        let mut next_id = existing_max;
+        for (mag_name, contig_names) in mags.iter() {
+            if existing_names.contains(mag_name) {
+                // Skip MAGs that already exist in the DB (extend mode re-run with same manifest).
+                continue;
+            }
+            next_id += 1;
+            let mag_id = next_id;
+
+            // Resolve member contig ids (ordered longest-first).
+            let mut members: Vec<(i64, i64, Option<i32>, Option<i32>, Option<i32>, Option<i32>, Option<i32>)> = Vec::with_capacity(contig_names.len());
+            {
+                let mut stmt = tx.prepare(
+                    "SELECT Contig_id, Contig_length, Duplication_percentage, GC_mean, GC_sd, GC_skew_amplitude, Positive_GC_skew_windows_percentage
+                     FROM Contig WHERE Contig_name = ?"
+                )?;
+                for name in contig_names {
+                    let row = stmt.query_row(params![name], |r| {
+                        Ok((
+                            r.get::<_, i64>(0)?,
+                            r.get::<_, i64>(1)?,
+                            r.get::<_, Option<i32>>(2)?,
+                            r.get::<_, Option<i32>>(3)?,
+                            r.get::<_, Option<i32>>(4)?,
+                            r.get::<_, Option<i32>>(5)?,
+                            r.get::<_, Option<i32>>(6)?,
+                        ))
+                    })
+                    .with_context(|| format!("MAG '{}' references unknown contig '{}'", mag_name, name))?;
+                    members.push(row);
+                }
+            }
+            // Sort by length DESC; stable so ties break by insertion order.
+            members.sort_by(|a, b| b.1.cmp(&a.1));
+
+            let total_length: i64 = members.iter().map(|m| m.1).sum();
+            let n_contigs = members.len() as i64;
+
+            // N50: length of the shortest contig whose inclusion brings the cumulative
+            // sum (sorted DESC) to ≥ 50 % of total assembly length.
+            let n50: i64 = {
+                let half = (total_length + 1) / 2;
+                let mut cumsum: i64 = 0;
+                let mut n50_val: i64 = members.last().map(|m| m.1).unwrap_or(0);
+                for m in &members {
+                    cumsum += m.1;
+                    if cumsum >= half {
+                        n50_val = m.1;
+                        break;
+                    }
+                }
+                n50_val
+            };
+
+            // Length-weighted mean helper over (value, length); returns None if all missing or length=0.
+            let lw_mean = |values: &[(Option<i32>, i64)]| -> Option<f64> {
+                let total_len: i64 = values.iter().filter(|(v, _)| v.is_some()).map(|(_, l)| *l).sum();
+                if total_len == 0 {
+                    return None;
+                }
+                let num: f64 = values
+                    .iter()
+                    .filter_map(|(v, l)| v.map(|vv| vv as f64 * *l as f64))
+                    .sum();
+                Some(num / total_len as f64)
+            };
+
+            let dup: Vec<(Option<i32>, i64)> = members.iter().map(|m| (m.2, m.1)).collect();
+            let gc_mean_v: Vec<(Option<i32>, i64)> = members.iter().map(|m| (m.3, m.1)).collect();
+            let gc_sd_v: Vec<(Option<i32>, i64)> = members.iter().map(|m| (m.4, m.1)).collect();
+            let gc_amp_v: Vec<(Option<i32>, i64)> = members.iter().map(|m| (m.5, m.1)).collect();
+            let gc_pos_v: Vec<(Option<i32>, i64)> = members.iter().map(|m| (m.6, m.1)).collect();
+
+            let dup_mag = lw_mean(&dup).map(|v| v.round() as i32);
+            let gc_mean_mag = lw_mean(&gc_mean_v).map(|v| v.round() as i32);
+            let gc_sd_mag = lw_mean(&gc_sd_v).map(|v| v.round() as i32);
+            let gc_amp_mag = lw_mean(&gc_amp_v).map(|v| v.round() as i32);
+            let gc_pos_mag = lw_mean(&gc_pos_v).map(|v| v.round() as i32);
+
+            tx.execute(
+                "INSERT INTO MAG (MAG_id, MAG_name, MAG_length, Number_of_contigs, N50, Duplication_percentage, GC_mean, GC_sd, GC_skew_amplitude, Positive_GC_skew_windows_percentage)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                params![mag_id, mag_name, total_length, n_contigs, n50, dup_mag, gc_mean_mag, gc_sd_mag, gc_amp_mag, gc_pos_mag],
+            )
+            .with_context(|| format!("Failed to insert MAG '{}'", mag_name))?;
+
+            // Cumulative offset under longest-first ordering.
+            let mut cumulative_offset: i64 = 0;
+            for (contig_id, contig_length, _, _, _, _, _) in &members {
+                tx.execute(
+                    "INSERT INTO MAG_contigs_association (MAG_id, Contig_id, Offset_in_MAG) VALUES (?, ?, ?)",
+                    params![mag_id, *contig_id, cumulative_offset],
+                )
+                .with_context(|| format!("Failed to insert MAG_contigs_association for MAG '{}' contig_id {}", mag_name, contig_id))?;
+                cumulative_offset += *contig_length;
+            }
+        }
+
+        tx.commit().context("Failed to commit MAG rows")?;
+        Ok(())
+    }
+
+    /// Write inter-contig BLAST hits into Contig_blast_hits, canonicalising on
+    /// `Contig_id_1 <= Contig_id_2`. Uses INSERT OR IGNORE for idempotency.
+    pub fn write_contig_blast_hits(
+        &self,
+        hits: &[(String, String, i32, i32, i32, i32, f64)],
+    ) -> Result<usize> {
+        if hits.is_empty() || !self.is_mag_mode {
+            return Ok(0);
+        }
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
+
+        // Refresh contig_name → id map from DB (covers extend mode).
+        let name_to_id: HashMap<String, i64> = {
+            let mut stmt = conn.prepare("SELECT Contig_name, Contig_id FROM Contig")?;
+            let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
+            rows.collect::<std::result::Result<HashMap<_, _>, _>>()?
+        };
+
+        let tx = conn.unchecked_transaction()?;
+        let mut written = 0usize;
+        {
+            let mut stmt = tx.prepare(
+                "INSERT OR IGNORE INTO Contig_blast_hits
+                   (Contig_id_1, Contig_id_2, Position1, Position2, Position1prime, Position2prime, Pident)
+                 VALUES (?, ?, ?, ?, ?, ?, ?)"
+            )?;
+            for (qid, sid, mut p1, mut p2, mut p1p, mut p2p, pident) in hits.iter().cloned() {
+                let cid_q = match name_to_id.get(&qid) { Some(v) => *v, None => continue };
+                let cid_s = match name_to_id.get(&sid) { Some(v) => *v, None => continue };
+
+                let (cid1, cid2) = if cid_q <= cid_s {
+                    (cid_q, cid_s)
+                } else {
+                    std::mem::swap(&mut p1, &mut p1p);
+                    std::mem::swap(&mut p2, &mut p2p);
+                    (cid_s, cid_q)
+                };
+                let pident_i = (pident * 100.0).round() as i32;
+                if stmt.execute(params![cid1, cid2, p1, p2, p1p, p2p, pident_i]).is_ok() {
+                    written += 1;
+                }
+            }
+        }
+        tx.commit().context("Failed to commit Contig_blast_hits rows")?;
+        Ok(written)
+    }
+
+    /// Populate per-position inter-contig hit features in Contig_blob from the
+    /// Contig_blast_hits table. Produces two Sparse features per contig:
+    ///   - hit_count_within_mag    (count of hits covering the position)
+    ///   - hit_identity_within_mag (max Pident across hits, ×100; partner contig_id stored as metadata)
+    /// Must run AFTER write_contig_blast_hits and BEFORE index creation.
+    pub fn write_mag_hit_features(&self) -> Result<()> {
+        if !self.is_mag_mode {
+            return Ok(());
+        }
+        use crate::blob::{encode_sparse_blob, EventMeta, MetadataFlags};
+
+        let hit_count_fid = feature_name_to_id("hit_count_within_mag")
+            .ok_or_else(|| anyhow::anyhow!("Missing VARIABLES entry: hit_count_within_mag"))?;
+        let hit_ident_fid = feature_name_to_id("hit_identity_within_mag")
+            .ok_or_else(|| anyhow::anyhow!("Missing VARIABLES entry: hit_identity_within_mag"))?;
+
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
+
+        let contig_lengths: HashMap<i64, u32> = {
+            let mut stmt = conn.prepare("SELECT Contig_id, Contig_length FROM Contig")?;
+            let rows = stmt.query_map([], |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, i32>(1)? as u32))
+            })?;
+            rows.collect::<std::result::Result<HashMap<_, _>, _>>()?
+        };
+
+        // For each contig_id, per-position (count, max_pident, partner).
+        // Use BTreeMap so output positions are naturally sorted.
+        use std::collections::BTreeMap;
+        let mut per_contig: HashMap<i64, BTreeMap<u32, (u32, i32, i64)>> = HashMap::new();
+
+        {
+            let mut stmt = conn.prepare(
+                "SELECT Contig_id_1, Contig_id_2, Position1, Position2, Position1prime, Position2prime, Pident
+                 FROM Contig_blast_hits"
+            )?;
+            let rows = stmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, i32>(2)?,
+                    r.get::<_, i32>(3)?,
+                    r.get::<_, i32>(4)?,
+                    r.get::<_, i32>(5)?,
+                    r.get::<_, i32>(6)?,
+                ))
+            })?;
+
+            for row in rows {
+                let (cid1, cid2, p1, p2, p1p, p2p, pident_x100) = row?;
+                // Process the hit from BOTH sides (canonical storage is one-sided).
+                for (my_cid, partner_cid, a, b) in [
+                    (cid1, cid2, p1, p2),
+                    (cid2, cid1, p1p, p2p),
+                ] {
+                    let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+                    let clen = *contig_lengths.get(&my_cid).unwrap_or(&0);
+                    if clen == 0 { continue; }
+                    let lo = (lo as u32).saturating_sub(1); // 1-based → 0-based
+                    let hi = ((hi as u32).min(clen)).saturating_sub(1);
+                    let entry = per_contig.entry(my_cid).or_default();
+                    for pos in lo..=hi {
+                        let e = entry.entry(pos).or_insert((0u32, 0i32, 0i64));
+                        e.0 += 1;
+                        if pident_x100 > e.1 {
+                            e.1 = pident_x100;
+                            e.2 = partner_cid;
+                        }
+                    }
+                }
+            }
+        }
+
+        if per_contig.is_empty() {
+            return Ok(());
+        }
+
+        let mut appender = conn.appender("Contig_blob")
+            .context("Failed to open Contig_blob appender")?;
+        let mut chunk_appender = conn.appender("Contig_blob_chunk")
+            .context("Failed to open Contig_blob_chunk appender")?;
+
+        let count_flags = MetadataFlags::default();
+        let ident_flags = MetadataFlags { has_partner: true, ..MetadataFlags::default() };
+
+        for (contig_id, positions_map) in per_contig {
+            let clen = *contig_lengths.get(&contig_id).unwrap_or(&0);
+            if clen == 0 || positions_map.is_empty() { continue; }
+
+            let mut pos_vec: Vec<u32> = Vec::with_capacity(positions_map.len());
+            let mut count_vec: Vec<i32> = Vec::with_capacity(positions_map.len());
+            let mut ident_vec: Vec<i32> = Vec::with_capacity(positions_map.len());
+            let mut event_meta: Vec<EventMeta> = Vec::with_capacity(positions_map.len());
+            for (pos, (count, ident, partner)) in &positions_map {
+                pos_vec.push(*pos);
+                count_vec.push(*count as i32);
+                ident_vec.push(*ident);
+                event_meta.push(EventMeta { partner: Some(*partner as i32), ..Default::default() });
+            }
+
+            // Count (integer counts, no metadata).
+            debug_assert_eq!(crate::types::get_encoding("hit_count_within_mag"), crate::types::Encoding::Sparse);
+            let enc_count = encode_sparse_blob(&pos_vec, &count_vec, None, count_flags,
+                crate::types::get_value_scale("hit_count_within_mag"), clen);
+            appender.append_row(params![contig_id, hit_count_fid, enc_count.zoom])?;
+            for (i, chunk) in enc_count.chunks.iter().enumerate() {
+                chunk_appender.append_row(params![contig_id, hit_count_fid, i as i16, chunk.as_slice()])?;
+            }
+
+            // Identity (×100-scaled; partner contig_id stored as metadata).
+            debug_assert_eq!(crate::types::get_encoding("hit_identity_within_mag"), crate::types::Encoding::Sparse);
+            let enc_ident = encode_sparse_blob(&pos_vec, &ident_vec, Some(&event_meta), ident_flags,
+                crate::types::get_value_scale("hit_identity_within_mag"), clen);
+            appender.append_row(params![contig_id, hit_ident_fid, enc_ident.zoom])?;
+            for (i, chunk) in enc_ident.chunks.iter().enumerate() {
+                chunk_appender.append_row(params![contig_id, hit_ident_fid, i as i16, chunk.as_slice()])?;
+            }
+        }
+
+        appender.flush().context("Failed to flush Contig_blob appender")?;
+        chunk_appender.flush().context("Failed to flush Contig_blob_chunk appender")?;
+        Ok(())
+    }
+
+    /// Drop per-(MAG, Sample) data for MAGs that fail either the aligned-fraction
+    /// or mean-coverage threshold. Aggregates are length-weighted over member contigs.
+    /// Must be called AFTER all samples are processed and BEFORE index creation.
+    ///
+    /// Values are stored scaled in the DB: Aligned_fraction_percentage is ×10
+    /// (so `min_aligned_fraction` in percent is compared against value/10), and
+    /// Coverage_mean is ×10 (so `min_coverage_depth` is compared against value/10).
+    pub fn enforce_mag_thresholds(&self, min_aligned_fraction: f64, min_coverage_depth: f64) -> Result<usize> {
+        if !self.is_mag_mode {
+            return Ok(0);
+        }
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
+
+        // Identify (MAG_id, Sample_id) pairs that fail the thresholds.
+        let mut failing: Vec<(i64, i64, f64, f64)> = Vec::new();
+        {
+            let mut stmt = conn.prepare(
+                "SELECT mca.MAG_id, cov.Sample_id,
+                        SUM(cov.Aligned_fraction_percentage * c.Contig_length * 1.0) / NULLIF(SUM(c.Contig_length * 1.0), 0) / 10.0 AS af_mag,
+                        SUM(cov.Coverage_mean * c.Contig_length * 1.0)                / NULLIF(SUM(c.Contig_length * 1.0), 0) / 10.0 AS cov_mag
+                 FROM Coverage cov
+                 JOIN Contig c ON cov.Contig_id = c.Contig_id
+                 JOIN MAG_contigs_association mca ON mca.Contig_id = c.Contig_id
+                 GROUP BY mca.MAG_id, cov.Sample_id"
+            )?;
+            let rows = stmt.query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, Option<f64>>(2)?.unwrap_or(0.0),
+                    row.get::<_, Option<f64>>(3)?.unwrap_or(0.0),
+                ))
+            })?;
+            for r in rows {
+                let (mag_id, sample_id, af, cov) = r?;
+                let af_fail = min_aligned_fraction > 0.0 && af < min_aligned_fraction;
+                let cov_fail = min_coverage_depth > 0.0 && cov < min_coverage_depth;
+                if af_fail || cov_fail {
+                    failing.push((mag_id, sample_id, af, cov));
+                }
+            }
+        }
+
+        if failing.is_empty() {
+            return Ok(0);
+        }
+
+        let per_sample_tables = [
+            "Coverage", "Misassembly", "Microdiversity",
+            "Side_misassembly", "Topology", "Phage_mechanisms",
+        ];
+        // Phage_termini has no Sample_id column directly; it's keyed by Packaging_id.
+        // Feature_blob / Feature_blob_chunk are per-(Contig, Sample).
+
+        let tx = conn.unchecked_transaction()?;
+        for (mag_id, sample_id, _af, _cov) in &failing {
+            // Fetch member contig ids once.
+            let contig_ids: Vec<i64> = {
+                let mut stmt = tx.prepare(
+                    "SELECT Contig_id FROM MAG_contigs_association WHERE MAG_id = ?"
+                )?;
+                let rows = stmt.query_map(params![mag_id], |r| r.get::<_, i64>(0))?;
+                rows.collect::<std::result::Result<Vec<_>, _>>()?
+            };
+
+            for cid in &contig_ids {
+                // Phage_termini rows are linked via Packaging_id from Phage_mechanisms.
+                tx.execute(
+                    "DELETE FROM Phage_termini WHERE Packaging_id IN (
+                        SELECT Packaging_id FROM Phage_mechanisms WHERE Contig_id = ? AND Sample_id = ?
+                    )",
+                    params![cid, sample_id],
+                ).ok();
+                for t in &per_sample_tables {
+                    let sql = format!(
+                        "DELETE FROM {} WHERE Contig_id = ? AND Sample_id = ?",
+                        t
+                    );
+                    tx.execute(&sql, params![cid, sample_id]).ok();
+                }
+                tx.execute(
+                    "DELETE FROM Feature_blob_chunk WHERE Contig_id = ? AND Sample_id = ?",
+                    params![cid, sample_id],
+                ).ok();
+                tx.execute(
+                    "DELETE FROM Feature_blob WHERE Contig_id = ? AND Sample_id = ?",
+                    params![cid, sample_id],
+                ).ok();
+            }
+        }
+        tx.commit().context("Failed to commit MAG threshold deletions")?;
+
+        Ok(failing.len())
+    }
+
     /// Finalize the database after all samples are processed.
     /// Write initial metadata rows into the Database_metadata table.
     pub fn write_metadata(
@@ -955,6 +1652,7 @@ impl DbWriter {
         min_coverage_depth: f64,
         curve_ratio: f64,
         bar_ratio: f64,
+        view_mode: &str,
     ) -> Result<()> {
         let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
         let now = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
@@ -983,6 +1681,7 @@ impl DbWriter {
             ("Min_coverage_depth", min_coverage_depth.to_string()),
             ("Variation_percentage", curve_ratio.to_string()),
             ("Coverage_percentage", bar_ratio.to_string()),
+            ("View_mode", view_mode.to_string()),
         ];
 
         for (key, value) in &rows {
@@ -1028,17 +1727,24 @@ impl DbWriter {
     }
 
     pub fn finalize(self) -> Result<()> {
+        let has_bam = self.has_bam;
+        let is_mag_mode = self.is_mag_mode;
         let conn = self.conn.into_inner().unwrap();
 
         // Create derived views (in extend mode, views were dropped in open())
-        create_views(&conn, self.has_bam)?;
+        create_views(&conn, has_bam, is_mag_mode)?;
 
         // Delete Variable entries for features without data
         cleanup_unused_variables(&conn)?;
 
         // Drop empty module tables and their views (prevents empty UI sections)
-        if self.has_bam {
+        if has_bam {
             drop_empty_tables(&conn)?;
+        }
+
+        // Populate Number_of_samples on Contig (contig-mode) or MAG (MAG-mode)
+        if has_bam {
+            update_sample_counts(&conn, is_mag_mode)?;
         }
 
         // Force checkpoint to compress data and write to disk
@@ -1057,6 +1763,34 @@ impl DbWriter {
     pub fn contig_names(&self) -> Vec<String> {
         self.contig_name_to_id.keys().cloned().collect()
     }
+}
+
+/// Populate Number_of_samples: count distinct samples with any coverage entry.
+/// In MAG mode: stored on MAG (counts across all member contigs).
+/// In contig mode: stored on Contig (counts per contig directly).
+fn update_sample_counts(conn: &Connection, is_mag_mode: bool) -> Result<()> {
+    if is_mag_mode {
+        conn.execute(
+            "UPDATE MAG SET Number_of_samples = (
+                SELECT COUNT(DISTINCT c.Sample_id)
+                FROM Coverage c
+                JOIN MAG_contigs_association mca ON mca.Contig_id = c.Contig_id
+                WHERE mca.MAG_id = MAG.MAG_id
+            )",
+            [],
+        )
+        .context("Failed to update MAG.Number_of_samples")?;
+    } else {
+        conn.execute(
+            "UPDATE Contig SET Number_of_samples = (
+                SELECT COUNT(DISTINCT Sample_id) FROM Coverage
+                WHERE Coverage.Contig_id = Contig.Contig_id
+            )",
+            [],
+        )
+        .context("Failed to update Contig.Number_of_samples")?;
+    }
+    Ok(())
 }
 
 /// Calculate the minimal distance between any kept terminus center position
@@ -1151,7 +1885,7 @@ fn compact_pvalue(p: f64) -> String {
 }
 
 /// Create core database tables (no indexes - DuckDB uses zone maps).
-fn create_core_tables(conn: &Connection, has_bam: bool) -> Result<()> {
+fn create_core_tables(conn: &Connection, has_bam: bool, is_mag_mode: bool) -> Result<()> {
     conn.execute(
         "CREATE TABLE Contig (
             Contig_id INTEGER PRIMARY KEY,
@@ -1166,6 +1900,99 @@ fn create_core_tables(conn: &Connection, has_bam: bool) -> Result<()> {
         [],
     )
     .context("Failed to create Contig table")?;
+    // Number_of_samples is only relevant in contig-mode (in MAG-mode it lives on the MAG table)
+    if !is_mag_mode {
+        conn.execute("ALTER TABLE Contig ADD COLUMN Number_of_samples INTEGER", [])
+            .context("Failed to add Number_of_samples to Contig table")?;
+    }
+
+    if is_mag_mode {
+        // MAG bin table. Metric columns reuse the same integer encoding as the
+        // Contig table so Python decoders can share the scale constants
+        // (Duplication_percentage ×10; GC_mean integer 0-100;
+        // GC_sd / GC_skew_amplitude ×100; Positive_GC_skew_windows_percentage ×10).
+        conn.execute(
+            "CREATE TABLE MAG (
+                MAG_id INTEGER PRIMARY KEY,
+                MAG_name TEXT UNIQUE NOT NULL,
+                MAG_length INTEGER NOT NULL,
+                Number_of_contigs INTEGER NOT NULL,
+                N50 INTEGER NOT NULL,
+                Duplication_percentage INTEGER,
+                GC_mean INTEGER,
+                GC_sd INTEGER,
+                GC_skew_amplitude INTEGER,
+                Positive_GC_skew_windows_percentage INTEGER,
+                Number_of_samples INTEGER
+            )",
+            [],
+        )
+        .context("Failed to create MAG table")?;
+
+        // Associations are written longest-contig-first within each MAG. That
+        // ordering is the contract the visualization uses for the MAG track
+        // (longest → shortest) and for picking the "best hit partner".
+        // Offset_in_MAG is the cumulative bp offset of this contig within the
+        // MAG under the longest-first ordering — so per-contig coordinates can
+        // be mapped to MAG-space with a single read (no window function needed).
+        conn.execute(
+            "CREATE TABLE MAG_contigs_association (
+                MAG_id INTEGER NOT NULL REFERENCES MAG(MAG_id),
+                Contig_id INTEGER NOT NULL REFERENCES Contig(Contig_id),
+                Offset_in_MAG INTEGER NOT NULL,
+                PRIMARY KEY (MAG_id, Contig_id)
+            )",
+            [],
+        )
+        .context("Failed to create MAG_contigs_association table")?;
+
+        // MAG-scale contig-feature blobs (GC content, GC skew, repeats) —
+        // mirrors Contig_blob / Contig_blob_chunk but keyed by MAG_id.
+        conn.execute(
+            "CREATE TABLE MAG_contig_blob (
+                MAG_id      INTEGER NOT NULL REFERENCES MAG(MAG_id),
+                Feature_id  SMALLINT NOT NULL,
+                Zoom_data   BLOB NOT NULL,
+                PRIMARY KEY (MAG_id, Feature_id)
+            )",
+            [],
+        )
+        .context("Failed to create MAG_contig_blob table")?;
+
+        // Chunk_idx is INTEGER (not SMALLINT): a multi-Gbp MAG at 65536 bp
+        // chunks would overflow SMALLINT.
+        conn.execute(
+            "CREATE TABLE MAG_contig_blob_chunk (
+                MAG_id      INTEGER NOT NULL,
+                Feature_id  SMALLINT NOT NULL,
+                Chunk_idx   INTEGER NOT NULL,
+                Data        BLOB NOT NULL,
+                PRIMARY KEY (MAG_id, Feature_id, Chunk_idx)
+            )",
+            [],
+        )
+        .context("Failed to create MAG_contig_blob_chunk table")?;
+
+        // Inter-contig BLAST hits. Stored canonically with Contig_id_1 <= Contig_id_2
+        // to halve storage and guarantee idempotent re-insertion. Consumers that
+        // need both directions should query `Contig_blast_hits_symmetric`.
+        // Pident is ×100 (same scale as Contig_directRepeats / Contig_invertedRepeats).
+        conn.execute(
+            "CREATE TABLE Contig_blast_hits (
+                Contig_id_1 INTEGER NOT NULL REFERENCES Contig(Contig_id),
+                Contig_id_2 INTEGER NOT NULL REFERENCES Contig(Contig_id),
+                Position1 INTEGER NOT NULL,
+                Position2 INTEGER NOT NULL,
+                Position1prime INTEGER NOT NULL,
+                Position2prime INTEGER NOT NULL,
+                Pident INTEGER NOT NULL,
+                CHECK (Contig_id_1 <= Contig_id_2),
+                PRIMARY KEY (Contig_id_1, Contig_id_2, Position1, Position2, Position1prime, Position2prime)
+            )",
+            [],
+        )
+        .context("Failed to create Contig_blast_hits table")?;
+    }
 
     if has_bam {
     conn.execute(
@@ -1275,6 +2102,57 @@ fn create_core_tables(conn: &Connection, has_bam: bool) -> Result<()> {
     )
     .context("Failed to create Feature_blob_chunk table")?;
 
+    // MAG-scale sample-feature blobs — mirror Feature_blob / Feature_blob_chunk
+    // but keyed by MAG_id. Only created in MAG mode.
+    if is_mag_mode {
+        conn.execute(
+            "CREATE TABLE MAG_blob (
+                MAG_id     INTEGER NOT NULL REFERENCES MAG(MAG_id),
+                Sample_id  INTEGER NOT NULL REFERENCES Sample(Sample_id),
+                Feature_id SMALLINT NOT NULL,
+                Zoom_data  BLOB NOT NULL,
+                PRIMARY KEY (MAG_id, Sample_id, Feature_id)
+            )",
+            [],
+        )
+        .context("Failed to create MAG_blob table")?;
+
+        conn.execute(
+            "CREATE TABLE MAG_blob_chunk (
+                MAG_id     INTEGER NOT NULL,
+                Sample_id  INTEGER NOT NULL,
+                Feature_id SMALLINT NOT NULL,
+                Chunk_idx  INTEGER NOT NULL,
+                Data       BLOB NOT NULL,
+                PRIMARY KEY (MAG_id, Sample_id, Feature_id, Chunk_idx)
+            )",
+            [],
+        )
+        .context("Failed to create MAG_blob_chunk table")?;
+
+        // MAG-level coverage metrics recomputed from raw per-position coverage
+        // during build_mag_blobs_for_sample. Replaces the mathematically-wrong
+        // length-weighted / BOOL_OR aggregation previously done in the view.
+        conn.execute(
+            "CREATE TABLE MAG_coverage (
+                MAG_id                               INTEGER NOT NULL REFERENCES MAG(MAG_id),
+                Sample_id                            INTEGER NOT NULL REFERENCES Sample(Sample_id),
+                MAG_length                           INTEGER NOT NULL,
+                Aligned_fraction_percentage          INTEGER NOT NULL,
+                Above_expected_aligned_fraction      BOOLEAN NOT NULL,
+                Read_count                           INTEGER NOT NULL,
+                Coverage_mean                        INTEGER NOT NULL,
+                Coverage_median                      INTEGER NOT NULL,
+                Coverage_trimmed_mean                INTEGER NOT NULL,
+                Coverage_coefficient_of_variation    INTEGER NOT NULL,
+                Coverage_relative_coverage_roughness INTEGER NOT NULL,
+                PRIMARY KEY (MAG_id, Sample_id)
+            )",
+            [],
+        )
+        .context("Failed to create MAG_coverage table")?;
+    }
+
     } // end if has_bam (Sample, Coverage, Phage_mechanisms, Phage_termini, Feature_blob, Feature_blob_chunk)
 
     // Contig_blob table - zoom-level summaries for contig-level features (GC content, GC skew, repeats).
@@ -1341,8 +2219,8 @@ fn create_core_tables(conn: &Connection, has_bam: bool) -> Result<()> {
         // GC content/skew (×1000 for 3 decimal places)
         ("gc_content", "Value", 1000),
         ("gc_skew", "Value", 1000),
-        // Contig-level GC stats (×100)
-        ("Contig", "GC_mean", 100),
+        // Contig-level GC stats (GC_mean is integer 0-100; sd/amplitude ×100)
+        ("Contig", "GC_mean", 1),
         ("Contig", "GC_sd", 100),
         ("Contig", "GC_skew_amplitude", 100),
         // Repeat identity (×100)
@@ -1566,6 +2444,35 @@ fn create_core_tables(conn: &Connection, has_bam: bool) -> Result<()> {
         [],
     )
     .context("Failed to create Contig_annotation view")?;
+
+    // View that exposes every contig annotation in MAG coordinates (only
+    // usable rows exist when MAG_contigs_association has been populated).
+    // Used by the MAG-view gene map, which plots a single MAG-wide SeqRecord
+    // through DNAFeaturesViewer.
+    let has_mag_assoc: bool = conn.query_row(
+        "SELECT COUNT(*) > 0 FROM information_schema.tables
+         WHERE table_name = 'MAG_contigs_association'",
+        [],
+        |r| r.get(0),
+    ).unwrap_or(false);
+    if has_mag_assoc {
+        conn.execute(
+            "CREATE VIEW MAG_annotation_core AS
+             SELECT mca.MAG_id,
+                    ca.Annotation_id,
+                    ca.Contig_id,
+                    ca.\"Start\" + mca.Offset_in_MAG AS \"Start\",
+                    ca.\"End\"   + mca.Offset_in_MAG AS \"End\",
+                    ca.Strand,
+                    ca.\"Type\",
+                    ca.Main_isoform,
+                    ca.Parent_annotation_id
+             FROM Contig_annotation_core ca
+             JOIN MAG_contigs_association mca ON mca.Contig_id = ca.Contig_id",
+            [],
+        )
+        .context("Failed to create MAG_annotation_core view")?;
+    }
 
     conn.execute(
         "CREATE TABLE Variable (
@@ -2207,6 +3114,8 @@ fn create_variable_tables(conn: &Connection) -> Result<()> {
             "direct_repeat_identity" => "Contig_blob".to_string(),
             "inverted_repeat_count" => "Contig_blob".to_string(),
             "inverted_repeat_identity" => "Contig_blob".to_string(),
+            "hit_count_within_mag" => "Contig_blob".to_string(),
+            "hit_identity_within_mag" => "Contig_blob".to_string(),
             "gc_content" => "Contig_blob".to_string(),
             "gc_skew" => "Contig_blob".to_string(),
             _ => "Feature_blob".to_string(),
@@ -2240,112 +3149,10 @@ fn create_variable_tables(conn: &Connection) -> Result<()> {
 }
 
 /// Create materialized tables and views after all data is inserted.
-fn create_views(conn: &Connection, has_bam: bool) -> Result<()> {
+fn create_views(conn: &Connection, has_bam: bool, is_mag_mode: bool) -> Result<()> {
     // All per-sample features (including primary_reads) are now stored in Feature_blob.
-    // Previously, some features were stored in separate Feature_* tables.
-
-    // Materialized repeat tables (sweep-line algorithm, computed once after all repeat data is inserted).
-    // These produce (Contig_id, First_position, Last_position, Value) like other Contig_* tables,
-    // allowing the standard binning logic in get_feature_data() to work with repeats.
-
-    // Optimized repeat count tables using event-based running sum (O(n log n) instead of O(segments × repeats))
-    conn.execute(
-        "CREATE TABLE Contig_direct_repeat_count AS
-        WITH events AS (
-            SELECT Contig_id, LEAST(Position1, Position2) AS pos, 1 AS delta
-            FROM Contig_directRepeats
-            UNION ALL
-            SELECT Contig_id, GREATEST(Position1, Position2) + 1 AS pos, -1 AS delta
-            FROM Contig_directRepeats
-        ),
-        grouped AS (
-            SELECT Contig_id, pos, SUM(delta) AS net FROM events GROUP BY Contig_id, pos
-        ),
-        running AS (
-            SELECT Contig_id, pos,
-                   SUM(net) OVER (PARTITION BY Contig_id ORDER BY pos) AS count,
-                   LEAD(pos) OVER (PARTITION BY Contig_id ORDER BY pos) AS next_pos
-            FROM grouped
-        )
-        SELECT Contig_id, pos AS First_position, next_pos - 1 AS Last_position, count AS Value
-        FROM running WHERE next_pos IS NOT NULL AND count > 0",
-        [],
-    )
-    .context("Failed to create Contig_direct_repeat_count table")?;
-
-    conn.execute(
-        "CREATE TABLE Contig_inverted_repeat_count AS
-        WITH events AS (
-            SELECT Contig_id, LEAST(Position1, Position2) AS pos, 1 AS delta
-            FROM Contig_invertedRepeats
-            UNION ALL
-            SELECT Contig_id, GREATEST(Position1, Position2) + 1 AS pos, -1 AS delta
-            FROM Contig_invertedRepeats
-        ),
-        grouped AS (
-            SELECT Contig_id, pos, SUM(delta) AS net FROM events GROUP BY Contig_id, pos
-        ),
-        running AS (
-            SELECT Contig_id, pos,
-                   SUM(net) OVER (PARTITION BY Contig_id ORDER BY pos) AS count,
-                   LEAD(pos) OVER (PARTITION BY Contig_id ORDER BY pos) AS next_pos
-            FROM grouped
-        )
-        SELECT Contig_id, pos AS First_position, next_pos - 1 AS Last_position, count AS Value
-        FROM running WHERE next_pos IS NOT NULL AND count > 0",
-        [],
-    )
-    .context("Failed to create Contig_inverted_repeat_count table")?;
-
-    // Optimized repeat identity tables using explicit JOIN instead of correlated subquery
-    conn.execute(
-        "CREATE TABLE Contig_direct_repeat_identity AS
-        WITH boundaries AS (
-            SELECT Contig_id, LEAST(Position1, Position2) AS pos FROM Contig_directRepeats
-            UNION
-            SELECT Contig_id, GREATEST(Position1, Position2) + 1 AS pos FROM Contig_directRepeats
-        ),
-        segments AS (
-            SELECT Contig_id, pos AS seg_start,
-                   LEAD(pos) OVER (PARTITION BY Contig_id ORDER BY pos) - 1 AS seg_end
-            FROM boundaries
-        )
-        SELECT s.Contig_id, s.seg_start AS First_position, s.seg_end AS Last_position,
-               MAX(r.Pident) / 100.0 AS Value
-        FROM segments s
-        JOIN Contig_directRepeats r ON r.Contig_id = s.Contig_id
-          AND LEAST(r.Position1, r.Position2) <= s.seg_end
-          AND GREATEST(r.Position1, r.Position2) >= s.seg_start
-        WHERE s.seg_end IS NOT NULL
-        GROUP BY s.Contig_id, s.seg_start, s.seg_end",
-        [],
-    )
-    .context("Failed to create Contig_direct_repeat_identity table")?;
-
-    conn.execute(
-        "CREATE TABLE Contig_inverted_repeat_identity AS
-        WITH boundaries AS (
-            SELECT Contig_id, LEAST(Position1, Position2) AS pos FROM Contig_invertedRepeats
-            UNION
-            SELECT Contig_id, GREATEST(Position1, Position2) + 1 AS pos FROM Contig_invertedRepeats
-        ),
-        segments AS (
-            SELECT Contig_id, pos AS seg_start,
-                   LEAD(pos) OVER (PARTITION BY Contig_id ORDER BY pos) - 1 AS seg_end
-            FROM boundaries
-        )
-        SELECT s.Contig_id, s.seg_start AS First_position, s.seg_end AS Last_position,
-               MAX(r.Pident) / 100.0 AS Value
-        FROM segments s
-        JOIN Contig_invertedRepeats r ON r.Contig_id = s.Contig_id
-          AND LEAST(r.Position1, r.Position2) <= s.seg_end
-          AND GREATEST(r.Position1, r.Position2) >= s.seg_start
-        WHERE s.seg_end IS NOT NULL
-        GROUP BY s.Contig_id, s.seg_start, s.seg_end",
-        [],
-    )
-    .context("Failed to create Contig_inverted_repeat_identity table")?;
-
+    // Repeat features are converted to Contig_blob via DbWriter::convert_repeat_blobs,
+    // called in pre-sample setup so MAG-scale aggregation can read them.
     if has_bam {
     // Explicit_coverage VIEW with RPKM and TPM
     conn.execute(
@@ -2557,19 +3364,116 @@ fn create_views(conn: &Connection, has_bam: bool) -> Result<()> {
     .context("Failed to create Explicit_phage_termini VIEW")?;
     } // end if has_bam (Explicit_* views)
 
-    // Convert materialized repeat tables to Contig_blob
-    DbWriter::write_repeat_features_to_blob_static(conn)?;
+    if has_bam && is_mag_mode {
+        // Per-MAG aggregates. Counts: SUM. Per-100kbp: recomputed from
+        // SUM(count) × 100000 / SUM(Contig_length). Coverage metrics come
+        // from the MAG_coverage table, which is populated during
+        // build_mag_blobs_for_sample from raw per-position coverage.
 
-    // Drop intermediate materialized tables after conversion to Contig_blob
-    // Keep base tables (Contig_directRepeats, Contig_invertedRepeats) for reference
-    for table in &[
-        "Contig_direct_repeat_count", "Contig_inverted_repeat_count",
-        "Contig_direct_repeat_identity", "Contig_inverted_repeat_identity",
-    ] {
-        conn.execute(&format!("DROP TABLE IF EXISTS {}", table), [])
-            .context(format!("Failed to drop intermediate table {}", table))?;
+        conn.execute(
+            "CREATE VIEW Explicit_coverage_per_MAG AS
+             WITH rpkm_base_mag AS (
+                 SELECT
+                     mca.MAG_id,
+                     p.Sample_id,
+                     SUM(CASE WHEN c.Contig_length > 0 AND s.Number_of_mapped_reads > 0
+                              THEN (CAST(p.Read_count AS DOUBLE) * 1e9) / (CAST(c.Contig_length AS DOUBLE) * CAST(s.Number_of_mapped_reads AS DOUBLE))
+                              ELSE 0 END) AS RPKM
+                 FROM Coverage p
+                 JOIN Contig c ON p.Contig_id = c.Contig_id
+                 JOIN Sample s ON p.Sample_id = s.Sample_id
+                 JOIN MAG_contigs_association mca ON mca.Contig_id = c.Contig_id
+                 GROUP BY mca.MAG_id, p.Sample_id
+             ),
+             rpkm_sum_mag AS (
+                 SELECT Sample_id, SUM(RPKM) AS total_rpkm FROM rpkm_base_mag GROUP BY Sample_id
+             )
+             SELECT
+                 mg.MAG_name,
+                 s.Sample_name,
+                 mc.Aligned_fraction_percentage / 10.0                                                   AS Aligned_fraction_percentage,
+                 mc.Above_expected_aligned_fraction                                                      AS Above_expected_aligned_fraction,
+                 mc.Read_count                                                                           AS Read_count,
+                 mc.Coverage_mean / 10.0                                                                 AS Coverage_mean,
+                 mc.Coverage_median / 10.0                                                               AS Coverage_median,
+                 mc.Coverage_trimmed_mean / 10.0                                                         AS Coverage_trimmed_mean,
+                 rbm.RPKM                                                                                AS RPKM,
+                 CASE WHEN rsm.total_rpkm > 0 THEN (rbm.RPKM / rsm.total_rpkm) * 1e6 ELSE 0 END          AS TPM,
+                 ROUND(mc.Coverage_coefficient_of_variation / 1000000.0, 2)                              AS Coverage_coefficient_of_variation,
+                 ROUND(mc.Coverage_relative_coverage_roughness / 1000000.0, 4)                           AS Relative_coverage_roughness
+             FROM MAG_coverage mc
+             JOIN MAG mg    ON mg.MAG_id   = mc.MAG_id
+             JOIN Sample s  ON s.Sample_id = mc.Sample_id
+             JOIN rpkm_base_mag rbm ON rbm.MAG_id = mc.MAG_id AND rbm.Sample_id = mc.Sample_id
+             JOIN rpkm_sum_mag  rsm ON rsm.Sample_id = mc.Sample_id",
+            [],
+        )
+        .context("Failed to create Explicit_coverage_per_MAG VIEW")?;
+
+        conn.execute(
+            "CREATE VIEW Explicit_misassembly_per_MAG AS
+             SELECT
+                 mg.MAG_name,
+                 s.Sample_name,
+                 SUM(m.Mismatches_count) * 100000.0 / NULLIF(SUM(c.Contig_length), 0) AS Mismatches_per_100kbp,      -- recomputed
+                 SUM(m.Deletions_count)  * 100000.0 / NULLIF(SUM(c.Contig_length), 0) AS Deletions_per_100kbp,
+                 SUM(m.Insertions_count) * 100000.0 / NULLIF(SUM(c.Contig_length), 0) AS Insertions_per_100kbp,
+                 SUM(m.Clippings_count)  * 100000.0 / NULLIF(SUM(c.Contig_length), 0) AS Clippings_per_100kbp,
+                 SUM(m.Collapse_bp)  AS Collapse_bp,                                                                  -- SUM
+                 SUM(m.Collapse_bp)  * 100000.0 / NULLIF(SUM(c.Contig_length), 0) AS Collapse_per_100kbp,
+                 SUM(m.Expansion_bp) AS Expansion_bp,                                                                 -- SUM
+                 SUM(m.Expansion_bp) * 100000.0 / NULLIF(SUM(c.Contig_length), 0) AS Expansion_per_100kbp
+             FROM Misassembly m
+             JOIN Contig c ON m.Contig_id = c.Contig_id
+             JOIN Sample s ON m.Sample_id = s.Sample_id
+             JOIN MAG_contigs_association mca ON mca.Contig_id = c.Contig_id
+             JOIN MAG mg ON mg.MAG_id = mca.MAG_id
+             GROUP BY mg.MAG_name, s.Sample_name",
+            [],
+        )
+        .context("Failed to create Explicit_misassembly_per_MAG VIEW")?;
+
+        conn.execute(
+            "CREATE VIEW Explicit_microdiversity_per_MAG AS
+             SELECT
+                 mg.MAG_name,
+                 s.Sample_name,
+                 SUM(md.Mismatches_count) * 100000.0 / NULLIF(SUM(c.Contig_length), 0) AS Mismatches_per_100kbp,
+                 SUM(md.Deletions_count)  * 100000.0 / NULLIF(SUM(c.Contig_length), 0) AS Deletions_per_100kbp,
+                 SUM(md.Insertions_count) * 100000.0 / NULLIF(SUM(c.Contig_length), 0) AS Insertions_per_100kbp,
+                 SUM(md.Clippings_count)  * 100000.0 / NULLIF(SUM(c.Contig_length), 0) AS Clippings_per_100kbp,
+                 SUM(md.Microdiverse_bp_on_reads)     AS Microdiverse_bp_on_reads,
+                 SUM(md.Microdiverse_bp_on_reads)     * 100000.0 / NULLIF(SUM(c.Contig_length), 0) AS Microdiverse_bp_per_100kbp_on_reads,
+                 SUM(md.Microdiverse_bp_on_reference) AS Microdiverse_bp_on_reference,
+                 SUM(md.Microdiverse_bp_on_reference) * 100000.0 / NULLIF(SUM(c.Contig_length), 0) AS Microdiverse_bp_per_100kbp_on_reference
+             FROM Microdiversity md
+             JOIN Contig c ON md.Contig_id = c.Contig_id
+             JOIN Sample s ON md.Sample_id = s.Sample_id
+             JOIN MAG_contigs_association mca ON mca.Contig_id = c.Contig_id
+             JOIN MAG mg ON mg.MAG_id = mca.MAG_id
+             GROUP BY mg.MAG_name, s.Sample_name",
+            [],
+        )
+        .context("Failed to create Explicit_microdiversity_per_MAG VIEW")?;
+
+    } // end if has_bam && is_mag_mode
+
+    if is_mag_mode {
+        // Bidirectional view over canonically-stored inter-contig BLAST hits.
+        conn.execute(
+            "CREATE VIEW Contig_blast_hits_symmetric AS
+                SELECT Contig_id_1 AS Contig_id, Position1, Position2,
+                       Contig_id_2 AS Contig_id_other, Position1prime, Position2prime, Pident
+                FROM Contig_blast_hits
+                UNION ALL
+                SELECT Contig_id_2 AS Contig_id, Position1prime, Position2prime,
+                       Contig_id_1 AS Contig_id_other, Position1, Position2, Pident
+                FROM Contig_blast_hits
+                WHERE Contig_id_1 <> Contig_id_2",
+            [],
+        )
+        .context("Failed to create Contig_blast_hits_symmetric view")?;
     }
-    eprintln!("Dropped intermediate materialized tables (data now in Contig_blob)");
 
     Ok(())
 }

@@ -16,6 +16,86 @@ from dna_features_viewer import BiopythonTranslator
 _NULL_STRINGS = {'', 'none', 'null', 'nan'}
 
 
+def make_bokeh_mag_track(conn, mag_name, height=30, shared_xrange=None):
+    """Build a MAG overview track: horizontal grey line spanning the MAG with
+    black vertical tick marks at each contig boundary. Contigs are arranged
+    longest-first (matches MAG_contigs_association write order).
+
+    Only boundaries and segments that overlap the visible window are rendered,
+    so that large MAGs don't send unnecessary data to the browser.
+    """
+    from ..database.database_getters import get_mag_contigs
+    members = get_mag_contigs(conn, mag_name)
+    if not members:
+        return None
+    total_len = sum(length for _n, length, _o in members)
+
+    # Determine the visible window (clip rendering to this range)
+    if shared_xrange is not None:
+        vis_start = shared_xrange.start
+        vis_end = shared_xrange.end
+    else:
+        vis_start = 0
+        vis_end = total_len
+
+    # In MAG view (shared_xrange passed) the track shares x_range with the data
+    # subplots, so giving it xpan + xwheel_zoom lets the user click/drag on the
+    # track itself to slide the entire linked view. In contig view the track is
+    # informational only (different coordinate space from the data plots), so
+    # we omit the drag tools there.
+    tools = "xpan,reset" if shared_xrange is not None else ""
+    fig = figure(
+        height=int(height), sizing_mode='stretch_width',
+        x_range=shared_xrange if shared_xrange is not None else Range1d(0, total_len),
+        y_range=Range1d(-1, 1), tools=tools,
+        toolbar_location=None, outline_line_color=None,
+    )
+    if shared_xrange is not None:
+        wheel = WheelZoomTool(dimensions='width')
+        fig.add_tools(wheel)
+        fig.toolbar.active_scroll = wheel
+    fig.yaxis.visible = False
+    fig.xgrid.grid_line_color = None
+    fig.ygrid.grid_line_color = None
+
+    # Grey backbone: filled rectangle as tall as the contig border ticks
+    fig.quad(left=vis_start, right=vis_end, bottom=-0.8, top=0.8,
+             color="#DCDCDC", line_color=None)
+
+    # Collect all boundary positions
+    boundaries = []
+    running = 0
+    for _name, length, _offset in members:
+        boundaries.append(running)
+        running += length
+    boundaries.append(running)
+
+    # Black tick marks: only those inside the visible window
+    for x in boundaries:
+        if vis_start <= x <= vis_end:
+            fig.line([x, x], [-0.8, 0.8], color="black", line_width=3)
+
+    # Hover segments: only those overlapping the visible window
+    visible_segments = [
+        (name, length, offset, offset + length)
+        for name, length, offset in members
+        if offset < vis_end and offset + length > vis_start
+    ]
+    if visible_segments:
+        src = ColumnDataSource(dict(
+            name=[s[0] for s in visible_segments],
+            length=[s[1] for s in visible_segments],
+            x0=[s[2] for s in visible_segments],
+            x1=[s[3] for s in visible_segments],
+        ))
+        quads = fig.quad(left='x0', right='x1', bottom=-0.8, top=0.8,
+                         source=src, fill_alpha=0.0, line_color=None)
+        fig.add_tools(HoverTool(renderers=[quads], tooltips=[
+            ("Contig", "@name"), ("Length", "@length{0,0}"), ("Start", "@x0{0,0}"), ("End", "@x1{0,0}"),
+        ]))
+    return fig
+
+
 def _is_nullish(val):
     if val is None:
         return True
@@ -155,7 +235,7 @@ def get_contig_info(cur, contig_name):
         raise ValueError(f"Contig not found: {contig_name}")
     return row
 
-def make_bokeh_genemap(conn, contig_id, locus_name, locus_size, subplot_size, shared_xrange, xstart=None, xend=None, feature_types=None, plot_isoforms=True, feature_label_key=None, custom_colors=None):
+def make_bokeh_genemap(conn, contig_id, locus_name, locus_size, subplot_size, shared_xrange, xstart=None, xend=None, feature_types=None, plot_isoforms=True, feature_label_key=None, custom_colors=None, figure_width=30):
     cur = conn.cursor()
 
     # Build position filter clause for annotations
@@ -363,7 +443,7 @@ def make_bokeh_genemap(conn, contig_id, locus_name, locus_size, subplot_size, sh
     sequence_records = SeqRecord(Seq('N' * locus_size), id=locus_name, features=sequence_annotations)
     graphic_record = CustomTranslator().translate_record(sequence_records)
     # figure_width and figure_height for the arrow size
-    annotation_fig = graphic_record.plot_with_bokeh(figure_width=30, figure_height=40)
+    annotation_fig = graphic_record.plot_with_bokeh(figure_width=figure_width, figure_height=40)
     annotation_fig.height = subplot_size
 
     # Remove tap tool added by DNAFeaturesViewer
@@ -432,6 +512,10 @@ def make_bokeh_subplot(feature_dict, height, x_range, sample_title=None, show_to
             # Add repeat positions if available
             if "repeat_positions" in data_feature:
                 data_dict["repeat_positions"] = data_feature["repeat_positions"]
+
+            # Add partner contig name if available (hit_identity_within_mag)
+            if "partner_contig" in data_feature:
+                data_dict["partner_contig"] = data_feature["partner_contig"]
 
             # Add statistics if available
             has_stats = data_feature.get("has_stats", False)
@@ -503,6 +587,7 @@ def make_bokeh_subplot(feature_dict, height, x_range, sample_title=None, show_to
         has_variable_width = any("width" in d and any(w != 1 for w in d["width"]) for d in feature_dict)
         is_duplication = any(d.get("is_duplication", False) for d in feature_dict)
         has_repeat_positions = any("repeat_positions" in d for d in feature_dict)
+        has_partner_contig = any("partner_contig" in d for d in feature_dict)
 
         if is_duplication:
             tooltips = [
@@ -512,6 +597,12 @@ def make_bokeh_subplot(feature_dict, height, x_range, sample_title=None, show_to
                 ("Linked end", "@linked_end{0,0}"),
                 ("Length", "@length{0,0}"),
                 ("Identity", "@y{0.01}%")
+            ]
+        elif has_partner_contig:
+            tooltips = [
+                ("Position", "@x{0,0}"),
+                ("Identity (%)", "@y{0.01}"),
+                ("Closest contig:", "@partner_contig"),
             ]
         elif has_repeat_positions:
             tooltips = [
@@ -911,6 +1002,24 @@ def get_variable_metadata(cur, feature):
     return cur.fetchall()
 
 
+def split_contig_vs_sample_features(metadata_cache, requested_features):
+    """Split requested subplots into contig-level vs sample-dependent.
+
+    A subplot is contig-level when every one of its Variable rows is backed
+    by Contig_blob (no per-sample data). Falls back to sample-dependent if
+    the subplot has no metadata rows.
+    """
+    contig_features = []
+    sample_features = []
+    for feature in requested_features:
+        rows = metadata_cache.get(feature)
+        if rows and all(r[6] == "Contig_blob" for r in rows):
+            contig_features.append(feature)
+        else:
+            sample_features.append(feature)
+    return contig_features, sample_features
+
+
 def get_variable_metadata_batch(cur, subplot_list):
     """Batch fetch variable metadata for multiple subplots in one query.
 
@@ -982,8 +1091,8 @@ def _get_contig_blob(cur, contig_id, feature_name):
 
     Returns raw bytes or None if not found.
     """
-    from thebigbam.database.blob_decoder import contig_blob_name_to_id
-    fid = contig_blob_name_to_id(feature_name)
+    from thebigbam.database.blob_decoder import feature_name_to_id
+    fid = feature_name_to_id(feature_name, cur)
     if fid is None:
         return None
     cur.execute(
@@ -1026,8 +1135,8 @@ def _get_contig_chunks(cur, contig_id, feature_name, start_pos, end_pos, window_
 
     Returns list of (chunk_idx, raw_bytes) sorted by chunk_idx, or None if table doesn't exist.
     """
-    from thebigbam.database.blob_decoder import contig_blob_name_to_id, CHUNK_SIZE
-    fid = contig_blob_name_to_id(feature_name)
+    from thebigbam.database.blob_decoder import feature_name_to_id, CHUNK_SIZE
+    fid = feature_name_to_id(feature_name, cur)
     if fid is None:
         return None
     # Convert genomic positions to array indices (for windowed data like GC)
@@ -1048,7 +1157,45 @@ def _get_contig_chunks(cur, contig_id, feature_name, start_pos, end_pos, window_
         return None
 
 
-def _format_chunks_for_bokeh(chunk_dict, xstart, xend):
+_REPEAT_IDENTITY_FEATURES = {"direct_repeat_identity", "inverted_repeat_identity"}
+
+
+def _resolve_partner_lane(cur, blob_dict, feature_name):
+    if "partner_contig_id" not in blob_dict:
+        return
+    partner_ids = list(blob_dict.pop("partner_contig_id"))
+    if feature_name in _REPEAT_IDENTITY_FEATURES:
+        # Events arrive as (seg_start, seg_end) pairs per repeat segment. The seg_start
+        # event carries Partner_start and seg_end carries Partner_end (see db.rs
+        # write_repeat_features_to_blob_static). Pair them into a single "start-end"
+        # label and assign it to both events so the tooltip is uniform across the plateau.
+        labels = [None] * len(partner_ids)
+        for i in range(0, len(partner_ids) - 1, 2):
+            s, e = partner_ids[i], partner_ids[i + 1]
+            if s is None or e is None or int(s) < 0 or int(e) < 0:
+                continue
+            s1, e1 = int(s) + 1, int(e) + 1
+            label = f"{s1}-{e1}" if s1 != e1 else f"{s1}"
+            labels[i] = labels[i + 1] = label
+        blob_dict["repeat_positions"] = labels
+        return
+    unique_ids = {int(i) for i in partner_ids if i is not None and int(i) >= 0}
+    if unique_ids:
+        placeholders = ",".join("?" * len(unique_ids))
+        cur.execute(
+            f"SELECT Contig_id, Contig_name FROM Contig WHERE Contig_id IN ({placeholders})",
+            list(unique_ids),
+        )
+        id_to_name = {row[0]: row[1] for row in cur.fetchall()}
+    else:
+        id_to_name = {}
+    blob_dict["partner_contig"] = [
+        id_to_name.get(int(i), "unknown") if i is not None and int(i) >= 0 else None
+        for i in partner_ids
+    ]
+
+
+def _format_chunks_for_bokeh(chunk_dict, xstart, xend, type_picked="line"):
     """Slice decoded chunk data to view window and format for Bokeh.
 
     chunk_dict has 0-indexed numpy arrays {"x": ..., "y": ..., "sparse": bool, ...metadata}.
@@ -1070,21 +1217,61 @@ def _format_chunks_for_bokeh(chunk_dict, xstart, xend):
     y = y[start:stop]
     if len(x) == 0:
         return None
-    result = {
-        "x": (x + 1).tolist(),
-        "y": y.tolist(),
-    }
-    # Slice metadata arrays with the same range
+
+    # Slice metadata arrays before zero-anchor insertion (lengths match pre-anchor x/y)
+    sliced_meta = {}
     for key in list(chunk_dict.keys()):
         if key in ("x", "y", "sparse"):
             continue
         val = chunk_dict[key]
         if hasattr(val, "__len__") and len(val) == n_orig:
             if isinstance(val, np.ndarray):
-                sliced = val[start:stop]
-                result[key] = sliced.tolist()
+                sliced_meta[key] = val[start:stop].tolist()
             elif isinstance(val, list):
-                result[key] = val[start:stop]
+                sliced_meta[key] = val[start:stop]
+
+    # For sparse features, insert zero-anchor points between distant events
+    # so Bokeh lines/areas drop to zero instead of interpolating across gaps.
+    # Metadata lanes are padded with None at anchors so per-event tooltip
+    # fields (partner_contig_id, repeat_positions, stats, sequence, codons…)
+    # stay aligned with x/y.
+    if chunk_dict.get("sparse") and type_picked != "bars" and len(x) > 0:
+        new_x = []
+        new_y = []
+        anchor_meta = {k: [] for k in sliced_meta}
+
+        def _emit_anchor(px):
+            new_x.append(px)
+            new_y.append(0.0)
+            for k in anchor_meta:
+                anchor_meta[k].append(None)
+
+        for i in range(len(x)):
+            if i == 0 and x[i] > 0:
+                _emit_anchor(x[i] - 1)
+            elif i > 0 and x[i] > x[i - 1] + 1:
+                # Plateau preservation: when two adjacent real events share
+                # the same y (e.g. repeat_identity / repeat_count emit a
+                # (seg_start, seg_end) pair at the same value), skip the
+                # zero-anchor so the line renders as a plateau rather than
+                # two spikes dropping to zero between them.
+                if float(y[i]) != float(y[i - 1]):
+                    _emit_anchor(x[i - 1] + 1)
+                    _emit_anchor(x[i] - 1)
+            new_x.append(x[i])
+            new_y.append(float(y[i]))
+            for k, vals in sliced_meta.items():
+                anchor_meta[k].append(vals[i])
+        _emit_anchor(x[-1] + 1)
+        x = np.array(new_x, dtype=np.uint32)
+        y = np.array(new_y, dtype=np.float64)
+        sliced_meta = anchor_meta
+
+    result = {
+        "x": (x + 1).tolist(),
+        "y": y.tolist(),
+    }
+    result.update(sliced_meta)
     return result
 
 
@@ -1286,7 +1473,7 @@ def _format_zoom_for_bokeh(zoom_data, type_picked, xstart=None, xend=None):
 
 
 ### Function to get features of one variable
-def get_feature_data(cur, feature, contig_id, sample_id, xstart=None, xend=None, variable_metadata=None, max_base_resolution=None, min_relative_value=0.0):
+def get_feature_data(cur, feature, contig_id, sample_id, xstart=None, xend=None, variable_metadata=None, max_base_resolution=None, min_relative_value=0.0, window_for_zoom=None):
     """Get feature data for plotting from BLOB storage.
 
     Decodes Feature_blob (sample-level) or Contig_blob (contig-level) entries.
@@ -1343,7 +1530,9 @@ def get_feature_data(cur, feature, contig_id, sample_id, xstart=None, xend=None,
             if feature_var_name:
                 # Decide whether to fetch lightweight zoom-only blob or full data
                 _threshold = max_base_resolution if max_base_resolution is not None else _DEFAULT_MAX_BASE_RESOLUTION
-                _window = (xend - xstart) if (xstart is not None and xend is not None) else 0
+                _window = window_for_zoom if window_for_zoom is not None else (
+                    (xend - xstart) if (xstart is not None and xend is not None) else 0
+                )
                 _use_zoom = _window > _threshold
                 if _use_zoom:
                     zoom_blob = _get_feature_blob(cur, contig_id, sample_id, feature_var_name)
@@ -1356,9 +1545,9 @@ def get_feature_data(cur, feature, contig_id, sample_id, xstart=None, xend=None,
                     scale_div = get_scale_from_zoom_blob(zoom_blob) if zoom_blob else 1
                     if chunk_rows:
                         if zoom_blob and is_sparse_zoom_blob(zoom_blob):
-                            blob_dict = _format_chunks_for_bokeh(decode_raw_sparse_chunks(chunk_rows, scale_div), xstart, xend)
+                            blob_dict = _format_chunks_for_bokeh(decode_raw_sparse_chunks(chunk_rows, scale_div), xstart, xend, type_picked)
                         else:
-                            blob_dict = _format_chunks_for_bokeh(decode_raw_chunks(chunk_rows, scale_div), xstart, xend)
+                            blob_dict = _format_chunks_for_bokeh(decode_raw_chunks(chunk_rows, scale_div), xstart, xend, type_picked)
                     else:
                         blob_dict = None
 
@@ -1392,41 +1581,65 @@ def get_feature_data(cur, feature, contig_id, sample_id, xstart=None, xend=None,
                 # so use base resolution up to 10 Mbp window
                 is_gc = contig_feature_name in ("gc_content", "gc_skew")
                 res_threshold = 10_000_000 if is_gc else max_base_resolution
-                _window = (xend - xstart) if (xstart is not None and xend is not None) else 0
+                _window = window_for_zoom if window_for_zoom is not None else (
+                    (xend - xstart) if (xstart is not None and xend is not None) else 0
+                )
                 _use_zoom = _window > (res_threshold if res_threshold is not None else _DEFAULT_MAX_BASE_RESOLUTION)
                 if _use_zoom:
                     zoom_blob = _get_contig_blob(cur, contig_id, contig_feature_name)
                     blob_dict = _blob_to_feature_dict(None, type_picked, xstart, xend, res_threshold, zoom_blob_bytes=zoom_blob) if zoom_blob else None
                 elif xstart is not None and xend is not None:
                     # Zoomed in: fetch chunks
-                    from thebigbam.database.blob_decoder import decode_raw_chunks, get_scale_from_zoom_blob
+                    from thebigbam.database.blob_decoder import decode_raw_chunks, decode_raw_sparse_chunks, get_scale_from_zoom_blob, is_sparse_zoom_blob
                     gc_window = 500 if contig_feature_name == "gc_content" else (1000 if contig_feature_name == "gc_skew" else 1)
                     chunk_rows = _get_contig_chunks(cur, contig_id, contig_feature_name, xstart - 1, xend - 1, window_size=gc_window)
                     zoom_blob = _get_contig_blob(cur, contig_id, contig_feature_name)
                     scale_div = get_scale_from_zoom_blob(zoom_blob) if zoom_blob else 1
+                    is_sparse = bool(zoom_blob and is_sparse_zoom_blob(zoom_blob))
                     if chunk_rows:
-                        chunk_dict = decode_raw_chunks(chunk_rows, scale_div)
-                        # For windowed data, convert array indices to genomic positions
-                        if gc_window > 1:
-                            chunk_dict["x"] = chunk_dict["x"] * gc_window
-                        blob_dict = _format_chunks_for_bokeh(chunk_dict, xstart, xend)
+                        if is_sparse:
+                            blob_dict = _format_chunks_for_bokeh(decode_raw_sparse_chunks(chunk_rows, scale_div), xstart, xend, type_picked)
+                        else:
+                            chunk_dict = decode_raw_chunks(chunk_rows, scale_div)
+                            # For windowed data, convert array indices to 0-indexed window starts
+                            # (kept as-is for _format_chunks_for_bokeh slicing), then shift to
+                            # midpoints after slicing (add half - 1 because _format_chunks_for_bokeh
+                            # adds 1 when converting to 1-indexed genomic coordinates).
+                            if gc_window > 1:
+                                chunk_dict["x"] = chunk_dict["x"] * gc_window
+                            blob_dict = _format_chunks_for_bokeh(chunk_dict, xstart, xend, type_picked)
+                            if gc_window > 1 and blob_dict is not None:
+                                half = gc_window // 2 - 1
+                                blob_dict["x"] = [v + half for v in blob_dict["x"]]
                     else:
                         blob_dict = None
                 else:
                     # No window specified — fetch all chunks
-                    from thebigbam.database.blob_decoder import decode_raw_chunks, get_scale_from_zoom_blob
+                    from thebigbam.database.blob_decoder import decode_raw_chunks, decode_raw_sparse_chunks, get_scale_from_zoom_blob, is_sparse_zoom_blob
                     gc_window = 500 if contig_feature_name == "gc_content" else (1000 if contig_feature_name == "gc_skew" else 1)
                     chunk_rows = _get_contig_chunks(cur, contig_id, contig_feature_name, 0, 2**31, window_size=gc_window)
                     zoom_blob = _get_contig_blob(cur, contig_id, contig_feature_name)
                     scale_div = get_scale_from_zoom_blob(zoom_blob) if zoom_blob else 1
+                    is_sparse = bool(zoom_blob and is_sparse_zoom_blob(zoom_blob))
                     if chunk_rows:
-                        chunk_dict = decode_raw_chunks(chunk_rows, scale_div)
-                        if gc_window > 1:
-                            chunk_dict["x"] = chunk_dict["x"] * gc_window
-                        blob_dict = {"x": (chunk_dict["x"] + 1).tolist(), "y": chunk_dict["y"].tolist()}
+                        if is_sparse:
+                            raw = decode_raw_sparse_chunks(chunk_rows, scale_div)
+                            blob_dict = {"x": (raw["x"] + 1).tolist(), "y": raw["y"].tolist()}
+                            for k in raw:
+                                if k not in ("x", "y", "sparse"):
+                                    blob_dict[k] = raw[k].tolist() if hasattr(raw[k], "tolist") else raw[k]
+                        else:
+                            chunk_dict = decode_raw_chunks(chunk_rows, scale_div)
+                            if gc_window > 1:
+                                # Convert indices to 1-indexed midpoints directly
+                                chunk_dict["x"] = chunk_dict["x"] * gc_window + gc_window // 2
+                                blob_dict = {"x": chunk_dict["x"].tolist(), "y": chunk_dict["y"].tolist()}
+                            else:
+                                blob_dict = {"x": (chunk_dict["x"] + 1).tolist(), "y": chunk_dict["y"].tolist()}
                     else:
                         blob_dict = None
                 if blob_dict is not None:
+                    _resolve_partner_lane(cur, blob_dict, contig_feature_name)
                     feature_dict.update(blob_dict)
                     feature_dict["is_relative_scaled"] = False
                     feature_dict["has_stats"] = False
@@ -1498,9 +1711,9 @@ def get_feature_data_batch(cur, feature, contig_id, sample_ids, xstart=None, xen
                         chunk_rows = _get_feature_chunks(cur, contig_id, sid, feature_var_name, xstart - 1, xend - 1)
                         if chunk_rows:
                             if _sparse:
-                                blob_dict = _format_chunks_for_bokeh(decode_raw_sparse_chunks(chunk_rows, scale_div), xstart, xend)
+                                blob_dict = _format_chunks_for_bokeh(decode_raw_sparse_chunks(chunk_rows, scale_div), xstart, xend, type_picked)
                             else:
-                                blob_dict = _format_chunks_for_bokeh(decode_raw_chunks(chunk_rows, scale_div), xstart, xend)
+                                blob_dict = _format_chunks_for_bokeh(decode_raw_chunks(chunk_rows, scale_div), xstart, xend, type_picked)
                         else:
                             blob_dict = None
                         if blob_dict is not None:
@@ -1566,45 +1779,58 @@ def get_feature_data_batch(cur, feature, contig_id, sample_ids, xstart=None, xen
                     blob_dict = _blob_to_feature_dict(None, type_picked, xstart, xend, res_threshold, zoom_blob_bytes=zoom_blob) if zoom_blob else None
                 elif xstart is not None and xend is not None:
                     # Zoomed in: fetch chunks
-                    from thebigbam.database.blob_decoder import decode_raw_chunks, get_scale_from_zoom_blob
+                    from thebigbam.database.blob_decoder import decode_raw_chunks, decode_raw_sparse_chunks, get_scale_from_zoom_blob, is_sparse_zoom_blob
                     gc_window = 500 if contig_feature_name == "gc_content" else (1000 if contig_feature_name == "gc_skew" else 1)
                     chunk_rows = _get_contig_chunks(cur, contig_id, contig_feature_name, xstart - 1, xend - 1, window_size=gc_window)
                     zoom_blob = _get_contig_blob(cur, contig_id, contig_feature_name)
                     scale_div = get_scale_from_zoom_blob(zoom_blob) if zoom_blob else 1
+                    is_sparse = bool(zoom_blob and is_sparse_zoom_blob(zoom_blob))
                     if chunk_rows:
-                        chunk_dict = decode_raw_chunks(chunk_rows, scale_div)
-                        if gc_window > 1:
-                            chunk_dict["x"] = chunk_dict["x"] * gc_window
-                        if contig_feature_name == "gc_skew":
-                            chunk_dict["y"] = chunk_dict["y"] / 100.0
-                        blob_dict = _format_chunks_for_bokeh(chunk_dict, xstart, xend)
+                        if is_sparse:
+                            blob_dict = _format_chunks_for_bokeh(decode_raw_sparse_chunks(chunk_rows, scale_div), xstart, xend, type_picked)
+                        else:
+                            chunk_dict = decode_raw_chunks(chunk_rows, scale_div)
+                            if gc_window > 1:
+                                chunk_dict["x"] = chunk_dict["x"] * gc_window
+                            if contig_feature_name == "gc_skew":
+                                chunk_dict["y"] = chunk_dict["y"] / 100.0
+                            blob_dict = _format_chunks_for_bokeh(chunk_dict, xstart, xend, type_picked)
                     else:
                         blob_dict = None
                 else:
                     # No window specified — fetch all chunks
-                    from thebigbam.database.blob_decoder import decode_raw_chunks, get_scale_from_zoom_blob
+                    from thebigbam.database.blob_decoder import decode_raw_chunks, decode_raw_sparse_chunks, get_scale_from_zoom_blob, is_sparse_zoom_blob
                     gc_window = 500 if contig_feature_name == "gc_content" else (1000 if contig_feature_name == "gc_skew" else 1)
                     chunk_rows = _get_contig_chunks(cur, contig_id, contig_feature_name, 0, 2**31, window_size=gc_window)
                     zoom_blob = _get_contig_blob(cur, contig_id, contig_feature_name)
                     scale_div = get_scale_from_zoom_blob(zoom_blob) if zoom_blob else 1
+                    is_sparse = bool(zoom_blob and is_sparse_zoom_blob(zoom_blob))
                     if chunk_rows:
-                        chunk_dict = decode_raw_chunks(chunk_rows, scale_div)
-                        if gc_window > 1:
-                            chunk_dict["x"] = chunk_dict["x"] * gc_window
-                        blob_dict = {"x": (chunk_dict["x"] + 1).tolist(), "y": chunk_dict["y"].tolist()}
+                        if is_sparse:
+                            raw = decode_raw_sparse_chunks(chunk_rows, scale_div)
+                            blob_dict = {"x": (raw["x"] + 1).tolist(), "y": raw["y"].tolist()}
+                            for k in raw:
+                                if k not in ("x", "y", "sparse"):
+                                    blob_dict[k] = raw[k].tolist() if hasattr(raw[k], "tolist") else raw[k]
+                        else:
+                            chunk_dict = decode_raw_chunks(chunk_rows, scale_div)
+                            if gc_window > 1:
+                                chunk_dict["x"] = chunk_dict["x"] * gc_window
+                            blob_dict = {"x": (chunk_dict["x"] + 1).tolist(), "y": chunk_dict["y"].tolist()}
                     else:
                         blob_dict = None
                 if blob_dict is not None:
+                    _resolve_partner_lane(cur, blob_dict, contig_feature_name)
                     for sid in sample_ids:
-                            feature_dict = {
-                                "type": type_picked, "color": color, "alpha": alpha,
-                                "fill_alpha": fill_alpha, "size": size, "title": title,
-                                "is_relative_scaled": False,
-                                "has_stats": False,
-                                "has_sequences": False,
-                            }
-                            feature_dict.update(blob_dict)
-                            result[sid].append(feature_dict)
+                        feature_dict = {
+                            "type": type_picked, "color": color, "alpha": alpha,
+                            "fill_alpha": fill_alpha, "size": size, "title": title,
+                            "is_relative_scaled": False,
+                            "has_stats": False,
+                            "has_sequences": False,
+                        }
+                        feature_dict.update(blob_dict)
+                        result[sid].append(feature_dict)
             continue
 
         # All features should be handled by BLOB paths above.
@@ -1669,7 +1895,7 @@ def parse_requested_features(list_features):
 
 
 ### Function to generate the bokeh plot
-def generate_bokeh_plot_per_sample(conn, list_features, contig_name, sample_name, xstart=None, xend=None, subplot_size=100, genbank_path=None, feature_types=None, plot_isoforms=True, plot_sequence=False, plot_translated_sequence=False, same_y_scale=False, genemap_size=None, sequence_size=None, translated_sequence_size=None, max_base_resolution=None, max_genemap_window=None, max_sequence_window=None, min_relative_value=0.0, feature_label_key=None, custom_colors=None):
+def generate_bokeh_plot_per_sample(conn, list_features, contig_name, sample_name, xstart=None, xend=None, subplot_size=100, genbank_path=None, feature_types=None, plot_isoforms=True, plot_sequence=False, plot_translated_sequence=False, same_y_scale=False, genemap_size=None, sequence_size=None, translated_sequence_size=None, max_base_resolution=None, max_genemap_window=None, max_sequence_window=None, min_relative_value=0.0, feature_label_key=None, custom_colors=None, mag_name=None):
     """Generate a Bokeh plot for a single sample."""
     cur = conn.cursor()
 
@@ -1729,15 +1955,14 @@ def generate_bokeh_plot_per_sample(conn, list_features, contig_name, sample_name
 
     requested_features = parse_requested_features(list_features)
 
-    # Separate contig-level features from sample-dependent features
-    # Repeat features now use SQL views with standard binning (like GC content/skew)
-    contig_level_features = ["GC content", "GC skew", "Repeat count", "Max repeat identity"]
-    contig_features = [f for f in requested_features if f in contig_level_features]
-    sample_features = [f for f in requested_features if f not in contig_level_features]
+    # Separate contig-level features from sample-dependent features by
+    # consulting the Variable table: any subplot whose rows all live in
+    # Contig_blob is plotted once per contig, irrespective of samples.
+    metadata_cache = get_variable_metadata_batch(cur, requested_features)
+    contig_features, sample_features = split_contig_vs_sample_features(metadata_cache, requested_features)
 
     # Add contig-level features (don't require sample_id)
     if contig_features:
-        metadata_cache = get_variable_metadata_batch(cur, contig_features)
         for feature in contig_features:
             try:
                 list_feature_dict = get_feature_data(
@@ -1762,10 +1987,6 @@ def generate_bokeh_plot_per_sample(conn, list_features, contig_name, sample_name
     # Add sample-dependent features only when a sample is selected
     feature_subplots = []  # track (feature_name, figure, max_y) for same_y_scale
     if sample_id is not None and sample_features:
-        # Pre-fetch metadata for all features in one query
-        metadata_cache = get_variable_metadata_batch(cur, sample_features)
-
-        # Add other requested features
         for feature in sample_features:
             try:
                 list_feature_dict = get_feature_data(
@@ -1807,17 +2028,445 @@ def generate_bokeh_plot_per_sample(conn, list_features, contig_name, sample_name
                 if fname in PRIMARY_RELATIVE_SUBPLOTS:
                     fig.y_range = Range1d(0, primary_max)
 
+    # --- Optional MAG track (only when a MAG is selected in MAG-mode DBs) ---
+    mag_fig = None
+    if mag_name:
+        try:
+            mag_fig = make_bokeh_mag_track(conn, mag_name, height=30)
+        except Exception as e:
+            print(f"Error building MAG track for '{mag_name}': {e}", flush=True)
+            mag_fig = None
+
     # --- Combine all figures in a single grid with one shared toolbar ---
+    top_plots = [mag_fig] if mag_fig is not None else []
     if annotation_fig:
         if not subplots:
-            grid = gridplot([[annotation_fig]], merge_tools=True, sizing_mode='stretch_width')
+            grid = gridplot([[p] for p in (top_plots + [annotation_fig])], merge_tools=True, sizing_mode='stretch_width')
         else:
-            all_plots = [annotation_fig] + subplots
+            all_plots = top_plots + [annotation_fig] + subplots
             grid = gridplot([[p] for p in all_plots], merge_tools=True, sizing_mode='stretch_width')
     else:
-        # No gene map - just show subplots
-        if not subplots:
+        if not subplots and not top_plots:
             raise ValueError("No plots to display")
-        grid = gridplot([[p] for p in subplots], merge_tools=True, sizing_mode='stretch_width')
+        grid = gridplot([[p] for p in (top_plots + subplots)], merge_tools=True, sizing_mode='stretch_width')
 
     return grid
+
+
+def get_mag_feature_data(cur, feature, mag_id, sample_id, mag_length,
+                         xstart=None, xend=None, variable_metadata=None,
+                         max_base_resolution=None, min_relative_value=0.0):
+    """Read one MAG-wide blob per subplot from MAG_blob / MAG_contig_blob.
+
+    Shape of the returned list_feature_dict is identical to
+    get_feature_data(): `make_bokeh_subplot` consumes both the same way.
+    X-coordinates are already in MAG space — no offset arithmetic required.
+    """
+    from thebigbam.database.database_getters import (
+        get_mag_feature_zoom, get_mag_feature_chunks,
+        get_mag_contig_zoom, get_mag_contig_chunks,
+    )
+    from thebigbam.database.blob_decoder import (
+        decode_raw_chunks, decode_raw_sparse_chunks,
+        get_scale_from_zoom_blob, is_sparse_zoom_blob, CHUNK_SIZE,
+    )
+
+    rows = variable_metadata if variable_metadata is not None else get_variable_metadata(cur, feature)
+    xs = xstart if xstart is not None else 1
+    xe = xend   if xend   is not None else mag_length
+    _threshold = max_base_resolution if max_base_resolution is not None else _DEFAULT_MAX_BASE_RESOLUTION
+    _window = xe - xs
+    _use_zoom = _window > _threshold
+
+    list_feature_dict = []
+    for row in rows:
+        type_picked, color, alpha, fill_alpha, size, title, feature_table = row
+        feature_dict = {
+            "type": type_picked, "color": color, "alpha": alpha,
+            "fill_alpha": fill_alpha, "size": size, "title": title,
+            "x": [], "y": [], "is_relative_scaled": False,
+        }
+
+        cur.execute(
+            "SELECT Variable_name FROM Variable WHERE Title=? AND Feature_table_name=?",
+            (title, feature_table),
+        )
+        vname_row = cur.fetchone()
+        variable_name = vname_row[0] if vname_row else None
+        if not variable_name:
+            continue
+
+        if feature_table == "Feature_blob":
+            zoom_blob = get_mag_feature_zoom(cur, mag_id, sample_id, variable_name)
+            if zoom_blob is None:
+                continue
+            if _use_zoom:
+                blob_dict = _blob_to_feature_dict(None, type_picked, xs, xe, max_base_resolution, zoom_blob_bytes=zoom_blob)
+            else:
+                first_chunk = max(0, (xs - 1) // CHUNK_SIZE)
+                last_chunk = (xe - 1) // CHUNK_SIZE
+                chunk_rows = get_mag_feature_chunks(cur, mag_id, sample_id, variable_name, first_chunk, last_chunk)
+                scale_div = get_scale_from_zoom_blob(zoom_blob)
+                if chunk_rows:
+                    if is_sparse_zoom_blob(zoom_blob):
+                        blob_dict = _format_chunks_for_bokeh(decode_raw_sparse_chunks(chunk_rows, scale_div), xs, xe, type_picked)
+                    else:
+                        blob_dict = _format_chunks_for_bokeh(decode_raw_chunks(chunk_rows, scale_div), xs, xe, type_picked)
+                else:
+                    blob_dict = None
+        elif feature_table == "Contig_blob":
+            zoom_blob = get_mag_contig_zoom(cur, mag_id, variable_name)
+            if zoom_blob is None:
+                continue
+            # MAG_contig_blob is re-encoded at per-bp (not windowed), so
+            # window_size=1 here even for GC content/skew.
+            if _use_zoom:
+                blob_dict = _blob_to_feature_dict(None, type_picked, xs, xe, max_base_resolution, zoom_blob_bytes=zoom_blob)
+            else:
+                first_chunk = max(0, (xs - 1) // CHUNK_SIZE)
+                last_chunk = (xe - 1) // CHUNK_SIZE
+                chunk_rows = get_mag_contig_chunks(cur, mag_id, variable_name, first_chunk, last_chunk)
+                scale_div = get_scale_from_zoom_blob(zoom_blob)
+                if chunk_rows:
+                    if is_sparse_zoom_blob(zoom_blob):
+                        blob_dict = _format_chunks_for_bokeh(decode_raw_sparse_chunks(chunk_rows, scale_div), xs, xe, type_picked)
+                    else:
+                        blob_dict = _format_chunks_for_bokeh(decode_raw_chunks(chunk_rows, scale_div), xs, xe, type_picked)
+                else:
+                    blob_dict = None
+        else:
+            continue
+
+        if blob_dict is None:
+            continue
+
+        if min_relative_value > 0.0 and blob_dict.get("y"):
+            max_y = max(blob_dict["y"])
+            if max_y > 0:
+                cutoff = min_relative_value * max_y
+                blob_dict["y"] = [v if v >= cutoff else 0 for v in blob_dict["y"]]
+
+        _resolve_partner_lane(cur, blob_dict, variable_name)
+
+        feature_dict.update(blob_dict)
+        feature_dict["is_relative_scaled"] = False
+        feature_dict["has_stats"] = "mean" in blob_dict
+        feature_dict["has_sequences"] = "sequence" in blob_dict
+        list_feature_dict.append(feature_dict)
+
+    return list_feature_dict
+
+
+def make_bokeh_genemap_mag(conn, mag_id, mag_name, mag_length, subplot_size,
+                           shared_xrange, xstart=None, xend=None,
+                           feature_types=None, plot_isoforms=True,
+                           feature_label_key=None, custom_colors=None,
+                           figure_width=30):
+    """MAG-wide gene map. Builds a single SeqRecord spanning the entire MAG
+    using MAG_annotation_core (coordinates already offset into MAG space),
+    then runs it through the same DNAFeaturesViewer path as
+    make_bokeh_genemap. This preserves the y_range DNAFeaturesViewer sets,
+    so features render at identical thickness to the Contig view.
+    """
+    cur = conn.cursor()
+
+    position_filter = ""
+    params = [mag_id]
+    if xstart is not None and xend is not None:
+        position_filter = ' AND mac."End" >= ? AND mac."Start" <= ?'
+        params.extend([xstart, xend])
+
+    type_filter = ""
+    if feature_types:
+        type_filter = f' AND mac."Type" IN ({",".join("?" * len(feature_types))})'
+        params.extend(feature_types)
+
+    base_select = (
+        'SELECT mac.Annotation_id, mac."Start", mac."End", mac.Strand, mac."Type", '
+        'pq.Value AS Product, fq.Value AS Function, lq.Value AS Locus_tag, '
+        'mac.Main_isoform '
+        'FROM MAG_annotation_core mac '
+        'LEFT JOIN Annotation_qualifier pq ON pq.Annotation_id = mac.Annotation_id AND pq."Key" = \'product\' '
+        'LEFT JOIN Annotation_qualifier fq ON fq.Annotation_id = mac.Annotation_id AND fq."Key" = \'function\' '
+        'LEFT JOIN Annotation_qualifier lq ON lq.Annotation_id = mac.Annotation_id AND lq."Key" = \'locus_tag\' '
+        'WHERE mac.MAG_id = ?'
+    )
+    if not plot_isoforms:
+        query = f'{base_select}{position_filter}{type_filter} AND (lq.Value IS NULL OR mac.Main_isoform = true)'
+    else:
+        query = f'{base_select}{position_filter}{type_filter}'
+
+    cur.execute(query, tuple(params))
+    seq_ann_rows = cur.fetchall()
+
+    ann_ids = [r[0] for r in seq_ann_rows]
+    placeholders = ','.join('?' * len(ann_ids)) if ann_ids else ''
+    direct_col_idx = {'Type': 4, 'type': 4, 'Strand': 3, 'strand': 3,
+                      'Main_isoform': 8, 'main_isoform': 8}
+
+    def fetch_values_for_qkey(qkey):
+        if not ann_ids:
+            return {}
+        try:
+            kv_rows = cur.execute(
+                f'SELECT Annotation_id, "Value" FROM Annotation_qualifier '
+                f'WHERE "Key" = ? AND Annotation_id IN ({placeholders})',
+                [qkey] + ann_ids,
+            ).fetchall()
+            kv = {aid: val for aid, val in kv_rows if val is not None}
+            if kv:
+                return kv
+        except Exception:
+            pass
+        col_idx = direct_col_idx.get(qkey)
+        if col_idx is not None:
+            return {r[0]: r[col_idx] for r in seq_ann_rows if r[col_idx] is not None}
+        return {}
+
+    label_map = {}
+    if feature_label_key and seq_ann_rows:
+        label_map = fetch_values_for_qkey(feature_label_key)
+
+    custom_color_map = {}
+    if custom_colors and seq_ann_rows:
+        from collections import defaultdict
+        rules_by_key = defaultdict(list)
+        for rule in custom_colors:
+            rules_by_key[rule['qualifier_key']].append(rule)
+        for qkey, rules in rules_by_key.items():
+            values = fetch_values_for_qkey(qkey)
+            for rule in rules:
+                mode = rule.get('match_mode', 'exact')
+                if mode == 'random':
+                    filtered = {aid: val for aid, val in values.items() if not _is_nullish(val)}
+                    numeric_map = _try_numeric_map(filtered.values())
+                    if numeric_map is not None:
+                        value_to_color = _gradient_palette(numeric_map)
+                    else:
+                        distinct = {str(v) for v in filtered.values()}
+                        value_to_color = {v: _hash_color(v) for v in distinct}
+                    for aid, val in filtered.items():
+                        if aid in custom_color_map:
+                            continue
+                        color = value_to_color.get(str(val))
+                        if color:
+                            custom_color_map[aid] = color
+                    continue
+                rule_val = rule['value']
+                if mode in ('lt', 'gt'):
+                    try:
+                        rule_num = float(rule_val)
+                    except (TypeError, ValueError):
+                        continue
+                    for aid, val in values.items():
+                        if aid in custom_color_map or _is_nullish(val):
+                            continue
+                        try:
+                            v_num = float(val)
+                        except (TypeError, ValueError):
+                            continue
+                        if mode == 'lt' and v_num < rule_num:
+                            custom_color_map[aid] = rule['color']
+                        elif mode == 'gt' and v_num > rule_num:
+                            custom_color_map[aid] = rule['color']
+                    continue
+                rule_val_str = str(rule_val)
+                rule_val_lower = rule_val_str.lower()
+                rule_val_num = float(rule_val) if isinstance(rule_val, (int, float)) else None
+
+                def _values_equal(val):
+                    if rule_val_num is not None:
+                        try:
+                            return float(val) == rule_val_num
+                        except (TypeError, ValueError):
+                            pass
+                    return str(val) == rule_val_str
+
+                for aid, val in values.items():
+                    if aid in custom_color_map or _is_nullish(val):
+                        continue
+                    val_str = str(val)
+                    val_lower = val_str.lower()
+                    if mode == 'has':
+                        if rule_val_lower in val_lower:
+                            custom_color_map[aid] = rule['color']
+                    elif mode == 'has_not':
+                        if rule_val_lower not in val_lower:
+                            custom_color_map[aid] = rule['color']
+                    elif mode == 'not_equal':
+                        if not _values_equal(val):
+                            custom_color_map[aid] = rule['color']
+                    else:
+                        if _values_equal(val):
+                            custom_color_map[aid] = rule['color']
+
+    sequence_annotations = []
+    for ann_id, start, end, strand, ftype, product, function, locus_tag, _main in seq_ann_rows:
+        try:
+            floc = FeatureLocation(start - 1, end, strand=strand)
+        except Exception:
+            continue
+        qualifiers = {}
+        if product:
+            qualifiers['product'] = product
+        if function:
+            qualifiers['function'] = function
+        if locus_tag:
+            qualifiers['locus_tag'] = locus_tag
+        if custom_color_map and ann_id in custom_color_map:
+            qualifiers['_custom_color'] = custom_color_map[ann_id]
+        if feature_label_key:
+            qualifiers['_tooltip_key'] = feature_label_key
+            if ann_id in label_map:
+                qualifiers[feature_label_key] = label_map[ann_id]
+        sequence_annotations.append(SeqFeature(location=floc, type=ftype, qualifiers=qualifiers))
+
+    if not sequence_annotations:
+        return None
+
+    sequence_records = SeqRecord(Seq('N' * mag_length), id=mag_name, features=sequence_annotations)
+    graphic_record = CustomTranslator().translate_record(sequence_records)
+    annotation_fig = graphic_record.plot_with_bokeh(figure_width=figure_width, figure_height=40)
+    annotation_fig.height = subplot_size
+    annotation_fig.tools = [t for t in annotation_fig.tools if not isinstance(t, TapTool)]
+    annotation_fig.xaxis.formatter = NumeralTickFormatter(format="0,0")
+    wheel = WheelZoomTool(dimensions='width')
+    annotation_fig.add_tools(wheel)
+    annotation_fig.toolbar.active_scroll = wheel
+    annotation_fig.x_range = shared_xrange
+    return annotation_fig
+
+
+def generate_bokeh_plot_mag_view(conn, list_features, mag_name, sample_name, xstart=None, xend=None, subplot_size=100, genbank_path=None, feature_types=None, plot_isoforms=True, same_y_scale=False, genemap_size=None, sequence_size=None, max_base_resolution=None, max_genemap_window=None, min_relative_value=0.0, feature_label_key=None, custom_colors=None, is_all=False, allowed_samples=None):
+    """Generate a concatenated Bokeh plot for a MAG (all contigs, longest-first).
+
+    All contigs are placed consecutively on a shared x-axis (longest first), with
+    a MAG overview track at the top showing contig boundaries.
+    """
+    from ..database.database_getters import get_mag_contigs, get_mag_id
+
+    cur = conn.cursor()
+    members = get_mag_contigs(conn, mag_name)
+    if not members:
+        raise ValueError(f"MAG not found or empty: {mag_name}")
+
+    mag_id = get_mag_id(conn, mag_name)
+    if mag_id is None:
+        raise ValueError(f"MAG_id lookup failed for: {mag_name}")
+
+    total_len = sum(length for _n, length, _o in members)
+    print(f"MAG {mag_name}: {len(members)} contigs, {total_len} bp total", flush=True)
+
+    shared_xrange = Range1d(
+        xstart if xstart is not None else 1,
+        xend if xend is not None else total_len,
+    )
+
+    # --- MAG track at top (same height as nucleotide sequence track) ---
+    _seq_height = sequence_size if sequence_size is not None else subplot_size // 2
+    try:
+        mag_fig = make_bokeh_mag_track(conn, mag_name, height=_seq_height, shared_xrange=shared_xrange)
+    except Exception as e:
+        print(f"Error building MAG track for '{mag_name}': {e}", flush=True)
+        mag_fig = None
+
+    # --- Combined gene map (only when window is small enough) ---
+    _genemap_threshold = max_genemap_window if max_genemap_window is not None else 100_000
+    annotation_fig = None
+    if genbank_path and xstart is not None and xend is not None and (xend - xstart) <= _genemap_threshold:
+        _gm_size = genemap_size if genemap_size is not None else subplot_size
+        try:
+            annotation_fig = make_bokeh_genemap_mag(
+                conn, mag_id, mag_name, total_len, _gm_size, shared_xrange, xstart, xend,
+                feature_types=feature_types, plot_isoforms=plot_isoforms,
+                feature_label_key=feature_label_key, custom_colors=custom_colors,
+            )
+        except Exception as e:
+            print(f"Error building combined gene map for MAG '{mag_name}': {e}", flush=True)
+
+    # --- Resolve sample ---
+    sample_id = None
+    if sample_name:
+        cur.execute("SELECT Sample_id, Sample_name FROM Sample WHERE Sample_name=?", (sample_name,))
+        row = cur.fetchone()
+        if row is None:
+            raise ValueError(f"Sample not found: {sample_name}")
+        sample_id, sample_name = row
+        print(f"Sample {sample_name} validated.", flush=True)
+
+    requested_features = parse_requested_features(list_features)
+    metadata_cache = get_variable_metadata_batch(cur, requested_features)
+    contig_features, sample_features = split_contig_vs_sample_features(metadata_cache, requested_features)
+
+    subplots = []
+
+    # --- Contig-level features (GC content, GC skew, repeats, hits, …) ---
+    if contig_features:
+        for feature in contig_features:
+            try:
+                combined_dicts = get_mag_feature_data(
+                    cur, feature, mag_id, None, total_len,
+                    xstart=xstart, xend=xend,
+                    variable_metadata=metadata_cache.get(feature),
+                    max_base_resolution=max_base_resolution,
+                    min_relative_value=min_relative_value,
+                )
+                subplot = make_bokeh_subplot(combined_dicts, subplot_size, shared_xrange, show_tooltips=True)
+                if subplot is not None:
+                    subplots.append(subplot)
+            except Exception as e:
+                print(f"Error processing contig feature '{feature}' for MAG: {e}", flush=True)
+
+    # --- Sample-dependent features ---
+    if is_all and sample_features:
+        # ALL SAMPLES mode: one subplot per sample, each showing the concatenated MAG
+        all_rows = cur.execute(
+            "SELECT DISTINCT s.Sample_id, s.Sample_name FROM Sample s "
+            "JOIN MAG_blob mb ON mb.Sample_id = s.Sample_id "
+            "WHERE mb.MAG_id = ?",
+            (mag_id,),
+        ).fetchall()
+        if allowed_samples is not None:
+            all_rows = [(sid, sname) for sid, sname in all_rows if sname in allowed_samples]
+        all_rows.sort(key=lambda r: r[1])
+        for feature in sample_features:
+            for sid, sname in all_rows:
+                try:
+                    combined_dicts = get_mag_feature_data(
+                        cur, feature, mag_id, sid, total_len,
+                        xstart=xstart, xend=xend,
+                        variable_metadata=metadata_cache.get(feature),
+                        max_base_resolution=max_base_resolution,
+                        min_relative_value=min_relative_value,
+                    )
+                    for d in combined_dicts:
+                        d['title'] = sname
+                    subplot = make_bokeh_subplot(combined_dicts, subplot_size, shared_xrange, show_tooltips=True)
+                    if subplot is not None:
+                        subplots.append(subplot)
+                except Exception as e:
+                    print(f"Error processing feature '{feature}' for sample '{sname}' in MAG: {e}", flush=True)
+    elif sample_id is not None and sample_features:
+        for feature in sample_features:
+            try:
+                combined_dicts = get_mag_feature_data(
+                    cur, feature, mag_id, sample_id, total_len,
+                    xstart=xstart, xend=xend,
+                    variable_metadata=metadata_cache.get(feature),
+                    max_base_resolution=max_base_resolution,
+                    min_relative_value=min_relative_value,
+                )
+                subplot = make_bokeh_subplot(combined_dicts, subplot_size, shared_xrange, show_tooltips=True)
+                if subplot is not None:
+                    subplots.append(subplot)
+            except Exception as e:
+                print(f"Error processing sample feature '{feature}' for MAG: {e}", flush=True)
+
+    # --- Assemble grid ---
+    top_plots = [mag_fig] if mag_fig is not None else []
+    all_plots = top_plots + ([annotation_fig] if annotation_fig is not None else []) + subplots
+
+    if not all_plots:
+        raise ValueError("No plots to display for MAG view")
+
+    return gridplot([[p] for p in all_plots], merge_tools=True, sizing_mode='stretch_width')
