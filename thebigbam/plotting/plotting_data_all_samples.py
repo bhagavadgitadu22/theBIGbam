@@ -1,3 +1,5 @@
+import time
+
 from bokeh.models import Range1d
 from bokeh.layouts import gridplot
 
@@ -158,7 +160,10 @@ def generate_bokeh_plot_all_samples(conn, variable, contig_name, xstart=None, xe
     all_min_y = 0
     try:
         var_metadata = get_variable_metadata(cur, variable)
+        t_batch = time.perf_counter()
         batch_results = get_feature_data_batch(cur, variable, contig_id, sample_ids, xstart, xend, variable_metadata=var_metadata, max_base_resolution=max_base_resolution, min_relative_value=min_relative_value)
+        print(f"[timing]   get_feature_data_batch ({len(sample_ids)} samples): {time.perf_counter() - t_batch:.3f}s", flush=True)
+        t_subplots = time.perf_counter()
         for sample_id, sample_name in zip(sample_ids, sample_names):
             list_feature_dict = batch_results.get(sample_id, [])
             if not list_feature_dict:
@@ -171,6 +176,7 @@ def generate_bokeh_plot_all_samples(conn, variable, contig_name, xstart=None, xe
             subplot_feature = make_bokeh_subplot(list_feature_dict, subplot_size, shared_xrange, sample_title=sample_name, show_tooltips=True)
             if subplot_feature is not None:
                 subplots.append(subplot_feature)
+        print(f"[timing]   make_bokeh_subplot x{len(subplots)}: {time.perf_counter() - t_subplots:.3f}s", flush=True)
     except Exception as e:
         print(f"Error batch-processing variable '{variable}': {e}", flush=True)
 
@@ -190,6 +196,8 @@ def generate_bokeh_plot_all_samples(conn, variable, contig_name, xstart=None, xe
     if not all_plots:
         raise ValueError("No plots to display")
 
+    t_grid = time.perf_counter()
     grid = gridplot([[p] for p in all_plots], merge_tools=True, sizing_mode='stretch_width')
+    print(f"[timing]   gridplot ({len(all_plots)} figures): {time.perf_counter() - t_grid:.3f}s", flush=True)
 
     return grid

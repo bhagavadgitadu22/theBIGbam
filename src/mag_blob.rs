@@ -223,7 +223,7 @@ pub fn build_mag_blobs_for_sample(
             if mag_length == 0 {
                 continue;
             }
-            if feature_name == "coverage" {
+            if feature_name == "primary_reads" {
                 mag_cov_stats.insert(
                     mag_id,
                     compute_mag_coverage_stats(&members_and_blobs, mag_length),

@@ -1,5 +1,6 @@
 import argparse
 import os
+import time
 import duckdb
 import traceback
 
@@ -12,7 +13,7 @@ from bokeh.models.widgets import CheckboxGroup, HelpButton, Button, RadioButtonG
 # Import the plotting function from the repo
 from .plotting_data_per_sample import generate_bokeh_plot_per_sample, generate_bokeh_plot_mag_view
 from .plotting_data_all_samples import generate_bokeh_plot_all_samples
-from ..database.database_getters import get_filtering_metadata, ANNOTATION_EXCLUDED_COLUMNS, is_mag_mode, get_mag_contig_map
+from ..database.database_getters import get_filtering_metadata, resolve_distinct_values, ANNOTATION_EXCLUDED_COLUMNS, is_mag_mode, get_mag_contig_map
 from .searchable_select import SearchableSelect
 
 def build_controls(conn):
@@ -223,7 +224,7 @@ def build_controls(conn):
     }
     return widgets
 
-def create_layout(db_path):
+def create_layout(db_path, enable_timing=False):
     """Create and return the application layout for Panel serve."""
 
     ### Event functions
@@ -749,6 +750,8 @@ def create_layout(db_path):
     ## Apply button function
     def apply_clicked():
         try:
+            if enable_timing:
+                t_apply_start = time.perf_counter()
             contig = widgets['contig_select'].value
             has_samples = widgets['has_samples']
             
@@ -839,6 +842,22 @@ def create_layout(db_path):
                 mag_window = (xend - xstart) if xend is not None else float('inf')
                 plot_genemap = mag_window <= max_genemap_window
 
+                # Sequence / translated-sequence visibility — same threshold logic
+                # as the contig-view path (see below).
+                mag_max_sequence_window = int(max_sequence_window_input.value)
+                mag_plot_sequence = False
+                if sequence_cbg is not None and 0 in sequence_cbg.active:
+                    if mag_window <= mag_max_sequence_window:
+                        mag_plot_sequence = True
+                    else:
+                        print(f"Warning: Sequence will not be plotted for regions larger than {mag_max_sequence_window} bp.", flush=True)
+                mag_plot_translated_sequence = False
+                if translated_sequence_cbg is not None and 0 in translated_sequence_cbg.active:
+                    if mag_window <= mag_max_sequence_window:
+                        mag_plot_translated_sequence = True
+                    else:
+                        print(f"Warning: Translated sequence will not be plotted for regions larger than {mag_max_sequence_window} bp.", flush=True)
+
                 # Collect requested features
                 if is_all:
                     # ALL SAMPLES mode: pick one sample-level variable (same logic as contig-view all-samples)
@@ -878,6 +897,9 @@ def create_layout(db_path):
                     mag_allowed_samples = None
 
                 print(f"[start_bokeh_server] MAG view: mag={active_mag}, is_all={is_all}, sample={sample}, features={mag_requested_features}", flush=True)
+                if enable_timing:
+                    t_params = time.perf_counter()
+                    print(f"[timing] Parameter parsing: {t_params - t_apply_start:.3f}s", flush=True)
 
                 # Preserve x-range when re-plotting same MAG/sample/range
                 mag_preserve_xrange = (
@@ -892,21 +914,29 @@ def create_layout(db_path):
                     mag_prev_xstart = current_plot_state['shared_xrange'].start
                     mag_prev_xend = current_plot_state['shared_xrange'].end
 
+                if enable_timing:
+                    t_plot = time.perf_counter()
                 grid = generate_bokeh_plot_mag_view(
                     conn, mag_requested_features, active_mag, sample,
                     xstart=xstart, xend=xend,
                     genbank_path=genbank_path if plot_genemap else None,
                     feature_types=selected_feature_types, plot_isoforms=plot_isoforms,
+                    plot_sequence=mag_plot_sequence,
+                    plot_translated_sequence=mag_plot_translated_sequence,
                     same_y_scale=same_y_scale, subplot_size=subplot_size,
                     genemap_size=genemap_size, sequence_size=sequence_size,
+                    translated_sequence_size=translated_sequence_size,
                     max_base_resolution=max_binning,
                     max_genemap_window=max_genemap_window,
+                    max_sequence_window=mag_max_sequence_window,
                     min_relative_value=min_coverage_freq,
                     feature_label_key=feature_label_key,
                     custom_colors=custom_colors if custom_colors else None,
                     is_all=is_all,
                     allowed_samples=mag_allowed_samples,
                 )
+                if enable_timing:
+                    print(f"[timing] generate_bokeh_plot_mag_view (DB queries + plotting): {time.perf_counter() - t_plot:.3f}s", flush=True)
 
                 new_xrange = _get_shared_xrange(grid)
                 if mag_preserve_xrange and new_xrange is not None:
@@ -938,6 +968,8 @@ def create_layout(db_path):
                 download_data_button.visible = True
                 command_hint_pane.visible = False
                 main_placeholder.objects = [pn.Column(toolbar_row, command_hint_pane, grid, sizing_mode="stretch_both")]
+                if enable_timing:
+                    print(f"[timing] Total APPLY (MAG view): {time.perf_counter() - t_apply_start:.3f}s", flush=True)
                 return
             # --- end of MAG view early path ---
 
@@ -1002,6 +1034,10 @@ def create_layout(db_path):
                 prev_xstart = current_plot_state['shared_xrange'].start
                 prev_xend = current_plot_state['shared_xrange'].end
 
+            if enable_timing:
+                t_params = time.perf_counter()
+                print(f"[timing] Parameter parsing: {t_params - t_apply_start:.3f}s", flush=True)
+
             grid = None
             if is_all:
                 # All-samples view: require exactly one variable selected from non-Genome modules
@@ -1041,6 +1077,8 @@ def create_layout(db_path):
                 if not plot_genemap and genome_features:
                     # Remove "Gene map" from genome_features if present
                     genome_features = [f for f in genome_features if f != "Gene map"]
+                if enable_timing:
+                    t_plot = time.perf_counter()
                 grid = generate_bokeh_plot_all_samples(
                     conn, selected_var, contig, xstart=xstart, xend=xend, genbank_path=genbank_path,
                     genome_features=genome_features if genome_features else None, allowed_samples=set(filtered_samples),
@@ -1051,6 +1089,8 @@ def create_layout(db_path):
                     feature_label_key=feature_label_key,
                     custom_colors=custom_colors if custom_colors else None
                 )
+                if enable_timing:
+                    print(f"[timing] generate_bokeh_plot_all_samples (DB queries + plotting): {time.perf_counter() - t_plot:.3f}s", flush=True)
             else:
                 # One-sample view: collect possibly-many requested features and call per-sample plot
                 requested_features = []
@@ -1071,6 +1111,8 @@ def create_layout(db_path):
                     requested_features = [f for f in requested_features if f != "Gene map"]
                 # MAG view is handled by the early path above; MAG track is never shown in Contig view.
                 active_mag = None
+                if enable_timing:
+                    t_plot = time.perf_counter()
                 grid = generate_bokeh_plot_per_sample(
                     conn, requested_features, contig, sample, xstart=xstart, xend=xend, genbank_path=genbank_path,
                     feature_types=selected_feature_types, plot_isoforms=plot_isoforms,
@@ -1084,6 +1126,8 @@ def create_layout(db_path):
                     custom_colors=custom_colors if custom_colors else None,
                     mag_name=active_mag
                 )
+                if enable_timing:
+                    print(f"[timing] generate_bokeh_plot_per_sample (DB queries + plotting): {time.perf_counter() - t_plot:.3f}s", flush=True)
 
             # Restore preserved x-range and update state
             new_xrange = _get_shared_xrange(grid)
@@ -1130,6 +1174,9 @@ def create_layout(db_path):
 
             # Display the plot
             main_placeholder.objects = [pn.Column(toolbar_row, command_hint_pane, grid, sizing_mode="stretch_both")]
+            if enable_timing:
+                view_name = "all samples" if is_all else "one sample"
+                print(f"[timing] Total APPLY ({view_name}): {time.perf_counter() - t_apply_start:.3f}s", flush=True)
 
         except Exception as e:
             peruse_button.visible = False
@@ -1144,6 +1191,8 @@ def create_layout(db_path):
     def peruse_clicked():
         """Generate and open summary tables in a new browser window."""
         from .perusing_data import generate_and_open_peruse_html
+        if enable_timing:
+            t_peruse = time.perf_counter()
 
         is_mag_view = widgets['has_mags'] and widgets['view_radio'].active == 0
 
@@ -1156,6 +1205,8 @@ def create_layout(db_path):
             sample = widgets['sample_select'].value
             sample_names = [sample] if sample else []
             generate_and_open_peruse_html(conn, None, sample_names, mag_name=mag, is_mag_view=True)
+            if enable_timing:
+                print(f"[timing] SHOW SUMMARY (MAG view): {time.perf_counter() - t_peruse:.3f}s", flush=True)
             return
 
         # Contig view
@@ -1196,6 +1247,8 @@ def create_layout(db_path):
 
         # Generate and open HTML in new window
         generate_and_open_peruse_html(conn, contig, sample_names, mag_name=parent_mag, is_mag_view=False)
+        if enable_timing:
+            print(f"[timing] SHOW SUMMARY (contig view, {len(sample_names)} samples): {time.perf_counter() - t_peruse:.3f}s", flush=True)
 
     ## Download functionality using Panel FileDownload widgets
     import io
@@ -1225,6 +1278,8 @@ def create_layout(db_path):
     def make_contig_metrics_download_callback():
         """Create callback for contig metrics download (contig-level metrics across samples)."""
         from .downloading_data import download_contig_metrics_csv
+        if enable_timing:
+            t_dl = time.perf_counter()
 
         contig = widgets['contig_select'].value
         if not contig:
@@ -1260,6 +1315,8 @@ def create_layout(db_path):
                 download_widgets['contig_metrics'].filename = f"{safe_contig}_in_{safe_sample}_contig_metrics.csv"
 
         csv_content = download_contig_metrics_csv(db_path, contig, sample_names)
+        if enable_timing:
+            print(f"[timing] DOWNLOAD CONTIG METRICS ({len(sample_names)} samples): {time.perf_counter() - t_dl:.3f}s", flush=True)
         if csv_content:
             return io.StringIO(csv_content)
         return io.StringIO("")
@@ -1267,6 +1324,8 @@ def create_layout(db_path):
     def make_mag_metrics_download_callback():
         """Create callback for MAG metrics download (MAG-level metrics from Explicit_*_per_MAG views)."""
         from .downloading_data import download_mag_metrics_csv
+        if enable_timing:
+            t_dl = time.perf_counter()
 
         is_mag_view = widgets['has_mags'] and widgets['view_radio'].active == 0
         if is_mag_view:
@@ -1283,6 +1342,8 @@ def create_layout(db_path):
         sample_names = [sample] if sample else []
 
         csv_content = download_mag_metrics_csv(db_path, mag, sample_names)
+        if enable_timing:
+            print(f"[timing] DOWNLOAD MAG METRICS: {time.perf_counter() - t_dl:.3f}s", flush=True)
         if csv_content:
             safe_mag = "".join(c if c.isalnum() or c in "-_" else "_" for c in mag)
             if download_widgets['mag_metrics']:
@@ -1296,8 +1357,12 @@ def create_layout(db_path):
 
     ### Creating all DOM elements
     # Open DuckDB database connection to build widgets depending on data
+    if enable_timing:
+        t_init = time.perf_counter()
     conn = duckdb.connect(db_path, read_only=True)
     widgets = build_controls(conn)
+    if enable_timing:
+        print(f"[timing] build_controls (initial DB queries): {time.perf_counter() - t_init:.3f}s", flush=True)
 
     # Build subplot → variable_name(s) mapping for inspect command generation
     _subplot_to_varnames = {}
@@ -1306,6 +1371,10 @@ def create_layout(db_path):
     for _vname, _subplot in _cur.fetchall():
         _subplot_to_varnames.setdefault(_subplot, []).append(_vname)
     _cur.close()
+
+    if enable_timing:
+        t_ui = time.perf_counter()
+        t_section = time.perf_counter()
 
     # Load the CSS and logo
     static_path = os.path.join(os.path.dirname(__file__), "..", "static")
@@ -1364,7 +1433,11 @@ def create_layout(db_path):
     filtering_header = row(filtering_toggle_btn, filtering_title, _filter_help_btn, sizing_mode="stretch_width", align="center")
 
     # Cache filtering metadata once when document loads
+    if enable_timing:
+        t_fmeta = time.perf_counter()
     filtering_metadata = get_filtering_metadata(db_path)
+    if enable_timing:
+        print(f"[timing]   get_filtering_metadata: {time.perf_counter() - t_fmeta:.3f}s", flush=True)
 
     # Get Sample table columns for ordering dropdown (exclude ID and name columns)
     sample_order_columns = ["Sample name"]  # Default option
@@ -1443,7 +1516,7 @@ def create_layout(db_path):
 
         # Create initial input widget based on column type
         if initial_is_text:
-            distinct_values = initial_col_info.get('distinct_values', [])
+            distinct_values = resolve_distinct_values(db_path, filtering_metadata, initial_category, initial_column)
             initial_input = SearchableSelect(
                 value="", options=distinct_values,
                 placeholder="Search...", width=90
@@ -1490,7 +1563,7 @@ def create_layout(db_path):
                     current_input_ref['is_panel'] = False
                     new_input.on_change('value', lambda attr, old, new: refresh_on_filter_change())
                 else:
-                    distinct_values = col_info.get('distinct_values', [])
+                    distinct_values = resolve_distinct_values(db_path, filtering_metadata, category, col_name)
                     new_input = SearchableSelect(
                         value="", options=distinct_values,
                         placeholder="Search...", width=90
@@ -1539,7 +1612,7 @@ def create_layout(db_path):
                     current_input_ref['is_panel'] = False
                     new_input.on_change('value', lambda attr, old, new: refresh_on_filter_change())
                 else:
-                    distinct_values = col_info.get('distinct_values', [])
+                    distinct_values = resolve_distinct_values(db_path, filtering_metadata, category, col_name)
                     new_input = SearchableSelect(
                         value="", options=distinct_values,
                         placeholder="Search...", width=90
@@ -1724,6 +1797,9 @@ def create_layout(db_path):
     # Add toggle callback for collapsible Filtering section
     filtering_toggle_btn.on_click(make_toggle_callback(filtering_toggle_btn, filtering_content))
 
+    if enable_timing:
+        print(f"[timing]   Filtering section: {time.perf_counter() - t_section:.3f}s", flush=True)
+        t_section = time.perf_counter()
 
 
     ## Build Sample section
@@ -1892,6 +1968,10 @@ def create_layout(db_path):
         widgets['view_radio'].on_change('active', on_view_change)
 
 
+    if enable_timing:
+        print(f"[timing]   Sample/Contig/MAG sections: {time.perf_counter() - t_section:.3f}s", flush=True)
+        t_section = time.perf_counter()
+
     ## Build Variables section - TWO SEPARATE SECTIONS for each view
     variables_title_one = Div(text="<span style='font-size: 1.2em;'><b>Variables</b></span>")
     variables_title_all = Div(text="<span style='font-size: 1.2em;'><b>Variables</b></span>")
@@ -2049,7 +2129,8 @@ def create_layout(db_path):
     )
     custom_color_column = pn.Column(
         add_color_btn, sizing_mode="stretch_width",
-        styles={'border-left': '3px solid #00b17c', 'padding-left': '10px', 'margin-left': '5px'}
+        styles={'border-left': '3px solid #00b17c', 'padding-left': '10px', 'margin-left': '5px',
+                'max-height': '300px', 'overflow-y': 'auto'}
     )
 
     TEXT_OPS = ["=", "!=", "has", "has not", "Use random colors"]
@@ -2090,7 +2171,7 @@ def create_layout(db_path):
         initial_key = color_qualifier_options[0] if color_qualifier_options else ""
         initial_info = annotation_meta.get(initial_key, {})
         initial_is_text = initial_info.get('type') == 'text'
-        initial_distinct = initial_info.get('distinct_values', [])
+        initial_distinct = resolve_distinct_values(db_path, filtering_metadata, 'Annotations', initial_key) if initial_is_text else []
 
         qualifier_select = Select(
             options=[(k, k.replace("_", " ").replace("percentage", "(%)")) for k in color_qualifier_options],
@@ -2156,7 +2237,7 @@ def create_layout(db_path):
             """Rebuild operator options and the value widget for the new column type."""
             col_info = annotation_meta.get(col_name, {})
             is_text = col_info.get('type') == 'text'
-            distinct = col_info.get('distinct_values', [])
+            distinct = resolve_distinct_values(db_path, filtering_metadata, 'Annotations', col_name) if is_text else []
 
             # Swap operator options for the new type; preserve current operator
             # if still valid, otherwise default back to "=".
@@ -2193,7 +2274,8 @@ def create_layout(db_path):
                     new_input, is_panel = _build_color_value_widget(True, new, [])
                     _swap_value_widget(new_input, is_panel)
                 elif not want_text_input and not isinstance(cur, SearchableSelect):
-                    distinct = col_info.get('distinct_values', [])
+                    col_name_val = qualifier_select.value
+                    distinct = resolve_distinct_values(db_path, filtering_metadata, 'Annotations', col_name_val)
                     new_input, is_panel = _build_color_value_widget(True, new, distinct)
                     _swap_value_widget(new_input, is_panel)
 
@@ -2236,7 +2318,7 @@ def create_layout(db_path):
                     if rule['operator'] != "Use random colors":
                         widget = row_data['input_ref']['widget']
                         if isinstance(widget, SearchableSelect):
-                            # Seed values (e.g. "dna, rna and nucleotide metabolism")
+                            # Seed values (e.g. "DNA, RNA and nucleotide metabolism")
                             # may not be in the current distinct list; append so
                             # the Select can display them.
                             opts = list(widget.options)
@@ -2555,6 +2637,10 @@ def create_layout(db_path):
 
         toggles.on_change("active", make_variable_callback(mc, toggles, lock))
 
+    if enable_timing:
+        print(f"[timing]   Variables + Genome/Annotations sections: {time.perf_counter() - t_section:.3f}s", flush=True)
+        t_section = time.perf_counter()
+
     ## Plotting parameters section
     separator_plotting_params = Div(text="", height=2, sizing_mode="stretch_width",
         styles={'background-color': '#333', 'margin-top': '10px', 'margin-bottom': '10px'})
@@ -2870,7 +2956,10 @@ def create_layout(db_path):
                              buttons_row]
         placeholder_text = "<i>No plot yet. Select one contig and click Apply to view the genome annotation.</i>"
 
-    controls_column = pn.Column(*controls_children, sizing_mode="stretch_height", css_classes=["left-col"])
+    if enable_timing:
+        print(f"[timing]   Plotting params + layout assembly: {time.perf_counter() - t_section:.3f}s", flush=True)
+
+    controls_column = pn.Column(*controls_children, sizing_mode="fixed", width=400, css_classes=["left-col"])
 
     peruse_button.visible = False  # Initially hidden
     main_placeholder = pn.Column(
@@ -2883,11 +2972,16 @@ def create_layout(db_path):
     layout = pn.Row(controls_column, main_placeholder, sizing_mode="stretch_both", css_classes=["main-layout"])
     layout.stylesheets = [stylesheet]
 
+    if enable_timing:
+        print(f"[timing] UI construction (widgets + layout): {time.perf_counter() - t_ui:.3f}s", flush=True)
+        print(f"[timing] Total initial load: {time.perf_counter() - t_init:.3f}s", flush=True)
+
     return layout
 
 def add_serve_args(parser):
     parser.add_argument("--db", required=True, help="Path to DuckDB database")
     parser.add_argument("--port", type=int, default=5006, help="Port to serve Panel app")
+    parser.add_argument('--time', action='store_true', default=False, help=argparse.SUPPRESS)
 
 def run_serve(args):
     # Print database metadata if available
@@ -2914,8 +3008,9 @@ def run_serve(args):
         _conn.close()
 
     # Create a factory function that Panel will call for each session
+    enable_timing = getattr(args, 'time', False)
     def create_app():
-        return create_layout(args.db)
+        return create_layout(args.db, enable_timing=enable_timing)
 
     static_path = os.path.join(os.path.dirname(__file__), "..", "static")
     pn.serve(

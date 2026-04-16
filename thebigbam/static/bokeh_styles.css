@@ -9,6 +9,7 @@ html, body {
 
 .main-right {
   background-color: white;
+  margin-left: 400px;
 }
 
 .left-col {
@@ -16,9 +17,11 @@ html, body {
   padding: 10px;
   max-width: 400px;
   overflow-y: auto;
-  position: sticky;
+  position: fixed;
   top: 0;
+  left: 0;
   height: 100vh;
+  z-index: 10;
 }
 
 .bk-btn-group .bk-btn {

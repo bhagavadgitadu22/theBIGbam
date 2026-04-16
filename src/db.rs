@@ -67,7 +67,7 @@ impl DbWriter {
         create_variable_tables(&conn)?;
 
         // Insert contigs
-        insert_contigs(&conn, contigs)?;
+        insert_contigs(&conn, contigs, is_mag_mode)?;
 
         // Insert contig sequences (from GenBank or FASTA)
         insert_contig_sequences(&conn, contigs)?;
@@ -2579,23 +2579,38 @@ fn create_core_tables(conn: &Connection, has_bam: bool, is_mag_mode: bool) -> Re
 }
 
 /// Insert contigs into the database using Appender for bulk loading.
-fn insert_contigs(conn: &Connection, contigs: &[ContigInfo]) -> Result<()> {
+fn insert_contigs(conn: &Connection, contigs: &[ContigInfo], is_mag_mode: bool) -> Result<()> {
     let mut appender = conn.appender("Contig")
         .context("Failed to create Contig appender")?;
 
     for (i, contig) in contigs.iter().enumerate() {
         let null_int: Option<i32> = None;
-        appender.append_row(params![
-            (i + 1) as i64,
-            &contig.name,
-            contig.length as i64,
-            null_int,  // Duplication_percentage - set later from autoblast
-            null_int,  // GC_mean - set later from GC content computation (stored as int 0-100)
-            null_int,  // GC_sd - set later from GC content computation (stored as int, ×100)
-            null_int,  // GC_skew_amplitude - set later from GC skew computation (stored as int, ×100)
-            null_int,  // Positive_GC_skew_windows_percentage - set later from GC skew computation (stored as int 0-100)
-        ])
-        .with_context(|| format!("Failed to append contig: {}", contig.name))?;
+        if is_mag_mode {
+            appender.append_row(params![
+                (i + 1) as i64,
+                &contig.name,
+                contig.length as i64,
+                null_int,  // Duplication_percentage - set later from autoblast
+                null_int,  // GC_mean - set later from GC content computation (stored as int 0-100)
+                null_int,  // GC_sd - set later from GC content computation (stored as int, ×100)
+                null_int,  // GC_skew_amplitude - set later from GC skew computation (stored as int, ×100)
+                null_int,  // Positive_GC_skew_windows_percentage - set later from GC skew computation (stored as int 0-100)
+            ])
+            .with_context(|| format!("Failed to append contig: {}", contig.name))?;
+        } else {
+            appender.append_row(params![
+                (i + 1) as i64,
+                &contig.name,
+                contig.length as i64,
+                null_int,  // Duplication_percentage - set later from autoblast
+                null_int,  // GC_mean - set later from GC content computation (stored as int 0-100)
+                null_int,  // GC_sd - set later from GC content computation (stored as int, ×100)
+                null_int,  // GC_skew_amplitude - set later from GC skew computation (stored as int, ×100)
+                null_int,  // Positive_GC_skew_windows_percentage - set later from GC skew computation (stored as int 0-100)
+                null_int,  // Number_of_samples - set later
+            ])
+            .with_context(|| format!("Failed to append contig: {}", contig.name))?;
+        }
     }
 
     appender.flush().context("Failed to flush Contig appender")?;
@@ -2772,7 +2787,7 @@ fn insert_annotations(conn: &Connection, annotations: &[FeatureAnnotation]) -> R
         "other",
         "tail",
         "transcription regulation",
-        "dna, rna and nucleotide metabolism",
+        "DNA, RNA and nucleotide metabolism",
         "lysis",
         "moron, auxiliary metabolic gene and host takeover",
         "integration and excision",
@@ -3047,7 +3062,7 @@ fn insert_annotations(conn: &Connection, annotations: &[FeatureAnnotation]) -> R
             ("function", "=", "other", "#4deeea"),
             ("function", "=", "tail", "#74ee15"),
             ("function", "=", "transcription regulation", "#ffe700"),
-            ("function", "=", "dna, rna and nucleotide metabolism", "#f000ff"),
+            ("function", "=", "DNA, RNA and nucleotide metabolism", "#f000ff"),
             ("function", "=", "lysis", "#001eff"),
             ("function", "=", "moron, auxiliary metabolic gene and host takeover", "#8900ff"),
             ("function", "=", "integration and excision", "#E0B0FF"),

@@ -216,14 +216,20 @@ def get_filtering_metadata(db_path: str) -> dict:
     """
     Get column metadata for Filtering2 UI.
 
-    Returns cached metadata for Filtering2.
+    Returns metadata structure with lazy-loaded distinct values.
+    On startup, only column names and types are collected (fast DESCRIBE queries).
+    Distinct values for text columns are fetched on-demand via resolve_distinct_values().
+
     Structure: {
         category: {
             'source': 'table_or_view_name',
             'columns': {
                 col_name: {
                     'type': 'text' | 'numeric',
-                    'distinct_values': [...] | None  # Only for text columns
+                    'distinct_values': None  # Populated lazily
+                    'is_bool': True  # Only for boolean columns
+                    'source': ...  # For qualifier-based columns
+                    'qualifier_key': ...  # For qualifier-based columns
                 }
             }
         }
@@ -297,70 +303,27 @@ def get_filtering_metadata(db_path: str) -> dict:
         source = config['source']
         exclude = set(config['exclude'])
 
-        # Check if table/view exists and get column info
+        # Check if table/view exists and get column info (DESCRIBE is instant)
         try:
             cols_info = conn.execute(f"DESCRIBE {source}").fetchall()
         except duckdb.Error:
             continue
 
-        # Classify columns by type before querying
-        col_meta = []  # (col_name, is_bool, is_text)
+        # Classify columns by type — no data queries needed
+        columns = {}
         for col_name, col_type, *_ in cols_info:
             if col_name in exclude:
                 continue
             is_bool = col_type.upper() in bool_types
             is_text = is_bool or any(t in col_type.upper() for t in text_types)
-            col_meta.append((col_name, is_bool, is_text))
 
-        if not col_meta:
-            continue
-
-        # Materialize the view ONCE into a temp table to avoid re-executing
-        # expensive JOINs for every column query
-        tmp = f"_tmp_{source}"
-        try:
-            conn.execute(f"DROP TABLE IF EXISTS {tmp}")
-            conn.execute(f"CREATE TEMP TABLE {tmp} AS SELECT * FROM {source}")
-        except duckdb.Error:
-            continue
-
-        # Build a single query to check which numeric columns have any non-NULL values
-        numeric_cols = [name for name, is_bool, is_text in col_meta if not is_text]
-        has_values_map = {}
-        if numeric_cols:
-            # COUNT(col) > 0 tells us if any non-NULL value exists, all in one scan
-            count_exprs = ", ".join(f'COUNT("{c}") AS "{c}"' for c in numeric_cols)
-            try:
-                row = conn.execute(f"SELECT {count_exprs} FROM {tmp}").fetchone()
-                for i, c in enumerate(numeric_cols):
-                    has_values_map[c] = row[i] > 0
-            except duckdb.Error:
-                pass
-
-        columns = {}
-        for col_name, is_bool, is_text in col_meta:
             col_data = {'type': 'text' if is_text else 'numeric'}
-
             if is_bool:
                 col_data['distinct_values'] = ['yes', 'no']
                 col_data['is_bool'] = True
-            elif is_text:
-                try:
-                    distinct = conn.execute(
-                        f'SELECT DISTINCT "{col_name}" FROM {tmp} WHERE "{col_name}" IS NOT NULL ORDER BY "{col_name}"'
-                    ).fetchall()
-                    col_data['distinct_values'] = [row[0] for row in distinct]
-                except duckdb.Error:
-                    col_data['distinct_values'] = []
-                if not col_data['distinct_values']:
-                    continue
             else:
-                if not has_values_map.get(col_name, False):
-                    continue
-
+                col_data['distinct_values'] = None  # Loaded lazily
             columns[col_name] = col_data
-
-        conn.execute(f"DROP TABLE IF EXISTS {tmp}")
 
         if columns:
             result[category] = {
@@ -368,7 +331,7 @@ def get_filtering_metadata(db_path: str) -> dict:
                 'columns': columns
             }
 
-    # Add Contig_qualifier keys (contig-level source qualifiers from GenBank) to Contig category
+    # Add Contig_qualifier keys (cheap: just get key names, not values)
     if 'Contig' in result:
         try:
             cq_keys = [
@@ -380,82 +343,34 @@ def get_filtering_metadata(db_path: str) -> dict:
             cq_keys = []
 
         for key in cq_keys:
-            # Avoid shadowing an existing Contig table column
             if key in result['Contig']['columns']:
-                continue
-            try:
-                distinct = conn.execute(
-                    'SELECT DISTINCT "Value" FROM Contig_qualifier WHERE "Key" = ? AND "Value" IS NOT NULL ORDER BY "Value"',
-                    [key]
-                ).fetchall()
-                distinct_values = [row[0] for row in distinct]
-            except duckdb.Error:
-                distinct_values = []
-            if not distinct_values:
                 continue
             result['Contig']['columns'][key] = {
                 'type': 'text',
                 'source': 'Contig_qualifier',
                 'qualifier_key': key,
-                'distinct_values': distinct_values,
+                'distinct_values': None,  # Loaded lazily
             }
 
-    # Build a new "Annotations" category from Contig_annotation view + Annotation_qualifier keys
+    # Build Annotations category — schema only (DESCRIBE + key listing)
     annotations_columns = {}
 
-    # 1. Columns from Contig_annotation view (pivoted qualifiers + structural fields)
-    # Materialize once to avoid repeated view evaluation
     try:
         ann_cols_info = conn.execute("DESCRIBE Contig_annotation").fetchall()
-        conn.execute("DROP TABLE IF EXISTS _tmp_Contig_annotation")
-        conn.execute("CREATE TEMP TABLE _tmp_Contig_annotation AS SELECT * FROM Contig_annotation")
     except duckdb.Error:
         ann_cols_info = []
 
-    ann_col_meta = []
     for col_name, col_type, *_ in ann_cols_info:
         if col_name in ANNOTATION_EXCLUDED_COLUMNS:
             continue
         is_text = any(t in col_type.upper() for t in text_types)
-        ann_col_meta.append((col_name, is_text))
-
-    # Check numeric columns for non-NULL values in one query
-    ann_numeric_cols = [name for name, is_text in ann_col_meta if not is_text]
-    ann_has_values = {}
-    if ann_numeric_cols:
-        count_exprs = ", ".join(f'COUNT("{c}") AS "{c}"' for c in ann_numeric_cols)
-        try:
-            row = conn.execute(f"SELECT {count_exprs} FROM _tmp_Contig_annotation").fetchone()
-            for i, c in enumerate(ann_numeric_cols):
-                ann_has_values[c] = row[i] > 0
-        except duckdb.Error:
-            pass
-
-    for col_name, is_text in ann_col_meta:
-        col_data = {
+        annotations_columns[col_name] = {
             'type': 'text' if is_text else 'numeric',
             'source': 'Contig_annotation',
+            'distinct_values': None,  # Loaded lazily
         }
 
-        if not is_text and not ann_has_values.get(col_name, False):
-            continue
-
-        try:
-            distinct = conn.execute(
-                f'SELECT DISTINCT "{col_name}" FROM _tmp_Contig_annotation '
-                f'WHERE "{col_name}" IS NOT NULL ORDER BY "{col_name}"'
-            ).fetchall()
-            col_data['distinct_values'] = [row[0] for row in distinct]
-        except duckdb.Error:
-            col_data['distinct_values'] = []
-        if not col_data['distinct_values']:
-            continue
-
-        annotations_columns[col_name] = col_data
-
-    conn.execute("DROP TABLE IF EXISTS _tmp_Contig_annotation")
-
-    # 2. Distinct keys from Annotation_qualifier (exclude keys already pivoted in the view)
+    # Annotation_qualifier keys (just key names)
     pivoted_lower = {c.lower() for c in annotations_columns.keys()}
     try:
         aq_keys = [
@@ -469,21 +384,11 @@ def get_filtering_metadata(db_path: str) -> dict:
     for key in aq_keys:
         if key.lower() in pivoted_lower or key in annotations_columns:
             continue
-        try:
-            distinct = conn.execute(
-                'SELECT DISTINCT "Value" FROM Annotation_qualifier WHERE "Key" = ? AND "Value" IS NOT NULL ORDER BY "Value"',
-                [key]
-            ).fetchall()
-            distinct_values = [row[0] for row in distinct]
-        except duckdb.Error:
-            distinct_values = []
-        if not distinct_values:
-            continue
         annotations_columns[key] = {
             'type': 'text',
             'source': 'Annotation_qualifier',
             'qualifier_key': key,
-            'distinct_values': distinct_values,
+            'distinct_values': None,  # Loaded lazily
         }
 
     if annotations_columns:
@@ -496,7 +401,6 @@ def get_filtering_metadata(db_path: str) -> dict:
                     'source': 'Contig_annotation',
                     'columns': annotations_columns,
                 }
-        # If Contig wasn't in result, append at end
         if 'Annotations' not in new_result:
             new_result['Annotations'] = {
                 'source': 'Contig_annotation',
@@ -506,6 +410,66 @@ def get_filtering_metadata(db_path: str) -> dict:
 
     conn.close()
     return result
+
+
+def resolve_distinct_values(db_path: str, filtering_metadata: dict,
+                            category: str, col_name: str) -> list:
+    """Fetch and cache distinct values for a text column on demand.
+
+    First call for a given (category, col_name) runs the query; subsequent
+    calls return the cached list.  Returns [] for numeric columns or on error.
+    """
+    cat_meta = filtering_metadata.get(category, {})
+    col_info = cat_meta.get('columns', {}).get(col_name, {})
+    if not col_info:
+        return []
+
+    # Already resolved
+    if col_info.get('distinct_values') is not None:
+        return col_info['distinct_values']
+
+    # Numeric columns don't have distinct values
+    if col_info.get('type') != 'text':
+        return []
+
+    conn = duckdb.connect(db_path, read_only=True)
+    distinct_values = []
+
+    try:
+        source_override = col_info.get('source')
+        qualifier_key = col_info.get('qualifier_key')
+
+        if qualifier_key and source_override == 'Contig_qualifier':
+            distinct = conn.execute(
+                'SELECT DISTINCT "Value" FROM Contig_qualifier '
+                'WHERE "Key" = ? AND "Value" IS NOT NULL ORDER BY "Value"',
+                [qualifier_key]
+            ).fetchall()
+            distinct_values = [row[0] for row in distinct]
+        elif qualifier_key and source_override == 'Annotation_qualifier':
+            distinct = conn.execute(
+                'SELECT DISTINCT "Value" FROM Annotation_qualifier '
+                'WHERE "Key" = ? AND "Value" IS NOT NULL ORDER BY "Value"',
+                [qualifier_key]
+            ).fetchall()
+            distinct_values = [row[0] for row in distinct]
+        else:
+            # Regular column from a table or view
+            source = source_override or cat_meta.get('source', '')
+            if source:
+                distinct = conn.execute(
+                    f'SELECT DISTINCT "{col_name}" FROM {source} '
+                    f'WHERE "{col_name}" IS NOT NULL ORDER BY "{col_name}"'
+                ).fetchall()
+                distinct_values = [row[0] for row in distinct]
+    except duckdb.Error:
+        distinct_values = []
+    finally:
+        conn.close()
+
+    # Cache result so we don't query again
+    col_info['distinct_values'] = distinct_values
+    return distinct_values
 
 
 def list_variables(db_path, detailed=False):

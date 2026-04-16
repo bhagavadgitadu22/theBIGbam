@@ -39,7 +39,7 @@ class SearchableSelect(JSComponent):
 
         const ts = new TomSelect(select, {
             create: false,
-            maxOptions: null,
+            maxOptions: 100,
             placeholder: model.placeholder,
             options: allOptions,
             items: model.value ? [model.value] : [],

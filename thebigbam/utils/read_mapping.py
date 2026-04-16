@@ -215,19 +215,21 @@ def map_with_mapper(threads: int, assembly_file: Path, mapper: str, read1: Optio
 
         sorted_bam = Path(tempfile.mkstemp(prefix=output_file.stem + "_sorted_", suffix=".bam")[1])
 
-        # Build optional per-read quality filter expression for samtools view -e
-        _exprs = []
+        # Build optional per-read quality filter expressions for samtools view -e
+        _identity_expr = ""
+        _aligned_expr = ""
         if min_read_percent_identity > 0.0:
-            _exprs.append(f"(qlen-[NM])*100/qlen>={min_read_percent_identity}")
+            _identity_expr = f"(qlen-[NM])*100/qlen>={min_read_percent_identity}"
         if min_read_aligned_percent > 0.0:
-            _exprs.append(f"(qlen-sclen)*100/qlen>={min_read_aligned_percent}")
+            _aligned_expr = f"(qlen-sclen)*100/qlen>={min_read_aligned_percent}"
+        _combined_expr = " && ".join(e for e in [_identity_expr, _aligned_expr] if e)
 
-        # Pipe: mapper | samtools view -bS -F 4 [-e EXPR] | samtools sort -o sorted_bam
+        # Pipe: mapper | samtools view -bS -F 4 | samtools sort -o sorted_bam
+        # Filtering is applied as a separate step so we can report how many reads
+        # were excluded by each criterion.
         view_cmd = ["samtools", "view", "-@", str(threads), "-bS", "-"]
         if not keep_unmapped:
             view_cmd[-1:-1] = ["-F", "4"]
-        if _exprs:
-            view_cmd[-1:-1] = ["-e", " && ".join(_exprs)]
         sort_cmd = ["samtools", "sort", "-@", str(threads), "-o", str(sorted_bam), "-"]
         print("COMMAND_MAP:", " ".join(mapper_cmd), flush=True)
         print("COMMAND_VIEW:", " ".join(view_cmd), flush=True)
@@ -239,6 +241,35 @@ def map_with_mapper(threads: int, assembly_file: Path, mapper: str, read1: Optio
         p1.stdout.close()
         subprocess.run(sort_cmd, stdin=p2.stdout, check=True)
         p2.stdout.close()
+
+        # Apply per-read quality filters (if any) and report filtering stats
+        if _combined_expr:
+            # Count total reads before filtering
+            total_before = int(subprocess.run(
+                ["samtools", "view", "-@", str(threads), "-c", str(sorted_bam)],
+                capture_output=True, text=True, check=True,
+            ).stdout.strip())
+
+            # Apply combined filter
+            filtered_bam = Path(tempfile.mkstemp(prefix=output_file.stem + "_filtered_", suffix=".bam")[1])
+            filter_cmd = ["samtools", "view", "-@", str(threads), "-b", "-e", _combined_expr, "-o", str(filtered_bam), str(sorted_bam)]
+            print("COMMAND_FILTER:", " ".join(filter_cmd), flush=True)
+            subprocess.run(filter_cmd, check=True)
+
+            total_after = int(subprocess.run(
+                ["samtools", "view", "-@", str(threads), "-c", str(filtered_bam)],
+                capture_output=True, text=True, check=True,
+            ).stdout.strip())
+            excluded_total = total_before - total_after
+            filters_used = []
+            if _identity_expr:
+                filters_used.append(f"--min-read-percent-identity {min_read_percent_identity}%")
+            if _aligned_expr:
+                filters_used.append(f"--min-read-aligned-percent {min_read_aligned_percent}%")
+            print(f"Read filtering ({' + '.join(filters_used)}): {excluded_total}/{total_before} reads excluded ({total_after} remaining)", flush=True)
+
+            # Replace sorted_bam with filtered result
+            shutil.move(str(filtered_bam), str(sorted_bam))
 
         # Add MD tags and write final BAM (suppress warnings about secondary/supplementary alignments)
         with output_file.open("wb") as outfh:
