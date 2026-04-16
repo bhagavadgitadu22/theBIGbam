@@ -7,7 +7,7 @@ import csv
 import duckdb
 
 from thebigbam.database.database_getters import update_database_metadata, is_mag_mode
-from thebigbam.utils.add_contig_metadata import _infer_column_type, _convert_value
+from thebigbam.utils.metadata_helpers import infer_column_type as _infer_column_type, convert_value as _convert_value
 
 
 def add_add_mag_metadata_args(parser):

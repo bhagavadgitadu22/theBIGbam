@@ -23,7 +23,7 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use crate::features::translate_codon;
-use crate::gc_content::{GCSkewStats, GCStats};
+use crate::gc_content::{GCSkewStats, GCStats, DEFAULT_GC_CONTENT_WINDOW_SIZE, DEFAULT_GC_SKEW_WINDOW_SIZE};
 use crate::types::{feature_name_to_id, ContigInfo, FeatureAnnotation, PackagingData, PresenceData, VARIABLES};
 // Re-export new metric data structs (defined below in this file)
 
@@ -588,7 +588,9 @@ impl DbWriter {
         Ok(())
     }
 
-    /// Write MAG-scale sample-feature BLOBs (MAG_blob + MAG_blob_chunk).
+    /// Write MAG-scale sample-feature zoom BLOBs to MAG_blob.
+    /// Base-resolution chunks are NOT stored — they are assembled on the fly
+    /// from per-contig chunks at display time.
     pub fn write_mag_blobs(
         &self,
         conn: &Connection,
@@ -600,26 +602,20 @@ impl DbWriter {
 
         let mut appender = conn.appender("MAG_blob")
             .context("Failed to create MAG_blob appender")?;
-        let mut chunk_appender = conn.appender("MAG_blob_chunk")
-            .context("Failed to create MAG_blob_chunk appender")?;
 
         for (feature_name, encoded) in blobs {
             if encoded.zoom.is_empty() { continue; }
             let fid = match feature_name_to_id(feature_name) { Some(v) => v, None => continue };
             appender.append_row(params![mag_id, sample_id, fid as i32, encoded.zoom.as_slice()])?;
-            for (chunk_idx, chunk_data) in encoded.chunks.iter().enumerate() {
-                chunk_appender.append_row(params![
-                    mag_id, sample_id, fid as i32, chunk_idx as i32, chunk_data.as_slice()
-                ])?;
-            }
         }
 
         appender.flush().context("Failed to flush MAG_blob appender")?;
-        chunk_appender.flush().context("Failed to flush MAG_blob_chunk appender")?;
         Ok(())
     }
 
-    /// Write MAG-scale contig-level feature BLOBs (MAG_contig_blob + MAG_contig_blob_chunk).
+    /// Write MAG-scale contig-level feature zoom BLOBs to MAG_contig_blob.
+    /// Base-resolution chunks are NOT stored — they are assembled on the fly
+    /// from per-contig chunks at display time.
     pub fn write_mag_contig_blobs(
         &self,
         conn: &Connection,
@@ -630,22 +626,14 @@ impl DbWriter {
 
         let mut appender = conn.appender("MAG_contig_blob")
             .context("Failed to create MAG_contig_blob appender")?;
-        let mut chunk_appender = conn.appender("MAG_contig_blob_chunk")
-            .context("Failed to create MAG_contig_blob_chunk appender")?;
 
         for (feature_name, encoded) in blobs {
             if encoded.zoom.is_empty() { continue; }
             let fid = match feature_name_to_id(feature_name) { Some(v) => v, None => continue };
             appender.append_row(params![mag_id, fid as i32, encoded.zoom.as_slice()])?;
-            for (chunk_idx, chunk_data) in encoded.chunks.iter().enumerate() {
-                chunk_appender.append_row(params![
-                    mag_id, fid as i32, chunk_idx as i32, chunk_data.as_slice()
-                ])?;
-            }
         }
 
         appender.flush().context("Failed to flush MAG_contig_blob appender")?;
-        chunk_appender.flush().context("Failed to flush MAG_contig_blob_chunk appender")?;
         Ok(())
     }
 
@@ -840,7 +828,7 @@ impl DbWriter {
 
         let gc_content_feature_id = feature_name_to_id("gc_content")
             .ok_or_else(|| anyhow::anyhow!("Missing VARIABLES entry: gc_content"))?;
-        const GC_WINDOW_SIZE: u32 = 500; // Standard GC content window size
+        let gc_window_size = DEFAULT_GC_CONTENT_WINDOW_SIZE as u32;
 
         for data in gc_data {
             if let Some(&contig_id) = self.contig_name_to_id.get(&data.contig_name) {
@@ -852,7 +840,7 @@ impl DbWriter {
                 let values: Vec<i32> = data.gc_values.iter().map(|&v| v as i32).collect();
 
                 // Estimate contig length from number of windows
-                let contig_length = (values.len() as u32) * GC_WINDOW_SIZE;
+                let contig_length = (values.len() as u32) * gc_window_size;
 
                 // Encode as dense BLOB (array index is window number)
                 debug_assert_eq!(crate::types::get_encoding("gc_content"), crate::types::Encoding::Dense);
@@ -860,7 +848,7 @@ impl DbWriter {
                     &values,
                     crate::types::get_value_scale("gc_content"),
                     contig_length,
-                    GC_WINDOW_SIZE,
+                    gc_window_size,
                 );
 
                 appender.append_row(params![
@@ -900,7 +888,7 @@ impl DbWriter {
 
         let gc_skew_feature_id = feature_name_to_id("gc_skew")
             .ok_or_else(|| anyhow::anyhow!("Missing VARIABLES entry: gc_skew"))?;
-        const GC_SKEW_WINDOW_SIZE: u32 = 1000; // Standard GC skew window size
+        let gc_skew_window_size = DEFAULT_GC_SKEW_WINDOW_SIZE as u32;
 
         for data in gc_data {
             if let Some(&contig_id) = self.contig_name_to_id.get(&data.contig_name) {
@@ -912,7 +900,7 @@ impl DbWriter {
                 let values: Vec<i32> = data.skew_values.iter().map(|&v| v as i32).collect();
 
                 // Estimate contig length from number of windows
-                let contig_length = (values.len() as u32) * GC_SKEW_WINDOW_SIZE;
+                let contig_length = (values.len() as u32) * gc_skew_window_size;
 
                 // Encode as dense BLOB (array index is window number)
                 // Values are stored as integer ×100 (e.g. -40 = -0.40), use Times100 scale
@@ -921,7 +909,7 @@ impl DbWriter {
                     &values,
                     crate::types::get_value_scale("gc_skew"),
                     contig_length,
-                    GC_SKEW_WINDOW_SIZE,
+                    gc_skew_window_size,
                 );
 
                 appender.append_row(params![
@@ -1959,20 +1947,6 @@ fn create_core_tables(conn: &Connection, has_bam: bool, is_mag_mode: bool) -> Re
         )
         .context("Failed to create MAG_contig_blob table")?;
 
-        // Chunk_idx is INTEGER (not SMALLINT): a multi-Gbp MAG at 65536 bp
-        // chunks would overflow SMALLINT.
-        conn.execute(
-            "CREATE TABLE MAG_contig_blob_chunk (
-                MAG_id      INTEGER NOT NULL,
-                Feature_id  SMALLINT NOT NULL,
-                Chunk_idx   INTEGER NOT NULL,
-                Data        BLOB NOT NULL,
-                PRIMARY KEY (MAG_id, Feature_id, Chunk_idx)
-            )",
-            [],
-        )
-        .context("Failed to create MAG_contig_blob_chunk table")?;
-
         // Inter-contig BLAST hits. Stored canonically with Contig_id_1 <= Contig_id_2
         // to halve storage and guarantee idempotent re-insertion. Consumers that
         // need both directions should query `Contig_blast_hits_symmetric`.
@@ -2116,19 +2090,6 @@ fn create_core_tables(conn: &Connection, has_bam: bool, is_mag_mode: bool) -> Re
             [],
         )
         .context("Failed to create MAG_blob table")?;
-
-        conn.execute(
-            "CREATE TABLE MAG_blob_chunk (
-                MAG_id     INTEGER NOT NULL,
-                Sample_id  INTEGER NOT NULL,
-                Feature_id SMALLINT NOT NULL,
-                Chunk_idx  INTEGER NOT NULL,
-                Data       BLOB NOT NULL,
-                PRIMARY KEY (MAG_id, Sample_id, Feature_id, Chunk_idx)
-            )",
-            [],
-        )
-        .context("Failed to create MAG_blob_chunk table")?;
 
         // MAG-level coverage metrics recomputed from raw per-position coverage
         // during build_mag_blobs_for_sample. Replaces the mathematically-wrong

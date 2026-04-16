@@ -22,6 +22,14 @@ const LONG_READ_LENGTH_THRESHOLD: usize = 1000;
 /// We only need to check a few reads - they should all be the same type.
 const SEQUENCING_TYPE_SAMPLE_SIZE: usize = 100;
 
+/// Distance from contig ends (in bp) within which a read is considered "near the edge".
+/// Used for circularity confirmation and mate-pair topology.
+const NEAR_CONTIG_END_DISTANCE: usize = 1000;
+
+/// Maximum reasonable insert size (bp) for paired-end reads.
+/// Pairs with template length exceeding this are treated as structural anomalies.
+const MAX_REASONABLE_INSERT_SIZE: i32 = 10000;
+
 /// Per-contig timing breakdown for `process_contig_streaming`.
 /// Populated only when the caller passes `Some(&mut _)`.
 #[derive(Default, Clone, Debug)]
@@ -189,14 +197,14 @@ pub fn process_contig_streaming(
 
                 let same_ref = record.tid() == record.mtid();
                 let opposite_strands = record.is_reverse() != record.is_mate_reverse();
-                let reasonable = tlen > 0 && tlen < 10000;
+                let reasonable = tlen > 0 && tlen < MAX_REASONABLE_INSERT_SIZE;
                 (tlen, same_ref && opposite_strands && reasonable)
             } else {
                 // Linear: use absolute insert size, recompute proper pair
                 let tlen = record.insert_size().abs() as i32;
                 let same_ref = record.tid() == record.mtid();
                 let opposite_strands = record.is_reverse() != record.is_mate_reverse();
-                let reasonable = tlen > 0 && tlen < 10000;
+                let reasonable = tlen > 0 && tlen < MAX_REASONABLE_INSERT_SIZE;
                 (tlen, same_ref && opposite_strands && reasonable)
             };
 
@@ -237,8 +245,8 @@ pub fn process_contig_streaming(
         if seq_type.is_short_paired() && !record.is_secondary() && !record.is_supplementary() {
             // Detect reads near contig ends for circularisation analysis
             let pos = record.pos() as usize;
-            let near_left = pos < 1000;
-            let near_right = pos >= ref_length.saturating_sub(1000);
+            let near_left = pos < NEAR_CONTIG_END_DISTANCE;
+            let near_right = pos >= ref_length.saturating_sub(NEAR_CONTIG_END_DISTANCE);
 
             if near_left || near_right {
                 // Circularising inserts: read1 near one end, mate near opposite end
@@ -247,8 +255,8 @@ pub fn process_contig_streaming(
                         // In SAM-spec circular mode, both mates have POS < LN.
                         // Junction-spanning pairs have one mate near each end.
                         let mpos = record.mpos() as usize;
-                        let mate_near_left = mpos < 1000;
-                        let mate_near_right = mpos >= ref_length.saturating_sub(1000);
+                        let mate_near_left = mpos < NEAR_CONTIG_END_DISTANCE;
+                        let mate_near_right = mpos >= ref_length.saturating_sub(NEAR_CONTIG_END_DISTANCE);
                         if (near_left && mate_near_right) || (near_right && mate_near_left) {
                             let bam_proper = record.is_proper_pair();
                             let bam_non_inward = !record.is_proper_pair()
@@ -262,8 +270,8 @@ pub fn process_contig_streaming(
                     } else if is_non_inward {
                         // Linear mode: non-inward pairs with mate on opposite end
                         let mpos = record.mpos() as usize;
-                        let mate_near_left = mpos < 1000;
-                        let mate_near_right = mpos >= ref_length.saturating_sub(1000);
+                        let mate_near_left = mpos < NEAR_CONTIG_END_DISTANCE;
+                        let mate_near_right = mpos >= ref_length.saturating_sub(NEAR_CONTIG_END_DISTANCE);
                         if (near_left && mate_near_right) || (near_right && mate_near_left) {
                             arrays.circularising_inserts_count += 1;
                             // Use wrapped distance: these pairs span the contig boundary,

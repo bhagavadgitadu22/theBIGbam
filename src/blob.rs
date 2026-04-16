@@ -30,15 +30,9 @@ const CHUNK_SIZE: u32 = 65536;
 /// Zoom level bin sizes (100bp, 1000bp, 10000bp)
 const ZOOM_BIN_SIZES: &[u32] = &[100, 1000, 10000];
 
-/// Number of zoom levels
-const NUM_ZOOM_LEVELS: u8 = 3;
-
 /// Zoom level bin sizes for contig features (GC content, GC skew, repeats)
 /// Only 10kbp zoom - used for contigs > 1 Mbp; base resolution used otherwise
 const CONTIG_ZOOM_BIN_SIZES: &[u32] = &[10000];
-
-/// Number of zoom levels for contig features
-const NUM_CONTIG_ZOOM_LEVELS: u8 = 1;
 
 /// Zstd compression level (3 = good balance of speed and compression)
 const ZSTD_LEVEL: i32 = 3;
@@ -94,7 +88,6 @@ impl MetadataFlags {
         flags
     }
 
-    #[allow(dead_code)]
     fn from_byte(b: u8) -> Self {
         Self {
             sparse: b & 0x01 != 0,
@@ -221,7 +214,7 @@ fn compute_zoom_levels_dense(values: &[i32], contig_length: u32, bin_sizes: &[u3
     let mut all_levels = Vec::with_capacity(bin_sizes.len());
 
     for &bin_size in bin_sizes {
-        let num_bins = (contig_length + bin_size - 1) / bin_size;
+        let num_bins = contig_length.div_ceil(bin_size);
         let mut bins = Vec::with_capacity(num_bins as usize);
 
         for bin_idx in 0..num_bins {
@@ -259,7 +252,7 @@ fn compute_zoom_levels_sparse(
     let mut all_levels = Vec::with_capacity(bin_sizes.len());
 
     for &bin_size in bin_sizes {
-        let num_bins = (contig_length + bin_size - 1) / bin_size;
+        let num_bins = contig_length.div_ceil(bin_size);
         let mut bins: Vec<ZoomBinSparse> = (0..num_bins)
             .map(|_| ZoomBinSparse { max_value: 0 })
             .collect();
@@ -387,7 +380,7 @@ pub fn encode_dense_blob(values: &[i32], scale: ValueScale, contig_length: u32) 
     blob.push(FORMAT_VERSION);                         // [4] version
     blob.push(MetadataFlags::default().to_byte());     // [5] flags (dense, no metadata)
     blob.push(scale as u8);                            // [6] scale_code
-    blob.push(NUM_ZOOM_LEVELS);                        // [7] num_zoom_levels
+    blob.push(ZOOM_BIN_SIZES.len() as u8);                        // [7] num_zoom_levels
     write_u32(&mut blob, contig_length);               // [8..12] contig_length
     // Placeholders for offsets (patched later)
     let base_block_offset_pos = blob.len();
@@ -403,7 +396,7 @@ pub fn encode_dense_blob(values: &[i32], scale: ValueScale, contig_length: u32) 
     let base_block_start = blob.len() as u32;
     patch_u32(&mut blob, base_block_offset_pos, base_block_start);
 
-    let num_chunks = (values.len() as u32 + CHUNK_SIZE - 1) / CHUNK_SIZE;
+    let num_chunks = (values.len() as u32).div_ceil(CHUNK_SIZE);
     write_u16(&mut blob, num_chunks as u16);
     write_u32(&mut blob, CHUNK_SIZE);
 
@@ -436,7 +429,7 @@ pub fn encode_dense_blob(values: &[i32], scale: ValueScale, contig_length: u32) 
     let zoom_bytes = encode_zoom_levels_dense(&zoom_levels);
     blob.extend_from_slice(&zoom_bytes);
 
-    let zoom_blob = build_zoom_blob(scale, false, NUM_ZOOM_LEVELS, contig_length, &zoom_bytes);
+    let zoom_blob = build_zoom_blob(scale, false, ZOOM_BIN_SIZES.len() as u8, contig_length, &zoom_bytes);
     EncodedBlob { data: blob, zoom: zoom_blob, chunks }
 }
 
@@ -480,7 +473,7 @@ pub fn encode_sparse_blob(
     meta_flags.sparse = true;
     blob.push(meta_flags.to_byte());                        // [5] flags
     blob.push(scale as u8);                                 // [6] scale_code
-    blob.push(NUM_ZOOM_LEVELS);                             // [7] num_zoom_levels
+    blob.push(ZOOM_BIN_SIZES.len() as u8);                             // [7] num_zoom_levels
     write_u32(&mut blob, contig_length);                    // [8..12] contig_length
     let base_block_offset_pos = blob.len();
     write_u32(&mut blob, 0);                                // [12..16] base_block_offset
@@ -546,7 +539,7 @@ pub fn encode_sparse_blob(
     let has_meta = metadata.is_some()
         && metadata.unwrap().len() == positions.len()
         && (flags.has_stats || flags.has_sequence || flags.has_codons || flags.has_partner);
-    let num_chunks = (contig_length + CHUNK_SIZE - 1) / CHUNK_SIZE;
+    let num_chunks = contig_length.div_ceil(CHUNK_SIZE);
     let mut chunks = Vec::with_capacity(num_chunks as usize);
     for chunk_idx in 0..num_chunks {
         let range_start = chunk_idx * CHUNK_SIZE;
@@ -589,7 +582,7 @@ pub fn encode_sparse_blob(
         chunks.push(cb);
     }
 
-    let zoom_blob = build_zoom_blob(scale, true, NUM_ZOOM_LEVELS, contig_length, &zoom_bytes);
+    let zoom_blob = build_zoom_blob(scale, true, ZOOM_BIN_SIZES.len() as u8, contig_length, &zoom_bytes);
     EncodedBlob { data: blob, zoom: zoom_blob, chunks }
 }
 
@@ -669,7 +662,7 @@ pub fn encode_contig_dense_blob(values: &[i32], scale: ValueScale, contig_length
     blob.push(FORMAT_VERSION);                         // [4] version
     blob.push(MetadataFlags::default().to_byte());     // [5] flags (dense, no metadata)
     blob.push(scale as u8);                            // [6] scale_code
-    blob.push(NUM_CONTIG_ZOOM_LEVELS);                 // [7] num_zoom_levels (1 for contig)
+    blob.push(CONTIG_ZOOM_BIN_SIZES.len() as u8);                 // [7] num_zoom_levels (1 for contig)
     write_u32(&mut blob, contig_length);               // [8..12] contig_length
     // Placeholders for offsets (patched later)
     let base_block_offset_pos = blob.len();
@@ -685,7 +678,7 @@ pub fn encode_contig_dense_blob(values: &[i32], scale: ValueScale, contig_length
     let base_block_start = blob.len() as u32;
     patch_u32(&mut blob, base_block_offset_pos, base_block_start);
 
-    let num_chunks = (values.len() as u32 + CHUNK_SIZE - 1) / CHUNK_SIZE;
+    let num_chunks = (values.len() as u32).div_ceil(CHUNK_SIZE);
     write_u16(&mut blob, num_chunks as u16);
     write_u32(&mut blob, CHUNK_SIZE);
 
@@ -722,7 +715,7 @@ pub fn encode_contig_dense_blob(values: &[i32], scale: ValueScale, contig_length
     let zoom_bytes = encode_zoom_levels_dense(&zoom_levels);
     blob.extend_from_slice(&zoom_bytes);
 
-    let zoom_blob = build_zoom_blob(scale, false, NUM_CONTIG_ZOOM_LEVELS, contig_length, &zoom_bytes);
+    let zoom_blob = build_zoom_blob(scale, false, CONTIG_ZOOM_BIN_SIZES.len() as u8, contig_length, &zoom_bytes);
     EncodedBlob { data: blob, zoom: zoom_blob, chunks }
 }
 
@@ -745,7 +738,7 @@ pub fn encode_contig_sparse_blob(
     meta_flags.sparse = true;
     blob.push(meta_flags.to_byte());                        // [5] flags
     blob.push(scale as u8);                                 // [6] scale_code
-    blob.push(NUM_ZOOM_LEVELS);                              // [7] num_zoom_levels (3: 100bp, 1000bp, 10000bp)
+    blob.push(ZOOM_BIN_SIZES.len() as u8);                              // [7] num_zoom_levels (3: 100bp, 1000bp, 10000bp)
     write_u32(&mut blob, contig_length);                    // [8..12] contig_length
     let base_block_offset_pos = blob.len();
     write_u32(&mut blob, 0);                                // [12..16] base_block_offset
@@ -789,7 +782,7 @@ pub fn encode_contig_sparse_blob(
     let zoom_bytes = encode_zoom_levels_sparse(&zoom_levels);
     blob.extend_from_slice(&zoom_bytes);
 
-    let zoom_blob = build_zoom_blob(scale, true, NUM_ZOOM_LEVELS, contig_length, &zoom_bytes);
+    let zoom_blob = build_zoom_blob(scale, true, ZOOM_BIN_SIZES.len() as u8, contig_length, &zoom_bytes);
     EncodedBlob { data: blob, zoom: zoom_blob, chunks: Vec::new() }
 }
 
@@ -1119,7 +1112,7 @@ mod tests {
         // Check scale
         assert_eq!(blob[6], 0); // Raw
         // Check num_zoom_levels
-        assert_eq!(blob[7], NUM_ZOOM_LEVELS);
+        assert_eq!(blob[7], ZOOM_BIN_SIZES.len() as u8);
         // Check contig_length
         assert_eq!(u32::from_le_bytes([blob[8], blob[9], blob[10], blob[11]]), 5);
     }

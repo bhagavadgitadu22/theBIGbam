@@ -61,6 +61,22 @@ fn detect_format(path: &Path) -> Result<AnnotationFormat> {
     }
 }
 
+/// Returns true if the path has a recognized annotation file extension.
+pub fn is_annotation_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| matches!(e.to_lowercase().as_str(), "gbk" | "gbff" | "gb" | "genbank" | "gff" | "gff3"))
+        .unwrap_or(false)
+}
+
+/// Returns true if the path has a recognized FASTA file extension.
+pub fn is_fasta_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| matches!(e.to_lowercase().as_str(), "fa" | "fasta" | "fna"))
+        .unwrap_or(false)
+}
+
 // ============================================================================
 // Main Entry Point
 // ============================================================================

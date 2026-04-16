@@ -771,7 +771,7 @@ fn combine_duplication_status(
 /// Returns (unique_areas, duplication_status):
 /// - unique_areas: areas with center_pos translated to first region
 /// - duplication_status: Some(true) if all in DTR, Some(false) if all in ITR, None otherwise
-fn deduplicate_dtr_equivalent_areas(areas: &[PeakArea], dtr_regions: &[DtrRegion]) -> (Vec<PeakArea>, Option<bool>) {
+fn deduplicate_dtr_equivalent_areas(areas: &[PeakArea], dtr_regions: &[DtrRegion], max_distance_peaks: i32) -> (Vec<PeakArea>, Option<bool>) {
     if areas.is_empty() {
         return (Vec::new(), None);
     }
@@ -818,7 +818,7 @@ fn deduplicate_dtr_equivalent_areas(areas: &[PeakArea], dtr_regions: &[DtrRegion
 
         // Check if this canonical position already exists (within tolerance)
         let is_duplicate = unique.iter().any(|existing| {
-            (existing.center_pos - canonical_pos).abs() <= 20 // Use 20bp tolerance
+            (existing.center_pos - canonical_pos).abs() <= max_distance_peaks
         });
 
         if !is_duplicate {
@@ -884,6 +884,7 @@ pub fn classify_packaging_areas(
     genome_length: usize,
     circular: bool,
     dtr_regions: &[DtrRegion],
+    max_distance_peaks: i32,
 ) -> (String, Vec<TerminusArea>, Vec<TerminusArea>, Option<bool>, Option<i32>, Vec<f64>, Vec<f64>) {
     // Filter to only kept areas for classification
     let kept_start_areas: Vec<&PeakArea> = start_areas.iter().filter(|a| a.passed_poisson_test && a.passed_clipping_test).collect();
@@ -892,8 +893,8 @@ pub fn classify_packaging_areas(
     // Deduplicate DTR-equivalent areas from KEPT areas only
     let kept_start_clones: Vec<PeakArea> = kept_start_areas.iter().map(|&a| a.clone()).collect();
     let kept_end_clones: Vec<PeakArea> = kept_end_areas.iter().map(|&a| a.clone()).collect();
-    let (unique_starts, starts_status) = deduplicate_dtr_equivalent_areas(&kept_start_clones, dtr_regions);
-    let (unique_ends, ends_status) = deduplicate_dtr_equivalent_areas(&kept_end_clones, dtr_regions);
+    let (unique_starts, starts_status) = deduplicate_dtr_equivalent_areas(&kept_start_clones, dtr_regions, max_distance_peaks);
+    let (unique_ends, ends_status) = deduplicate_dtr_equivalent_areas(&kept_end_clones, dtr_regions, max_distance_peaks);
 
     // Use unique counts from KEPT areas for classification logic
     let mut repeat_length: Option<i32> = None;
@@ -934,7 +935,7 @@ pub fn classify_packaging_areas(
             };
 
             // Check for ITR configuration
-            let itr_config = if distance <= 20 {
+            let itr_config = if distance <= max_distance_peaks {
                 check_itr_configuration(start_pos, end_pos, dtr_regions)
             } else {
                 None
@@ -952,7 +953,7 @@ pub fn classify_packaging_areas(
                 }
             } else if distance < 2 {
                 "COS".to_string()
-            } else if distance <= 20 {
+            } else if distance <= max_distance_peaks {
                 format!("COS{}", suffix)
             } else if distance <= 1000 {
                 format!("DTR_short{}", suffix)

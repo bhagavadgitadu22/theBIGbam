@@ -1052,6 +1052,10 @@ def get_variable_metadata_batch(cur, subplot_list):
 ### Default threshold: windows larger than this use zoom-level binning instead of base resolution
 _DEFAULT_MAX_BASE_RESOLUTION = 10_000  # 10 kb
 
+### Default window thresholds for optional plot components
+DEFAULT_GENEMAP_WINDOW = 100_000   # gene-map shown when window <= this (bp)
+DEFAULT_SEQUENCE_WINDOW = 1_000    # sequence track shown when window <= this (bp)
+
 
 # ============================================================================
 # BLOB-based feature data retrieval
@@ -1595,8 +1599,8 @@ def get_feature_data(cur, feature, contig_id, sample_id, xstart=None, xend=None,
                     blob_dict = _blob_to_feature_dict(None, type_picked, xstart, xend, res_threshold, zoom_blob_bytes=zoom_blob) if zoom_blob else None
                 elif xstart is not None and xend is not None:
                     # Zoomed in: fetch chunks
-                    from thebigbam.database.blob_decoder import decode_raw_chunks, decode_raw_sparse_chunks, get_scale_from_zoom_blob, is_sparse_zoom_blob
-                    gc_window = 500 if contig_feature_name == "gc_content" else (1000 if contig_feature_name == "gc_skew" else 1)
+                    from thebigbam.database.blob_decoder import decode_raw_chunks, decode_raw_sparse_chunks, get_scale_from_zoom_blob, is_sparse_zoom_blob, gc_window_size
+                    gc_window = gc_window_size(contig_feature_name)
                     chunk_rows = _get_contig_chunks(cur, contig_id, contig_feature_name, xstart - 1, xend - 1, window_size=gc_window)
                     zoom_blob = _get_contig_blob(cur, contig_id, contig_feature_name)
                     scale_div = get_scale_from_zoom_blob(zoom_blob) if zoom_blob else 1
@@ -1620,8 +1624,8 @@ def get_feature_data(cur, feature, contig_id, sample_id, xstart=None, xend=None,
                         blob_dict = None
                 else:
                     # No window specified — fetch all chunks
-                    from thebigbam.database.blob_decoder import decode_raw_chunks, decode_raw_sparse_chunks, get_scale_from_zoom_blob, is_sparse_zoom_blob
-                    gc_window = 500 if contig_feature_name == "gc_content" else (1000 if contig_feature_name == "gc_skew" else 1)
+                    from thebigbam.database.blob_decoder import decode_raw_chunks, decode_raw_sparse_chunks, get_scale_from_zoom_blob, is_sparse_zoom_blob, gc_window_size
+                    gc_window = gc_window_size(contig_feature_name)
                     chunk_rows = _get_contig_chunks(cur, contig_id, contig_feature_name, 0, 2**31, window_size=gc_window)
                     zoom_blob = _get_contig_blob(cur, contig_id, contig_feature_name)
                     scale_div = get_scale_from_zoom_blob(zoom_blob) if zoom_blob else 1
@@ -1784,8 +1788,8 @@ def get_feature_data_batch(cur, feature, contig_id, sample_ids, xstart=None, xen
                     blob_dict = _blob_to_feature_dict(None, type_picked, xstart, xend, res_threshold, zoom_blob_bytes=zoom_blob) if zoom_blob else None
                 elif xstart is not None and xend is not None:
                     # Zoomed in: fetch chunks
-                    from thebigbam.database.blob_decoder import decode_raw_chunks, decode_raw_sparse_chunks, get_scale_from_zoom_blob, is_sparse_zoom_blob
-                    gc_window = 500 if contig_feature_name == "gc_content" else (1000 if contig_feature_name == "gc_skew" else 1)
+                    from thebigbam.database.blob_decoder import decode_raw_chunks, decode_raw_sparse_chunks, get_scale_from_zoom_blob, is_sparse_zoom_blob, gc_window_size
+                    gc_window = gc_window_size(contig_feature_name)
                     chunk_rows = _get_contig_chunks(cur, contig_id, contig_feature_name, xstart - 1, xend - 1, window_size=gc_window)
                     zoom_blob = _get_contig_blob(cur, contig_id, contig_feature_name)
                     scale_div = get_scale_from_zoom_blob(zoom_blob) if zoom_blob else 1
@@ -1804,8 +1808,8 @@ def get_feature_data_batch(cur, feature, contig_id, sample_ids, xstart=None, xen
                         blob_dict = None
                 else:
                     # No window specified — fetch all chunks
-                    from thebigbam.database.blob_decoder import decode_raw_chunks, decode_raw_sparse_chunks, get_scale_from_zoom_blob, is_sparse_zoom_blob
-                    gc_window = 500 if contig_feature_name == "gc_content" else (1000 if contig_feature_name == "gc_skew" else 1)
+                    from thebigbam.database.blob_decoder import decode_raw_chunks, decode_raw_sparse_chunks, get_scale_from_zoom_blob, is_sparse_zoom_blob, gc_window_size
+                    gc_window = gc_window_size(contig_feature_name)
                     chunk_rows = _get_contig_chunks(cur, contig_id, contig_feature_name, 0, 2**31, window_size=gc_window)
                     zoom_blob = _get_contig_blob(cur, contig_id, contig_feature_name)
                     scale_div = get_scale_from_zoom_blob(zoom_blob) if zoom_blob else 1
@@ -1914,7 +1918,7 @@ def generate_bokeh_plot_per_sample(conn, list_features, contig_name, sample_name
         shared_xrange.start = xstart
         shared_xrange.end = xend
 
-    _genemap_threshold = max_genemap_window if max_genemap_window is not None else 100_000
+    _genemap_threshold = max_genemap_window if max_genemap_window is not None else DEFAULT_GENEMAP_WINDOW
     annotation_fig = None
     if genbank_path and xstart is not None and xend is not None and (xend - xstart) <= _genemap_threshold:
         annotation_fig = make_bokeh_genemap(
@@ -1940,7 +1944,7 @@ def generate_bokeh_plot_per_sample(conn, list_features, contig_name, sample_name
     subplots = []
 
     # --- Add sequence subplot right after annotation (top of data tracks) ---
-    _seq_threshold = max_sequence_window if max_sequence_window is not None else 1_000
+    _seq_threshold = max_sequence_window if max_sequence_window is not None else DEFAULT_SEQUENCE_WINDOW
     if plot_sequence and xstart is not None and xend is not None and (xend - xstart) <= _seq_threshold:
         _seq_height = sequence_size if sequence_size is not None else subplot_size // 2
         seq_subplot = make_bokeh_sequence_subplot(conn, contig_name, xstart, xend, _seq_height, shared_xrange)
@@ -2058,6 +2062,87 @@ def generate_bokeh_plot_per_sample(conn, list_features, contig_name, sample_name
     return grid
 
 
+def _merge_decoded_chunks(decoded_list):
+    """Merge decoded chunk dicts from multiple contigs into one sorted result."""
+    import numpy as np
+    all_x = np.concatenate([d["x"] for d in decoded_list])
+    all_y = np.concatenate([d["y"] for d in decoded_list])
+    is_sparse = any(d.get("sparse", False) for d in decoded_list)
+
+    order = np.argsort(all_x)
+    result = {"x": all_x[order], "y": all_y[order], "sparse": is_sparse}
+
+    meta_keys = set()
+    for d in decoded_list:
+        meta_keys.update(k for k in d if k not in ("x", "y", "sparse"))
+    for key in meta_keys:
+        arrays = []
+        for d in decoded_list:
+            if key in d:
+                val = d[key]
+                if isinstance(val, np.ndarray):
+                    arrays.append(val)
+                elif isinstance(val, list):
+                    arrays.append(np.array(val))
+        if arrays:
+            merged = np.concatenate(arrays)
+            result[key] = merged[order]
+
+    return result
+
+
+def _assemble_mag_chunks_from_contigs(cur, mag_id, sample_id, variable_name,
+                                       zoom_blob, xs, xe, type_picked,
+                                       is_contig_blob=False):
+    """Build MAG base-resolution data on the fly from per-contig chunks.
+
+    Instead of reading from (now-removed) MAG_blob_chunk / MAG_contig_blob_chunk
+    tables, fetch the relevant per-contig chunks and shift positions by the
+    contig's offset in the MAG.
+    """
+    import numpy as np
+    from thebigbam.database.database_getters import get_mag_members
+    from thebigbam.database.blob_decoder import (
+        decode_raw_chunks, decode_raw_sparse_chunks,
+        get_scale_from_zoom_blob, is_sparse_zoom_blob,
+    )
+
+    members = get_mag_members(cur, mag_id)
+    scale_div = get_scale_from_zoom_blob(zoom_blob)
+    sparse = is_sparse_zoom_blob(zoom_blob)
+
+    all_decoded = []
+    for cid, clen, offset in members:
+        # Contig covers [offset+1, offset+clen] in 1-indexed MAG space
+        if offset + clen < xs or offset + 1 > xe:
+            continue
+        # Convert MAG window to contig-local 0-indexed coords
+        local_start = max(0, xs - 1 - offset)
+        local_end = min(clen, xe - 1 - offset)
+
+        if is_contig_blob:
+            chunk_rows = _get_contig_chunks(cur, cid, variable_name, local_start, local_end)
+        else:
+            chunk_rows = _get_feature_chunks(cur, cid, sample_id, variable_name, local_start, local_end)
+
+        if not chunk_rows:
+            continue
+
+        if sparse:
+            decoded = decode_raw_sparse_chunks(chunk_rows, scale_div)
+        else:
+            decoded = decode_raw_chunks(chunk_rows, scale_div)
+
+        if len(decoded["x"]) > 0:
+            decoded["x"] = decoded["x"] + offset
+            all_decoded.append(decoded)
+
+    if all_decoded:
+        merged = _merge_decoded_chunks(all_decoded)
+        return _format_chunks_for_bokeh(merged, xs, xe, type_picked)
+    return None
+
+
 def get_mag_feature_data(cur, feature, mag_id, sample_id, mag_length,
                          xstart=None, xend=None, variable_metadata=None,
                          max_base_resolution=None, min_relative_value=0.0):
@@ -2068,8 +2153,7 @@ def get_mag_feature_data(cur, feature, mag_id, sample_id, mag_length,
     X-coordinates are already in MAG space — no offset arithmetic required.
     """
     from thebigbam.database.database_getters import (
-        get_mag_feature_zoom, get_mag_feature_chunks,
-        get_mag_contig_zoom, get_mag_contig_chunks,
+        get_mag_feature_zoom, get_mag_contig_zoom, get_mag_members,
     )
     from thebigbam.database.blob_decoder import (
         decode_raw_chunks, decode_raw_sparse_chunks,
@@ -2108,37 +2192,21 @@ def get_mag_feature_data(cur, feature, mag_id, sample_id, mag_length,
             if _use_zoom:
                 blob_dict = _blob_to_feature_dict(None, type_picked, xs, xe, max_base_resolution, zoom_blob_bytes=zoom_blob)
             else:
-                first_chunk = max(0, (xs - 1) // CHUNK_SIZE)
-                last_chunk = (xe - 1) // CHUNK_SIZE
-                chunk_rows = get_mag_feature_chunks(cur, mag_id, sample_id, variable_name, first_chunk, last_chunk)
-                scale_div = get_scale_from_zoom_blob(zoom_blob)
-                if chunk_rows:
-                    if is_sparse_zoom_blob(zoom_blob):
-                        blob_dict = _format_chunks_for_bokeh(decode_raw_sparse_chunks(chunk_rows, scale_div), xs, xe, type_picked)
-                    else:
-                        blob_dict = _format_chunks_for_bokeh(decode_raw_chunks(chunk_rows, scale_div), xs, xe, type_picked)
-                else:
-                    blob_dict = None
+                blob_dict = _assemble_mag_chunks_from_contigs(
+                    cur, mag_id, sample_id, variable_name, zoom_blob,
+                    xs, xe, type_picked, is_contig_blob=False,
+                )
         elif feature_table == "Contig_blob":
             zoom_blob = get_mag_contig_zoom(cur, mag_id, variable_name)
             if zoom_blob is None:
                 continue
-            # MAG_contig_blob is re-encoded at per-bp (not windowed), so
-            # window_size=1 here even for GC content/skew.
             if _use_zoom:
                 blob_dict = _blob_to_feature_dict(None, type_picked, xs, xe, max_base_resolution, zoom_blob_bytes=zoom_blob)
             else:
-                first_chunk = max(0, (xs - 1) // CHUNK_SIZE)
-                last_chunk = (xe - 1) // CHUNK_SIZE
-                chunk_rows = get_mag_contig_chunks(cur, mag_id, variable_name, first_chunk, last_chunk)
-                scale_div = get_scale_from_zoom_blob(zoom_blob)
-                if chunk_rows:
-                    if is_sparse_zoom_blob(zoom_blob):
-                        blob_dict = _format_chunks_for_bokeh(decode_raw_sparse_chunks(chunk_rows, scale_div), xs, xe, type_picked)
-                    else:
-                        blob_dict = _format_chunks_for_bokeh(decode_raw_chunks(chunk_rows, scale_div), xs, xe, type_picked)
-                else:
-                    blob_dict = None
+                blob_dict = _assemble_mag_chunks_from_contigs(
+                    cur, mag_id, None, variable_name, zoom_blob,
+                    xs, xe, type_picked, is_contig_blob=True,
+                )
         else:
             continue
 
@@ -2376,7 +2444,7 @@ def generate_bokeh_plot_mag_view(conn, list_features, mag_name, sample_name, xst
         mag_fig = None
 
     # --- Combined gene map (only when window is small enough) ---
-    _genemap_threshold = max_genemap_window if max_genemap_window is not None else 100_000
+    _genemap_threshold = max_genemap_window if max_genemap_window is not None else DEFAULT_GENEMAP_WINDOW
     annotation_fig = None
     if genbank_path and xstart is not None and xend is not None and (xend - xstart) <= _genemap_threshold:
         _gm_size = genemap_size if genemap_size is not None else subplot_size
@@ -2406,7 +2474,7 @@ def generate_bokeh_plot_mag_view(conn, list_features, mag_name, sample_name, xst
     subplots = []
 
     # --- Sequence subplot (stitched across member contigs) ---
-    _seq_threshold = max_sequence_window if max_sequence_window is not None else 1_000
+    _seq_threshold = max_sequence_window if max_sequence_window is not None else DEFAULT_SEQUENCE_WINDOW
     if plot_sequence and xstart is not None and xend is not None and (xend - xstart) <= _seq_threshold:
         seq_subplot = make_bokeh_sequence_subplot_mag(conn, mag_name, xstart, xend, _seq_height, shared_xrange)
         if seq_subplot:

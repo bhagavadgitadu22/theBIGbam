@@ -23,6 +23,7 @@ from thebigbam.database.blob_decoder import (
     feature_name_to_id,
     decode_raw_chunks,
     get_scale_from_zoom_blob,
+    GC_CONTENT_WINDOW_SIZE,
 )
 
 
@@ -62,7 +63,7 @@ def _load_contig_gc(conn, contig_id, contig_length):
     chunk_rows = [(r[0], r[1]) for r in chunk_rows]
     data = decode_raw_chunks(chunk_rows, scale_div)
 
-    window_size = 500
+    window_size = GC_CONTENT_WINDOW_SIZE
     arr = np.full(contig_length, np.nan, dtype=np.float64)
     for i in range(len(data["x"])):
         start = int(data["x"][i]) * window_size

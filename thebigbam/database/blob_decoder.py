@@ -27,6 +27,18 @@ CHUNK_SIZE = 65536
 # Zoom level bin sizes (100bp, 1000bp, 10000bp)
 ZOOM_BIN_SIZES = [100, 1000, 10000]
 
+# GC window sizes (must match src/gc_content.rs DEFAULT_GC_*_WINDOW_SIZE)
+GC_CONTENT_WINDOW_SIZE = 500
+GC_SKEW_WINDOW_SIZE = 1000
+
+def gc_window_size(feature_name):
+    """Return the window size for a windowed contig feature (GC content/skew), or 1 for base-resolution."""
+    if feature_name == "gc_content":
+        return GC_CONTENT_WINDOW_SIZE
+    elif feature_name == "gc_skew":
+        return GC_SKEW_WINDOW_SIZE
+    return 1
+
 # Scale factor mapping
 SCALE_DIVISORS = {0: 1, 1: 100, 2: 1000, 3: 10}
 

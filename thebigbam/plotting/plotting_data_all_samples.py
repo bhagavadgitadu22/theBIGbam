@@ -3,7 +3,7 @@ import time
 from bokeh.models import Range1d
 from bokeh.layouts import gridplot
 
-from .plotting_data_per_sample import get_contig_info, get_feature_data, get_feature_data_batch, get_variable_metadata, make_bokeh_subplot, make_bokeh_genemap, make_bokeh_sequence_subplot, make_bokeh_translated_sequence_subplot
+from .plotting_data_per_sample import get_contig_info, get_feature_data, get_feature_data_batch, get_variable_metadata, make_bokeh_subplot, make_bokeh_genemap, make_bokeh_sequence_subplot, make_bokeh_translated_sequence_subplot, DEFAULT_GENEMAP_WINDOW
 
 ### Function to generate the bokeh plot
 def generate_bokeh_plot_all_samples(conn, variable, contig_name, xstart=None, xend=None, subplot_size=130, genbank_path=None, genome_features=None, allowed_samples=None, feature_types=None, plot_isoforms=True, plot_sequence=False, plot_translated_sequence=False, same_y_scale=False, genemap_size=None, sequence_size=None, translated_sequence_size=None, order_by_column=None, max_base_resolution=None, max_genemap_window=None, min_relative_value=0.0, feature_label_key=None, custom_colors=None):
@@ -35,7 +35,7 @@ def generate_bokeh_plot_all_samples(conn, variable, contig_name, xstart=None, xe
         shared_xrange.start = xstart
         shared_xrange.end = xend
 
-    _genemap_threshold = max_genemap_window if max_genemap_window is not None else 100_000
+    _genemap_threshold = max_genemap_window if max_genemap_window is not None else DEFAULT_GENEMAP_WINDOW
     annotation_fig = None
     if genbank_path and xstart is not None and xend is not None and (xend - xstart) <= _genemap_threshold:
         annotation_fig = make_bokeh_genemap(conn, contig_id, locus_name, locus_size, genemap_size if genemap_size is not None else subplot_size, shared_xrange, xstart, xend, feature_types=feature_types, plot_isoforms=plot_isoforms, feature_label_key=feature_label_key, custom_colors=custom_colors)

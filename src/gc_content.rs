@@ -3,6 +3,11 @@
 //! Computes GC content (percentage of G and C bases) using a sliding window approach
 //! and applies RLE compression for efficient storage.
 
+/// Default window size for GC content computation (500bp).
+pub const DEFAULT_GC_CONTENT_WINDOW_SIZE: usize = 500;
+/// Default window size for GC skew computation (1000bp).
+pub const DEFAULT_GC_SKEW_WINDOW_SIZE: usize = 1000;
+
 /// Configuration parameters for GC content and GC skew computation.
 #[derive(Debug, Clone, Copy)]
 pub struct GCParams {
@@ -15,8 +20,8 @@ pub struct GCParams {
 impl Default for GCParams {
     fn default() -> Self {
         Self {
-            gc_content_window_size: 500,
-            gc_skew_window_size: 1000,
+            gc_content_window_size: DEFAULT_GC_CONTENT_WINDOW_SIZE,
+            gc_skew_window_size: DEFAULT_GC_SKEW_WINDOW_SIZE,
         }
     }
 }

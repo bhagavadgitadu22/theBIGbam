@@ -11,7 +11,7 @@ from bokeh.models import Div, InlineStyleSheet, Tooltip
 from bokeh.models.widgets import CheckboxGroup, HelpButton, Button, RadioButtonGroup, CheckboxButtonGroup, Select, TextInput, Spinner, MultiChoice, ColorPicker
 
 # Import the plotting function from the repo
-from .plotting_data_per_sample import generate_bokeh_plot_per_sample, generate_bokeh_plot_mag_view
+from .plotting_data_per_sample import generate_bokeh_plot_per_sample, generate_bokeh_plot_mag_view, DEFAULT_GENEMAP_WINDOW, DEFAULT_SEQUENCE_WINDOW, _DEFAULT_MAX_BASE_RESOLUTION
 from .plotting_data_all_samples import generate_bokeh_plot_all_samples
 from ..database.database_getters import get_filtering_metadata, resolve_distinct_values, ANNOTATION_EXCLUDED_COLUMNS, is_mag_mode, get_mag_contig_map
 from .searchable_select import SearchableSelect
@@ -2689,15 +2689,15 @@ def create_layout(db_path, enable_timing=False):
     min_coverage_freq_row = row(min_coverage_freq_input, min_coverage_freq_label, sizing_mode="stretch_width", margin=(0, 0, 5, 0))
 
     # Subsection: Max window sizes for plotting
-    max_genemap_window_input = Spinner(value=100000, low=10, high=1000000, step=1000, width=100, margin=(0, 2, 0, 0))
+    max_genemap_window_input = Spinner(value=DEFAULT_GENEMAP_WINDOW, low=10, high=1000000, step=1000, width=100, margin=(0, 2, 0, 0))
     max_genemap_window_label = Div(text="Gene map (bp)", margin=(5, 0, 5, 5))
     max_genemap_window_row = row(max_genemap_window_input, max_genemap_window_label, sizing_mode="stretch_width", margin=(5, 0, 5, 0))
 
-    max_sequence_window_input = Spinner(value=1000, low=10, high=1000000, step=100, width=100, margin=(0, 2, 0, 0))
+    max_sequence_window_input = Spinner(value=DEFAULT_SEQUENCE_WINDOW, low=10, high=1000000, step=100, width=100, margin=(0, 2, 0, 0))
     max_sequence_window_label = Div(text="Sequence plots (bp)", margin=(5, 0, 5, 5))
     max_sequence_window_row = row(max_sequence_window_input, max_sequence_window_label, sizing_mode="stretch_width", margin=(0, 0, 5, 0))
 
-    max_binning_window_input = Spinner(value=10000, low=10, high=1000000, step=1000, width=100, margin=(0, 2, 0, 0))
+    max_binning_window_input = Spinner(value=_DEFAULT_MAX_BASE_RESOLUTION, low=10, high=1000000, step=1000, width=100, margin=(0, 2, 0, 0))
     max_binning_window_label = Div(text="Feature plots without binning (bp)", margin=(5, 0, 5, 5))
     max_binning_window_row = row(max_binning_window_input, max_binning_window_label, sizing_mode="stretch_width", margin=(0, 0, 5, 0))
 

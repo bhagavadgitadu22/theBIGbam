@@ -11,7 +11,7 @@ except ImportError:
     _rust = None
 
 
-def calculating_all_features_parallel(list_modules, bam_files, output_db, min_aligned_fraction, min_coverage_depth, curve_ratio, bar_ratio, n_sample_cores=None, sequencing_type=None, genbank_path=None, assembly_path=None, extend_db=None, min_occurrences=2, enable_timing=False, view="contig", mag_manifest=None):
+def calculating_all_features_parallel(list_modules, bam_files, output_db, min_aligned_fraction, min_coverage_depth, coverage_percentage, n_sample_cores=None, sequencing_type=None, genbank_path=None, assembly_path=None, extend_db=None, min_occurrences=2, enable_timing=False, view="contig", mag_manifest=None):
     """Process all BAM files in parallel using Rust bindings."""
     if not HAS_RUST:
         sys.exit("ERROR: Rust bindings (thebigbam_rs) are required but not available. Please install them first.")
@@ -34,8 +34,8 @@ def calculating_all_features_parallel(list_modules, bam_files, output_db, min_al
             sequencing_type=sequencing_type,
             min_aligned_fraction=float(min_aligned_fraction),
             min_coverage_depth=float(min_coverage_depth),
-            curve_ratio=float(curve_ratio),
-            bar_ratio=float(bar_ratio),
+            curve_ratio=float(coverage_percentage),
+            bar_ratio=float(coverage_percentage),
             create_indexes=True,
             assembly_path=assembly_path if assembly_path else "",
             extend_db=extend_db if extend_db else "",
@@ -371,7 +371,7 @@ def run_calculate_args(args):
 
     print("\nCalculating values for all requested features from mapping files...", flush=True)
     calculating_all_features_parallel(
-        requested_modules, bam_files, output_db, min_aligned_fraction, min_coverage_depth, coverage_percentage, coverage_percentage,
+        requested_modules, bam_files, output_db, min_aligned_fraction, min_coverage_depth, coverage_percentage,
         n_sample_cores=n_cores,
         sequencing_type=args.sequencing_type, genbank_path=genbank_path,
         assembly_path=assembly_path,

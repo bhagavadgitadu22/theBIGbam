@@ -16,6 +16,10 @@ use std::collections::HashMap;
 /// while bounding memory usage.
 const MAX_SEQS_PER_POS: usize = 10;
 
+/// Maximum number of bases to store from clipping sequences.
+/// Keeps memory bounded while retaining enough for terminus identification.
+const MAX_CLIP_SEQ_LEN: usize = 20;
+
 /// Track a sequence variant at a given position, capping the number of
 /// unique variants stored per position to [`MAX_SEQS_PER_POS`].
 fn track_sequence(
@@ -798,27 +802,27 @@ fn end_pos(end: usize, ref_length: usize, circular: bool) -> usize {
     }
 }
 
-/// Track a left (start) clip sequence from the read, truncated to 20 bp.
+/// Track a left (start) clip sequence from the read, truncated to [`MAX_CLIP_SEQ_LEN`] bp.
 #[inline]
 fn track_left_clip(arrays: &mut FeatureArrays, pos: usize, seq: &[u8], cigar_raw: &[(u32, u32)], evt_len: u32) {
     if evt_len > 0 {
         if let Some(&(op, _)) = cigar_raw.first() {
             if op as u8 as char == 'S' && !seq.is_empty() {
-                let clip_len = (evt_len as usize).min(20).min(seq.len());
+                let clip_len = (evt_len as usize).min(MAX_CLIP_SEQ_LEN).min(seq.len());
                 track_sequence(&mut arrays.start_clip_sequences, pos, &seq[..clip_len]);
             }
         }
     }
 }
 
-/// Track a right (end) clip sequence from the read, truncated to 20 bp.
+/// Track a right (end) clip sequence from the read, truncated to [`MAX_CLIP_SEQ_LEN`] bp.
 #[inline]
 fn track_right_clip(arrays: &mut FeatureArrays, pos: usize, seq: &[u8], cigar_raw: &[(u32, u32)], evt_len: u32) {
     if evt_len > 0 {
         if let Some(&(op, _)) = cigar_raw.last() {
             if op as u8 as char == 'S' && !seq.is_empty() {
                 let clip_start = seq.len().saturating_sub(evt_len as usize);
-                let clip_len = (evt_len as usize).min(20);
+                let clip_len = (evt_len as usize).min(MAX_CLIP_SEQ_LEN);
                 let clip_end = (clip_start + clip_len).min(seq.len());
                 track_sequence(&mut arrays.end_clip_sequences, pos, &seq[clip_start..clip_end]);
             }
@@ -996,7 +1000,7 @@ fn process_clippings(arrays: &mut FeatureArrays, ctx: &ReadContext, flags: Modul
         if raw_cigar_is_clipping(op) {
             arrays.left_clipping_lengths[ctx.start].push(len);
             if flags.mapping_metrics && op as u8 as char == 'S' && !ctx.seq.is_empty() {
-                let clip_len = (len as usize).min(20).min(ctx.seq.len());
+                let clip_len = (len as usize).min(MAX_CLIP_SEQ_LEN).min(ctx.seq.len());
                 track_sequence(&mut arrays.left_clip_sequences, ctx.start, &ctx.seq[..clip_len]);
             }
         }
@@ -1015,7 +1019,7 @@ fn process_clippings(arrays: &mut FeatureArrays, ctx: &ReadContext, flags: Modul
             if flags.mapping_metrics && op as u8 as char == 'S' && !ctx.seq.is_empty() {
                 let len_usize = len as usize;
                 let clip_start = ctx.seq.len().saturating_sub(len_usize);
-                let clip_len = len_usize.min(20);
+                let clip_len = len_usize.min(MAX_CLIP_SEQ_LEN);
                 let clip_end = (clip_start + clip_len).min(ctx.seq.len());
                 track_sequence(&mut arrays.right_clip_sequences, clip_pos, &ctx.seq[clip_start..clip_end]);
             }

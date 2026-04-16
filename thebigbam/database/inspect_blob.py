@@ -18,7 +18,7 @@ from thebigbam.database.blob_decoder import (
     decode_zoom_standalone,
     decode_raw_chunks, decode_raw_sparse_chunks,
     get_scale_from_zoom_blob, is_sparse_zoom_blob,
-    feature_name_to_id, is_contig_blob_feature,
+    feature_name_to_id, is_contig_blob_feature, gc_window_size,
     CHUNK_SIZE, SCALE_DIVISORS, ZOOM_MAGIC,
 )
 
@@ -213,12 +213,12 @@ def _inspect_contig_feature(conn, contig_id, contig_name, feature_name, fid,
     x_arr = data["x"]
     y_arr = data["y"]
 
-    gc_window = 500 if feature_name == "gc_content" else (1000 if feature_name == "gc_skew" else 1)
-    if gc_window > 1:
-        x_arr = x_arr * gc_window
+    gc_win = gc_window_size(feature_name)
+    if gc_win > 1:
+        x_arr = x_arr * gc_win
 
     _print_rows(contig_name, "", feature_name, x_arr, y_arr, region_start, region_end,
-                window_size=gc_window, mag_name=mag_name, mag_offset=mag_offset)
+                window_size=gc_win, mag_name=mag_name, mag_offset=mag_offset)
 
 
 def _inspect_sample_feature(conn, contig_id, contig_name, sample_name, sample_id,
@@ -260,10 +260,10 @@ def _inspect_sample_feature(conn, contig_id, contig_name, sample_name, sample_id
 
 def _fetch_contig_chunks(conn, contig_id, fid, region_start, region_end, feature_name):
     """Fetch Contig_blob_chunk rows, optionally limited to region."""
-    gc_window = 500 if feature_name == "gc_content" else (1000 if feature_name == "gc_skew" else 1)
+    gc_win = gc_window_size(feature_name)
     if region_start is not None:
-        first_idx = max(0, (region_start - 1) // gc_window // CHUNK_SIZE)
-        last_idx = (region_end - 1) // gc_window // CHUNK_SIZE
+        first_idx = max(0, (region_start - 1) // gc_win // CHUNK_SIZE)
+        last_idx = (region_end - 1) // gc_win // CHUNK_SIZE
         rows = conn.execute(
             "SELECT Chunk_idx, Data FROM Contig_blob_chunk "
             "WHERE Contig_id=? AND Feature_id=? AND Chunk_idx BETWEEN ? AND ? ORDER BY Chunk_idx",

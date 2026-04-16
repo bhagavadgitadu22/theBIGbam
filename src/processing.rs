@@ -750,7 +750,6 @@ fn compute_area_median_clippings(
 fn add_features_from_arrays(
     arrays: &mut FeatureArrays,
     contig_name: &str,
-    contig_length: usize,
     config: &ProcessConfig,
     is_circular: bool,
     seq_type: SequencingType,
@@ -764,6 +763,7 @@ fn add_features_from_arrays(
                        codon_category_to_id, codon_to_id, aa_to_id};
     use crate::types::{get_encoding, get_value_scale, Encoding};
     let pt_config = config.phagetermini_config;
+    let contig_length = arrays.ref_length();
 
     // Build DTR regions from repeats for this contig (used for both merging and classification)
     // Filter criteria:
@@ -1318,6 +1318,7 @@ fn add_features_from_arrays(
                 contig_length,
                 is_circular,
                 &dtr_regions,
+                pt_config.max_distance_peaks,
             );
 
             // Only return PackagingData if there's a detected mechanism (not "No_packaging")
@@ -1379,7 +1380,7 @@ fn add_features_from_arrays(
 pub fn process_sample(
     bam_path: &Path,
     contigs: &[ContigInfo],
-    modules: &[String],
+    flags: ModuleFlags,
     config: &ProcessConfig,
     is_circular: bool,
     repeats: &[RepeatsData],
@@ -1390,8 +1391,6 @@ pub fn process_sample(
         .unwrap_or_default()
         .to_string_lossy()
         .replace("_with_MD", "");
-
-    let flags = ModuleFlags::from_modules(modules);
 
     let time_on = config.enable_timing;
     let mut st = if time_on { Some(SampleTimings::default()) } else { None };
@@ -1587,7 +1586,7 @@ pub fn process_sample(
                 // Sub-phase: feature calculation
                 let ts = accum_ref.map(|_| std::time::Instant::now());
                 let mut feature_blobs: Vec<(String, String, crate::blob::EncodedBlob)> = Vec::new();
-                let (packaging_info, metrics_info) = add_features_from_arrays(&mut arrays, ref_name, ref_length, config, is_circular, seq_type, flags, primary_count, repeats, cds_index.as_ref(), &mut feature_blobs);
+                let (packaging_info, metrics_info) = add_features_from_arrays(&mut arrays, ref_name, config, is_circular, seq_type, flags, primary_count, repeats, cds_index.as_ref(), &mut feature_blobs);
                 let coverage_median = arrays.coverage_median() as f32;
                 let coverage_trimmed_mean = arrays.coverage_trimmed_mean(0.05) as f32;
 
@@ -1855,6 +1854,39 @@ pub fn run_all_samples(
         let contigs = extract_contigs_from_bams(bam_files, &preliminary_map)?;
         eprintln!("Found {} contigs from BAM files", contigs.len());
         (contigs, Vec::new(), Vec::new())
+    } else if has_genbank && genbank_path.is_dir() {
+        // Directory of annotation files in contig mode — parse each file and merge.
+        let mut all_contigs: Vec<ContigInfo> = Vec::new();
+        let mut all_annotations: Vec<FeatureAnnotation> = Vec::new();
+        let mut all_quals: Vec<(i64, HashMap<String, String>)> = Vec::new();
+
+        let mut entries: Vec<_> = std::fs::read_dir(genbank_path)?
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.is_file() && crate::parser::is_annotation_file(p))
+            .collect();
+        entries.sort();
+
+        if entries.is_empty() {
+            return Err(anyhow::anyhow!(
+                "No annotation files found in directory: {}",
+                genbank_path.display()
+            ));
+        }
+
+        for path in &entries {
+            let base_global = all_contigs.len() as i64;
+            let (contigs, anns, quals) = parse_annotations(path)?;
+            for mut ann in anns {
+                ann.contig_id += base_global;
+                all_annotations.push(ann);
+            }
+            for (qid, qmap) in quals {
+                all_quals.push((qid + base_global, qmap));
+            }
+            all_contigs.extend(contigs);
+        }
+        (all_contigs, all_annotations, all_quals)
     } else {
         parse_annotations(genbank_path)?
     };
@@ -1867,14 +1899,23 @@ pub fn run_all_samples(
     eprintln!("Found {} BAM files", bam_files.len());
 
     // 3. If assembly_path provided, parse FASTA and merge sequences into contigs.
-    //    Skipped in MAG mode — sequences are already merged per-MAG above — and
-    //    guarded with is_file() so a stray directory path can never reach parse_fasta.
-    if config.view_mode != ViewMode::Mag
-        && !assembly_path.as_os_str().is_empty()
-        && assembly_path.is_file()
-    {
-        eprintln!("\n### Merging sequences from assembly FASTA...");
-        merge_sequences_from_fasta(&mut contigs, assembly_path)?;
+    //    Skipped in MAG mode — sequences are already merged per-MAG above.
+    if config.view_mode != ViewMode::Mag && !assembly_path.as_os_str().is_empty() {
+        if assembly_path.is_file() {
+            eprintln!("\n### Merging sequences from assembly FASTA...");
+            merge_sequences_from_fasta(&mut contigs, assembly_path)?;
+        } else if assembly_path.is_dir() {
+            eprintln!("\n### Merging sequences from assembly FASTA directory...");
+            let mut fasta_entries: Vec<_> = std::fs::read_dir(assembly_path)?
+                .filter_map(|e| e.ok())
+                .map(|e| e.path())
+                .filter(|p| p.is_file() && crate::parser::is_fasta_file(p))
+                .collect();
+            fasta_entries.sort();
+            for path in &fasta_entries {
+                merge_sequences_from_fasta(&mut contigs, path)?;
+            }
+        }
     }
 
     // 3b. Compute nucleotide/protein sequences for CDS annotations
@@ -2186,7 +2227,8 @@ pub fn run_all_samples(
     eprintln!("\n### Processing {} samples with {} threads", bam_files.len(), config.threads);
     eprintln!("Modules: {}\n", modules.join(", "));
 
-    let result = process_samples_parallel(&bam_files, &contigs, modules, config, &circularity_map, db_writer, &repeats, &annotations, output_db, timing_file, autoblast_secs, gc_secs)?;
+    let flags = ModuleFlags::from_modules(modules);
+    let result = process_samples_parallel(&bam_files, &contigs, flags, config, &circularity_map, db_writer, &repeats, &annotations, output_db, timing_file, autoblast_secs, gc_secs)?;
 
     print_summary(&result, output_db);
 
@@ -2214,7 +2256,7 @@ struct SampleResult {
 fn process_samples_parallel(
     bam_files: &[PathBuf],
     contigs: &[ContigInfo],
-    modules: &[String],
+    flags: ModuleFlags,
     config: &ProcessConfig,
     circularity_map: &HashMap<PathBuf, bool>,
     db_writer: DbWriter,
@@ -2235,7 +2277,7 @@ fn process_samples_parallel(
     //   outer sample parallelism causes all samples to progress simultaneously
     //   without any completing. Sequential ensures samples finish one-by-one.
     if config.threads == 1 || contigs.len() >= 500 {
-        return process_samples_sequential(bam_files, contigs, modules, config, circularity_map, db_writer, is_tty, repeats, annotations, output_db, timing_file, autoblast_secs, gc_secs);
+        return process_samples_sequential(bam_files, contigs, flags, config, circularity_map, db_writer, is_tty, repeats, annotations, output_db, timing_file, autoblast_secs, gc_secs);
     }
 
     // Adaptive channel size based on memory pressure from contig count
@@ -2386,7 +2428,7 @@ fn process_samples_parallel(
         let sample_start = std::time::Instant::now();
 
         let sample_circular = circularity_map.get(bam_path).copied().unwrap_or(false);
-        match process_sample(bam_path, contigs, modules, config, sample_circular, repeats, annotations) {
+        match process_sample(bam_path, contigs, flags, config, sample_circular, repeats, annotations) {
             Ok((feature_blobs, presences, packaging, misassembly, microdiversity, side_misassembly, topology, sample_name, sequencing_type, total_reads, mapped_reads, is_circular, mut timings)) => {
                 let sample_time = sample_start.elapsed().as_secs_f64();
                 // Fill the total processing time (DB write will be added by writer thread)
@@ -2477,7 +2519,7 @@ fn process_samples_parallel(
 fn process_samples_sequential(
     bam_files: &[PathBuf],
     contigs: &[ContigInfo],
-    modules: &[String],
+    flags: ModuleFlags,
     config: &ProcessConfig,
     circularity_map: &HashMap<PathBuf, bool>,
     db_writer: DbWriter,
@@ -2520,7 +2562,7 @@ fn process_samples_sequential(
         let sample_start = std::time::Instant::now();
 
         let sample_circular = circularity_map.get(bam_path).copied().unwrap_or(false);
-        match process_sample(bam_path, contigs, modules, config, sample_circular, repeats, annotations) {
+        match process_sample(bam_path, contigs, flags, config, sample_circular, repeats, annotations) {
             Ok((feature_blobs, presences, packaging, misassembly, microdiversity, side_misassembly, topology, sample_name, sequencing_type, total_reads, mapped_reads, is_circular, mut timings)) => {
                 let process_elapsed = sample_start.elapsed();
                 processing_time_total += process_elapsed;

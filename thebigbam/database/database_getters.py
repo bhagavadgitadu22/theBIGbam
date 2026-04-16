@@ -138,22 +138,19 @@ def get_mag_feature_zoom(cur, mag_id, sample_id, feature_name):
     return bytes(row[0]) if row else None
 
 
-def get_mag_feature_chunks(cur, mag_id, sample_id, feature_name, chunk_lo, chunk_hi):
-    """Return [(chunk_idx, bytes)] for Chunk_idx in [chunk_lo, chunk_hi]."""
-    fid = _feature_id_for(cur, feature_name)
-    if fid is None:
-        return []
+def get_mag_members(conn, mag_id):
+    """Return [(contig_id, contig_length, offset)] for a MAG, ordered by offset."""
     try:
-        rows = cur.execute(
-            "SELECT Chunk_idx, Data FROM MAG_blob_chunk "
-            "WHERE MAG_id = ? AND Sample_id = ? AND Feature_id = ? "
-            "AND Chunk_idx BETWEEN ? AND ? "
-            "ORDER BY Chunk_idx",
-            [mag_id, sample_id, fid, chunk_lo, chunk_hi],
+        rows = conn.execute(
+            "SELECT mca.Contig_id, c.Contig_length, mca.Offset_in_MAG "
+            "FROM MAG_contigs_association mca "
+            "JOIN Contig c ON c.Contig_id = mca.Contig_id "
+            "WHERE mca.MAG_id = ? ORDER BY mca.Offset_in_MAG",
+            [mag_id],
         ).fetchall()
     except duckdb.Error:
         return []
-    return [(int(idx), bytes(data)) for idx, data in rows]
+    return [(int(cid), int(clen), int(off)) for cid, clen, off in rows]
 
 
 def get_mag_contig_zoom(cur, mag_id, feature_name):
@@ -172,22 +169,6 @@ def get_mag_contig_zoom(cur, mag_id, feature_name):
     return bytes(row[0]) if row else None
 
 
-def get_mag_contig_chunks(cur, mag_id, feature_name, chunk_lo, chunk_hi):
-    """Return [(chunk_idx, bytes)] for Chunk_idx in [chunk_lo, chunk_hi]."""
-    fid = _feature_id_for(cur, feature_name)
-    if fid is None:
-        return []
-    try:
-        rows = cur.execute(
-            "SELECT Chunk_idx, Data FROM MAG_contig_blob_chunk "
-            "WHERE MAG_id = ? AND Feature_id = ? "
-            "AND Chunk_idx BETWEEN ? AND ? "
-            "ORDER BY Chunk_idx",
-            [mag_id, fid, chunk_lo, chunk_hi],
-        ).fetchall()
-    except duckdb.Error:
-        return []
-    return [(int(idx), bytes(data)) for idx, data in rows]
 
 
 def get_mag_contig_map(conn):
@@ -824,8 +805,8 @@ def remove_mag(db_path, mag_name):
 
     # Delete MAG-level blob data
     for table in [
-        'MAG_blob', 'MAG_blob_chunk',
-        'MAG_contig_blob', 'MAG_contig_blob_chunk',
+        'MAG_blob',
+        'MAG_contig_blob',
         'MAG_coverage',
     ]:
         _delete_from(conn, table, 'MAG_id', mag_id)

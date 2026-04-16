@@ -24,6 +24,7 @@ use crate::blob::{
     EncodedBlob, EventMeta, MetadataFlags,
 };
 use crate::db::DbWriter;
+use crate::gc_content::{DEFAULT_GC_CONTENT_WINDOW_SIZE, DEFAULT_GC_SKEW_WINDOW_SIZE};
 use crate::types::{feature_name_to_id, get_encoding, Encoding, ValueScale, VARIABLES};
 
 /// How `EventMeta.partner` is interpreted for a sparse Contig_blob feature.
@@ -53,8 +54,8 @@ struct ContigBlobConfig {
 
 fn contig_blob_config(name: &str) -> Option<ContigBlobConfig> {
     match name {
-        "gc_content" => Some(ContigBlobConfig { window_size:  500, partner_kind: PartnerKind::None }),
-        "gc_skew"    => Some(ContigBlobConfig { window_size: 1000, partner_kind: PartnerKind::None }),
+        "gc_content" => Some(ContigBlobConfig { window_size: DEFAULT_GC_CONTENT_WINDOW_SIZE as u32, partner_kind: PartnerKind::None }),
+        "gc_skew"    => Some(ContigBlobConfig { window_size: DEFAULT_GC_SKEW_WINDOW_SIZE as u32, partner_kind: PartnerKind::None }),
         "direct_repeat_count"      => Some(ContigBlobConfig { window_size: 1, partner_kind: PartnerKind::None }),
         "inverted_repeat_count"    => Some(ContigBlobConfig { window_size: 1, partner_kind: PartnerKind::None }),
         "direct_repeat_identity"   => Some(ContigBlobConfig { window_size: 1, partner_kind: PartnerKind::Position }),
@@ -376,7 +377,9 @@ fn aggregate_feature_dense_inmem(
     if !any {
         return empty_blob();
     }
-    encode_dense_blob(&mag_values, scale, mag_length)
+    let mut encoded = encode_dense_blob(&mag_values, scale, mag_length);
+    encoded.chunks = Vec::new(); // MAG chunks not stored — assembled on the fly from per-contig chunks
+    encoded
 }
 
 fn aggregate_feature_sparse_inmem(
@@ -407,10 +410,19 @@ fn aggregate_feature_sparse_inmem(
     if all_pos.is_empty() {
         return empty_blob();
     }
-    encode_sparse_blob(
+    // Sort by position — zoom level computation is order-independent, but
+    // encode_sparse_blob builds the zoom from sorted positions internally.
+    let mut order: Vec<usize> = (0..all_pos.len()).collect();
+    order.sort_unstable_by_key(|&i| all_pos[i]);
+    let all_pos: Vec<u32> = order.iter().map(|&i| all_pos[i]).collect();
+    let all_val: Vec<i32> = order.iter().map(|&i| all_val[i]).collect();
+    let all_meta: Vec<EventMeta> = order.iter().map(|&i| all_meta[i].clone()).collect();
+    let mut encoded = encode_sparse_blob(
         &all_pos, &all_val,
         Some(&all_meta), union_flags, scale, mag_length,
-    )
+    );
+    encoded.chunks = Vec::new(); // MAG chunks not stored — assembled on the fly from per-contig chunks
+    encoded
 }
 
 // ---------------------------------------------------------------------------
@@ -473,7 +485,7 @@ fn aggregate_contig_dense(
         let num_values = if window_size <= 1 {
             m.length
         } else {
-            (m.length + window_size - 1) / window_size
+            m.length.div_ceil(window_size)
         };
         let values = decode_dense_from_chunks(&chunks, num_values);
 
@@ -498,7 +510,9 @@ fn aggregate_contig_dense(
     if !any {
         return Ok(empty_blob());
     }
-    Ok(encode_dense_blob(&mag_values, scale, mag_length))
+    let mut encoded = encode_dense_blob(&mag_values, scale, mag_length);
+    encoded.chunks = Vec::new(); // MAG chunks not stored — assembled on the fly from per-contig chunks
+    Ok(encoded)
 }
 
 fn aggregate_contig_sparse(
@@ -542,10 +556,19 @@ fn aggregate_contig_sparse(
     if all_pos.is_empty() {
         return Ok(empty_blob());
     }
-    Ok(encode_sparse_blob(
+    // Sort by position — encode_sparse_blob uses binary search (partition_point)
+    // to assign events to chunks, which requires sorted input.
+    let mut order: Vec<usize> = (0..all_pos.len()).collect();
+    order.sort_unstable_by_key(|&i| all_pos[i]);
+    let all_pos: Vec<u32> = order.iter().map(|&i| all_pos[i]).collect();
+    let all_val: Vec<i32> = order.iter().map(|&i| all_val[i]).collect();
+    let all_meta: Vec<EventMeta> = order.iter().map(|&i| all_meta[i].clone()).collect();
+    let mut encoded = encode_sparse_blob(
         &all_pos, &all_val,
         Some(&all_meta), union_flags, scale, mag_length,
-    ))
+    );
+    encoded.chunks = Vec::new();
+    Ok(encoded)
 }
 
 fn load_contig_chunks(

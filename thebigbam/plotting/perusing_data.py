@@ -1,17 +1,13 @@
-## Decode maps for integer-encoded DB columns (applied before display)
-_CONTIG_DECODE = {
+## Decode maps for integer-encoded DB columns (applied before display).
+## Contig and MAG tables share the same scaling rules.
+_SUMMARY_DECODE = {
     "Duplication_percentage": lambda v: round(v / 10.0, 1),
     "GC_sd": lambda v: round(v / 100.0, 2),
     "GC_skew_amplitude": lambda v: round(v / 100.0, 2),
     "Positive_GC_skew_windows_percentage": lambda v: round(v / 10.0, 1),
 }
-
-_MAG_DECODE = {
-    "Duplication_percentage": lambda v: round(v / 10.0, 1),
-    "GC_sd": lambda v: round(v / 100.0, 2),
-    "GC_skew_amplitude": lambda v: round(v / 100.0, 2),
-    "Positive_GC_skew_windows_percentage": lambda v: round(v / 10.0, 1),
-}
+_CONTIG_DECODE = _SUMMARY_DECODE
+_MAG_DECODE = _SUMMARY_DECODE
 
 
 ## Helper to build an HTML table from query rows with optional column filtering and decoding

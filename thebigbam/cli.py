@@ -5,7 +5,7 @@ import sys
 from thebigbam.utils import (
     read_mapping, add_sample_metadata, add_contig_metadata, add_mag_metadata,
 )
-from thebigbam.database import add_variable, calculating_data, export_data, inspect_blob
+from thebigbam.database import add_variable, calculating_data, database_getters, export_data, inspect_blob
 from thebigbam.plotting import start_bokeh_server
 from thebigbam.analysis import (
     mapping_patterns_per_CDS_per_contig_per_sample,
@@ -193,7 +193,7 @@ def main(argv=None):
     # removing data from the db (call into package functions)
     if args.cmd == 'remove-sample-metadata':
             try:
-                from thebigbam.database import database_getters
+
                 database_getters.remove_sample_metadata(args.db, args.colname)
                 return 0
             except Exception as e:
@@ -202,7 +202,7 @@ def main(argv=None):
 
     if args.cmd == 'remove-contig-metadata':
         try:
-            from thebigbam.database import database_getters
+
             database_getters.remove_contig_metadata(args.db, args.colname)
             return 0
         except Exception as e:
@@ -211,7 +211,7 @@ def main(argv=None):
 
     if args.cmd == 'remove-mag-metadata':
         try:
-            from thebigbam.database import database_getters
+
             database_getters.remove_mag_metadata(args.db, args.colname)
             return 0
         except Exception as e:
@@ -220,7 +220,7 @@ def main(argv=None):
 
     if args.cmd == 'remove-sample':
         try:
-            from thebigbam.database import database_getters
+
             database_getters.remove_sample(args.db, args.name)
             return 0
         except Exception as e:
@@ -229,7 +229,7 @@ def main(argv=None):
 
     if args.cmd == 'remove-contig':
         try:
-            from thebigbam.database import database_getters
+
             database_getters.remove_contig(args.db, args.name)
             return 0
         except Exception as e:
@@ -238,7 +238,7 @@ def main(argv=None):
 
     if args.cmd == 'remove-mag':
         try:
-            from thebigbam.database import database_getters
+
             database_getters.remove_mag(args.db, args.name)
             return 0
         except Exception as e:
@@ -251,7 +251,7 @@ def main(argv=None):
     # DB inspection commands (call into package functions)
     if args.cmd == 'list-samples':
         try:
-            from thebigbam.database import database_getters
+
             database_getters.list_samples(args.db)
             return 0
         except Exception as e:
@@ -260,7 +260,7 @@ def main(argv=None):
 
     if args.cmd == 'list-contigs':
         try:
-            from thebigbam.database import database_getters
+
             database_getters.list_contigs(args.db)
             return 0
         except Exception as e:
@@ -269,7 +269,7 @@ def main(argv=None):
 
     if args.cmd == 'list-mags':
         try:
-            from thebigbam.database import database_getters
+
             database_getters.list_mags_cli(args.db)
             return 0
         except Exception as e:
@@ -278,7 +278,7 @@ def main(argv=None):
 
     if args.cmd == 'list-sample-metadata':
         try:
-            from thebigbam.database import database_getters
+
             database_getters.list_sample_metadata(args.db)
             return 0
         except Exception as e:
@@ -287,7 +287,7 @@ def main(argv=None):
 
     if args.cmd == 'list-contig-metadata':
         try:
-            from thebigbam.database import database_getters
+
             database_getters.list_contig_metadata(args.db)
             return 0
         except Exception as e:
@@ -296,7 +296,7 @@ def main(argv=None):
 
     if args.cmd == 'list-mag-metadata':
         try:
-            from thebigbam.database import database_getters
+
             database_getters.list_mag_metadata(args.db)
             return 0
         except Exception as e:
@@ -312,7 +312,7 @@ def main(argv=None):
 
     if args.cmd == 'list-variables':
             try:
-                from thebigbam.database import database_getters
+
                 database_getters.list_variables(args.db, args.detailed)
                 return 0
             except Exception as e:
