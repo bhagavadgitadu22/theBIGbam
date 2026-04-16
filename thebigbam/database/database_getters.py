@@ -537,6 +537,21 @@ def list_contigs(db_path):
             print(f"{c}")
     conn.close()
 
+def list_mags_cli(db_path):
+    """Print MAG_name values from MAG table."""
+    conn = duckdb.connect(db_path, read_only=True)
+    if conn.execute("SELECT 1 FROM information_schema.tables WHERE table_name = 'MAG'").fetchone() is None:
+        print("No MAG table in database (not in MAG mode).")
+        conn.close()
+        return
+    rows = [r[0] for r in conn.execute("SELECT MAG_name FROM MAG ORDER BY MAG_name").fetchall()]
+    if not rows:
+        print("No MAGs found in the database.")
+    else:
+        for m in rows:
+            print(f"{m}")
+    conn.close()
+
 SAMPLE_INTERNAL_COLUMNS = {
     'Sample_id', 'Sample_name', 'Sequencing_type',
     'Number_of_reads', 'Number_of_mapped_reads',
@@ -786,6 +801,78 @@ def remove_contig(db_path, contig_name):
     conn.close()
     print(f"Removed contig '{contig_name}' and all associated data.")
 
+
+
+
+def remove_mag(db_path, mag_name):
+    """Remove a MAG and all its associated data from the database."""
+    conn = duckdb.connect(db_path)
+
+    if not _table_exists(conn, 'MAG'):
+        conn.close()
+        print("No MAG table in database (not in MAG mode).")
+        return
+
+    row = conn.execute(
+        "SELECT MAG_id FROM MAG WHERE MAG_name = ?", [mag_name]
+    ).fetchone()
+    if row is None:
+        conn.close()
+        print(f"Error: MAG '{mag_name}' not found in database.")
+        return
+    mag_id = row[0]
+
+    # Delete MAG-level blob data
+    for table in [
+        'MAG_blob', 'MAG_blob_chunk',
+        'MAG_contig_blob', 'MAG_contig_blob_chunk',
+        'MAG_coverage',
+    ]:
+        _delete_from(conn, table, 'MAG_id', mag_id)
+
+    # Get contigs belonging to this MAG
+    contig_ids = [
+        r[0] for r in conn.execute(
+            "SELECT Contig_id FROM MAG_contigs_association WHERE MAG_id = ?",
+            [mag_id],
+        ).fetchall()
+    ]
+
+    # Delete per-contig data for each member contig
+    for contig_id in contig_ids:
+        # Phage termini via Phage_mechanisms
+        if _table_exists(conn, 'Phage_mechanisms') and _table_exists(conn, 'Phage_termini'):
+            conn.execute(
+                "DELETE FROM Phage_termini WHERE Packaging_id IN "
+                "(SELECT Packaging_id FROM Phage_mechanisms WHERE Contig_id = ?)",
+                [contig_id],
+            )
+
+        for table in [
+            'Phage_mechanisms', 'Coverage', 'Misassembly', 'Microdiversity',
+            'Side_misassembly', 'Topology',
+            'Contig_sequence', 'Contig_annotation',
+            'Contig_directRepeats', 'Contig_invertedRepeats',
+            'Contig_GCContent', 'Contig_GCSkew',
+            'Contig_direct_repeat_count', 'Contig_inverted_repeat_count',
+            'Contig_direct_repeat_identity', 'Contig_inverted_repeat_identity',
+        ]:
+            _delete_from(conn, table, 'Contig_id', contig_id)
+
+        # Dynamic feature tables
+        for ft in _get_feature_tables(conn):
+            if _table_exists(conn, ft) and _table_has_column(conn, ft, 'Contig_id'):
+                _delete_from(conn, ft, 'Contig_id', contig_id)
+
+        # Delete the contig row itself
+        conn.execute("DELETE FROM Contig WHERE Contig_id = ?", [contig_id])
+
+    # Delete association rows and the MAG row itself
+    _delete_from(conn, 'MAG_contigs_association', 'MAG_id', mag_id)
+    conn.execute("DELETE FROM MAG WHERE MAG_id = ?", [mag_id])
+    update_database_metadata(conn)
+    conn.close()
+    print(f"Removed MAG '{mag_name}' and all associated data ({len(contig_ids)} contigs).")
 
 def main(argv=None):
     import argparse

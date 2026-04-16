@@ -704,24 +704,31 @@ def create_layout(db_path, enable_timing=False):
                 sel_index = new[-1]
 
             # Enforce single selection across all modules in Variables section
+            from bokeh.io import curdoc
+            doc = curdoc()
+            doc.hold('combine')
             global_toggle_lock['locked'] = True
             try:
                 for other in widgets['variables_widgets_all']:
                     if other is cbg:
-                        if sel_index is None:
-                            other.active = []
-                        else:
-                            other.active = [sel_index]
+                        target = [] if sel_index is None else [sel_index]
+                        if other.active != target:
+                            other.active = target
                     else:
-                        other.active = []
+                        if other.active:
+                            other.active = []
             finally:
                 global_toggle_lock['locked'] = False
+                doc.unhold()
         return callback
 
     # Views (One sample / All samples) callback: show/hide sample-related controls
     def on_view_change(attr, old, new):
         is_all = (new == 1)  # True means All samples
 
+        from bokeh.io import curdoc
+        doc = curdoc()
+        doc.hold('combine')
         # Lock callbacks during view change to prevent cascading updates
         global_toggle_lock['locked'] = True
         try:
@@ -746,6 +753,7 @@ def create_layout(db_path, enable_timing=False):
         finally:
             global_toggle_lock['locked'] = False
         update_section_titles()
+        doc.unhold()
 
     ## Apply button function
     def apply_clicked():
@@ -1459,6 +1467,9 @@ def create_layout(db_path, enable_timing=False):
 
     def refresh_on_filter_change():
         """Refresh contig and sample options when Filtering2 values change."""
+        from bokeh.io import curdoc
+        doc = curdoc()
+        doc.hold('combine')
         _filtering_cache['valid'] = False
         global_toggle_lock['locked'] = True
         try:
@@ -1468,6 +1479,7 @@ def create_layout(db_path, enable_timing=False):
         finally:
             global_toggle_lock['locked'] = False
         update_section_titles()
+        doc.unhold()
 
     def create_query_row(section_data):
         """Create a single query row with cascading selects, comparison, dynamic input and remove button."""
@@ -1814,6 +1826,9 @@ def create_layout(db_path, enable_timing=False):
     def _on_sample_change(event):
         if global_toggle_lock['locked']:
             return
+        from bokeh.io import curdoc
+        doc = curdoc()
+        doc.hold('combine')
         global_toggle_lock['locked'] = True
         try:
             if widgets['has_mags']:
@@ -1827,6 +1842,7 @@ def create_layout(db_path, enable_timing=False):
         finally:
             global_toggle_lock['locked'] = False
         update_section_titles()
+        doc.unhold()
     widgets['sample_select'].param.watch(_on_sample_change, 'value')
 
 
@@ -1853,6 +1869,9 @@ def create_layout(db_path, enable_timing=False):
     def on_contig_change(event):
         if global_toggle_lock['locked']:
             return
+        from bokeh.io import curdoc
+        doc = curdoc()
+        doc.hold('combine')
         new = event.new
         global_toggle_lock['locked'] = True
         try:
@@ -1879,7 +1898,8 @@ def create_layout(db_path, enable_timing=False):
         else:
             from_position_input.value = "1"
             to_position_input.value = ""
-    
+        doc.unhold()
+
     widgets['contig_select'].param.watch(on_contig_change, 'value')
 
     # MAG cross-filter callbacks (only attached when DB is MAG-mode)
@@ -1887,6 +1907,9 @@ def create_layout(db_path, enable_timing=False):
         def on_mag_change(event):
             if global_toggle_lock['locked']:
                 return
+            from bokeh.io import curdoc
+            doc = curdoc()
+            doc.hold('combine')
             new = event.new
             global_toggle_lock['locked'] = True
             try:
@@ -1905,6 +1928,7 @@ def create_layout(db_path, enable_timing=False):
                 )
                 from_position_input.value = "1"
                 to_position_input.value = str(total)
+            doc.unhold()
 
         widgets['mag_select'].param.watch(on_mag_change, 'value')
 
@@ -1913,6 +1937,9 @@ def create_layout(db_path, enable_timing=False):
         def on_contig_sync_mag(event):
             if global_toggle_lock['locked']:
                 return
+            from bokeh.io import curdoc
+            doc = curdoc()
+            doc.hold('combine')
             contig_to_mag = widgets['contig_to_mag']
             new = event.new
             mag_select = widgets['mag_select']
@@ -1937,6 +1964,7 @@ def create_layout(db_path, enable_timing=False):
                 finally:
                     global_toggle_lock['locked'] = False
                 update_section_titles()
+            doc.unhold()
 
         widgets['contig_select'].param.watch(on_contig_sync_mag, 'value')
 
