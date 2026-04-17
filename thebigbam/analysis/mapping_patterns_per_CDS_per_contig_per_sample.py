@@ -30,7 +30,7 @@ from thebigbam.database.blob_decoder import (
 )
 
 
-COLUMNS = [
+_BASE_COLUMNS = [
     "sample_name",
     "contig_name",
     "gene_name",
@@ -58,6 +58,20 @@ COLUMNS = [
     "right_clippings_positions",
     "right_clippings_prevalence",
 ]
+
+_MAG_EXTRA_COLUMNS = {
+    "contig_aligned_fraction": "mag_aligned_fraction",
+    "contig_coverage_trimmed_mean": "mag_coverage_trimmed_mean",
+}
+
+
+def _build_columns(mag_mode):
+    cols = []
+    for c in _BASE_COLUMNS:
+        if mag_mode and c in _MAG_EXTRA_COLUMNS:
+            cols.append(_MAG_EXTRA_COLUMNS[c])
+        cols.append(c)
+    return cols
 
 # Features to decode per (contig, sample)
 _DENSE_FEATURES = ["primary_reads", "secondary_reads"]
@@ -255,7 +269,8 @@ def _build_gene_names(genes, contig_info):
 # ============================================================================
 
 def process_sample(conn, sample_id, sample_name, contig_info, cov_map, af_map,
-                   id_to_name, name_to_id, genes_by_contig, gene_names_by_contig):
+                   id_to_name, name_to_id, genes_by_contig, gene_names_by_contig,
+                   mag_mode=False, contig_to_mag=None, mag_cov_map=None):
     """Process all CDS for one sample. Yields row tuples."""
     contig_ids = list(cov_map.keys())
     if not contig_ids:
@@ -269,6 +284,13 @@ def process_sample(conn, sample_id, sample_name, contig_info, cov_map, af_map,
         contig_name, contig_length, _ = contig_info[contig_id]
         contig_cov_tmean = cov_map[contig_id]
         contig_af = af_map[contig_id]
+
+        mag_af = None
+        mag_cov_tmean = None
+        if mag_mode and contig_to_mag and mag_cov_map:
+            mag_id = contig_to_mag.get(contig_id)
+            if mag_id is not None:
+                mag_af, mag_cov_tmean = mag_cov_map.get((mag_id, sample_id), (None, None))
 
         features = _load_all_features(
             conn, contig_id, sample_id, contig_length, id_to_name, name_to_id
@@ -308,12 +330,18 @@ def process_sample(conn, sample_id, sample_name, contig_info, cov_map, af_map,
             lc_pos, lc_prev = _sparse_stats(features["left_clippings"], s0, e0)
             rc_pos, rc_prev = _sparse_stats(features["right_clippings"], s0, e0)
 
-            yield (
+            row = [
                 sample_name,
                 contig_name,
                 gene_name,
-                contig_af,
-                gene_af,
+            ]
+            if mag_mode:
+                row.append(mag_af)
+            row.append(contig_af)
+            row.append(gene_af)
+            if mag_mode:
+                row.append(mag_cov_tmean)
+            row.extend([
                 contig_cov_tmean,
                 gene_cov_med,
                 coverage_ratio,
@@ -335,7 +363,8 @@ def process_sample(conn, sample_id, sample_name, contig_info, cov_map, af_map,
                 lc_prev,
                 rc_pos,
                 rc_prev,
-            )
+            ])
+            yield tuple(row)
 
 
 DESCRIPTION = """\
@@ -345,8 +374,10 @@ Output columns (one row per sample x CDS):
 - sample_name: BAM sample name
 - contig_name: contig the CDS belongs to
 - gene_name: stable identifier <contig_name>_tbb_<N>, numbered per contig by start position
+- mag_aligned_fraction: (MAG mode only) percentage of the MAG covered by aligned reads (0-100)
 - contig_aligned_fraction: percentage of the contig covered by aligned reads (0-100)
 - gene_aligned_fraction: percentage of positions in the CDS covered by at least one primary read (0-100)
+- mag_coverage_trimmed_mean: (MAG mode only) trimmed mean primary read depth across the whole MAG
 - contig_coverage_trimmed_mean: trimmed mean primary read depth across the whole contig
 - gene_coverage_median: median primary read depth across the CDS
 - coverage_ratio: gene_coverage_median / contig_coverage_trimmed_mean
@@ -397,6 +428,25 @@ def run(args):
         sys.exit(1)
 
     conn = duckdb.connect(args.db, read_only=True)
+
+    from thebigbam.database.database_getters import is_mag_mode
+    mag_mode = is_mag_mode(conn)
+    contig_to_mag = {}
+    mag_cov_map = {}
+    if mag_mode:
+        contig_to_mag = {
+            r[0]: r[1] for r in conn.execute(
+                "SELECT Contig_id, MAG_id FROM MAG_contigs_association"
+            ).fetchall()
+        }
+        if _table_exists(conn, "MAG_coverage"):
+            mag_cov_map = {
+                (r[0], r[1]): (r[2] / 10.0, r[3] / 10.0)
+                for r in conn.execute(
+                    "SELECT MAG_id, Sample_id, Aligned_fraction_percentage, "
+                    "Coverage_trimmed_mean FROM MAG_coverage"
+                ).fetchall()
+            }
 
     if not _table_exists(conn, "Contig_annotation"):
         print("Error: No Contig_annotation table. Run annotation first.", file=sys.stderr)
@@ -478,9 +528,11 @@ def run(args):
 
     total_rows = 0
 
+    columns = _build_columns(mag_mode)
+
     with open(args.output, "w", newline="") as f:
         writer = csv.writer(f, delimiter="\t")
-        writer.writerow(COLUMNS)
+        writer.writerow(columns)
 
         for sample_id, sample_name in samples:
             if has_coverage:
@@ -505,6 +557,7 @@ def run(args):
             for row in process_sample(
                 conn, sample_id, sample_name, contig_info, cov_map, af_map,
                 id_to_name, name_to_id, genes_by_contig, gene_names_by_contig,
+                mag_mode=mag_mode, contig_to_mag=contig_to_mag, mag_cov_map=mag_cov_map,
             ):
                 writer.writerow(row)
                 sample_rows += 1
