@@ -749,9 +749,11 @@ impl DbWriter {
         Ok(())
     }
 
-    /// Calculate and update Duplication_percentage for all contigs based on repeat data.
-    /// For each contig, merges overlapping repeat intervals (both copies) and calculates
-    /// the percentage of the contig covered by repeats.
+    pub fn compute_duplication_percentages(&self, repeats: &[RepeatsData]) -> Result<()> {
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
+        self.update_duplication_percentages(&conn, repeats)
+    }
+
     fn update_duplication_percentages(&self, conn: &Connection, repeats: &[RepeatsData]) -> Result<()> {
         // Build a map of contig_id -> contig_length from the database
         let contig_lengths: HashMap<i64, i64> = {

@@ -606,12 +606,13 @@ fn run_autoblast(contigs: &[ContigInfo], _threads: usize) -> Result<Vec<RepeatsD
 fn run_mag_interblast(
     contigs: &[ContigInfo],
     mag_manifest: &[(String, Vec<String>)],
-) -> Result<(Vec<RepeatsData>, Vec<(String, String, i32, i32, i32, i32, f64)>)> {
+    db_writer: &DbWriter,
+) -> Result<(Vec<RepeatsData>, usize)> {
     match std::process::Command::new("blastn").arg("-version").output() {
         Ok(output) if output.status.success() => {}
         _ => {
             eprintln!("Warning: blastn not found on PATH. Skipping MAG inter-contig BLAST.");
-            return Ok((Vec::new(), Vec::new()));
+            return Ok((Vec::new(), 0));
         }
     }
 
@@ -620,101 +621,155 @@ fn run_mag_interblast(
 
     eprintln!("\n### Running MAG inter-contig BLAST on {} MAGs...", mag_manifest.len());
 
-    let results: Vec<(Vec<RepeatsData>, Vec<(String, String, i32, i32, i32, i32, f64)>)> =
-        mag_manifest.par_iter().filter_map(|(mag_name, member_names)| {
-            let members: Vec<&ContigInfo> = member_names
-                .iter()
-                .filter_map(|n| name_to_contig.get(n.as_str()).copied())
-                .filter(|c| c.sequence.is_some())
-                .collect();
-            if members.is_empty() {
-                return None;
-            }
+    let total_repeat_count = std::sync::atomic::AtomicUsize::new(0);
+    let total_inter_count = std::sync::atomic::AtomicUsize::new(0);
+    let mags_done = std::sync::atomic::AtomicUsize::new(0);
+    let total_mags = mag_manifest.len();
 
-            let mut temp_file = match tempfile::NamedTempFile::new() {
-                Ok(f) => f,
-                Err(e) => {
-                    eprintln!("Warning: temp file for MAG '{}': {}", mag_name, e);
-                    return None;
+    let all_repeats: std::sync::Mutex<Vec<RepeatsData>> = std::sync::Mutex::new(Vec::new());
+
+    mag_manifest.par_iter().for_each(|(mag_name, member_names)| {
+        let members: Vec<&ContigInfo> = member_names
+            .iter()
+            .filter_map(|n| name_to_contig.get(n.as_str()).copied())
+            .filter(|c| c.sequence.is_some())
+            .collect();
+        if members.is_empty() {
+            mags_done.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            return;
+        }
+
+        let mut temp_file = match tempfile::NamedTempFile::new() {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!("Warning: temp file for MAG '{}': {}", mag_name, e);
+                mags_done.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                return;
+            }
+        };
+        use std::io::Write;
+        for contig in &members {
+            if writeln!(temp_file, ">{}", contig.name).is_err() { return; }
+            if let Some(seq) = contig.sequence.as_ref() {
+                for chunk in seq.chunks(80) {
+                    if temp_file.write_all(chunk).is_err() { return; }
+                    if writeln!(temp_file).is_err() { return; }
                 }
-            };
-            use std::io::Write;
-            for contig in &members {
-                if writeln!(temp_file, ">{}", contig.name).is_err() { return None; }
-                if let Some(seq) = contig.sequence.as_ref() {
-                    for chunk in seq.chunks(80) {
-                        if temp_file.write_all(chunk).is_err() { return None; }
-                        if writeln!(temp_file).is_err() { return None; }
+            }
+        }
+        if temp_file.flush().is_err() { return; }
+        let temp_path = temp_file.path().to_path_buf();
+
+        let output = match std::process::Command::new("blastn")
+            .arg("-query").arg(&temp_path)
+            .arg("-subject").arg(&temp_path)
+            .arg("-evalue").arg("1e-10")
+            .arg("-outfmt").arg("6")
+            .output()
+        {
+            Ok(o) => o,
+            Err(e) => {
+                eprintln!("Warning: blastn failed for MAG '{}': {}", mag_name, e);
+                mags_done.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                return;
+            }
+        };
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            eprintln!("Warning: blastn non-zero for MAG '{}': {}", mag_name, stderr);
+            mags_done.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            return;
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let mut repeats: Vec<RepeatsData> = Vec::new();
+        let mut inter: Vec<(String, String, i32, i32, i32, i32, f64)> = Vec::new();
+        for line in stdout.lines() {
+            let line = line.trim();
+            if line.is_empty() { continue; }
+            let f: Vec<&str> = line.split('\t').collect();
+            if f.len() < 10 { continue; }
+            let qid = f[0].to_string();
+            let sid = f[1].to_string();
+            let pident: f64 = f[2].parse().unwrap_or(0.0);
+            let qstart: i32 = f[6].parse().unwrap_or(0);
+            let qend:   i32 = f[7].parse().unwrap_or(0);
+            let sstart: i32 = f[8].parse().unwrap_or(0);
+            let send:   i32 = f[9].parse().unwrap_or(0);
+
+            if qid == sid {
+                if qstart == sstart && qend == send { continue; }
+                let is_direct = (qstart < qend && sstart < send) || (qstart > qend && sstart > send);
+                repeats.push(RepeatsData {
+                    contig_name: qid,
+                    position1: qstart, position2: qend,
+                    position1prime: sstart, position2prime: send,
+                    pident, is_direct,
+                });
+            } else {
+                inter.push((qid, sid, qstart, qend, sstart, send, pident));
+            }
+        }
+
+        let n_repeats = repeats.len();
+        let n_inter = inter.len();
+
+        // Write this MAG's results to DB immediately.
+        if let Ok(conn) = db_writer.lock_conn() {
+            use duckdb::params;
+            for dup in &repeats {
+                if let Some(contig_id) = db_writer.get_contig_id(&dup.contig_name) {
+                    let pident_int = (dup.pident * 100.0).round() as i32;
+                    let table = if dup.is_direct { "Contig_directRepeats" } else { "Contig_invertedRepeats" };
+                    let _ = conn.execute(
+                        &format!("INSERT INTO {} (Contig_id, Position1, Position2, Position1prime, Position2prime, Pident) VALUES (?, ?, ?, ?, ?, ?)", table),
+                        params![contig_id, dup.position1, dup.position2, dup.position1prime, dup.position2prime, pident_int],
+                    );
+                }
+            }
+            if !inter.is_empty() {
+                let mut stmt = conn.prepare(
+                    "INSERT OR IGNORE INTO Contig_blast_hits
+                       (Contig_id_1, Contig_id_2, Position1, Position2, Position1prime, Position2prime, Pident)
+                     VALUES (?, ?, ?, ?, ?, ?, ?)"
+                ).ok();
+                if let Some(ref mut stmt) = stmt {
+                    for (qid, sid, mut p1, mut p2, mut p1p, mut p2p, pident) in inter.iter().cloned() {
+                        let cid_q = match db_writer.get_contig_id(&qid) { Some(v) => v, None => continue };
+                        let cid_s = match db_writer.get_contig_id(&sid) { Some(v) => v, None => continue };
+                        let (cid1, cid2) = if cid_q <= cid_s {
+                            (cid_q, cid_s)
+                        } else {
+                            std::mem::swap(&mut p1, &mut p1p);
+                            std::mem::swap(&mut p2, &mut p2p);
+                            (cid_s, cid_q)
+                        };
+                        let pident_i = (pident * 100.0).round() as i32;
+                        let _ = stmt.execute(params![cid1, cid2, p1, p2, p1p, p2p, pident_i]);
                     }
                 }
             }
-            if temp_file.flush().is_err() { return None; }
-            let temp_path = temp_file.path().to_path_buf();
+        }
 
-            let output = match std::process::Command::new("blastn")
-                .arg("-query").arg(&temp_path)
-                .arg("-subject").arg(&temp_path)
-                .arg("-evalue").arg("1e-10")
-                .arg("-outfmt").arg("6")
-                .output()
-            {
-                Ok(o) => o,
-                Err(e) => {
-                    eprintln!("Warning: blastn failed for MAG '{}': {}", mag_name, e);
-                    return None;
-                }
-            };
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                eprintln!("Warning: blastn non-zero for MAG '{}': {}", mag_name, stderr);
-                return None;
-            }
+        // Keep repeats for later (repeat blob conversion needs them).
+        all_repeats.lock().unwrap().extend(repeats);
 
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let mut repeats: Vec<RepeatsData> = Vec::new();
-            let mut inter: Vec<(String, String, i32, i32, i32, i32, f64)> = Vec::new();
-            for line in stdout.lines() {
-                let line = line.trim();
-                if line.is_empty() { continue; }
-                let f: Vec<&str> = line.split('\t').collect();
-                if f.len() < 10 { continue; }
-                let qid = f[0].to_string();
-                let sid = f[1].to_string();
-                let pident: f64 = f[2].parse().unwrap_or(0.0);
-                let qstart: i32 = f[6].parse().unwrap_or(0);
-                let qend:   i32 = f[7].parse().unwrap_or(0);
-                let sstart: i32 = f[8].parse().unwrap_or(0);
-                let send:   i32 = f[9].parse().unwrap_or(0);
+        total_repeat_count.fetch_add(n_repeats, std::sync::atomic::Ordering::Relaxed);
+        total_inter_count.fetch_add(n_inter, std::sync::atomic::Ordering::Relaxed);
+        let done = mags_done.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        if done % 100 == 0 || done == total_mags {
+            eprintln!("  MAG BLAST: {}/{} MAGs", done, total_mags);
+        }
+    });
 
-                if qid == sid {
-                    // Exact self coordinates → skip.
-                    if qstart == sstart && qend == send { continue; }
-                    let is_direct = (qstart < qend && sstart < send) || (qstart > qend && sstart > send);
-                    repeats.push(RepeatsData {
-                        contig_name: qid,
-                        position1: qstart, position2: qend,
-                        position1prime: sstart, position2prime: send,
-                        pident, is_direct,
-                    });
-                } else {
-                    inter.push((qid, sid, qstart, qend, sstart, send, pident));
-                }
-            }
-            Some((repeats, inter))
-        }).collect();
-
-    let mut all_repeats: Vec<RepeatsData> = Vec::new();
-    let mut all_inter: Vec<(String, String, i32, i32, i32, i32, f64)> = Vec::new();
-    for (r, i) in results {
-        all_repeats.extend(r);
-        all_inter.extend(i);
-    }
+    let repeat_count = total_repeat_count.load(std::sync::atomic::Ordering::Relaxed);
+    let inter_count = total_inter_count.load(std::sync::atomic::Ordering::Relaxed);
     eprintln!(
         "MAG BLAST: {} intra-contig repeat hits, {} inter-contig hits",
-        all_repeats.len(),
-        all_inter.len(),
+        repeat_count, inter_count,
     );
-    Ok((all_repeats, all_inter))
+    let reps = all_repeats.into_inner().unwrap();
+    Ok((reps, inter_count))
 }
 
 /// Compute median of event lengths (0 for exact match, clip/insertion length for near-match)
@@ -2162,13 +2217,12 @@ pub fn run_all_samples(
                 })
                 .filter(|(_, m)| !m.is_empty())
                 .collect();
-            let (reps, inter) = run_mag_interblast(blast_contigs, &filtered_manifest)?;
-            db_writer.write_repeats(&reps)?;
-            let written = db_writer.write_contig_blast_hits(&inter)?;
-            if written > 0 {
-                eprintln!("Wrote {} inter-contig BLAST hits", written);
-                // Fan out to per-position Contig_blob features used by the viz tooltip.
+            let (reps, inter_count) = run_mag_interblast(blast_contigs, &filtered_manifest, &db_writer)?;
+            db_writer.compute_duplication_percentages(&reps)?;
+            if inter_count > 0 {
+                let t_hit_features = std::time::Instant::now();
                 db_writer.write_mag_hit_features()?;
+                eprintln!("  Per-position hit features: {:.1}s", t_hit_features.elapsed().as_secs_f64());
             }
             reps
         } else {
@@ -2416,7 +2470,7 @@ fn process_samples_parallel(
                 &result.feature_blobs,
                 result.is_circular,
             ) {
-                eprintln!("\nError writing data for {}: {}", result.sample_name, e);
+                eprintln!("\n### ERROR writing data for {}: {:?}", result.sample_name, e);
                 let msg = format!("ERR: {}", result.sample_name);
                 write_pb_clone.set_message(msg.clone());
                 if !is_tty_writer {
@@ -2429,7 +2483,7 @@ fn process_samples_parallel(
                     if let Err(e) = crate::mag_blob::build_mag_blobs_for_sample(
                         &db_writer, sample_id, &result.feature_blobs, &mag_lookup,
                     ) {
-                        eprintln!("\nError aggregating MAG blobs for {}: {}", result.sample_name, e);
+                        eprintln!("\n### ERROR aggregating MAG blobs for {}: {:?}", result.sample_name, e);
                     }
                     mag_agg_ns = mag_t.elapsed().as_nanos() as u64;
                 }
@@ -2637,7 +2691,7 @@ fn process_samples_sequential(
                         if let Err(e) = crate::mag_blob::build_mag_blobs_for_sample(
                             &db_writer, sample_id, &feature_blobs, &mag_lookup,
                         ) {
-                            eprintln!("\nError aggregating MAG blobs for {}: {}", sample_name, e);
+                            eprintln!("\n### ERROR aggregating MAG blobs for {}: {:?}", sample_name, e);
                         }
                         mag_agg_ns = mag_t.elapsed().as_nanos() as u64;
                     }
