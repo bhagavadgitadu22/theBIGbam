@@ -60,6 +60,7 @@ _BASE_COLUMNS = [
 ]
 
 _MAG_EXTRA_COLUMNS = {
+    "contig_name": "mag_name",
     "contig_aligned_fraction": "mag_aligned_fraction",
     "contig_coverage_trimmed_mean": "mag_coverage_trimmed_mean",
 }
@@ -270,7 +271,8 @@ def _build_gene_names(genes, contig_info):
 
 def process_sample(conn, sample_id, sample_name, contig_info, cov_map, af_map,
                    id_to_name, name_to_id, genes_by_contig, gene_names_by_contig,
-                   mag_mode=False, contig_to_mag=None, mag_cov_map=None):
+                   mag_mode=False, contig_to_mag=None, mag_cov_map=None,
+                   mag_id_to_name=None):
     """Process all CDS for one sample. Yields row tuples."""
     contig_ids = list(cov_map.keys())
     if not contig_ids:
@@ -285,12 +287,15 @@ def process_sample(conn, sample_id, sample_name, contig_info, cov_map, af_map,
         contig_cov_tmean = cov_map[contig_id]
         contig_af = af_map[contig_id]
 
+        mag_name = ""
         mag_af = None
         mag_cov_tmean = None
-        if mag_mode and contig_to_mag and mag_cov_map:
+        if mag_mode and contig_to_mag:
             mag_id = contig_to_mag.get(contig_id)
             if mag_id is not None:
-                mag_af, mag_cov_tmean = mag_cov_map.get((mag_id, sample_id), (None, None))
+                mag_name = (mag_id_to_name or {}).get(mag_id, "")
+                if mag_cov_map:
+                    mag_af, mag_cov_tmean = mag_cov_map.get((mag_id, sample_id), (None, None))
 
         features = _load_all_features(
             conn, contig_id, sample_id, contig_length, id_to_name, name_to_id
@@ -332,9 +337,13 @@ def process_sample(conn, sample_id, sample_name, contig_info, cov_map, af_map,
 
             row = [
                 sample_name,
+            ]
+            if mag_mode:
+                row.append(mag_name)
+            row.extend([
                 contig_name,
                 gene_name,
-            ]
+            ])
             if mag_mode:
                 row.append(mag_af)
             row.append(contig_af)
@@ -372,6 +381,7 @@ Export per-CDS mapping signals from a theBIGbam database.
 
 Output columns (one row per sample x CDS):
 - sample_name: BAM sample name
+- mag_name: (MAG mode only) MAG the contig belongs to
 - contig_name: contig the CDS belongs to
 - gene_name: stable identifier <contig_name>_tbb_<N>, numbered per contig by start position
 - mag_aligned_fraction: (MAG mode only) percentage of the MAG covered by aligned reads (0-100)
@@ -432,11 +442,17 @@ def run(args):
     from thebigbam.database.database_getters import is_mag_mode
     mag_mode = is_mag_mode(conn)
     contig_to_mag = {}
+    mag_id_to_name = {}
     mag_cov_map = {}
     if mag_mode:
         contig_to_mag = {
             r[0]: r[1] for r in conn.execute(
                 "SELECT Contig_id, MAG_id FROM MAG_contigs_association"
+            ).fetchall()
+        }
+        mag_id_to_name = {
+            r[0]: r[1] for r in conn.execute(
+                "SELECT MAG_id, MAG_name FROM MAG"
             ).fetchall()
         }
         if _table_exists(conn, "MAG_coverage"):
@@ -558,6 +574,7 @@ def run(args):
                 conn, sample_id, sample_name, contig_info, cov_map, af_map,
                 id_to_name, name_to_id, genes_by_contig, gene_names_by_contig,
                 mag_mode=mag_mode, contig_to_mag=contig_to_mag, mag_cov_map=mag_cov_map,
+                mag_id_to_name=mag_id_to_name,
             ):
                 writer.writerow(row)
                 sample_rows += 1

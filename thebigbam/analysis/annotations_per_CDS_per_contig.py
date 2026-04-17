@@ -72,11 +72,30 @@ def _load_contig_gc(conn, contig_id, contig_length):
     return arr
 
 
-DESCRIPTION = "Export all annotation info per CDS from a theBIGbam database."
+DESCRIPTION = """\
+Export all annotation info per CDS from a theBIGbam database.
+
+Output columns (one row per CDS):
+- mag_name: (MAG mode only) MAG the contig belongs to
+- contig_name: contig the CDS belongs to
+- gene_name: stable identifier <contig_name>_tbb_<N>, numbered per contig by start position
+- start: 1-based start position of the CDS on the contig
+- end: 1-based end position of the CDS on the contig
+- gene_length: length of the CDS in base pairs (end - start + 1)
+- strand: coding strand (+ or -)
+- main_isoform: whether this CDS is the main isoform at its locus
+- contig_gc_content: mean GC content of the contig (percentage)
+- gene_gc_content: mean GC content across the CDS (percentage)
+- <qualifier columns>: one column per distinct qualifier Key found for CDS features \
+(e.g. product, gene, locus_tag)
+"""
 
 
 def add_args(parser):
     """Register arguments on an existing subparser."""
+    import argparse
+
+    parser.formatter_class = argparse.RawDescriptionHelpFormatter
     parser.add_argument("--db", required=True, help="Path to the theBIGbam DuckDB database")
     parser.add_argument("--output", required=True, help="Path to the output TSV file")
 
