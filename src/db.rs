@@ -1438,11 +1438,8 @@ impl DbWriter {
             rows.collect::<std::result::Result<HashMap<_, _>, _>>()?
         };
 
-        // For each contig_id, per-position (count, max_pident, partner).
-        // Use BTreeMap so output positions are naturally sorted.
-        use std::collections::BTreeMap;
-        let mut per_contig: HashMap<i64, BTreeMap<u32, (u32, i32, i64)>> = HashMap::new();
-
+        // Group hits by contig (single O(n) pass over DB rows).
+        let mut hits_by_contig: HashMap<i64, Vec<(i64, i32, i32, i32)>> = HashMap::new();
         {
             let mut stmt = conn.prepare(
                 "SELECT Contig_id_1, Contig_id_2, Position1, Position2, Position1prime, Position2prime, Pident
@@ -1459,35 +1456,72 @@ impl DbWriter {
                     r.get::<_, i32>(6)?,
                 ))
             })?;
-
             for row in rows {
                 let (cid1, cid2, p1, p2, p1p, p2p, pident_x100) = row?;
-                // Process the hit from BOTH sides (canonical storage is one-sided).
-                for (my_cid, partner_cid, a, b) in [
-                    (cid1, cid2, p1, p2),
-                    (cid2, cid1, p1p, p2p),
-                ] {
-                    let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
-                    let clen = *contig_lengths.get(&my_cid).unwrap_or(&0);
-                    if clen == 0 { continue; }
-                    let lo = (lo as u32).saturating_sub(1); // 1-based → 0-based
-                    let hi = ((hi as u32).min(clen)).saturating_sub(1);
-                    let entry = per_contig.entry(my_cid).or_default();
-                    for pos in lo..=hi {
-                        let e = entry.entry(pos).or_insert((0u32, 0i32, 0i64));
-                        e.0 += 1;
-                        if pident_x100 > e.1 {
-                            e.1 = pident_x100;
-                            e.2 = partner_cid;
-                        }
-                    }
-                }
+                hits_by_contig.entry(cid1).or_default().push((cid2, p1, p2, pident_x100));
+                hits_by_contig.entry(cid2).or_default().push((cid1, p1p, p2p, pident_x100));
             }
         }
 
-        if per_contig.is_empty() {
+        if hits_by_contig.is_empty() {
             return Ok(());
         }
+
+        let total_contigs = hits_by_contig.len();
+        eprintln!("Computing per-position BLAST hit features for {} contigs...", total_contigs);
+
+        // Difference array for counts + Vec for identity, parallel per contig.
+        use rayon::prelude::*;
+        let done = std::sync::atomic::AtomicUsize::new(0);
+
+        let results: Vec<(i64, Vec<u32>, Vec<i32>, Vec<i32>, Vec<EventMeta>)> = hits_by_contig
+            .into_par_iter()
+            .filter_map(|(cid, hits)| {
+                let clen = *contig_lengths.get(&cid).unwrap_or(&0) as usize;
+                if clen == 0 { return None; }
+
+                let mut count_diff = vec![0i32; clen + 1];
+                let mut max_ident = vec![(0i32, 0i64); clen];
+
+                for &(partner, a, b, pident) in &hits {
+                    let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+                    let lo = (lo as usize).saturating_sub(1);
+                    let hi = (hi as usize).min(clen).saturating_sub(1);
+                    if lo > hi || lo >= clen { continue; }
+
+                    count_diff[lo] += 1;
+                    if hi + 1 <= clen { count_diff[hi + 1] -= 1; }
+
+                    for pos in lo..=hi.min(clen - 1) {
+                        if pident > max_ident[pos].0 {
+                            max_ident[pos] = (pident, partner);
+                        }
+                    }
+                }
+
+                let mut running = 0i32;
+                let mut pos_vec = Vec::new();
+                let mut count_vec = Vec::new();
+                let mut ident_vec = Vec::new();
+                let mut meta_vec = Vec::new();
+                for i in 0..clen {
+                    running += count_diff[i];
+                    if running > 0 {
+                        pos_vec.push(i as u32);
+                        count_vec.push(running);
+                        ident_vec.push(max_ident[i].0);
+                        meta_vec.push(EventMeta { partner: Some(max_ident[i].1 as i32), ..Default::default() });
+                    }
+                }
+
+                let n = done.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                if n % 5000 == 0 || n == total_contigs {
+                    eprintln!("  BLAST features: {}/{} contigs", n, total_contigs);
+                }
+
+                if pos_vec.is_empty() { None } else { Some((cid, pos_vec, count_vec, ident_vec, meta_vec)) }
+            })
+            .collect();
 
         let mut appender = conn.appender("Contig_blob")
             .context("Failed to open Contig_blob appender")?;
@@ -1497,33 +1531,19 @@ impl DbWriter {
         let count_flags = MetadataFlags::default();
         let ident_flags = MetadataFlags { has_partner: true, ..MetadataFlags::default() };
 
-        for (contig_id, positions_map) in per_contig {
-            let clen = *contig_lengths.get(&contig_id).unwrap_or(&0);
-            if clen == 0 || positions_map.is_empty() { continue; }
+        for (contig_id, pos_vec, count_vec, ident_vec, meta_vec) in &results {
+            let clen = *contig_lengths.get(contig_id).unwrap_or(&0);
 
-            let mut pos_vec: Vec<u32> = Vec::with_capacity(positions_map.len());
-            let mut count_vec: Vec<i32> = Vec::with_capacity(positions_map.len());
-            let mut ident_vec: Vec<i32> = Vec::with_capacity(positions_map.len());
-            let mut event_meta: Vec<EventMeta> = Vec::with_capacity(positions_map.len());
-            for (pos, (count, ident, partner)) in &positions_map {
-                pos_vec.push(*pos);
-                count_vec.push(*count as i32);
-                ident_vec.push(*ident);
-                event_meta.push(EventMeta { partner: Some(*partner as i32), ..Default::default() });
-            }
-
-            // Count (integer counts, no metadata).
             debug_assert_eq!(crate::types::get_encoding("hit_count_within_mag"), crate::types::Encoding::Sparse);
-            let enc_count = encode_sparse_blob(&pos_vec, &count_vec, None, count_flags,
+            let enc_count = encode_sparse_blob(pos_vec, count_vec, None, count_flags,
                 crate::types::get_value_scale("hit_count_within_mag"), clen);
             appender.append_row(params![contig_id, hit_count_fid, enc_count.zoom])?;
             for (i, chunk) in enc_count.chunks.iter().enumerate() {
                 chunk_appender.append_row(params![contig_id, hit_count_fid, i as i16, chunk.as_slice()])?;
             }
 
-            // Identity (×100-scaled; partner contig_id stored as metadata).
             debug_assert_eq!(crate::types::get_encoding("hit_identity_within_mag"), crate::types::Encoding::Sparse);
-            let enc_ident = encode_sparse_blob(&pos_vec, &ident_vec, Some(&event_meta), ident_flags,
+            let enc_ident = encode_sparse_blob(pos_vec, ident_vec, Some(meta_vec), ident_flags,
                 crate::types::get_value_scale("hit_identity_within_mag"), clen);
             appender.append_row(params![contig_id, hit_ident_fid, enc_ident.zoom])?;
             for (i, chunk) in enc_ident.chunks.iter().enumerate() {

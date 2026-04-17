@@ -1848,6 +1848,42 @@ pub fn run_all_samples(
             mag_contig_map.push((mag.name.clone(), member_names));
         }
 
+        // Fallback: single annotation file covers all MAGs (e.g. -g one_big.gff -a mags_dir/).
+        if all_annotations.is_empty() && has_genbank && genbank_path.is_file() {
+            eprintln!("No per-MAG annotation files; parsing global annotation file for all MAGs...");
+            let (parser_contigs, global_anns, global_quals) = parse_annotations(genbank_path)?;
+
+            let local_to_name: HashMap<i64, &str> = parser_contigs
+                .iter()
+                .enumerate()
+                .map(|(i, c)| ((i + 1) as i64, c.name.as_str()))
+                .collect();
+
+            let name_to_global: HashMap<&str, i64> = all_contigs
+                .iter()
+                .enumerate()
+                .map(|(i, c)| (c.name.as_str(), (i + 1) as i64))
+                .collect();
+
+            for mut ann in global_anns {
+                if let Some(name) = local_to_name.get(&ann.contig_id) {
+                    if let Some(&global_id) = name_to_global.get(name) {
+                        ann.contig_id = global_id;
+                        all_annotations.push(ann);
+                    }
+                }
+            }
+            for (qid, qmap) in global_quals {
+                if let Some(name) = local_to_name.get(&qid) {
+                    if let Some(&global_id) = name_to_global.get(name) {
+                        all_quals.push((global_id, qmap));
+                    }
+                }
+            }
+            eprintln!("Distributed {} annotations across {} contigs from global annotation file",
+                all_annotations.len(), all_contigs.len());
+        }
+
         (all_contigs, all_annotations, all_quals)
     } else if !has_genbank {
         eprintln!("No GenBank file provided - extracting contigs from BAM headers");

@@ -1259,14 +1259,18 @@ def _format_chunks_for_bokeh(chunk_dict, xstart, xend, type_picked="line"):
             if i == 0 and x[i] > 0:
                 _emit_anchor(x[i] - 1)
             elif i > 0 and x[i] > x[i - 1] + 1:
-                # Plateau preservation: when two adjacent real events share
-                # the same y (e.g. repeat_identity / repeat_count emit a
-                # (seg_start, seg_end) pair at the same value), skip the
-                # zero-anchor so the line renders as a plateau rather than
-                # two spikes dropping to zero between them.
                 if float(y[i]) != float(y[i - 1]):
                     _emit_anchor(x[i - 1] + 1)
                     _emit_anchor(x[i] - 1)
+                else:
+                    # Same y across a gap. Preserve plateau only for segment
+                    # pairs (repeat start/end): both sides of the gap are
+                    # isolated events, not part of dense per-position runs.
+                    prev_is_dense = (i >= 2 and x[i - 1] == x[i - 2] + 1)
+                    next_is_dense = (i + 1 < len(x) and x[i + 1] == x[i] + 1)
+                    if prev_is_dense or next_is_dense:
+                        _emit_anchor(x[i - 1] + 1)
+                        _emit_anchor(x[i] - 1)
             new_x.append(x[i])
             new_y.append(float(y[i]))
             for k, vals in sliced_meta.items():
