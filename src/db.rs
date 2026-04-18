@@ -1367,58 +1367,10 @@ impl DbWriter {
         Ok(())
     }
 
-    /// Write inter-contig BLAST hits into Contig_blast_hits, canonicalising on
-    /// `Contig_id_1 <= Contig_id_2`. Uses INSERT OR IGNORE for idempotency.
-    pub fn write_contig_blast_hits(
-        &self,
-        hits: &[(String, String, i32, i32, i32, i32, f64)],
-    ) -> Result<usize> {
-        if hits.is_empty() || !self.is_mag_mode {
-            return Ok(0);
-        }
-        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
-
-        // Refresh contig_name → id map from DB (covers extend mode).
-        let name_to_id: HashMap<String, i64> = {
-            let mut stmt = conn.prepare("SELECT Contig_name, Contig_id FROM Contig")?;
-            let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
-            rows.collect::<std::result::Result<HashMap<_, _>, _>>()?
-        };
-
-        let tx = conn.unchecked_transaction()?;
-        let mut written = 0usize;
-        {
-            let mut stmt = tx.prepare(
-                "INSERT OR IGNORE INTO Contig_blast_hits
-                   (Contig_id_1, Contig_id_2, Position1, Position2, Position1prime, Position2prime, Pident)
-                 VALUES (?, ?, ?, ?, ?, ?, ?)"
-            )?;
-            for (qid, sid, mut p1, mut p2, mut p1p, mut p2p, pident) in hits.iter().cloned() {
-                let cid_q = match name_to_id.get(&qid) { Some(v) => *v, None => continue };
-                let cid_s = match name_to_id.get(&sid) { Some(v) => *v, None => continue };
-
-                let (cid1, cid2) = if cid_q <= cid_s {
-                    (cid_q, cid_s)
-                } else {
-                    std::mem::swap(&mut p1, &mut p1p);
-                    std::mem::swap(&mut p2, &mut p2p);
-                    (cid_s, cid_q)
-                };
-                let pident_i = (pident * 100.0).round() as i32;
-                if stmt.execute(params![cid1, cid2, p1, p2, p1p, p2p, pident_i]).is_ok() {
-                    written += 1;
-                }
-            }
-        }
-        tx.commit().context("Failed to commit Contig_blast_hits rows")?;
-        Ok(written)
-    }
-
     /// Populate per-position inter-contig hit features in Contig_blob from the
     /// Contig_blast_hits table. Produces two Sparse features per contig:
     ///   - hit_count_within_mag    (count of hits covering the position)
     ///   - hit_identity_within_mag (max Pident across hits, ×100; partner contig_id stored as metadata)
-    /// Must run AFTER write_contig_blast_hits and BEFORE index creation.
     pub fn write_mag_hit_features(&self) -> Result<()> {
         if !self.is_mag_mode {
             return Ok(());
@@ -1556,101 +1508,6 @@ impl DbWriter {
         appender.flush().context("Failed to flush Contig_blob appender")?;
         chunk_appender.flush().context("Failed to flush Contig_blob_chunk appender")?;
         Ok(())
-    }
-
-    /// Drop per-(MAG, Sample) data for MAGs that fail either the aligned-fraction
-    /// or mean-coverage threshold. Aggregates are length-weighted over member contigs.
-    /// Must be called AFTER all samples are processed and BEFORE index creation.
-    ///
-    /// Values are stored scaled in the DB: Aligned_fraction_percentage is ×10
-    /// (so `min_aligned_fraction` in percent is compared against value/10), and
-    /// Coverage_mean is ×10 (so `min_coverage_depth` is compared against value/10).
-    pub fn enforce_mag_thresholds(&self, min_aligned_fraction: f64, min_coverage_depth: f64) -> Result<usize> {
-        if !self.is_mag_mode {
-            return Ok(0);
-        }
-        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
-
-        // Identify (MAG_id, Sample_id) pairs that fail the thresholds.
-        let mut failing: Vec<(i64, i64, f64, f64)> = Vec::new();
-        {
-            let mut stmt = conn.prepare(
-                "SELECT mca.MAG_id, cov.Sample_id,
-                        SUM(cov.Aligned_fraction_percentage * c.Contig_length * 1.0) / NULLIF(SUM(c.Contig_length * 1.0), 0) / 10.0 AS af_mag,
-                        SUM(cov.Coverage_mean * c.Contig_length * 1.0)                / NULLIF(SUM(c.Contig_length * 1.0), 0) / 10.0 AS cov_mag
-                 FROM Coverage cov
-                 JOIN Contig c ON cov.Contig_id = c.Contig_id
-                 JOIN MAG_contigs_association mca ON mca.Contig_id = c.Contig_id
-                 GROUP BY mca.MAG_id, cov.Sample_id"
-            )?;
-            let rows = stmt.query_map([], |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, Option<f64>>(2)?.unwrap_or(0.0),
-                    row.get::<_, Option<f64>>(3)?.unwrap_or(0.0),
-                ))
-            })?;
-            for r in rows {
-                let (mag_id, sample_id, af, cov) = r?;
-                let af_fail = min_aligned_fraction > 0.0 && af < min_aligned_fraction;
-                let cov_fail = min_coverage_depth > 0.0 && cov < min_coverage_depth;
-                if af_fail || cov_fail {
-                    failing.push((mag_id, sample_id, af, cov));
-                }
-            }
-        }
-
-        if failing.is_empty() {
-            return Ok(0);
-        }
-
-        let per_sample_tables = [
-            "Coverage", "Misassembly", "Microdiversity",
-            "Side_misassembly", "Topology", "Phage_mechanisms",
-        ];
-        // Phage_termini has no Sample_id column directly; it's keyed by Packaging_id.
-        // Feature_blob / Feature_blob_chunk are per-(Contig, Sample).
-
-        let tx = conn.unchecked_transaction()?;
-        for (mag_id, sample_id, _af, _cov) in &failing {
-            // Fetch member contig ids once.
-            let contig_ids: Vec<i64> = {
-                let mut stmt = tx.prepare(
-                    "SELECT Contig_id FROM MAG_contigs_association WHERE MAG_id = ?"
-                )?;
-                let rows = stmt.query_map(params![mag_id], |r| r.get::<_, i64>(0))?;
-                rows.collect::<std::result::Result<Vec<_>, _>>()?
-            };
-
-            for cid in &contig_ids {
-                // Phage_termini rows are linked via Packaging_id from Phage_mechanisms.
-                tx.execute(
-                    "DELETE FROM Phage_termini WHERE Packaging_id IN (
-                        SELECT Packaging_id FROM Phage_mechanisms WHERE Contig_id = ? AND Sample_id = ?
-                    )",
-                    params![cid, sample_id],
-                ).ok();
-                for t in &per_sample_tables {
-                    let sql = format!(
-                        "DELETE FROM {} WHERE Contig_id = ? AND Sample_id = ?",
-                        t
-                    );
-                    tx.execute(&sql, params![cid, sample_id]).ok();
-                }
-                tx.execute(
-                    "DELETE FROM Feature_blob_chunk WHERE Contig_id = ? AND Sample_id = ?",
-                    params![cid, sample_id],
-                ).ok();
-                tx.execute(
-                    "DELETE FROM Feature_blob WHERE Contig_id = ? AND Sample_id = ?",
-                    params![cid, sample_id],
-                ).ok();
-            }
-        }
-        tx.commit().context("Failed to commit MAG threshold deletions")?;
-
-        Ok(failing.len())
     }
 
     /// Finalize the database after all samples are processed.

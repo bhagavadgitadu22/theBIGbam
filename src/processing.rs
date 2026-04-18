@@ -2318,11 +2318,96 @@ pub fn run_all_samples(
     eprintln!("Modules: {}\n", modules.join(", "));
 
     let flags = ModuleFlags::from_modules(modules);
-    let result = process_samples_parallel(&bam_files, &contigs, flags, config, &circularity_map, db_writer, &repeats, &annotations, output_db, timing_file, autoblast_secs, gc_secs)?;
+    let result = process_samples_parallel(&bam_files, &contigs, flags, config, &circularity_map, db_writer, &repeats, &annotations, output_db, timing_file, autoblast_secs, gc_secs, &mag_contig_map)?;
 
     print_summary(&result, output_db);
 
     Ok(result)
+}
+
+/// For a single sample, identify MAGs that fail the aligned-fraction or
+/// coverage-depth thresholds and return the set of member contig names to drop.
+/// All member contigs contribute their length to the denominator (even if they
+/// have zero reads), so absent contigs correctly penalise the MAG aggregate.
+fn filter_failing_mags(
+    presences: &[PresenceData],
+    mag_contig_map: &[(String, Vec<String>)],
+    contig_lengths: &HashMap<String, usize>,
+    min_aligned_fraction: f64,
+    min_coverage_depth: f64,
+) -> (HashSet<String>, usize) {
+    let presence_map: HashMap<&str, &PresenceData> = presences
+        .iter()
+        .map(|p| (p.contig_name.as_str(), p))
+        .collect();
+
+    let mut drop_set: HashSet<String> = HashSet::new();
+    let mut n_dropped: usize = 0;
+
+    for (_mag_name, members) in mag_contig_map {
+        let mut num_af: f64 = 0.0;
+        let mut num_cov: f64 = 0.0;
+        let mut total_len: f64 = 0.0;
+
+        for cname in members {
+            let clen = *contig_lengths.get(cname).unwrap_or(&0) as f64;
+            total_len += clen;
+            if let Some(p) = presence_map.get(cname.as_str()) {
+                num_af += p.coverage_pct as f64 * clen;
+                num_cov += p.coverage_mean as f64 * clen;
+            }
+        }
+
+        if total_len == 0.0 {
+            continue;
+        }
+
+        let af_mag = num_af / total_len;
+        let cov_mag = num_cov / total_len;
+
+        let af_fail = min_aligned_fraction > 0.0 && af_mag < min_aligned_fraction;
+        let cov_fail = min_coverage_depth > 0.0 && cov_mag < min_coverage_depth;
+
+        if af_fail || cov_fail {
+            n_dropped += 1;
+            for cname in members {
+                drop_set.insert(cname.clone());
+            }
+        }
+    }
+
+    (drop_set, n_dropped)
+}
+
+/// Apply a contig drop set to all per-sample data vectors, removing entries
+/// whose contig_name is in `drop`.
+fn apply_mag_filter(
+    drop: &HashSet<String>,
+    presences: Vec<PresenceData>,
+    packaging: Vec<PackagingData>,
+    misassembly: Vec<MisassemblyData>,
+    microdiversity: Vec<MicrodiversityData>,
+    side_misassembly: Vec<SideMisassemblyData>,
+    topology: Vec<TopologyData>,
+    feature_blobs: Vec<(String, String, crate::blob::EncodedBlob)>,
+) -> (
+    Vec<PresenceData>,
+    Vec<PackagingData>,
+    Vec<MisassemblyData>,
+    Vec<MicrodiversityData>,
+    Vec<SideMisassemblyData>,
+    Vec<TopologyData>,
+    Vec<(String, String, crate::blob::EncodedBlob)>,
+) {
+    (
+        presences.into_iter().filter(|p| !drop.contains(&p.contig_name)).collect(),
+        packaging.into_iter().filter(|p| !drop.contains(&p.contig_name)).collect(),
+        misassembly.into_iter().filter(|p| !drop.contains(&p.contig_name)).collect(),
+        microdiversity.into_iter().filter(|p| !drop.contains(&p.contig_name)).collect(),
+        side_misassembly.into_iter().filter(|p| !drop.contains(&p.contig_name)).collect(),
+        topology.into_iter().filter(|p| !drop.contains(&p.contig_name)).collect(),
+        feature_blobs.into_iter().filter(|(_, cname, _)| !drop.contains(cname)).collect(),
+    )
 }
 
 /// Holds processed sample data ready for database writing.
@@ -2356,6 +2441,7 @@ fn process_samples_parallel(
     timing_file: Option<fs::File>,
     autoblast_secs: f64,
     gc_secs: f64,
+    mag_contig_map: &[(String, Vec<String>)],
 ) -> Result<ProcessResult> {
     let total = bam_files.len();
     let is_tty = atty::is(Stream::Stderr);
@@ -2367,7 +2453,7 @@ fn process_samples_parallel(
     //   outer sample parallelism causes all samples to progress simultaneously
     //   without any completing. Sequential ensures samples finish one-by-one.
     if config.threads == 1 || contigs.len() >= 500 {
-        return process_samples_sequential(bam_files, contigs, flags, config, circularity_map, db_writer, is_tty, repeats, annotations, output_db, timing_file, autoblast_secs, gc_secs);
+        return process_samples_sequential(bam_files, contigs, flags, config, circularity_map, db_writer, is_tty, repeats, annotations, output_db, timing_file, autoblast_secs, gc_secs, mag_contig_map);
     }
 
     // Adaptive channel size based on memory pressure from contig count
@@ -2427,10 +2513,20 @@ fn process_samples_parallel(
 
     let timing_threads = config.threads;
 
+    // MAG threshold filtering data (moved into writer thread)
+    let is_mag_mode = config.view_mode == ViewMode::Mag;
+    let min_af = config.min_aligned_fraction;
+    let min_cov = config.min_coverage_depth;
+    let mag_map_owned: Vec<(String, Vec<String>)> = mag_contig_map.to_vec();
+    let contig_length_map: HashMap<String, usize> = contigs.iter()
+        .map(|c| (c.name.clone(), c.length))
+        .collect();
+
     // Spawn dedicated writer thread
-    let writer_handle = thread::spawn(move || -> Result<(usize, std::time::Duration, Vec<SampleTimings>)> {
+    let writer_handle = thread::spawn(move || -> Result<(usize, std::time::Duration, Vec<SampleTimings>, usize)> {
         let write_start = std::time::Instant::now();
         let mut written_count = 0usize;
+        let mut mag_drops: usize = 0;
         let mut all_timings: Vec<SampleTimings> = Vec::new();
         let mut timing_file = timing_file;
 
@@ -2440,6 +2536,27 @@ fn process_samples_parallel(
         // Receive and write samples as they arrive
         for result in rx {
             written_count += 1;
+
+            // MAG-level threshold pre-filter: drop contigs from failing MAGs
+            let (presences, packaging, misassembly, microdiversity, side_misassembly, topology, feature_blobs) =
+                if is_mag_mode && !mag_map_owned.is_empty() {
+                    let (drop_set, n_dropped) = filter_failing_mags(
+                        &result.presences, &mag_map_owned, &contig_length_map, min_af, min_cov,
+                    );
+                    mag_drops += n_dropped;
+                    if !drop_set.is_empty() {
+                        apply_mag_filter(&drop_set, result.presences, result.packaging, result.misassembly, result.microdiversity, result.side_misassembly, result.topology, result.feature_blobs)
+                    } else {
+                        (result.presences, result.packaging, result.misassembly, result.microdiversity, result.side_misassembly, result.topology, result.feature_blobs)
+                    }
+                } else {
+                    (result.presences, result.packaging, result.misassembly, result.microdiversity, result.side_misassembly, result.topology, result.feature_blobs)
+                };
+
+            if presences.is_empty() {
+                write_pb_clone.inc(1);
+                continue;
+            }
 
             // Insert sample
             let sample_id = match db_writer.insert_sample(&result.sample_name, result.sequencing_type.as_str(), result.total_reads, result.mapped_reads, result.is_circular) {
@@ -2461,13 +2578,13 @@ fn process_samples_parallel(
             let mut mag_agg_ns: u64 = 0;
             if let Err(e) = db_writer.write_sample_data(
                 &result.sample_name,
-                &result.presences,
-                &result.packaging,
-                &result.misassembly,
-                &result.microdiversity,
-                &result.side_misassembly,
-                &result.topology,
-                &result.feature_blobs,
+                &presences,
+                &packaging,
+                &misassembly,
+                &microdiversity,
+                &side_misassembly,
+                &topology,
+                &feature_blobs,
                 result.is_circular,
             ) {
                 eprintln!("\n### ERROR writing data for {}: {:?}", result.sample_name, e);
@@ -2481,7 +2598,7 @@ fn process_samples_parallel(
                 if !mag_lookup.is_empty() {
                     let mag_t = std::time::Instant::now();
                     if let Err(e) = crate::mag_blob::build_mag_blobs_for_sample(
-                        &db_writer, sample_id, &result.feature_blobs, &mag_lookup,
+                        &db_writer, sample_id, &feature_blobs, &mag_lookup,
                     ) {
                         eprintln!("\n### ERROR aggregating MAG blobs for {}: {:?}", result.sample_name, e);
                     }
@@ -2509,7 +2626,7 @@ fn process_samples_parallel(
         db_writer.finalize()?;
         write_pb_clone.finish();
 
-        Ok((written_count, write_start.elapsed(), all_timings))
+        Ok((written_count, write_start.elapsed(), all_timings, mag_drops))
     });
 
     // Process samples in parallel, sending to channel immediately
@@ -2572,9 +2689,13 @@ fn process_samples_parallel(
     let processing_time = start_time.elapsed();
 
     // Wait for writer thread to finish
-    let (written_count, writing_time, all_timings) = writer_handle
+    let (written_count, writing_time, all_timings, mag_drops) = writer_handle
         .join()
         .map_err(|_| anyhow::anyhow!("Writer thread panicked"))??;
+
+    if mag_drops > 0 {
+        eprintln!("### Dropped {} (MAG, Sample) groups that failed thresholds", mag_drops);
+    }
 
     // Clear MultiProgress to avoid duplicate bar display
     mp.clear().ok();
@@ -2620,9 +2741,15 @@ fn process_samples_sequential(
     timing_file: Option<fs::File>,
     autoblast_secs: f64,
     gc_secs: f64,
+    mag_contig_map: &[(String, Vec<String>)],
 ) -> Result<ProcessResult> {
     let total = bam_files.len();
     let start_time = std::time::Instant::now();
+    let is_mag_mode = config.view_mode == ViewMode::Mag;
+    let contig_length_map: HashMap<String, usize> = contigs.iter()
+        .map(|c| (c.name.clone(), c.length))
+        .collect();
+    let mut mag_drops: usize = 0;
 
     let pb = if is_tty {
         let pb = ProgressBar::new(total as u64);
@@ -2658,6 +2785,28 @@ fn process_samples_sequential(
                 processing_time_total += process_elapsed;
 
                 let write_start = std::time::Instant::now();
+
+                // MAG-level threshold pre-filter
+                let (presences, packaging, misassembly, microdiversity, side_misassembly, topology, feature_blobs) =
+                    if is_mag_mode && !mag_contig_map.is_empty() {
+                        let (drop_set, n_dropped) = filter_failing_mags(
+                            &presences, mag_contig_map, &contig_length_map,
+                            config.min_aligned_fraction, config.min_coverage_depth,
+                        );
+                        mag_drops += n_dropped;
+                        if !drop_set.is_empty() {
+                            apply_mag_filter(&drop_set, presences, packaging, misassembly, microdiversity, side_misassembly, topology, feature_blobs)
+                        } else {
+                            (presences, packaging, misassembly, microdiversity, side_misassembly, topology, feature_blobs)
+                        }
+                    } else {
+                        (presences, packaging, misassembly, microdiversity, side_misassembly, topology, feature_blobs)
+                    };
+
+                if presences.is_empty() {
+                    pb.inc(1);
+                    continue;
+                }
 
                 // Insert sample
                 let sample_id = match db_writer.insert_sample(&sample_name, sequencing_type.as_str(), total_reads, mapped_reads, is_circular) {
@@ -2733,14 +2882,9 @@ fn process_samples_sequential(
         }
     }
 
-    // MAG-level threshold post-pass (MAG mode only).
-    if config.view_mode == ViewMode::Mag {
-        let dropped = db_writer
-            .enforce_mag_thresholds(config.min_aligned_fraction, config.min_coverage_depth)?;
-        if dropped > 0 {
-            eprintln!("### Dropped {} (MAG, Sample) groups that failed thresholds", dropped);
-        }
-    } else {
+    if is_mag_mode && mag_drops > 0 {
+        eprintln!("### Dropped {} (MAG, Sample) groups that failed thresholds", mag_drops);
+    } else if !is_mag_mode {
         let dropped = config.contig_drops_counter.load(Ordering::Relaxed);
         if dropped > 0 {
             eprintln!("### Dropped {} (Contig, Sample) pairs that failed thresholds", dropped);
