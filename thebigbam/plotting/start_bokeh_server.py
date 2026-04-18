@@ -2849,12 +2849,22 @@ def create_layout(db_path, enable_timing=False):
                 return
 
             # Region (position inputs apply to the MAG layout, not a contig position)
+            mag_length = sum(
+                widgets['contig_lengths'].get(c, 0)
+                for c in widgets['mag_to_contigs'].get(mag, [])
+            )
             try:
-                xstart = int(from_position_input.value) if from_position_input.value.strip() else None
-                xend = int(to_position_input.value) if to_position_input.value.strip() else None
+                xstart = int(from_position_input.value) if from_position_input.value.strip() else 1
+                xend = int(to_position_input.value) if to_position_input.value.strip() else mag_length
             except ValueError:
-                xstart = xend = None
-            region_arg = f" --region {xstart}-{xend}" if (xstart is not None and xend is not None) else ""
+                xstart = 1
+                xend = mag_length
+            if mag_length > 0:
+                xstart = max(1, min(xstart, mag_length))
+                xend = max(1, min(xend, mag_length))
+            region_arg = ""
+            if mag_length > 0 and xstart < xend and (xstart > 1 or xend < mag_length):
+                region_arg = f" --region {xstart}-{xend}"
 
             sample_arg = ""
             if has_samples:
@@ -2891,8 +2901,11 @@ def create_layout(db_path, enable_timing=False):
             except ValueError:
                 xstart = 1
                 xend = contig_length
+            if contig_length > 0:
+                xstart = max(1, min(xstart, contig_length))
+                xend = max(1, min(xend, contig_length))
             region_arg = ""
-            if xstart > 1 or xend < contig_length:
+            if contig_length > 0 and xstart < xend and (xstart > 1 or xend < contig_length):
                 region_arg = f" --region {xstart}-{xend}"
 
             sample_arg = ""
