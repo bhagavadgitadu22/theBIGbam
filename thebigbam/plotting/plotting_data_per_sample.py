@@ -394,6 +394,7 @@ def make_bokeh_genemap(conn, contig_id, locus_name, locus_size, subplot_size, sh
                             pass
                     return str(val) == rule_val_str
 
+                is_negation = mode in ('has_not', 'not_equal')
                 for aid, val in values.items():
                     if aid in custom_color_map or _is_nullish(val):
                         continue
@@ -410,6 +411,11 @@ def make_bokeh_genemap(conn, contig_id, locus_name, locus_size, subplot_size, sh
                             custom_color_map[aid] = rule['color']
                     else:  # 'exact'
                         if _values_equal(val):
+                            custom_color_map[aid] = rule['color']
+
+                if is_negation:
+                    for aid in ann_ids:
+                        if aid not in custom_color_map and aid not in values:
                             custom_color_map[aid] = rule['color']
 
     sequence_annotations = []
@@ -2359,6 +2365,7 @@ def make_bokeh_genemap_mag(conn, mag_id, mag_name, mag_length, subplot_size,
                             pass
                     return str(val) == rule_val_str
 
+                is_negation = mode in ('has_not', 'not_equal')
                 for aid, val in values.items():
                     if aid in custom_color_map or _is_nullish(val):
                         continue
@@ -2375,6 +2382,11 @@ def make_bokeh_genemap_mag(conn, mag_id, mag_name, mag_length, subplot_size,
                             custom_color_map[aid] = rule['color']
                     else:
                         if _values_equal(val):
+                            custom_color_map[aid] = rule['color']
+
+                if is_negation:
+                    for aid in ann_ids:
+                        if aid not in custom_color_map and aid not in values:
                             custom_color_map[aid] = rule['color']
 
     sequence_annotations = []

@@ -306,7 +306,45 @@ All sparse features are filtered: `left_clippings`, `right_clippings`, `insertio
 `mate_on_another_contig`, `reads_starts`, `reads_ends`.
 
 Dense features (coverage, mapq, read_lengths, insert_sizes, coverage_reduced) store
-**every position** — no filtering.
+**every position** — no filtering. However, they can optionally be smoothed using
+`--variation_percentage` (see below).
+
+---
+
+## Dense smoothing: variation_percentage
+
+Dense features store one value per base position, which can produce very large blobs
+for long contigs. The `--variation_percentage` parameter (default: **0**, disabled)
+applies adaptive smoothing before blob encoding: consecutive positions whose values
+are within the specified percentage of each other are collapsed to the same value.
+
+This makes the delta encoding step produce many zeros, which compress dramatically
+better with zstd.
+
+**Tradeoffs:**
+- **Database size**: substantially reduced (the main benefit)
+- **Visualization**: fine — smoothed values are visually indistinguishable at typical zoom levels
+- **Analysis precision**: slightly lossy — downstream per-position calculations may lose marginal precision
+
+**Recommended values**: 5–10% for large genomes where exact base-level precision is not critical.
+
+### Example
+
+```
+Original:   [100, 101, 99, 102, 98, 200, 195, 205]
+Smoothed (5%): [100, 100, 100, 100, 100, 200, 200, 200]
+```
+
+With 5% tolerance around 100, values 98–105 are collapsed. When 200 appears (outside
+the range), a new run starts.
+
+### Features affected
+
+All dense features: `primary_reads`, `primary_reads_plus_only`, `primary_reads_minus_only`,
+`secondary_reads`, `supplementary_reads`, `mapq`, `insert_sizes`, `read_lengths`,
+`coverage_reduced`.
+
+GC content and GC skew are **not affected** (separate computation path).
 
 ---
 

@@ -199,7 +199,7 @@ A more detailed explanation of the modules and the features it contains is avail
 
 ### Database compression
 
-**Parameters (optional):** --min_aligned_fraction, --min_coverage_depth, --coverage_percentage,
+**Parameters (optional):** --min_aligned_fraction, --min_coverage_depth, --coverage_percentage, --variation_percentage,
 
 Discarding the reads to only keep the main features of the mappings (like the coverage per position) already allows the DuckDB database to be way lighter than the original BAM file. The database itself is also structured to be as light as possible. 
 
@@ -212,6 +212,8 @@ First, the database is organised per contig per sample (qualified as a contig/sa
 To further reduce the size of the database, values per feature are compressed rather than saving all positions. The type of compression depends on the type of plots:
 
 - Only positions with values above a defined percentage of the local coverage are retained for Bar plots (Misalignment and Phage termini module except for "Coverage reduced" feature). For each position, values are compared to the local coverage and discarded if they fall below the **--coverage_percentage** threshold (default 10%), ensuring that only meaningful peaks are preserved
+
+- Dense features (coverage, MAPQ, insert sizes, read lengths) can optionally be smoothed using **--variation_percentage** (default 0, disabled). Consecutive positions within this percentage of each other are collapsed to the same value, substantially reducing database size. Good for visualization; slightly lossy for precise per-position analysis. Recommended: 5–10% for large genomes.
 
 The output is a DuckDB database that is typically **10–100 times smaller** than the original BAM files while retaining the essential characteristics of the mapping data. When using **theBIGbam** only for a **GenBank file**, the main objective is visualization, as the output database is typically **similar in size to the original file**.
 

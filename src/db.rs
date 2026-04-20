@@ -1519,6 +1519,7 @@ impl DbWriter {
         min_coverage_depth: f64,
         curve_ratio: f64,
         bar_ratio: f64,
+        variation_percentage: f64,
         view_mode: &str,
     ) -> Result<()> {
         let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
@@ -1548,6 +1549,7 @@ impl DbWriter {
             ("Min_coverage_depth", min_coverage_depth.to_string()),
             ("Variation_percentage", curve_ratio.to_string()),
             ("Coverage_percentage", bar_ratio.to_string()),
+            ("Dense_variation_percentage", variation_percentage.to_string()),
             ("View_mode", view_mode.to_string()),
         ];
 

@@ -286,7 +286,7 @@ def create_layout(db_path, enable_timing=False):
             'Contig': 'Contig',
             'Annotations': 'Contig_annotation',
             'Sample': 'Sample',
-            'MAG Coverage': 'Explicit_coverage_per_MAG',
+            'MAG coverage': 'Explicit_coverage_per_MAG',
             'MAG misassembly': 'Explicit_misassembly_per_MAG',
             'MAG microdiversity': 'Explicit_microdiversity_per_MAG',
             'Coverage': 'Explicit_coverage',
@@ -298,7 +298,7 @@ def create_layout(db_path, enable_timing=False):
         }
         # Categories that yield (MAG_name, Sample_name) pairs (or MAG-only) —
         # expanded to (Contig_name, Sample_name) via MAG_contigs_association.
-        mag_categories = {'MAG', 'MAG Coverage', 'MAG misassembly', 'MAG microdiversity'}
+        mag_categories = {'MAG', 'MAG coverage', 'MAG misassembly', 'MAG microdiversity'}
 
         def get_pairs_for_condition(category, column_name, operator, value):
             """Query database for contig/sample pairs matching a single condition."""

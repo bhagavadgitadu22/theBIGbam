@@ -93,6 +93,9 @@ pub struct ProcessConfig {
     pub phagetermini_config: PhageTerminiConfig,
     /// GC content and GC skew parameters
     pub gc_params: GCParams,
+    /// Adaptive smoothing percentage for dense features (0.0 = disabled).
+    /// Consecutive positions within this % of the run value are collapsed.
+    pub variation_percentage: f64,
     /// Minimum absolute event count for a sparse feature position to be kept.
     /// Applied in addition to bar_ratio filtering: position kept only if
     /// `value > coverage × bar_ratio AND value > min_occurrences`.
@@ -814,7 +817,7 @@ fn add_features_from_arrays(
     cds_index: Option<&CdsIndex>,
     blob_output: &mut Vec<(String, String, crate::blob::EncodedBlob)>,
 ) -> (Option<PackagingData>, Option<(MisassemblyData, MicrodiversityData, SideMisassemblyData, TopologyData)>) {
-    use crate::blob::{encode_dense_blob, encode_sparse_blob, EventMeta, MetadataFlags,
+    use crate::blob::{encode_dense_blob, smooth_dense_values, encode_sparse_blob, EventMeta, MetadataFlags,
                        codon_category_to_id, codon_to_id, aa_to_id};
     use crate::types::{get_encoding, get_value_scale, Encoding};
     let pt_config = config.phagetermini_config;
@@ -876,28 +879,34 @@ fn add_features_from_arrays(
         let cn = contig_name.to_string();
 
         // primary_reads: raw i32
-        let pr_i32: Vec<i32> = arrays.primary_reads.iter().map(|&x| x as i32).collect();
+        let mut pr_i32: Vec<i32> = arrays.primary_reads.iter().map(|&x| x as i32).collect();
+        smooth_dense_values(&mut pr_i32, config.variation_percentage);
         debug_assert_eq!(get_encoding("primary_reads"), Encoding::Dense);
         blob_output.push(("primary_reads".into(), cn.clone(), encode_dense_blob(&pr_i32, get_value_scale("primary_reads"), clen)));
 
         // plus/minus strand
-        let pp_i32: Vec<i32> = arrays.primary_reads_plus_only.iter().map(|&x| x as i32).collect();
+        let mut pp_i32: Vec<i32> = arrays.primary_reads_plus_only.iter().map(|&x| x as i32).collect();
+        smooth_dense_values(&mut pp_i32, config.variation_percentage);
         debug_assert_eq!(get_encoding("primary_reads_plus_only"), Encoding::Dense);
         blob_output.push(("primary_reads_plus_only".into(), cn.clone(), encode_dense_blob(&pp_i32, get_value_scale("primary_reads_plus_only"), clen)));
-        let pm_i32: Vec<i32> = arrays.primary_reads_minus_only.iter().map(|&x| x as i32).collect();
+        let mut pm_i32: Vec<i32> = arrays.primary_reads_minus_only.iter().map(|&x| x as i32).collect();
+        smooth_dense_values(&mut pm_i32, config.variation_percentage);
         debug_assert_eq!(get_encoding("primary_reads_minus_only"), Encoding::Dense);
         blob_output.push(("primary_reads_minus_only".into(), cn.clone(), encode_dense_blob(&pm_i32, get_value_scale("primary_reads_minus_only"), clen)));
 
         // secondary, supplementary
-        let sec_i32: Vec<i32> = arrays.secondary_reads.iter().map(|&x| x as i32).collect();
+        let mut sec_i32: Vec<i32> = arrays.secondary_reads.iter().map(|&x| x as i32).collect();
+        smooth_dense_values(&mut sec_i32, config.variation_percentage);
         debug_assert_eq!(get_encoding("secondary_reads"), Encoding::Dense);
         blob_output.push(("secondary_reads".into(), cn.clone(), encode_dense_blob(&sec_i32, get_value_scale("secondary_reads"), clen)));
-        let sup_i32: Vec<i32> = arrays.supplementary_reads.iter().map(|&x| x as i32).collect();
+        let mut sup_i32: Vec<i32> = arrays.supplementary_reads.iter().map(|&x| x as i32).collect();
+        smooth_dense_values(&mut sup_i32, config.variation_percentage);
         debug_assert_eq!(get_encoding("supplementary_reads"), Encoding::Dense);
         blob_output.push(("supplementary_reads".into(), cn.clone(), encode_dense_blob(&sup_i32, get_value_scale("supplementary_reads"), clen)));
 
         // MAPQ: stored as ×100 integer
-        let mapq_i32: Vec<i32> = mapq_f64.iter().map(|&x| (x * 100.0).round() as i32).collect();
+        let mut mapq_i32: Vec<i32> = mapq_f64.iter().map(|&x| (x * 100.0).round() as i32).collect();
+        smooth_dense_values(&mut mapq_i32, config.variation_percentage);
         debug_assert_eq!(get_encoding("mapq"), Encoding::Dense);
         blob_output.push(("mapq".into(), cn.clone(), encode_dense_blob(&mapq_i32, get_value_scale("mapq"), clen)));
     }
@@ -1200,7 +1209,8 @@ fn add_features_from_arrays(
             encode_sparse_blob(&pos, &vals, None, sp_flags, get_value_scale("mate_on_another_contig"), clen)));
 
         // insert_sizes: dense curve
-        let is_i32: Vec<i32> = values.iter().map(|&x| (x * 10.0).round() as i32).collect();
+        let mut is_i32: Vec<i32> = values.iter().map(|&x| (x * 10.0).round() as i32).collect();
+        smooth_dense_values(&mut is_i32, config.variation_percentage);
         debug_assert_eq!(get_encoding("insert_sizes"), Encoding::Dense);
         blob_output.push(("insert_sizes".into(), cn.clone(), encode_dense_blob(&is_i32, get_value_scale("insert_sizes"), clen)));
     }
@@ -1217,7 +1227,8 @@ fn add_features_from_arrays(
         // === BLOB encoding for long-reads features ===
         let clen = contig_length as u32;
         let cn = contig_name.to_string();
-        let rl_i32: Vec<i32> = values.iter().map(|&x| (x * 10.0).round() as i32).collect();
+        let mut rl_i32: Vec<i32> = values.iter().map(|&x| (x * 10.0).round() as i32).collect();
+        smooth_dense_values(&mut rl_i32, config.variation_percentage);
         debug_assert_eq!(get_encoding("read_lengths"), Encoding::Dense);
         blob_output.push(("read_lengths".into(), cn, encode_dense_blob(&rl_i32, get_value_scale("read_lengths"), clen)));
     }
@@ -1247,7 +1258,8 @@ fn add_features_from_arrays(
             let min_occ = config.min_occurrences;
 
             // coverage_reduced: dense curve
-            let cr_i32: Vec<i32> = arrays.coverage_reduced.iter().map(|&x| x as i32).collect();
+            let mut cr_i32: Vec<i32> = arrays.coverage_reduced.iter().map(|&x| x as i32).collect();
+            smooth_dense_values(&mut cr_i32, config.variation_percentage);
             debug_assert_eq!(get_encoding("coverage_reduced"), Encoding::Dense);
             blob_output.push(("coverage_reduced".into(), cn.clone(), encode_dense_blob(&cr_i32, get_value_scale("coverage_reduced"), clen)));
 
@@ -2171,6 +2183,7 @@ pub fn run_all_samples(
             config.min_coverage_depth,
             config.curve_ratio,
             config.bar_ratio,
+            config.variation_percentage,
             config.view_mode.as_str(),
         )?;
         (writer, new_contigs_for_blast)

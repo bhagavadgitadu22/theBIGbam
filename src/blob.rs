@@ -433,6 +433,25 @@ pub fn encode_dense_blob(values: &[i32], scale: ValueScale, contig_length: u32) 
     EncodedBlob { data: blob, zoom: zoom_blob, chunks }
 }
 
+/// Adaptive smoothing for dense values before blob encoding.
+///
+/// Consecutive positions whose values are within `variation_pct`% of the
+/// current run value are set to the run value, producing long constant runs
+/// that delta-encode to zeros. No-op when `variation_pct` <= 0.
+pub fn smooth_dense_values(values: &mut [i32], variation_pct: f64) {
+    if variation_pct <= 0.0 || values.is_empty() { return; }
+    let ratio = variation_pct / 100.0;
+    let mut run_val = values[0];
+    for v in values.iter_mut().skip(1) {
+        let threshold = ((run_val.abs() as f64) * ratio).max(1.0) as i32;
+        if (*v - run_val).abs() <= threshold {
+            *v = run_val;
+        } else {
+            run_val = *v;
+        }
+    }
+}
+
 // ============================================================================
 // Sparse BLOB Encoding
 // ============================================================================
@@ -1170,6 +1189,44 @@ mod tests {
         let base_offset = u32::from_le_bytes([blob[12], blob[13], blob[14], blob[15]]) as usize;
         let num_chunks = u16::from_le_bytes([blob[base_offset], blob[base_offset + 1]]);
         assert_eq!(num_chunks, 2); // 100000 / 65536 = 2 chunks
+    }
+
+    #[test]
+    fn test_smooth_dense_noop_at_zero() {
+        let mut vals = vec![100, 102, 98, 200, 95];
+        let original = vals.clone();
+        smooth_dense_values(&mut vals, 0.0);
+        assert_eq!(vals, original);
+    }
+
+    #[test]
+    fn test_smooth_dense_collapses_similar() {
+        let mut vals = vec![100, 101, 99, 102, 98, 200, 195, 205];
+        smooth_dense_values(&mut vals, 5.0); // 5% tolerance
+        // 100 ± 5 → 101,99,102,98 all within 5 of 100 → collapsed
+        assert_eq!(vals[0], 100);
+        assert_eq!(vals[1], 100);
+        assert_eq!(vals[2], 100);
+        assert_eq!(vals[3], 100);
+        assert_eq!(vals[4], 100);
+        // 200 starts new run; 195 within 5% of 200 (10), 205 within 5% of 200
+        assert_eq!(vals[5], 200);
+        assert_eq!(vals[6], 200);
+        assert_eq!(vals[7], 200);
+    }
+
+    #[test]
+    fn test_smooth_dense_near_zero() {
+        let mut vals = vec![0, 1, 0, 1, 0, 5, 0];
+        smooth_dense_values(&mut vals, 10.0);
+        // threshold = max(|0| * 0.1, 1) = 1 → |1-0|=1 ≤ 1 → collapsed
+        assert_eq!(vals[0], 0);
+        assert_eq!(vals[1], 0);
+        assert_eq!(vals[2], 0);
+        assert_eq!(vals[3], 0);
+        assert_eq!(vals[4], 0);
+        assert_eq!(vals[5], 5); // |5-0|=5 > 1 → new run
+        assert_eq!(vals[6], 0); // |0-5|=5 > max(5*0.1,1)=1 → new run
     }
 
     #[test]
