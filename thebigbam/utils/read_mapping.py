@@ -11,11 +11,42 @@ from Bio import SeqIO
 
 from thebigbam.utils.convert_circular_bam import convert_circular_bam
 
+FASTA_EXTS = ('.fa', '.fasta', '.fna')
+
 MAPPER_CHOICES = [
     'minimap2-sr', 'bwa-mem2',
     'minimap2-ont', 'minimap2-pb', 'minimap2-hifi',
     'minimap2-no-preset', 'minimap2-sr-secondary',
 ]
+
+def _resolve_assembly(raw_path: str):
+    """Resolve an assembly path that may be a file or a directory.
+
+    Returns (assembly_path: Path, temp_file: Optional[Path]).
+    When a directory is given the FASTA files inside are concatenated into a
+    temporary file; the caller must delete it when done.
+    """
+    p = Path(raw_path)
+    if not p.exists():
+        sys.exit(f"ERROR: Assembly path not found: {raw_path}")
+
+    if p.is_file():
+        if not p.name.lower().endswith(FASTA_EXTS):
+            sys.exit(f"ERROR: Unsupported assembly file format. Supported extensions: {', '.join(FASTA_EXTS)}")
+        return p, None
+
+    fasta_files = sorted(f for f in p.iterdir() if f.is_file() and f.name.lower().endswith(FASTA_EXTS))
+    if not fasta_files:
+        sys.exit(f"ERROR: No FASTA files (extensions {FASTA_EXTS}) found in directory '{raw_path}'.")
+
+    print(f"Assembly directory: concatenating {len(fasta_files)} FASTA file(s) into a single reference.", flush=True)
+    tmp = Path(tempfile.mkstemp(prefix="assembly_concat_", suffix=".fasta")[1])
+    with tmp.open("wb") as out:
+        for fa in fasta_files:
+            with fa.open("rb") as inp:
+                shutil.copyfileobj(inp, out)
+    return tmp, tmp
+
 
 def _double_fasta(in_path: Path, out_path: Path) -> None:
     records = list(SeqIO.parse(str(in_path), "fasta"))
@@ -43,7 +74,7 @@ def add_mapping_per_sample_args(parser):
     reads_group.add_argument('-r1', '--read1', help='Read1 (fastq/fastq.gz)')
     reads_group.add_argument('--interleaved', help='Interleaved paired-end reads (fastq/fastq.gz; alternative to -r1/-r2)')
     parser.add_argument('-r2', '--read2', help='Read2 for paired-end reads (fastq/fastq.gz)')
-    parser.add_argument('-a', '--assembly', required=True, help='Reference assembly to map against (fasta file)')
+    parser.add_argument('-a', '--assembly', required=True, help='Path to assembly FASTA FILE or DIRECTORY (.fa, .fasta, .fna).')
     parser.add_argument('-o', '--output', required=True, help='Output BAM path (will be written)')
     parser.add_argument('--mapper', choices=MAPPER_CHOICES, default='minimap2-sr-secondary', help='Mapper and preset to use. Default: short-read preset minimap2-sr-secondary that uses the same options as -ax sr but keeping secondary reads')
     parser.add_argument('--circular', action='store_true', help='Concatenate each contig to itself during the mapping to circularize it')
@@ -59,27 +90,36 @@ def run_mapping_per_sample(args):
     _validate_read_inputs(args)
     _validate_extra_params(args)
 
+    assembly_path, assembly_tmp = _resolve_assembly(args.assembly)
+
     read1 = Path(args.read1) if getattr(args, 'read1', None) else None
     read2 = Path(args.read2) if getattr(args, 'read2', None) else None
     interleaved = Path(args.interleaved) if getattr(args, 'interleaved', None) else None
     minimap2_params = getattr(args, 'minimap2_params', None)
     bwa_params = getattr(args, 'bwa_params', None)
 
-    return map_with_mapper(
-        args.threads,
-        Path(args.assembly),
-        args.mapper,
-        read1,
-        read2,
-        Path(args.output),
-        circular=bool(getattr(args, 'circular', False)),
-        keep_unmapped=bool(getattr(args, 'keep_unmapped', False)),
-        interleaved=interleaved,
-        minimap2_params=minimap2_params,
-        bwa_params=bwa_params,
-        min_read_percent_identity=getattr(args, 'min_read_percent_identity', 0.0),
-        min_read_aligned_percent=getattr(args, 'min_read_aligned_percent', 0.0),
-    ) or 0
+    try:
+        return map_with_mapper(
+            args.threads,
+            assembly_path,
+            args.mapper,
+            read1,
+            read2,
+            Path(args.output),
+            circular=bool(getattr(args, 'circular', False)),
+            keep_unmapped=bool(getattr(args, 'keep_unmapped', False)),
+            interleaved=interleaved,
+            minimap2_params=minimap2_params,
+            bwa_params=bwa_params,
+            min_read_percent_identity=getattr(args, 'min_read_percent_identity', 0.0),
+            min_read_aligned_percent=getattr(args, 'min_read_aligned_percent', 0.0),
+        ) or 0
+    finally:
+        if assembly_tmp:
+            try:
+                assembly_tmp.unlink()
+            except OSError:
+                pass
 
 def _get_version() -> str:
     """Get theBIGbam version from pyproject.toml or fallback."""
