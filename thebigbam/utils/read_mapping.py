@@ -194,7 +194,12 @@ def map_with_mapper(threads: int, assembly_file: Path, mapper: str, read1: Optio
     work_assembly = assembly
     temp_files = []
     bwa_index_sidecars = []
+    split_prefix = None
     try:
+        if mapper.startswith('minimap2'):
+            split_dir = Path(tempfile.mkdtemp(prefix="mm2_split_"))
+            split_prefix = str(split_dir / "part")
+
         if circular:
             doubled = Path(tempfile.mkstemp(prefix=assembly.stem + "_doubled_", suffix=".fasta")[1])
             _double_fasta(assembly, doubled)
@@ -228,23 +233,25 @@ def map_with_mapper(threads: int, assembly_file: Path, mapper: str, read1: Optio
         elif mapper == 'bwa-mem2' and bwa_params:
             extra_params = shlex.split(bwa_params)
 
+        split_args = ["--split-prefix", split_prefix] if split_prefix else []
+
         if mapper == 'minimap2-sr':
-            mapper_cmd = ["minimap2", "-ax", "sr", "-t", str(threads)] + extra_params + [str(work_assembly)] + reads_args
+            mapper_cmd = ["minimap2", "-ax", "sr", "-t", str(threads)] + split_args + extra_params + [str(work_assembly)] + reads_args
         elif mapper == 'minimap2-sr-secondary':
             mapper_cmd = [
                 "minimap2", "-a", "-k21", "-w11", "--sr", "--frag=yes", "-A2", "-B8",
                 "-O12,32", "-E2,1", "-r100", "-p.5", "-N20", "-f1000,5000", "-n2",
                 "-m25", "-s40", "-g100", "-2K50m", "--heap-sort=yes", "--secondary=yes",
                 "-t", str(threads),
-            ] + extra_params + [str(work_assembly)] + reads_args
+            ] + split_args + extra_params + [str(work_assembly)] + reads_args
         elif mapper == 'minimap2-ont':
-            mapper_cmd = ["minimap2", "-ax", "map-ont", "-t", str(threads)] + extra_params + [str(work_assembly)] + reads_args
+            mapper_cmd = ["minimap2", "-ax", "map-ont", "-t", str(threads)] + split_args + extra_params + [str(work_assembly)] + reads_args
         elif mapper == 'minimap2-pb':
-            mapper_cmd = ["minimap2", "-ax", "map-pb", "-t", str(threads)] + extra_params + [str(work_assembly)] + reads_args
+            mapper_cmd = ["minimap2", "-ax", "map-pb", "-t", str(threads)] + split_args + extra_params + [str(work_assembly)] + reads_args
         elif mapper == 'minimap2-hifi':
-            mapper_cmd = ["minimap2", "-ax", "map-hifi", "-t", str(threads)] + extra_params + [str(work_assembly)] + reads_args
+            mapper_cmd = ["minimap2", "-ax", "map-hifi", "-t", str(threads)] + split_args + extra_params + [str(work_assembly)] + reads_args
         elif mapper == 'minimap2-no-preset':
-            mapper_cmd = ["minimap2", "-a", "-t", str(threads)] + extra_params + [str(work_assembly)] + reads_args
+            mapper_cmd = ["minimap2", "-a", "-t", str(threads)] + split_args + extra_params + [str(work_assembly)] + reads_args
         elif mapper == 'bwa-mem2':
             mapper_cmd = ["bwa-mem2", "mem", "-t", str(threads)]
             if interleaved:
@@ -350,6 +357,8 @@ def map_with_mapper(threads: int, assembly_file: Path, mapper: str, read1: Optio
                 Path(f).unlink()
             except OSError:
                 pass
+        if split_prefix:
+            shutil.rmtree(Path(split_prefix).parent, ignore_errors=True)
         for f in bwa_index_sidecars:
             try:
                 f.unlink()
