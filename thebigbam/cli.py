@@ -4,6 +4,7 @@ import sys
 # Import command modules so we can share arg definitions and run functions
 from thebigbam.utils import (
     read_mapping, add_sample_metadata, add_contig_metadata, add_mag_metadata,
+    add_contig_annotations,
 )
 from thebigbam.database import add_variable, calculating_data, database_getters, export_data, inspect_blob
 from thebigbam.plotting import start_bokeh_server
@@ -33,6 +34,7 @@ SCRIPTS = {
     'add-sample-metadata': "Add sample metadata from CSV as new columns in Sample table",
     'add-contig-metadata': "Add contig metadata from CSV as new columns in Contig table",
     'add-mag-metadata': "Add MAG metadata from CSV as new columns in MAG table",
+    'add-contig-annotations': 'Add qualifiers to annotation files from a CSV spreadsheet',
     'add-variable': "Add an external variable from CSV to DB",
 
     'remove-sample': 'Remove a sample and all its data from DB',
@@ -81,6 +83,9 @@ def build_argparser():
 
     sp = sub.add_parser('add-mag-metadata', help=SCRIPTS['add-mag-metadata'])
     add_mag_metadata.add_add_mag_metadata_args(sp)
+
+    sp = sub.add_parser('add-contig-annotations', help=SCRIPTS['add-contig-annotations'])
+    add_contig_annotations.add_add_contig_annotations_args(sp)
 
     sp = sub.add_parser('add-variable', help=SCRIPTS['add-variable'])
     add_variable.add_add_variable_args(sp)
@@ -186,6 +191,9 @@ def main(argv=None):
 
     if args.cmd == 'add-mag-metadata':
         return add_mag_metadata.run_add_mag_metadata(args)
+
+    if args.cmd == 'add-contig-annotations':
+        return add_contig_annotations.run_add_contig_annotations(args)
 
     if args.cmd == 'add-variable':
         return add_variable.run_add_variable(args)
