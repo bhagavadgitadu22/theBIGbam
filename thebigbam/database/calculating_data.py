@@ -60,7 +60,7 @@ def add_calculate_args(parser):
     parser.add_argument("-g", "--genbank", help="Path to annotation FILE or DIRECTORY: GenBank (.gbk, .gbff, .gb) or GFF3 (.gff, .gff3). With --view mag, a directory means one file per MAG (MAG name = filename stem). Required if no BAM files provided.")
     parser.add_argument("-b", "--bam_files", help="Path to bam file or directory containing mapping files (BAM format). Optional if genbank is provided.")
     parser.add_argument("-o", "--output", required=True, help="Output database file path (.db)")
-    parser.add_argument("-m", "--modules", required=False, default=None, help="List of modules to compute (comma-separated). If not provided, all modules are computed. Options: coverage, misalignment, rna, longreads, pairedreads, termini")
+    parser.add_argument("-m", "--modules", required=False, default=None, help="List of modules to compute (comma-separated). If not provided, all modules are computed. Options: coverage,misalignment,rna,longreads,pairedreads,phagetermini")
     parser.add_argument("-a", "--assembly", help="Path to assembly FASTA FILE or DIRECTORY (.fa, .fasta, .fna). Needed for autoblast when genbank lacks sequence data. With --view mag, a directory means one file per MAG (MAG name = filename stem).")
     parser.add_argument("--view", choices=["contig", "mag"], default="contig", help="Aggregation level: 'contig' (default) processes each contig independently; 'mag' groups contigs by MAG, requires at least one of -g / -a to be a directory of per-MAG files.")
     parser.add_argument('-s', '--sequencing_type', choices=['long', 'paired-short', 'single-short'], help='Sequencing type (long or short allowed)')

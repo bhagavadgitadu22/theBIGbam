@@ -131,3 +131,7 @@ thebigbam calculate -t 8 -b new_phage.bam -g pharokka_new_phage/pharokka.gbk -o 
 When extending a database, previously processed samples will not contain mapping information for newly added contigs. If this information is required, those samples must be removed and reprocessed using updated BAM files that include the new contigs as references.
 
 This is not useful for the collection presented here, but it may be relevant in **Use Case 2**. For example, if a new glacier-fed stream metagenome is sequenced, additional viral contigs may be assembled that were present but not assembled in previously sequenced metagenomes. Detecting these would require remapping all samples to the updated reference set. However, remapping all samples can be computationally expensive and should only be performed if it is expected to substantially affect the final results.
+
+
+
+MAG example: TODO

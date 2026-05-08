@@ -19,7 +19,7 @@ from thebigbam.database.blob_decoder import (
     decode_raw_chunks, decode_raw_sparse_chunks,
     get_scale_from_zoom_blob, is_sparse_zoom_blob,
     feature_name_to_id, is_contig_blob_feature, gc_window_size,
-    CHUNK_SIZE, SCALE_DIVISORS, ZOOM_MAGIC,
+    CHUNK_SIZE,
 )
 
 
@@ -33,13 +33,9 @@ def add_inspect_args(parser):
     parser.add_argument('--region', default=None, help='Genomic region to display (e.g. 1000-2000)')
     parser.add_argument('--zoom', type=int, default=None, choices=[0, 1, 2],
                         help='Show zoom level instead of base resolution (0=100bp, 1=1000bp, 2=10000bp)')
-    parser.add_argument('--header-only', action='store_true', help='Only show BLOB header info')
 
 
 def run_inspect(args):
-    if args.header_only and args.zoom is not None:
-        sys.exit("ERROR: --header-only and --zoom are mutually exclusive.")
-
     conn = duckdb.connect(args.db, read_only=True)
 
     features = [f.strip() for f in args.feature.split(',')]
@@ -81,11 +77,10 @@ def run_inspect(args):
         contigs = [c.strip() for c in args.contig.split(',')]
 
     # Print header once (use buffer.write to avoid mixed text/binary buffering)
-    if not args.header_only:
-        if mag_of_contig:
-            sys.stdout.buffer.write(b"mag\tcontig\tsample\tfeature\tposition_start\tposition_end\tvalue\n")
-        else:
-            sys.stdout.buffer.write(b"contig\tsample\tfeature\tposition_start\tposition_end\tvalue\n")
+    if mag_of_contig:
+        sys.stdout.buffer.write(b"mag\tcontig\tsample\tfeature\tposition_start\tposition_end\tvalue\n")
+    else:
+        sys.stdout.buffer.write(b"contig\tsample\tfeature\tposition_start\tposition_end\tvalue\n")
 
     # When using --mag with --zoom, query MAG-level zoom blobs directly.
     # They are pre-computed in MAG-global coordinates — no per-contig offset needed.
@@ -157,7 +152,7 @@ def run_inspect(args):
                     continue
                 _inspect_contig_feature(
                     conn, contig_id, contig_name, feature_name, fid,
-                    local_rs, local_re, zoom_bin_size, args.header_only,
+                    local_rs, local_re, zoom_bin_size,
                     mag_name=contig_mag, mag_offset=mag_offset,
                 )
             elif fid is not None:
@@ -173,7 +168,7 @@ def run_inspect(args):
                     _inspect_sample_feature(
                         conn, contig_id, contig_name, sample_name, sample_id,
                         feature_name, fid,
-                        local_rs, local_re, zoom_bin_size, args.header_only,
+                        local_rs, local_re, zoom_bin_size,
                         mag_name=contig_mag, mag_offset=mag_offset,
                     )
             else:
@@ -184,7 +179,7 @@ def run_inspect(args):
 
 
 def _inspect_contig_feature(conn, contig_id, contig_name, feature_name, fid,
-                            region_start, region_end, zoom_bin_size, header_only,
+                            region_start, region_end, zoom_bin_size,
                             mag_name="", mag_offset=0):
     """Inspect a contig-level feature from Contig_blob / Contig_blob_chunk."""
     row = conn.execute(
@@ -194,10 +189,6 @@ def _inspect_contig_feature(conn, contig_id, contig_name, feature_name, fid,
     if row is None:
         return
     zoom_blob = bytes(row[0])
-
-    if header_only:
-        _print_zoom_header(zoom_blob, contig_name, feature_name)
-        return
 
     if zoom_bin_size is not None:
         _print_zoom_rows(zoom_blob, zoom_bin_size, contig_name, "", feature_name, region_start, region_end,
@@ -223,7 +214,7 @@ def _inspect_contig_feature(conn, contig_id, contig_name, feature_name, fid,
 
 def _inspect_sample_feature(conn, contig_id, contig_name, sample_name, sample_id,
                             feature_name, fid,
-                            region_start, region_end, zoom_bin_size, header_only,
+                            region_start, region_end, zoom_bin_size,
                             mag_name="", mag_offset=0):
     """Inspect a sample-level feature from Feature_blob / Feature_blob_chunk."""
     row = conn.execute(
@@ -233,10 +224,6 @@ def _inspect_sample_feature(conn, contig_id, contig_name, sample_name, sample_id
     if row is None:
         return
     zoom_blob = bytes(row[0])
-
-    if header_only:
-        _print_zoom_header(zoom_blob, contig_name, feature_name, sample_name)
-        return
 
     if zoom_bin_size is not None:
         _print_zoom_rows(zoom_blob, zoom_bin_size, contig_name, sample_name, feature_name, region_start, region_end,
@@ -295,28 +282,6 @@ def _fetch_feature_chunks(conn, contig_id, sample_id, fid, region_start, region_
             [contig_id, sample_id, fid],
         ).fetchall()
     return [(r[0], r[1]) for r in rows] if rows else []
-
-
-def _print_zoom_header(zoom_blob, contig_name, feature_name, sample_name=None):
-    """Print zoom blob header info (diagnostic, to stderr)."""
-    if len(zoom_blob) < 16 or zoom_blob[:4] != ZOOM_MAGIC:
-        print("  Invalid zoom blob", file=sys.stderr)
-        return
-    scale_code = zoom_blob[4]
-    flags = zoom_blob[5]
-    num_levels = zoom_blob[6]
-    import struct
-    contig_length = struct.unpack_from("<I", zoom_blob, 8)[0]
-    sparse = bool(flags & 0x01)
-
-    parts = [f"contig={contig_name}", f"feature={feature_name}"]
-    if sample_name:
-        parts.append(f"sample={sample_name}")
-    print(f"  {'  '.join(parts)}")
-    print(f"  Zoom blob: {len(zoom_blob):,} bytes")
-    print(f"  Contig length: {contig_length:,}")
-    print(f"  Sparse: {sparse}, Scale: ÷{SCALE_DIVISORS.get(scale_code, 1)}")
-    print(f"  Zoom levels: {num_levels}")
 
 
 def _print_zoom_rows(zoom_blob, bin_size, contig_name, sample_name, feature_name,

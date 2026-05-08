@@ -35,3 +35,7 @@ The algorithm tracks the minimum and maximum values within each run, and a new e
 where r is the allowed variation ratio. This range-based criterion is symmetric (independent of position order) and prevents drift on gradual monotonic changes. The stored value for each run is the average of all values in the run.
 
 Contig features use a separate parameter with a lower default value because only one value needs to be computed per contig and per position (O(n²)), whereas mapping features require computing one value per contig, per position, and per sample in which the contig is present (O(n³)).
+
+compression variation_percentage -> not symmetric, greedy run boundaries still depend on scan direction (inherent to any single-pass approach), but the invariant itself is now symmetric over the run's values rather than anchored to whichever value came first
+
+explain zoom blobs etc.

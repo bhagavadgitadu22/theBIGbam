@@ -24,7 +24,7 @@ Built with **Rust** for fast BAM processing and **Python + Bokeh** for interacti
     + [Database compression](#database-compression)
     + [Metrics computed per contig and per sample](#metrics-computed-per-contig-and-per-sample)
   * [Visualization](#visualization)
-    + [Serving from a remote server](#serving-from-a-remote-server)
+    + [Serving from arnemote server](#serving-from-a-remote-server)
     + [Web interface overview](#web-interface-overview)
       - [One Sample mode](#one-sample-mode)
       - [All Samples mode](#all-samples-mode)
@@ -96,7 +96,7 @@ Open browser to http://localhost:5006 to see the visualization. If working from 
 
 TheBIGbam consists of 3 main steps: 
 
-- (optional) Generation of alignment files for your samples with circular-genome support
+- (optional) Generation of alignment files for your samples with or without circular-genome support
 - Generation of a DuckDB database summarizing your genomic and mapping files with Rust
 - Interactive visualization of the DuckDB database content using Python and Bokeh
 
@@ -114,8 +114,7 @@ thebigbam calculate \
   -b tests/HK97 \
   -g tests/HK97/HK97_GCF_000848825.1_pharokka.gbk \
   -m coverage,misalignment \
-  -o tests/HK97/HK97.db \
-  -t 4
+  -o tests/HK97/HK97.db
 
 thebigbam serve --db tests/HK97/HK97.db --port 5006
 ```
@@ -124,7 +123,7 @@ For more complex examples see [the usage page](docs/USAGE.md).
 
 ## Database computation
 
-`thebigbam calculate` command converts large BAM files and associated annotated assemblies into a compact, queryable DuckDB database.
+`thebigbam calculate` command converts large BAM files and associated annotated assemblies into a compact, queryable DuckDB database. The command can be performed either independently per contig or jointly across grouped contigs (e.g., MAGs, Metagenome-Assembled Genomes), allowing flexible analysis at different genomic aggregation levels.
 
 Example command to compute the database for a single sample containing paired-end short reads mapped to the reference genome of phage HK97:
 
@@ -137,6 +136,8 @@ thebigbam calculate
 -t 4
 ```
 
+TO-DO add MAG example?
+
 For more complex examples see [the usage page](docs/USAGE.md).
 
 ### What input files do I need?
@@ -145,11 +146,13 @@ You need to provide at least one of the following:
 
 - BAM mapping files (`-b`)
 
-- A GenBank annotation file (`-g`)
+- GenBank annotation files (`-g`)
 
-If only an annotation file is provided, contig-level data (annotations, GC content, repeats) is calculated without any sample-level mapping features. 
+If only annotation files are provided, contig-level data (annotations, GC content, repeats) are calculated without any sample-level mapping features. 
 
-If only BAM files are provided, an assembly file of contigs (FASTA format) can be supplied with `-a` to allow the computation of sequence-dependent, mapping-derived features.
+If only BAM files are provided, assembly files of contigs (FASTA format) can be supplied with `-a` to allow the computation of sequence-dependent, mapping-derived features.
+
+By default, `thebigbam calculate` is run independently per contig. If --view mag is chosen instead, the input path provided to `-g` or `-a` must be a directory comprising one file per MAG.
 
 #### Alignment files
 
@@ -171,11 +174,11 @@ samtools calmd -b example.sorted.bam ref.fasta > example.sorted.md.bam
 
 Alternatively, you can produce your alignment files directly in theBIGbam as specified in the [Mapping](#mapping) section.
 
-#### Annotation file
+#### Annotation files
 
-**Parameter:** --genbank FILE, short-version -g
+**Parameter:** --genbank FILE or DIRECTORY, short-version -g
 
-Annotation file should be in GenBank (`.gbk`, `.gbff`, `.gb`) or GFF3 (`.gff`, `.gff3`) format, made with the tool of your choice: bakta for bacteria, pharokka or phold for phages, eggnog-mapper for eukaryotes, etc.
+Annotation files should be in GenBank (`.gbk`, `.gbff`, `.gb`) or GFF3 (`.gff`, `.gff3`) format, made with the tool of your choice: bakta for bacteria, pharokka or phold for phages, eggnog-mapper for eukaryotes, etc.
 
 Examples of commands to generate such annotations are available in [the usage page](docs/USAGE.md).
 
@@ -185,50 +188,59 @@ Examples of commands to generate such annotations are available in [the usage pa
 
 **When BAM files are provided**, theBIGbam performs fast Rust-based computations on them to extract relevant values. Individual read information is discarded in favor of lightweight per-position averages for each contig in each sample.
 
-All mapping-derived modules are computed and stored in the database unless you provide a specific subset of modules. 5 mapping-derived modules exist at the moment:
+All mapping-derived modules are computed and stored in the database unless you provide a specific subset of modules. 6 mapping-derived modules exist at the moment:
 
 - **Coverage**: computes per-position coverage for primary, secondary, and supplementary reads, as well as the mapping quality (MAPQ)
 - **Misalignment:** computes per-position number of clippings, insertions, deletions and mismatches
+- **RNA:**  computes per-position number of splicings (necessitates alignment files made with RNA-seq aligners like STAR or HISAT2)
 - **Long-reads:** computes per-position average length of reads
 - **Paired-reads:** computes per-position average insert size of reads along with the number of incorrect pair orientations (non-inward pairs, mates unmapped or mapping or another contig)
-- **Phage termini:** compute per-position coverage for primary-reads starting with an exact match (a short clipping < 5 bp is tolerated). Among those reads, the number of mapped reads starting and ending is computed. This module requires sequences to be provided
+- **Phage termini:** compute per-position coverage for primary-reads starting with an exact match (a short clipping < 5 bp is tolerated). Among those reads, the number of mapped reads starting and ending is computed. **This module requires sequences** to be provided to find terminal repeats
 
-**When contig sequences are provided**, the **Genome** module is computed. It calculates GC content, GC skew and the repeats contained within each contig using an autoblast. If annotations are available (GenBank file provided), contig annotations (e.g. positions of the coding sequences and their functions) are also saved.
+**When sequences are provided**, the **Genome** module is computed. It calculates GC content, GC skew and the repeats contained within each contig/MAG using an autoblast. Annotations (e.g. positions of the coding sequences and their functions) are also saved when available (GenBank file provided).
 
 A more detailed explanation of the modules and the features it contains is available in [the features section](docs/FEATURES.md).
 
 ### Database compression
 
-**Parameters (optional):** --min_aligned_fraction, --min_coverage_depth, --coverage_percentage, --variation_percentage,
+**Parameters (optional):** --min_aligned_fraction, --min_coverage_depth, --coverage_percentage, --min_occurrences, --variation_percentage
 
 Discarding the reads to only keep the main features of the mappings (like the coverage per position) already allows the DuckDB database to be way lighter than the original BAM file. The database itself is also structured to be as light as possible. 
 
 First, the database is organised per contig per sample (qualified as a contig/sample pair thereafter). Only pairs relative to a contig present in a sample are stored in the database. The definition of a presence can be tweaked via two parameters: 
 
-- **--min_aligned_fraction** controls the minimum percentage of positions that received reads (default 50%, meaning a contig is considered present only if more than half of it received reads)
+- **--min_aligned_fraction** controls the minimum percentage of positions that received reads (default 50%, meaning a contig is considered present only if more than half of it received reads). In MAG view, **--min_aligned_fraction** applies to the MAG instead of each contig.
 
-- **--min_coverage_depth** sets the minimum mean coverage depth required for contig inclusion (default 0, i.e. disabled — set to e.g. 5 to filter out contigs with very low depth that produce noisy signals).
+- **--min_coverage_depth** sets the minimum mean coverage depth required for contig inclusion (default 0, i.e. disabled — set to e.g. 5 to filter out contigs with very low depth that produce noisy signals). In MAG view, **--min_coverage_depth** applies to the MAG instead of each contig.
 
 To further reduce the size of the database, values per feature are compressed rather than saving all positions. The type of compression depends on the type of plots:
 
-- Only positions with values above a defined percentage of the local coverage are retained for Bar plots (Misalignment and Phage termini module except for "Coverage reduced" feature). For each position, values are compared to the local coverage and discarded if they fall below the **--coverage_percentage** threshold (default 10%), ensuring that only meaningful peaks are preserved
+- Only positions with values above a defined percentage of the local coverage are retained for Bar plots (Misalignment and Phage termini module except for "Coverage reduced" feature). For each position, values are compared to the local coverage and discarded if they fall below the **--coverage_percentage** threshold (default 10%), ensuring that only meaningful peaks are preserved. In addition, an event must occur more than **--min_occurrences** to be considered (default 2).
 
-- Dense features (coverage, MAPQ, insert sizes, read lengths) can optionally be smoothed using **--variation_percentage** (default 0, disabled). Consecutive positions within this percentage of each other are collapsed to the same value, substantially reducing database size. Good for visualization; slightly lossy for precise per-position analysis. Recommended: 5–10% for large genomes.
+- Dense features (coverage, MAPQ, insert sizes, read lengths) can optionally be smoothed using **--variation_percentage** (default 0, disabled). Consecutive positions within this percentage of each other are collapsed to the same value, substantially reducing database size. The minimum and maximum values within each run are tracked, and a new entry is created when the range of values in the run exceeds a threshold relative to the smallest absolute value, defined as:
+  
+  $\text{max}(\text{run}) - \text{min}(\text{run}) > r \times \min(|\text{min}(\text{run})|, |\text{max}(\text{run})|)$
+  
+  Where r is the **--variation_percentage**. This mode produces significantly smaller databases at the cost of per-position precision, making it suitable for visualization and long-term storage when storage space is limited.
 
-The output is a DuckDB database that is typically **10–100 times smaller** than the original BAM files while retaining the essential characteristics of the mapping data. When using **theBIGbam** only for a **GenBank file**, the main objective is visualization, as the output database is typically **similar in size to the original file**.
+The output is a DuckDB database that is typically **10-100 times smaller** than the original BAM files while retaining the essential characteristics of the mapping data. When using **theBIGbam** only for annotation files, the main objective is visualization, as the output database is typically similar in size to the original file.
 
 For more information see [the compression section](docs/COMPRESSION.md).
 
-### Metrics computed per contig and per sample
+### Metrics computed per contig/MAG and per sample
 
-In addition to per-position information, summary metrics are computed and stored in the database per contig, per sample and per contig–sample pair. These metrics combine the per-position values into average values like the coverage mean to help identify informative contig–sample pairs without requiring specific hypotheses.
+In addition to per-position information, summary metrics are computed and stored in the database per contig, per sample and per contig–sample pair. In the MAG view, metrics relevant at the MAG level are computed twice: once at the contig level and once at the MAG level.
 
-Metrics belong to 4 categories: 
+These metrics combine the per-position values into average values like the coverage mean to help identify informative contig–sample pairs without requiring specific hypotheses.
 
-- **Presence detection**
-- **Misassembly**
-- **Microdiversity**
+Metrics belong to several categories: 
+
+- **Presence detection** (also available for MAGs)
+- **Misassembly** (also available for MAGs)
+- **Microdiversity** (also available for MAGs)
+- **Side misassembly**
 - **Topology**
+- **Phage termini**
 
 A description of all metrics is available in [the filters section](docs/FILTERS.md).
 
@@ -244,7 +256,9 @@ thebigbam serve --db tests/HK97/HK97.db --port 5006
 
 ### Serving from a remote server
 
-If calculating and serving the database from remote machine without graphical interface, you can use SSH port forwarding to access the visualization on your local machine. For example, if your remote server is `remote.server.com` and you want to forward port `5006`, you can run the following command on your local machine:
+If calculating and serving the database from a remote machine without graphical interface, you can use SSH port forwarding to access the visualization on your local machine. 
+
+For example, if your remote server is `remote.server.com` and you want to forward port `5006`, you can run the following command on your local machine:
 
 ```bash
 ssh -N -L 5006:localhost:5006 user@remote.server.com
@@ -270,7 +284,7 @@ You are initially in the **One Sample** mode, which allows exploration of all co
 
 - **Filtering**: Only pairs of contig/samples matching the selected filters are available in the **Contigs** and **Samples** sections. For instance, if the contig length filter is set to >10 kbp, only contigs longer than this threshold will appear in the **Contigs** section, and only samples containing at least one such contig will appear in the **Samples** section. To consult the list of filters available have a look at [the filtering page](docs/FILTERS.md)
 
-- **Contigs**: Select the contig you want to explore. If sequences and/or annotations were provided when creating the database, genomic features (gene maps, repeats, GC content, GC skew) can be selected for plotting by clicking on the contig features
+- **Contigs**: Select the contig you want to explore. If annotations were provided when creating the database, a gene map can be plotted: users can choose which features to include on the map and customize their colors and labels. In addition, if sequence data was provided when creating the database, genomic features can be selected for plotting: repeats within contigs (and within MAGs in MAG view), GC content, GC skew
 
 - **Samples**: Select the sample you want to explore
 
@@ -284,37 +298,52 @@ Finally, click **Apply** to visualize the requested features for the selected co
 
 **All Samples** mode enables comparison of a specific feature across multiple samples. Compared to the **One Sample** mode, the **Samples** section is omitted, and only a single feature can be selected in the **Variables** section (e.g. mismatches on the figure above).
 
+#### MAG view
+
+For a database computed with `--view mag`, a **MAGs** section is added to the visualization. Users can select a MAG of interest and then choose a contig from this MAG in the **Contigs** section.
+
+The MAG and contig filters in the Filtering panel affect the list of MAGs displayed in the **MAGs** section. Only MAGs containing at least one contig passing the contig filters are included in the MAG list. Only contigs belonging to a MAG passing the MAG filters are included in the contig list.
+
+Plots can be generated in the standard contig-based view or in **MAG view**, which displays an entire MAG at once. In **MAG view**, contigs are ordered from longest to shortest, and an additional MAG track is shown above the plots to indicate which contigs are currently being visualized.
+
 #### Plotting
 
 Genomic tracks are plotted at the top and mapping-derived features below. On the figure for instance, you can see the gene map, the sequence track and the codon track. Below are displayed the mismatch track for the samples in display (All Samples mode).
 
-All plots leverage the full capabilities of Bokeh: you can pan, zoom, and hover over specific points to inspect local values. For misalignment tracks, the dominant alternative sequences among the misaligned reads is displayed, in addition with the potential replacement codon for mismatches (for example a Glycine on the figure above).
+All plots leverage the full capabilities of Bokeh: you can pan, zoom, and hover over specific points to inspect local values. For Misalignment tracks, the dominant alternative sequences among the misaligned reads is displayed, in addition with the potential replacement codon for mismatches (for example a Glycine on the figure above).
 
-Buttons in the top-right section allow you to disable pan, zoom, or hover interactions, reset the plots to their original state, and **export the current view as a PNG image**. In addition, the green button **SHOW SUMMARY** opens a new html page showing the metrics computed per contig per sample for the contig and samples in display. The blue buttons allow you to download:
+Buttons in the top-right section allow you to disable pan, zoom, or hover interactions, reset the plots to their original state, and **export the current view as a PNG image**. 
 
-- The metrics relative to the contig (**DOWNLOAD CONTIG SUMMARY**)
+In addition, the green button **SHOW SUMMARY** opens a new html page showing the characteristics of the contig, MAG, sample(s) in display along with the metrics computed per contig per sample for the contig and samples in display. 
 
-- The metrics relative to the contig per sample for all samples in display (**DOWNLOAD METRICS SUMMARY**)
+Users can download this data via the blue buttons:
 
-- All data plotted at the moment (considering all points without adaptive resolution rendering) (**DOWNLOAD DATA**)
+- **DOWNLOAD CONTIG METRICS**: Downloads the metrics relative to the contig in all samples in display
+
+- **DOWNLOAD MAG METRICS**: Downloads the metrics relative to the MAG in all samples in display (only available for MAG-aware databases)
+
+- **DOWNLOAD DATA**: Generates the command required to download all plotted data. This command has to be executed outside the browser to avoid browser-side lag
 
 #### Adaptive resolution rendering
 
-Sequences and contig annotations only make sense when looking at a small window: by default sequences are plotted for ≤ 1 kbp window and gene maps are plotted for ≤ 100 kbp window. 
+Sequences and contig annotations are only informative at small scales. By default:
 
-The level of detail of the other plots is adapted to the viewing window size to ensure responsive plotting:
+- Sequences are displayed for windows ≤ 1 kbp
+- Gene maps are displayed for windows ≤ 100 kbp
+- Genomic and mapping-derived features are shown at full resolution for windows ≤ 10 kbp
 
-- **Full resolution (≤ 100 kbp window)**: All data points are plotted
+These three thresholds can be modified in the **Plotting parameters** section, under **Max window size for plotting**.
 
-- **Downsampled view (> 100 kbp window)**: SQL-side binning reduces the number of points sent to the browser: the visible window is divided into **1000 fixed-width bins** and the **maximum** value per bin is kept to preserve spikes and outliers
+For windows larger than these thresholds, genomic and mapping-derived features are displayed using binned data:
 
-The binning thresholds are configurable in the **Plotting parameters** via 3 spinners:
+- For curve plots, the average value within each bin is shown
+- For bar plots, the maximum value within each bin is shown to highlight the most critical regions
 
-- **Feature plots without binning** (default: 100 kbp)
+The binning resolution depends on the window size:
 
-- **Gene map (bp)** (default: 100 kbp)
-
-- **Sequence plots (bp)** (default: 1000 bp)
+- Up to 100 kbp: 100 bp bins
+- Up to 1 Mbp: 1 kbp bins
+- Above 1 Mbp: 10 kbp bins
 
 When zooming or panning, you need to re-click APPLY to refresh the plots with the current window size. For more information consult [the visualization section](docs/VISUALIZATION.md).
 
@@ -340,6 +369,8 @@ Default mapping uses minimap2 for short reads while keeping secondary and supple
 
 Additional parameters can be provided to minimap2 and bwa-mem2 using the `--minimap2-params` and  `--bwa-params` options. Those paramaters takes precedence over the presets parameters if different values for the same parameter are provided.
 
+In addition, alignments can optionally be filtered to retain only reads meeting a minimum identity threshold with the reference (`--min-read-percent-identity`) and a minimum aligned coverage threshold (`--min-read-aligned-percent`).
+
 ### Mapping with circular genome support
 
 The `--circular` flag is a specificity of theBIGbam mapping allowing explicit circular genome support. To do that, each contig is duplicated prior to alignment, enabling seamless mapping across the junction. Artificial secondary and supplementary alignments arising from the duplication are removed, and reads are reassigned to their correct positions before output. This approach preserves consistent coverage at contig ends of circular genomes. 
@@ -360,6 +391,34 @@ For more details on theBIGbam circular genome support, you can consult [the circ
 
 # Additional utilities
 
+## Extending annotation files
+
+All annotations provided through annotation files are stored in the database during its creation. Therefore, you may want to enrich your annotation files with additional metadata before computing the database. This is done via:
+
+```bash
+thebigbam add-contig-annotations -g tests/HK97/HK97_GCF_000848825.1_pharokka.gbk --csv new_qualifiers.csv --match-by feature_type,ID -o annotations_enriched.gbk
+```
+
+Where new_qualifiers.tsv contains:
+
+- Columns specified in `--match-by`, used to identify the features to update
+- Additional columns corresponding to new qualifier–value pairs to add to matching features
+
+```tsv
+feature_type,ID,new_qualifier,new_qualifier2
+CDS,TTVDVOOI_CDS_0006,butter,butter2
+CDS,TTVDVOOI_CDS_0010,,butter3
+```
+
+In this example, the new file annotations_enriched.gbk will contain new annotations:
+
+- The feature `TTVDVOOI_CDS_0006` receives the qualifiers `new_qualifier=butter` and `new_qualifier2=butter2`
+- The feature `TTVDVOOI_CDS_0010` receives only `new_qualifier2=butter3`, as empty values are ignored
+
+## Database maintenance
+
+Consult [DATABASE.md](docs/DATABASE.md) for instructions on reading and modifying the database after it has been created. You can add, remove, or list samples, contigs, and variables. You can also design more complex queries using SQL.
+
 ## Exporting data
 
 Export any metric as a TSV matrix (with contigs as rows and samples as columns):
@@ -370,15 +429,57 @@ thebigbam export -d tests/HK97/HK97.db --metric Coverage_mean -o tests/HK97/cove
 
 Run `thebigbam export -h` to see the full list of available metrics.
 
-## Database maintenance
+## Inspecting data
 
-Consult [DATABASE.md](docs/DATABASE.md) for instructions on reading and modifying the database after it has been created. The documentation explains how to add, remove, or list samples, contigs, and variables. It also describes how to query the database directly using SQL.
+Any per-position feature stored in the database can be exported as a TSV file using the `inspect` command. Example:
+
+```bash
+thebigbam inspect -d tests/HK97/HK97.db --contig NC_002167.1 --sample HK97_illumina_circular --feature coverage,mismatches > output.tsv
+```
+
+The output is a TSV with one row per run of consecutive positions sharing the same value, with columns: contig, sample, feature, position_start, position_end, and value. 
+
+You can query multiple features, contigs or samples at once by providing comma-separated names. For databases computed with `--view mag`, use `--mag` instead of `--contig` to export all contigs belonging to a MAG at once (adds a mag column to the output). Contig-level features (e.g. gc_content, gc_skew, repeats) do not require `--sample`.
+
+To inspect features at a coarser resolution, use `--zoom` (0 = 100 bp bins, 1 = 1 kbp, 2 = 10 kbp). To restrict the output to a specific region, use `--region` (e.g. --region 1000-2000 to get data between positions 1 kbp and 2 kbp).
+
+Run `thebigbam inspect -h` to see the full list of options.
+
+## Analyse data
+
+Databases computed by theBIGbam contains a wealth of information that can be used in downstream analysis. Generic analysis scripts are available via the `analysis` command.
+
+At the moment both scripts available serve to export per-CDS (Coding DNA Sequences) summaries from the database for gene-level comparative analyses:
+
+- `cds-annotations` to export annotation information for all coding sequences:
+
+```bash
+thebigbam analysis cds-annotations --db tests/HK97/HK97.db --output cds_annotations.tsv
+```
+
+The output contains one row per CDS with coordinates, strand, GC content, and all qualifier fields found in the annotation file (product, function, etc.). Each gene is assigned a unique name following the pattern <contig_name>\_tbb\_<N>, numbered sequentially by start position.
+
+- `cds-mapping-patterns` to export per-CDS mapping signals for each sample: 
+
+```bash
+thebigbam analysis cds-mapping-patterns --db tests/HK97/HK97.db --output cds_patterns.tsv
+```
+
+The output contains one row per (sample, CDS) pair, with:
+
+- CDS coverage metrics (aligned fraction, median depth, etc.), 
+
+- CDS misalignment metrics for mismatches, insertions, deletions, clippings (number of concerned positions in the CDS, etc.) 
+
+- Additional metrics for mismatches: number of synonymous/non-synonymous positions, dN/dS ratio
+
+Run `thebigbam analysis -h` to display the list of available analysis scripts. Run `thebigbam analysis <script_name> -h` to view detailed documentation for a specific analysis script, including a description of its outputs.
 
 ---
 
 # Additional in-depth documentation pages
 
-- [How to run theBIGbam on big projects?](docs/USAGE.md)
+- [How to run theBIGbam on big projects?](docs/USAGE.md) TO-DO add MAG
 - [On mapping with circular genome support](docs/CIRCULAR_MAPPING.md)
 - [Features](docs/FEATURES.md) TO-DO
 - [Compression](docs/COMPRESSION.md) TO-DO
@@ -395,3 +496,5 @@ Consult [DATABASE.md](docs/DATABASE.md) for instructions on reading and modifyin
 
 TO-DO: check the list!
 Specify that links only work on main github page not pypi page
+
+Crucial to have proper unitary tests and tests behind that! 

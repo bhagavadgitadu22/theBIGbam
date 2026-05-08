@@ -435,20 +435,39 @@ pub fn encode_dense_blob(values: &[i32], scale: ValueScale, contig_length: u32) 
 
 /// Adaptive smoothing for dense values before blob encoding.
 ///
-/// Consecutive positions whose values are within `variation_pct`% of the
-/// current run value are set to the run value, producing long constant runs
-/// that delta-encode to zeros. No-op when `variation_pct` <= 0.
+/// Grows a run while `max(run) - min(run) <= r * min(|min(run)|, |max(run)|)`
+/// (floor 1). When the next value would break the invariant the run is flushed
+/// to its midpoint `(min + max) / 2`, producing long constant runs that
+/// delta-encode to zeros. No-op when `variation_pct` <= 0.
 pub fn smooth_dense_values(values: &mut [i32], variation_pct: f64) {
     if variation_pct <= 0.0 || values.is_empty() { return; }
     let ratio = variation_pct / 100.0;
-    let mut run_val = values[0];
-    for v in values.iter_mut().skip(1) {
-        let threshold = ((run_val.abs() as f64) * ratio).max(1.0) as i32;
-        if (*v - run_val).abs() <= threshold {
-            *v = run_val;
+    let mut run_start = 0usize;
+    let mut run_min = values[0];
+    let mut run_max = values[0];
+
+    for i in 1..values.len() {
+        let new_min = run_min.min(values[i]);
+        let new_max = run_max.max(values[i]);
+        let spread = (new_max - new_min) as f64;
+        let base = ((new_min.abs()).min(new_max.abs()) as f64).max(1.0);
+
+        if spread > ratio * base {
+            let rep = (run_min + run_max) / 2;
+            for v in &mut values[run_start..i] {
+                *v = rep;
+            }
+            run_start = i;
+            run_min = values[i];
+            run_max = values[i];
         } else {
-            run_val = *v;
+            run_min = new_min;
+            run_max = new_max;
         }
+    }
+    let rep = (run_min + run_max) / 2;
+    for v in &mut values[run_start..] {
+        *v = rep;
     }
 }
 
