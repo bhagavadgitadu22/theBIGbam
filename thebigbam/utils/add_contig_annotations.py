@@ -2,6 +2,7 @@ import argparse
 import csv
 import os
 import sys
+import urllib.parse
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
@@ -18,11 +19,21 @@ CSV format (wide / spreadsheet style):
   Columns listed in --match-by are used to locate existing features.
   All other columns are new qualifiers to add. Empty cells are skipped.
 
-  The special column name "feature_type" matches the feature type
-  (e.g. CDS, gene, tRNA) which in GenBank files appears as the keyword
-  before the location (not as a /qualifier).
+Special column names for --match-by:
+  "feature_type"  Matches the feature type keyword (CDS, gene, tRNA, ...).
+                  In GenBank this is the keyword before the location
+                  (not a /qualifier). In GFF3 this is column 3.
+  "locus"         Matches the record/sequence identifier.
+                  In GenBank this is the LOCUS name. In GFF3 this is
+                  column 1 (seqid). Useful to restrict matching to a
+                  specific contig.
+
+  All other column names match /qualifier values in GenBank files or
+  attribute keys in the GFF3 column 9.
 
 Example GenBank feature:
+  LOCUS       TTVDVOOI   10532 bp   DNA
+  ...
       CDS             4028..5185
                      /locus_tag="TTVDVOOI_CDS_0005"
                      /product="major head protein"
@@ -44,6 +55,10 @@ Example GenBank feature:
   type is "CDS" AND whose /locus_tag is "TTVDVOOI_CDS_0005", then add
   /category="structural" to it.
 
+  To restrict to a specific contig, add "locus" to --match-by:
+    --match-by locus,feature_type,locus_tag
+  and add a "locus" column to the CSV with the LOCUS/seqid name.
+
   If --match-by is omitted, the first CSV column is used for matching.
 """
 
@@ -56,10 +71,12 @@ def add_add_contig_annotations_args(parser):
     parser.add_argument('--csv', dest='csv_file', required=True,
                         help='CSV file (or directory of CSV files) with new annotations in wide format. '
                              'Columns in --match-by identify features; all other columns are qualifiers to add. '
-                             'Use "feature_type" as a column name to match by feature type (CDS, gene, etc.)')
+                             'Special column names: "feature_type" (CDS, gene, ...), '
+                             '"locus" (LOCUS name in GenBank / seqid in GFF3)')
     parser.add_argument('--match-by', dest='match_by', default=None,
                         help='Comma-separated column names used for feature matching. '
-                             'Use "feature_type" to match the feature type (CDS, gene, tRNA, ...). '
+                             'Special keywords: "feature_type" matches the feature type (CDS, gene, tRNA, ...); '
+                             '"locus" matches the record/sequence name (LOCUS in GenBank, seqid in GFF3). '
                              'Other column names match /qualifier values in GenBank or attributes in GFF3. '
                              'Default: first CSV column')
     parser.add_argument('-o', '--output', required=True,
@@ -132,24 +149,18 @@ def _load_csv_files(csv_files, match_by_cols):
     return rows, match_by_cols, value_cols
 
 
-def _get_feature_match_key(feature, match_by_cols, fmt):
-    """Extract match-by values from a feature. Returns tuple or None if any key missing."""
+def _get_genbank_match_key(feature, match_by_cols, record_name):
+    """Extract match-by values from a GenBank feature. Returns tuple or None if any key missing."""
     vals = []
     for col in match_by_cols:
-        if fmt == "genbank":
-            if col == "feature_type":
-                vals.append(feature.type)
-            elif col in feature.qualifiers:
-                vals.append(feature.qualifiers[col][0])
-            else:
-                return None
+        if col == "feature_type":
+            vals.append(feature.type)
+        elif col == "locus":
+            vals.append(record_name)
+        elif col in feature.qualifiers:
+            vals.append(feature.qualifiers[col][0])
         else:
-            if col == "feature_type":
-                vals.append(feature.get("feature_type", ""))
-            elif col in feature.get("attributes", {}):
-                vals.append(feature["attributes"][col])
-            else:
-                return None
+            return None
     return tuple(vals)
 
 
@@ -172,7 +183,7 @@ def _process_genbank_file(annot_path, csv_lookup, match_by_cols, value_cols, for
     for rec in records:
         for feat in rec.features:
             stats["total_features"] += 1
-            key = _get_feature_match_key(feat, match_by_cols, "genbank")
+            key = _get_genbank_match_key(feat, match_by_cols, rec.name)
             if key is not None:
                 key_to_features.setdefault(key, []).append(feat)
 
@@ -256,19 +267,22 @@ def _process_gff_file(annot_path, csv_lookup, match_by_cols, value_cols, force):
         parts = line.rstrip("\n").split("\t")
         if len(parts) < 9:
             continue
+        seqid = parts[0]
         feature_type = parts[2]
         attrs = _parse_gff_attributes(parts[8])
         attr_dict = {k: v for k, v in attrs}
-        feature_lines.append((i, parts, feature_type, attrs, attr_dict))
+        feature_lines.append((i, parts, seqid, feature_type, attrs, attr_dict))
         stats["total_features"] += 1
 
     key_to_feature_indices = {}
-    for idx, (line_idx, parts, feature_type, attrs, attr_dict) in enumerate(feature_lines):
+    for idx, (line_idx, parts, seqid, feature_type, attrs, attr_dict) in enumerate(feature_lines):
         vals = []
         valid = True
         for col in match_by_cols:
             if col == "feature_type":
                 vals.append(feature_type)
+            elif col == "locus":
+                vals.append(seqid)
             elif col in attr_dict:
                 vals.append(attr_dict[col])
             else:
@@ -292,7 +306,7 @@ def _process_gff_file(annot_path, csv_lookup, match_by_cols, value_cols, force):
                 stats["multi_match_features"] += len(feat_indices)
 
             for fidx in feat_indices:
-                line_idx, parts, feature_type, attrs, attr_dict = feature_lines[fidx]
+                line_idx, parts, seqid, feature_type, attrs, attr_dict = feature_lines[fidx]
                 feat_modified = False
 
                 for col in value_cols:
@@ -306,12 +320,13 @@ def _process_gff_file(annot_path, csv_lookup, match_by_cols, value_cols, force):
                             f"(use --force to overwrite)")
                         continue
 
+                    encoded_val = urllib.parse.quote(val, safe=" /:.^*$@!+?|")
                     existing_idx = next((i for i, (k, _) in enumerate(attrs) if k == col), None)
                     if existing_idx is not None:
-                        attrs[existing_idx] = (col, val)
+                        attrs[existing_idx] = (col, encoded_val)
                     else:
-                        attrs.append((col, val))
-                    attr_dict[col] = val
+                        attrs.append((col, encoded_val))
+                    attr_dict[col] = encoded_val
                     stats["qualifiers_added"][col] += 1
                     feat_modified = True
 
