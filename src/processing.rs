@@ -84,8 +84,6 @@ pub struct ProcessConfig {
     pub threads: usize,
     pub min_aligned_fraction: f64,
     pub min_coverage_depth: f64,
-    /// Relative tolerance for RLE compression (e.g., 0.1 = 10% change threshold)
-    pub curve_ratio: f64,
     pub bar_ratio: f64,
     /// Sequencing type: if None, auto-detect per sample; if Some, use for all samples
     pub sequencing_type: Option<SequencingType>,
@@ -611,11 +609,13 @@ fn run_mag_interblast(
     mag_manifest: &[(String, Vec<String>)],
     db_writer: &DbWriter,
 ) -> Result<(Vec<RepeatsData>, usize)> {
-    match std::process::Command::new("blastn").arg("-version").output() {
-        Ok(output) if output.status.success() => {}
-        _ => {
-            eprintln!("Warning: blastn not found on PATH. Skipping MAG inter-contig BLAST.");
-            return Ok((Vec::new(), 0));
+    for tool in &["blastn", "makeblastdb"] {
+        match std::process::Command::new(tool).arg("-version").output() {
+            Ok(output) if output.status.success() => {}
+            _ => {
+                eprintln!("Warning: {} not found on PATH. Skipping MAG inter-contig BLAST.", tool);
+                return Ok((Vec::new(), 0));
+            }
         }
     }
 
@@ -663,9 +663,29 @@ fn run_mag_interblast(
         if temp_file.flush().is_err() { return; }
         let temp_path = temp_file.path().to_path_buf();
 
+        let mkdb = std::process::Command::new("makeblastdb")
+            .arg("-in").arg(&temp_path)
+            .arg("-dbtype").arg("nucl")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        match mkdb {
+            Ok(s) if s.success() => {}
+            Ok(s) => {
+                eprintln!("Warning: makeblastdb failed for MAG '{}' (exit {})", mag_name, s);
+                mags_done.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                return;
+            }
+            Err(e) => {
+                eprintln!("Warning: makeblastdb failed for MAG '{}': {}", mag_name, e);
+                mags_done.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                return;
+            }
+        }
+
         let output = match std::process::Command::new("blastn")
             .arg("-query").arg(&temp_path)
-            .arg("-subject").arg(&temp_path)
+            .arg("-db").arg(&temp_path)
             .arg("-evalue").arg("1e-10")
             .arg("-outfmt").arg("6")
             .output()
@@ -751,6 +771,13 @@ fn run_mag_interblast(
                         let _ = stmt.execute(params![cid1, cid2, p1, p2, p1p, p2p, pident_i]);
                     }
                 }
+            }
+        }
+
+        // Clean up BLAST DB index files
+        if let Some(p) = temp_path.to_str() {
+            for ext in &[".ndb", ".nhr", ".nin", ".njs", ".not", ".nsq", ".ntf", ".nto"] {
+                let _ = std::fs::remove_file(format!("{}{}", p, ext));
             }
         }
 
@@ -1544,6 +1571,11 @@ pub fn process_sample(
             Some((tid, (*contig_idx + 1) as i64, ref_name.to_string(), ref_length))
         })
         .collect();
+    if jobs.is_empty() && n_refs > 0 {
+        eprintln!("WARNING: Sample '{}': 0/{} BAM references matched known contigs. \
+                   Check that contig names in your annotation/assembly files match the BAM reference names.",
+                  sample_name, n_refs);
+    }
     drop(temp_bam);
     if let (Some(s), Some(t)) = (st.as_mut(), t_filter) {
         s.filter_tids = t.elapsed();
@@ -2034,7 +2066,7 @@ pub fn run_all_samples(
 
     // 4. Create or open database
     // For extend mode: read existing contigs, determine new contigs, open existing DB
-    let (db_writer, new_contigs_for_blast) = if is_extending {
+    let (db_writer, new_contigs_for_blast, repeats_from_db) = if is_extending {
         // Read existing contig names from the database
         let existing_conn = duckdb::Connection::open(extend_db)
             .with_context(|| format!("Failed to open existing database: {}", extend_db.display()))?;
@@ -2063,25 +2095,140 @@ pub fn run_all_samples(
         let mut existing_contig_names: HashSet<String> = HashSet::new();
         let mut existing_contigs: Vec<ContigInfo> = Vec::new();
         {
-            let mut stmt = existing_conn.prepare("SELECT Contig_name, Contig_length FROM Contig")?;
+            let mut stmt = existing_conn.prepare(
+                "SELECT c.Contig_name, c.Contig_length, cs.Sequence \
+                 FROM Contig c LEFT JOIN Contig_sequence cs ON c.Contig_id = cs.Contig_id"
+            )?;
             let rows = stmt.query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, Option<String>>(2)?))
             })?;
             for row in rows {
-                let (name, length) = row?;
+                let (name, length, seq) = row?;
                 existing_contig_names.insert(name.clone());
                 existing_contigs.push(ContigInfo {
                     name,
                     length: length as usize,
-                    sequence: None,
+                    sequence: seq.map(|s| s.into_bytes()),
                 });
             }
         }
+
+        // Load existing MAG names (for MAG mode extend validation)
+        let existing_mag_names: HashSet<String> = {
+            let has_mag_table: bool = existing_conn.query_row(
+                "SELECT COUNT(*) > 0 FROM information_schema.tables WHERE table_name = 'MAG'",
+                [], |row| row.get(0),
+            ).unwrap_or(false);
+            if has_mag_table {
+                let mut names = HashSet::new();
+                let mut stmt = existing_conn.prepare("SELECT MAG_name FROM MAG")?;
+                let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+                for row in rows {
+                    names.insert(row?);
+                }
+                names
+            } else {
+                HashSet::new()
+            }
+        };
 
         // Detect if DB was created with annotations (genbank mode)
         let db_has_annotations: bool = existing_conn
             .query_row("SELECT COUNT(*) FROM Contig_annotation", [], |row| row.get::<_, i64>(0))
             .unwrap_or(0) > 0;
+
+        // Load repeats from DB for DTR region detection on existing contigs
+        let mut repeats_from_db: Vec<crate::db::RepeatsData> = Vec::new();
+        {
+            // Build Contig_id → name mapping for repeat loading
+            let mut id_to_name: HashMap<i64, String> = HashMap::new();
+            {
+                let mut stmt = existing_conn.prepare("SELECT Contig_id, Contig_name FROM Contig")?;
+                let rows = stmt.query_map([], |row| {
+                    Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+                })?;
+                for row in rows {
+                    let (id, name) = row?;
+                    id_to_name.insert(id, name);
+                }
+            }
+            for (table, is_direct) in &[("Contig_directRepeats", true), ("Contig_invertedRepeats", false)] {
+                let has_table: bool = existing_conn.query_row(
+                    "SELECT COUNT(*) > 0 FROM information_schema.tables WHERE table_name = ?",
+                    duckdb::params![table], |row| row.get(0),
+                ).unwrap_or(false);
+                if !has_table { continue; }
+                let mut stmt = existing_conn.prepare(&format!(
+                    "SELECT Contig_id, Position1, Position2, Position1prime, Position2prime, Pident FROM {}", table
+                ))?;
+                let rows = stmt.query_map([], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i32>(1)?,
+                        row.get::<_, i32>(2)?,
+                        row.get::<_, i32>(3)?,
+                        row.get::<_, i32>(4)?,
+                        row.get::<_, i32>(5)?,
+                    ))
+                })?;
+                for row in rows {
+                    let (cid, p1, p2, p1p, p2p, pident_int) = row?;
+                    if let Some(name) = id_to_name.get(&cid) {
+                        repeats_from_db.push(crate::db::RepeatsData {
+                            contig_name: name.clone(),
+                            position1: p1,
+                            position2: p2,
+                            position1prime: p1p,
+                            position2prime: p2p,
+                            pident: pident_int as f64 / 100.0,
+                            is_direct: *is_direct,
+                        });
+                    }
+                }
+            }
+        }
+
+        // Load CDS annotations from DB for codon change computation (when no -g provided)
+        let db_annotations: Vec<FeatureAnnotation> = if !has_genbank && db_has_annotations {
+            let mut anns = Vec::new();
+            let mut stmt = existing_conn.prepare(
+                "SELECT ca.Contig_id, ca.\"Start\", ca.\"End\", ca.Strand, ca.\"Type\", \
+                        aseq.Nucleotide_sequence \
+                 FROM Contig_annotation_core ca \
+                 LEFT JOIN Annotation_sequence aseq ON ca.Annotation_id = aseq.Annotation_id \
+                 WHERE ca.\"Type\" = 'CDS'"
+            )?;
+            let rows = stmt.query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                ))
+            })?;
+            for row in rows {
+                let (contig_id, start, end, strand, feature_type, nuc_seq) = row?;
+                anns.push(FeatureAnnotation {
+                    contig_id,
+                    start,
+                    end,
+                    strand,
+                    feature_type,
+                    nucleotide_sequence: nuc_seq,
+                    protein_sequence: None,
+                    qualifiers: HashMap::new(),
+                    segments: Vec::new(),
+                    parent_key: None,
+                    self_key: None,
+                });
+            }
+            eprintln!("Loaded {} CDS annotations from existing database", anns.len());
+            anns
+        } else {
+            Vec::new()
+        };
 
         drop(existing_conn);
 
@@ -2162,11 +2309,46 @@ pub fn run_all_samples(
         for nc in &new_contigs {
             contigs.push(nc.clone());
         }
-        annotations = new_annotations.clone();
+        annotations = if new_annotations.is_empty() && !db_annotations.is_empty() {
+            db_annotations
+        } else {
+            new_annotations.clone()
+        };
+
+        // In MAG mode, validate that new contigs only belong to new MAGs.
+        // Adding contigs to an existing MAG would invalidate its aggregates.
+        if config.view_mode == ViewMode::Mag && !mag_contig_map.is_empty() {
+            let new_contig_set: HashSet<&str> = new_contigs.iter().map(|c| c.name.as_str()).collect();
+            for (mag_name, members) in &mag_contig_map {
+                if existing_mag_names.contains(mag_name) {
+                    let new_in_existing: Vec<&str> = members.iter()
+                        .filter(|m| new_contig_set.contains(m.as_str()))
+                        .map(|m| m.as_str())
+                        .collect();
+                    if !new_in_existing.is_empty() {
+                        return Err(anyhow::anyhow!(
+                            "Cannot add contigs to existing MAG '{}': {:?}. \
+                             Adding contigs to an existing MAG would invalidate its aggregates. \
+                             Rebuild from scratch instead.",
+                            mag_name, new_in_existing
+                        ));
+                    }
+                }
+            }
+            // Filter mag_contig_map to only new MAGs
+            mag_contig_map.retain(|(name, _)| !existing_mag_names.contains(name));
+        }
 
         let writer = DbWriter::open(extend_db, &new_contigs, &new_annotations, &new_contig_qualifiers, !bam_files.is_empty())?;
         writer.update_metadata_modification()?;
-        (writer, new_contigs)
+        writer.write_compression_metadata(
+            config.min_aligned_fraction,
+            config.min_coverage_depth,
+            config.bar_ratio,
+            config.variation_percentage,
+            config.min_occurrences,
+        )?;
+        (writer, new_contigs, repeats_from_db)
     } else {
         let new_contigs_for_blast = contigs.clone();
         let writer = DbWriter::create(
@@ -2181,12 +2363,12 @@ pub fn run_all_samples(
             modules,
             config.min_aligned_fraction,
             config.min_coverage_depth,
-            config.curve_ratio,
             config.bar_ratio,
             config.variation_percentage,
+            config.min_occurrences,
             config.view_mode.as_str(),
         )?;
-        (writer, new_contigs_for_blast)
+        (writer, new_contigs_for_blast, Vec::new())
     };
 
     // 5. Auto-detect circularity per sample (now with contigs available for length comparison)
@@ -2248,6 +2430,12 @@ pub fn run_all_samples(
     };
     let autoblast_secs = t_autoblast.map(|t| t.elapsed().as_secs_f64()).unwrap_or(0.0);
 
+    let repeats = if repeats.is_empty() && !repeats_from_db.is_empty() {
+        repeats_from_db
+    } else {
+        repeats
+    };
+
     // 7. Compute and write GC content and GC skew from sequence data (only for new contigs)
     let t_gc = if config.enable_timing { Some(std::time::Instant::now()) } else { None };
     let gc_data: Vec<GCContentData> = blast_contigs
@@ -2275,9 +2463,11 @@ pub fn run_all_samples(
     }
     let gc_secs = t_gc.map(|t| t.elapsed().as_secs_f64()).unwrap_or(0.0);
 
-    // Convert repeat detections into per-contig blobs. Hoisted out of finalize
-    // so MAG_contig_blob aggregation below sees these as inputs.
-    db_writer.convert_repeat_blobs()?;
+    // Convert repeat detections into per-contig blobs (only for new contigs).
+    let new_contig_ids: Vec<i64> = new_contigs_for_blast.iter()
+        .filter_map(|c| db_writer.get_contig_id(&c.name))
+        .collect();
+    db_writer.convert_repeat_blobs(&new_contig_ids)?;
 
     // Write MAG rows after per-contig GC/duplication stats are finalized.
     if config.view_mode == ViewMode::Mag && !mag_contig_map.is_empty() {

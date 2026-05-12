@@ -940,9 +940,13 @@ impl DbWriter {
     /// upsert-only. Intended to run once, in pre-sample setup, after
     /// `write_repeats` but before the per-sample loop, so MAG-scale aggregation
     /// can read repeat data from `Contig_blob` like everything else.
-    pub fn convert_repeat_blobs(&self) -> Result<()> {
+    pub fn convert_repeat_blobs(&self, new_contig_ids: &[i64]) -> Result<()> {
+        if new_contig_ids.is_empty() {
+            return Ok(());
+        }
         let conn = self.lock_conn()?;
-        Self::build_materialized_repeat_tables(&conn)?;
+        let id_list = new_contig_ids.iter().map(|id| id.to_string()).collect::<Vec<_>>().join(",");
+        Self::build_materialized_repeat_tables(&conn, &id_list)?;
         Self::write_repeat_features_to_blob_static(&conn)?;
         for table in &[
             "Contig_direct_repeat_count", "Contig_inverted_repeat_count",
@@ -956,16 +960,18 @@ impl DbWriter {
 
     /// Build the four CTAS aggregates over `Contig_directRepeats` /
     /// `Contig_invertedRepeats`. Used by `convert_repeat_blobs`.
-    fn build_materialized_repeat_tables(conn: &Connection) -> Result<()> {
-        // Optimized repeat count tables using event-based running sum.
+    /// `id_filter` is a comma-separated list of Contig_ids to process.
+    fn build_materialized_repeat_tables(conn: &Connection, id_filter: &str) -> Result<()> {
+        let wh = format!(" WHERE Contig_id IN ({})", id_filter);
+
         conn.execute(
-            "CREATE TABLE Contig_direct_repeat_count AS
+            &format!("CREATE TABLE Contig_direct_repeat_count AS
             WITH events AS (
                 SELECT Contig_id, LEAST(Position1, Position2) AS pos, 1 AS delta
-                FROM Contig_directRepeats
+                FROM Contig_directRepeats{wh}
                 UNION ALL
                 SELECT Contig_id, GREATEST(Position1, Position2) + 1 AS pos, -1 AS delta
-                FROM Contig_directRepeats
+                FROM Contig_directRepeats{wh}
             ),
             grouped AS (
                 SELECT Contig_id, pos, SUM(delta) AS net FROM events GROUP BY Contig_id, pos
@@ -977,19 +983,19 @@ impl DbWriter {
                 FROM grouped
             )
             SELECT Contig_id, pos AS First_position, next_pos - 1 AS Last_position, count AS Value
-            FROM running WHERE next_pos IS NOT NULL AND count > 0",
+            FROM running WHERE next_pos IS NOT NULL AND count > 0"),
             [],
         )
         .context("Failed to create Contig_direct_repeat_count table")?;
 
         conn.execute(
-            "CREATE TABLE Contig_inverted_repeat_count AS
+            &format!("CREATE TABLE Contig_inverted_repeat_count AS
             WITH events AS (
                 SELECT Contig_id, LEAST(Position1, Position2) AS pos, 1 AS delta
-                FROM Contig_invertedRepeats
+                FROM Contig_invertedRepeats{wh}
                 UNION ALL
                 SELECT Contig_id, GREATEST(Position1, Position2) + 1 AS pos, -1 AS delta
-                FROM Contig_invertedRepeats
+                FROM Contig_invertedRepeats{wh}
             ),
             grouped AS (
                 SELECT Contig_id, pos, SUM(delta) AS net FROM events GROUP BY Contig_id, pos
@@ -1001,17 +1007,17 @@ impl DbWriter {
                 FROM grouped
             )
             SELECT Contig_id, pos AS First_position, next_pos - 1 AS Last_position, count AS Value
-            FROM running WHERE next_pos IS NOT NULL AND count > 0",
+            FROM running WHERE next_pos IS NOT NULL AND count > 0"),
             [],
         )
         .context("Failed to create Contig_inverted_repeat_count table")?;
 
         conn.execute(
-            "CREATE TABLE Contig_direct_repeat_identity AS
+            &format!("CREATE TABLE Contig_direct_repeat_identity AS
             WITH boundaries AS (
-                SELECT Contig_id, LEAST(Position1, Position2) AS pos FROM Contig_directRepeats
+                SELECT Contig_id, LEAST(Position1, Position2) AS pos FROM Contig_directRepeats{wh}
                 UNION
-                SELECT Contig_id, GREATEST(Position1, Position2) + 1 AS pos FROM Contig_directRepeats
+                SELECT Contig_id, GREATEST(Position1, Position2) + 1 AS pos FROM Contig_directRepeats{wh}
             ),
             segments AS (
                 SELECT Contig_id, pos AS seg_start,
@@ -1027,17 +1033,17 @@ impl DbWriter {
               AND LEAST(r.Position1, r.Position2) <= s.seg_end
               AND GREATEST(r.Position1, r.Position2) >= s.seg_start
             WHERE s.seg_end IS NOT NULL
-            GROUP BY s.Contig_id, s.seg_start, s.seg_end",
+            GROUP BY s.Contig_id, s.seg_start, s.seg_end"),
             [],
         )
         .context("Failed to create Contig_direct_repeat_identity table")?;
 
         conn.execute(
-            "CREATE TABLE Contig_inverted_repeat_identity AS
+            &format!("CREATE TABLE Contig_inverted_repeat_identity AS
             WITH boundaries AS (
-                SELECT Contig_id, LEAST(Position1, Position2) AS pos FROM Contig_invertedRepeats
+                SELECT Contig_id, LEAST(Position1, Position2) AS pos FROM Contig_invertedRepeats{wh}
                 UNION
-                SELECT Contig_id, GREATEST(Position1, Position2) + 1 AS pos FROM Contig_invertedRepeats
+                SELECT Contig_id, GREATEST(Position1, Position2) + 1 AS pos FROM Contig_invertedRepeats{wh}
             ),
             segments AS (
                 SELECT Contig_id, pos AS seg_start,
@@ -1053,7 +1059,7 @@ impl DbWriter {
               AND LEAST(r.Position1, r.Position2) <= s.seg_end
               AND GREATEST(r.Position1, r.Position2) >= s.seg_start
             WHERE s.seg_end IS NOT NULL
-            GROUP BY s.Contig_id, s.seg_start, s.seg_end",
+            GROUP BY s.Contig_id, s.seg_start, s.seg_end"),
             [],
         )
         .context("Failed to create Contig_inverted_repeat_identity table")?;
@@ -1517,9 +1523,9 @@ impl DbWriter {
         modules: &[String],
         min_aligned_fraction: f64,
         min_coverage_depth: f64,
-        curve_ratio: f64,
         bar_ratio: f64,
         variation_percentage: f64,
+        min_occurrences: u32,
         view_mode: &str,
     ) -> Result<()> {
         let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
@@ -1547,9 +1553,9 @@ impl DbWriter {
             ("Modules", modules_str),
             ("Min_aligned_fraction", min_aligned_fraction.to_string()),
             ("Min_coverage_depth", min_coverage_depth.to_string()),
-            ("Variation_percentage", curve_ratio.to_string()),
             ("Coverage_percentage", bar_ratio.to_string()),
-            ("Dense_variation_percentage", variation_percentage.to_string()),
+            ("Variation_percentage", variation_percentage.to_string()),
+            ("Min_occurrences", min_occurrences.to_string()),
             ("View_mode", view_mode.to_string()),
         ];
 
@@ -1592,6 +1598,37 @@ impl DbWriter {
         )
         .context("Failed to update Tool_version_used_for_last_modification")?;
 
+        Ok(())
+    }
+
+    pub fn write_compression_metadata(
+        &self,
+        min_aligned_fraction: f64,
+        min_coverage_depth: f64,
+        bar_ratio: f64,
+        variation_percentage: f64,
+        min_occurrences: u32,
+    ) -> Result<()> {
+        let conn = self.lock_conn()?;
+        let keys = [
+            ("Min_aligned_fraction", min_aligned_fraction.to_string()),
+            ("Min_coverage_depth", min_coverage_depth.to_string()),
+            ("Coverage_percentage", bar_ratio.to_string()),
+            ("Variation_percentage", variation_percentage.to_string()),
+            ("Min_occurrences", min_occurrences.to_string()),
+        ];
+        for (key, value) in &keys {
+            let exists: bool = conn.query_row(
+                "SELECT COUNT(*) > 0 FROM Database_metadata WHERE Key = ?",
+                params![key], |row| row.get(0),
+            ).unwrap_or(false);
+            if !exists {
+                conn.execute(
+                    "INSERT INTO Database_metadata (Key, Value) VALUES (?, ?)",
+                    params![key, value],
+                )?;
+            }
+        }
         Ok(())
     }
 

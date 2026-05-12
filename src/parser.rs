@@ -237,9 +237,9 @@ pub fn parse_genbank(
         };
 
         let name = seq
-            .version
+            .name
             .clone()
-            .or_else(|| seq.name.clone())
+            .or_else(|| seq.version.clone())
             .unwrap_or_else(|| format!("contig_{}", contig_id));
         let length = seq.seq.len();
 

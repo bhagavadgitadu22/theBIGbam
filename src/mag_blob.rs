@@ -714,5 +714,5 @@ fn compute_mag_coverage_stats(
 // ---------------------------------------------------------------------------
 
 fn empty_blob() -> EncodedBlob {
-    EncodedBlob { data: Vec::new(), zoom: Vec::new(), chunks: Vec::new() }
+    EncodedBlob { zoom: Vec::new(), chunks: Vec::new() }
 }

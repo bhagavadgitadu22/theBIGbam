@@ -1,28 +1,14 @@
 //! Compressed BLOB encoding for genomic feature data.
 //!
-//! Replaces per-row RLE storage with BigWig-inspired compressed BLOBs.
-//! Each BLOB stores one feature for one contig/sample combination.
+//! BigWig-inspired encoding that produces two outputs per feature/contig/sample:
+//! - **Zoom blob**: standalone summary at 100/1000/10000bp bins (→ Feature_blob table)
+//! - **Chunks**: base-resolution data split into 65,536bp pieces (→ Feature_blob_chunk table)
 //!
-//! Binary format:
-//! ```text
-//! BLOB = Header (32 bytes) + BaseResolution + ZoomLevels[0..N] + SparseMetadata?
-//! ```
-//!
-//! Key advantages:
-//! - Dense BLOBs use array index as position (no position columns needed)
-//! - Delta + zigzag + varint + zstd compression outperforms DuckDB column compression on RLE data
-//! - Sparse metadata packed columnar within BLOB compresses better than per-row TEXT columns
-//! - 1 table with ~3K rows vs 20 tables with ~1.7M rows
+//! Compression: delta + zigzag + varint + zstd for dense; sparse uses position + value pairs.
 
 // ============================================================================
 // Constants
 // ============================================================================
-
-/// Magic bytes identifying a theBIGbam feature BLOB
-const MAGIC: &[u8; 4] = b"TBB\x01";
-
-/// Current format version (simplified zoom levels: mean for dense, max for sparse + 10kbp zoom)
-const FORMAT_VERSION: u8 = 1;
 
 /// Positions per chunk for large genomes
 const CHUNK_SIZE: u32 = 65536;
@@ -48,8 +34,6 @@ const ZOOM_MAGIC: &[u8; 4] = b"TBZ\x01";
 /// The zoom blob can be fetched independently for large-window views, avoiding the cost
 /// of transferring the full base-resolution data from the database.
 pub struct EncodedBlob {
-    /// Full BLOB (header + base resolution + zoom levels + metadata)
-    pub data: Vec<u8>,
     /// Standalone zoom-only BLOB (small header + zoom levels only)
     pub zoom: Vec<u8>,
     /// Individual base-resolution chunks (one per CHUNK_SIZE bp region).
@@ -184,11 +168,6 @@ fn zstd_compress(data: &[u8]) -> Vec<u8> {
     zstd::encode_all(data.as_ref(), ZSTD_LEVEL).unwrap_or_else(|_| data.to_vec())
 }
 
-/// Write a little-endian u16 to a buffer.
-fn write_u16(buf: &mut Vec<u8>, val: u16) {
-    buf.extend_from_slice(&val.to_le_bytes());
-}
-
 /// Write a little-endian u32 to a buffer.
 fn write_u32(buf: &mut Vec<u8>, val: u32) {
     buf.extend_from_slice(&val.to_le_bytes());
@@ -197,11 +176,6 @@ fn write_u32(buf: &mut Vec<u8>, val: u32) {
 /// Write a little-endian i32 to a buffer.
 fn write_i32(buf: &mut Vec<u8>, val: i32) {
     buf.extend_from_slice(&val.to_le_bytes());
-}
-
-/// Patch a u32 value at a specific offset in the buffer (little-endian).
-fn patch_u32(buf: &mut [u8], offset: usize, val: u32) {
-    buf[offset..offset + 4].copy_from_slice(&val.to_le_bytes());
 }
 
 // ============================================================================
@@ -369,37 +343,12 @@ fn build_zoom_blob(scale: ValueScale, sparse: bool, num_zoom_levels: u8, contig_
 /// * `scale` - Scale factor applied to values
 /// * `contig_length` - Length of the contig in base pairs
 pub fn encode_dense_blob(values: &[i32], scale: ValueScale, contig_length: u32) -> EncodedBlob {
-    // Skip encoding when all values are zero — caller filters empty blobs
     if values.iter().all(|&v| v == 0) {
-        return EncodedBlob { data: Vec::new(), zoom: Vec::new(), chunks: Vec::new() };
+        return EncodedBlob { zoom: Vec::new(), chunks: Vec::new() };
     }
-    let mut blob = Vec::with_capacity(32 + values.len() * 2);
 
-    // === Header (32 bytes) ===
-    blob.extend_from_slice(MAGIC);                    // [0..4] magic
-    blob.push(FORMAT_VERSION);                         // [4] version
-    blob.push(MetadataFlags::default().to_byte());     // [5] flags (dense, no metadata)
-    blob.push(scale as u8);                            // [6] scale_code
-    blob.push(ZOOM_BIN_SIZES.len() as u8);                        // [7] num_zoom_levels
-    write_u32(&mut blob, contig_length);               // [8..12] contig_length
-    // Placeholders for offsets (patched later)
-    let base_block_offset_pos = blob.len();
-    write_u32(&mut blob, 0);                           // [12..16] base_block_offset
-    let base_block_size_pos = blob.len();
-    write_u32(&mut blob, 0);                           // [16..20] base_block_compressed_size
-    let zoom_index_offset_pos = blob.len();
-    write_u32(&mut blob, 0);                           // [20..24] zoom_index_offset
-    write_u32(&mut blob, 0);                           // [24..28] sparse_meta_offset (0=none)
-    write_u32(&mut blob, 0);                           // [28..32] sparse_meta_compressed_size (0=none)
-
-    // === Base Resolution (chunked) ===
-    let base_block_start = blob.len() as u32;
-    patch_u32(&mut blob, base_block_offset_pos, base_block_start);
-
+    // === Base Resolution Chunks ===
     let num_chunks = (values.len() as u32).div_ceil(CHUNK_SIZE);
-    write_u16(&mut blob, num_chunks as u16);
-    write_u32(&mut blob, CHUNK_SIZE);
-
     let mut chunks = Vec::with_capacity(num_chunks as usize);
     for chunk_idx in 0..num_chunks {
         let start = (chunk_idx * CHUNK_SIZE) as usize;
@@ -407,30 +356,18 @@ pub fn encode_dense_blob(values: &[i32], scale: ValueScale, contig_length: u32) 
         let end = end.min(values.len());
         let chunk_values = &values[start..end];
 
-        // Delta → zigzag → varint → zstd
         let deltas = delta_encode(chunk_values);
         let zigzagged: Vec<u32> = deltas.iter().map(|&d| zigzag_encode_val(d)).collect();
         let varint_bytes = varint_encode(&zigzagged);
-        let compressed = zstd_compress(&varint_bytes);
-
-        write_u32(&mut blob, compressed.len() as u32);
-        blob.extend_from_slice(&compressed);
-        chunks.push(compressed);
+        chunks.push(zstd_compress(&varint_bytes));
     }
 
-    let base_block_end = blob.len() as u32;
-    patch_u32(&mut blob, base_block_size_pos, base_block_end - base_block_start);
-
     // === Zoom Levels ===
-    let zoom_offset = blob.len() as u32;
-    patch_u32(&mut blob, zoom_index_offset_pos, zoom_offset);
-
     let zoom_levels = compute_zoom_levels_dense(values, contig_length, ZOOM_BIN_SIZES);
     let zoom_bytes = encode_zoom_levels_dense(&zoom_levels);
-    blob.extend_from_slice(&zoom_bytes);
-
     let zoom_blob = build_zoom_blob(scale, false, ZOOM_BIN_SIZES.len() as u8, contig_length, &zoom_bytes);
-    EncodedBlob { data: blob, zoom: zoom_blob, chunks }
+
+    EncodedBlob { zoom: zoom_blob, chunks }
 }
 
 /// Adaptive smoothing for dense values before blob encoding.
@@ -497,81 +434,14 @@ pub fn encode_sparse_blob(
 ) -> EncodedBlob {
     assert_eq!(positions.len(), values.len());
 
-    // Skip encoding when no events — caller filters empty blobs
     if positions.is_empty() {
-        return EncodedBlob { data: Vec::new(), zoom: Vec::new(), chunks: Vec::new() };
+        return EncodedBlob { zoom: Vec::new(), chunks: Vec::new() };
     }
-
-    let mut blob = Vec::with_capacity(32 + positions.len() * 8);
-
-    // === Header (32 bytes) ===
-    blob.extend_from_slice(MAGIC);                         // [0..4] magic
-    blob.push(FORMAT_VERSION);                              // [4] version
-    let mut meta_flags = flags;
-    meta_flags.sparse = true;
-    blob.push(meta_flags.to_byte());                        // [5] flags
-    blob.push(scale as u8);                                 // [6] scale_code
-    blob.push(ZOOM_BIN_SIZES.len() as u8);                             // [7] num_zoom_levels
-    write_u32(&mut blob, contig_length);                    // [8..12] contig_length
-    let base_block_offset_pos = blob.len();
-    write_u32(&mut blob, 0);                                // [12..16] base_block_offset
-    let base_block_size_pos = blob.len();
-    write_u32(&mut blob, 0);                                // [16..20] base_block_compressed_size
-    let zoom_index_offset_pos = blob.len();
-    write_u32(&mut blob, 0);                                // [20..24] zoom_index_offset
-    let sparse_meta_offset_pos = blob.len();
-    write_u32(&mut blob, 0);                                // [24..28] sparse_meta_offset
-    let sparse_meta_size_pos = blob.len();
-    write_u32(&mut blob, 0);                                // [28..32] sparse_meta_compressed_size
-
-    // === Sparse Base Resolution ===
-    let base_block_start = blob.len() as u32;
-    patch_u32(&mut blob, base_block_offset_pos, base_block_start);
-
-    // Event count
-    write_u32(&mut blob, positions.len() as u32);
-
-    // Delta-encode positions, then varint compress, then zstd
-    let pos_deltas = delta_encode(&positions.iter().map(|&p| p as i32).collect::<Vec<_>>());
-    let pos_zigzagged: Vec<u32> = pos_deltas.iter().map(|&d| zigzag_encode_val(d)).collect();
-    let pos_varint = varint_encode(&pos_zigzagged);
-    let pos_compressed = zstd_compress(&pos_varint);
-    write_u32(&mut blob, pos_compressed.len() as u32);
-    blob.extend_from_slice(&pos_compressed);
-
-    // Values: zigzag + varint + zstd (no delta — sparse values don't correlate well)
-    let val_zigzagged: Vec<u32> = values.iter().map(|&v| zigzag_encode_val(v)).collect();
-    let val_varint = varint_encode(&val_zigzagged);
-    let val_compressed = zstd_compress(&val_varint);
-    write_u32(&mut blob, val_compressed.len() as u32);
-    blob.extend_from_slice(&val_compressed);
-
-    let base_block_end = blob.len() as u32;
-    patch_u32(&mut blob, base_block_size_pos, base_block_end - base_block_start);
 
     // === Zoom Levels ===
-    let zoom_offset = blob.len() as u32;
-    patch_u32(&mut blob, zoom_index_offset_pos, zoom_offset);
-
     let zoom_levels = compute_zoom_levels_sparse(positions, values, contig_length, ZOOM_BIN_SIZES);
     let zoom_bytes = encode_zoom_levels_sparse(&zoom_levels);
-    blob.extend_from_slice(&zoom_bytes);
-
-    // === Sparse Metadata Block ===
-    if let Some(meta) = metadata {
-        if meta.len() == positions.len() && (flags.has_stats || flags.has_sequence || flags.has_codons || flags.has_partner) {
-            let sparse_meta_start = blob.len() as u32;
-            patch_u32(&mut blob, sparse_meta_offset_pos, sparse_meta_start);
-
-            let meta_bytes = encode_sparse_metadata(meta, &flags);
-            let meta_compressed = zstd_compress(&meta_bytes);
-            write_u32(&mut blob, meta_compressed.len() as u32);
-            blob.extend_from_slice(&meta_compressed);
-
-            let meta_total_size = (blob.len() as u32) - sparse_meta_start;
-            patch_u32(&mut blob, sparse_meta_size_pos, meta_total_size);
-        }
-    }
+    let zoom_blob = build_zoom_blob(scale, true, ZOOM_BIN_SIZES.len() as u8, contig_length, &zoom_bytes);
 
     // === Build sparse chunks: group events by CHUNK_SIZE bp position ranges ===
     let has_meta = metadata.is_some()
@@ -582,11 +452,10 @@ pub fn encode_sparse_blob(
     for chunk_idx in 0..num_chunks {
         let range_start = chunk_idx * CHUNK_SIZE;
         let range_end = range_start + CHUNK_SIZE;
-        // Binary search for events in [range_start, range_end)
         let lo = positions.partition_point(|&p| p < range_start);
         let hi = positions.partition_point(|&p| p < range_end);
         if lo >= hi {
-            chunks.push(Vec::new()); // empty chunk
+            chunks.push(Vec::new());
             continue;
         }
         let chunk_pos = &positions[lo..hi];
@@ -595,33 +464,29 @@ pub fn encode_sparse_blob(
 
         let mut cb = Vec::new();
         write_u32(&mut cb, n_events);
-        // Positions: delta → zigzag → varint → zstd
         let p_deltas = delta_encode(&chunk_pos.iter().map(|&p| p as i32).collect::<Vec<_>>());
         let p_zig: Vec<u32> = p_deltas.iter().map(|&d| zigzag_encode_val(d)).collect();
         let p_compressed = zstd_compress(&varint_encode(&p_zig));
         write_u32(&mut cb, p_compressed.len() as u32);
         cb.extend_from_slice(&p_compressed);
-        // Values: zigzag → varint → zstd
         let v_zig: Vec<u32> = chunk_vals.iter().map(|&v| zigzag_encode_val(v)).collect();
         let v_compressed = zstd_compress(&varint_encode(&v_zig));
         write_u32(&mut cb, v_compressed.len() as u32);
         cb.extend_from_slice(&v_compressed);
-        // Metadata slice — store flags byte so decoder knows which fields are present
         if has_meta {
             let chunk_meta = &metadata.unwrap()[lo..hi];
             let meta_bytes = encode_sparse_metadata(chunk_meta, &flags);
             let meta_compressed = zstd_compress(&meta_bytes);
-            cb.push(flags.to_byte()); // flags byte (has_stats, has_sequence, has_codons)
+            cb.push(flags.to_byte());
             write_u32(&mut cb, meta_compressed.len() as u32);
             cb.extend_from_slice(&meta_compressed);
         } else {
-            cb.push(0u8); // no metadata
+            cb.push(0u8);
         }
         chunks.push(cb);
     }
 
-    let zoom_blob = build_zoom_blob(scale, true, ZOOM_BIN_SIZES.len() as u8, contig_length, &zoom_bytes);
-    EncodedBlob { data: blob, zoom: zoom_blob, chunks }
+    EncodedBlob { zoom: zoom_blob, chunks }
 }
 
 /// Encode sparse metadata in columnar format.
@@ -693,33 +558,8 @@ fn encode_sparse_metadata(metadata: &[EventMeta], flags: &MetadataFlags) -> Vec<
 /// `window_size` is the genomic window each value represents (e.g. 500 for GC content).
 /// Zoom bins are computed in window-index space so indices align with the values array.
 pub fn encode_contig_dense_blob(values: &[i32], scale: ValueScale, contig_length: u32, window_size: u32) -> EncodedBlob {
-    let mut blob = Vec::with_capacity(32 + values.len() * 2);
-
-    // === Header (32 bytes) ===
-    blob.extend_from_slice(MAGIC);                    // [0..4] magic
-    blob.push(FORMAT_VERSION);                         // [4] version
-    blob.push(MetadataFlags::default().to_byte());     // [5] flags (dense, no metadata)
-    blob.push(scale as u8);                            // [6] scale_code
-    blob.push(CONTIG_ZOOM_BIN_SIZES.len() as u8);                 // [7] num_zoom_levels (1 for contig)
-    write_u32(&mut blob, contig_length);               // [8..12] contig_length
-    // Placeholders for offsets (patched later)
-    let base_block_offset_pos = blob.len();
-    write_u32(&mut blob, 0);                           // [12..16] base_block_offset
-    let base_block_size_pos = blob.len();
-    write_u32(&mut blob, 0);                           // [16..20] base_block_compressed_size
-    let zoom_index_offset_pos = blob.len();
-    write_u32(&mut blob, 0);                           // [20..24] zoom_index_offset
-    write_u32(&mut blob, 0);                           // [24..28] sparse_meta_offset (0=none)
-    write_u32(&mut blob, 0);                           // [28..32] sparse_meta_compressed_size (0=none)
-
-    // === Base Resolution (chunked) ===
-    let base_block_start = blob.len() as u32;
-    patch_u32(&mut blob, base_block_offset_pos, base_block_start);
-
+    // === Base Resolution Chunks ===
     let num_chunks = (values.len() as u32).div_ceil(CHUNK_SIZE);
-    write_u16(&mut blob, num_chunks as u16);
-    write_u32(&mut blob, CHUNK_SIZE);
-
     let mut chunks = Vec::with_capacity(num_chunks as usize);
     for chunk_idx in 0..num_chunks {
         let start = (chunk_idx * CHUNK_SIZE) as usize;
@@ -727,34 +567,21 @@ pub fn encode_contig_dense_blob(values: &[i32], scale: ValueScale, contig_length
         let end = end.min(values.len());
         let chunk_values = &values[start..end];
 
-        // Delta → zigzag → varint → zstd
         let deltas = delta_encode(chunk_values);
         let zigzagged: Vec<u32> = deltas.iter().map(|&d| zigzag_encode_val(d)).collect();
         let varint_bytes = varint_encode(&zigzagged);
-        let compressed = zstd_compress(&varint_bytes);
-
-        write_u32(&mut blob, compressed.len() as u32);
-        blob.extend_from_slice(&compressed);
-        chunks.push(compressed);
+        chunks.push(zstd_compress(&varint_bytes));
     }
 
-    let base_block_end = blob.len() as u32;
-    patch_u32(&mut blob, base_block_size_pos, base_block_end - base_block_start);
-
     // === Zoom Levels (only 10kbp for contig features) ===
-    let zoom_offset = blob.len() as u32;
-    patch_u32(&mut blob, zoom_index_offset_pos, zoom_offset);
-
-    // Scale bin sizes from bp to window indices so zoom computation indexes correctly
     let scaled_bins: Vec<u32> = CONTIG_ZOOM_BIN_SIZES.iter()
         .map(|&bs| (bs / window_size).max(1))
         .collect();
     let zoom_levels = compute_zoom_levels_dense(values, values.len() as u32, &scaled_bins);
     let zoom_bytes = encode_zoom_levels_dense(&zoom_levels);
-    blob.extend_from_slice(&zoom_bytes);
-
     let zoom_blob = build_zoom_blob(scale, false, CONTIG_ZOOM_BIN_SIZES.len() as u8, contig_length, &zoom_bytes);
-    EncodedBlob { data: blob, zoom: zoom_blob, chunks }
+
+    EncodedBlob { zoom: zoom_blob, chunks }
 }
 
 /// Encode a sparse contig feature (repeat features) as a compressed BLOB.
@@ -767,61 +594,12 @@ pub fn encode_contig_sparse_blob(
 ) -> EncodedBlob {
     assert_eq!(positions.len(), values.len());
 
-    let mut blob = Vec::with_capacity(32 + positions.len() * 8);
-
-    // === Header (32 bytes) ===
-    blob.extend_from_slice(MAGIC);                         // [0..4] magic
-    blob.push(FORMAT_VERSION);                              // [4] version
-    let mut meta_flags = MetadataFlags::default();
-    meta_flags.sparse = true;
-    blob.push(meta_flags.to_byte());                        // [5] flags
-    blob.push(scale as u8);                                 // [6] scale_code
-    blob.push(ZOOM_BIN_SIZES.len() as u8);                              // [7] num_zoom_levels (3: 100bp, 1000bp, 10000bp)
-    write_u32(&mut blob, contig_length);                    // [8..12] contig_length
-    let base_block_offset_pos = blob.len();
-    write_u32(&mut blob, 0);                                // [12..16] base_block_offset
-    let base_block_size_pos = blob.len();
-    write_u32(&mut blob, 0);                                // [16..20] base_block_compressed_size
-    let zoom_index_offset_pos = blob.len();
-    write_u32(&mut blob, 0);                                // [20..24] zoom_index_offset
-    write_u32(&mut blob, 0);                                // [24..28] sparse_meta_offset (0=none)
-    write_u32(&mut blob, 0);                                // [28..32] sparse_meta_compressed_size (0=none)
-
-    // === Sparse Base Resolution ===
-    let base_block_start = blob.len() as u32;
-    patch_u32(&mut blob, base_block_offset_pos, base_block_start);
-
-    // Event count
-    write_u32(&mut blob, positions.len() as u32);
-
-    // Delta-encode positions, then varint compress, then zstd
-    let pos_deltas = delta_encode(&positions.iter().map(|&p| p as i32).collect::<Vec<_>>());
-    let pos_zigzagged: Vec<u32> = pos_deltas.iter().map(|&d| zigzag_encode_val(d)).collect();
-    let pos_varint = varint_encode(&pos_zigzagged);
-    let pos_compressed = zstd_compress(&pos_varint);
-    write_u32(&mut blob, pos_compressed.len() as u32);
-    blob.extend_from_slice(&pos_compressed);
-
-    // Values: zigzag + varint + zstd
-    let val_zigzagged: Vec<u32> = values.iter().map(|&v| zigzag_encode_val(v)).collect();
-    let val_varint = varint_encode(&val_zigzagged);
-    let val_compressed = zstd_compress(&val_varint);
-    write_u32(&mut blob, val_compressed.len() as u32);
-    blob.extend_from_slice(&val_compressed);
-
-    let base_block_end = blob.len() as u32;
-    patch_u32(&mut blob, base_block_size_pos, base_block_end - base_block_start);
-
     // === Zoom Levels (100bp, 1000bp, 10000bp — same as sample-level blobs) ===
-    let zoom_offset = blob.len() as u32;
-    patch_u32(&mut blob, zoom_index_offset_pos, zoom_offset);
-
     let zoom_levels = compute_zoom_levels_sparse(positions, values, contig_length, ZOOM_BIN_SIZES);
     let zoom_bytes = encode_zoom_levels_sparse(&zoom_levels);
-    blob.extend_from_slice(&zoom_bytes);
-
     let zoom_blob = build_zoom_blob(scale, true, ZOOM_BIN_SIZES.len() as u8, contig_length, &zoom_bytes);
-    EncodedBlob { data: blob, zoom: zoom_blob, chunks: Vec::new() }
+
+    EncodedBlob { zoom: zoom_blob, chunks: Vec::new() }
 }
 
 /// Chunk size in base pairs (must match CHUNK_SIZE constant used in encoding).
@@ -1137,37 +915,30 @@ mod tests {
     }
 
     #[test]
-    fn test_dense_blob_roundtrip_header() {
+    fn test_dense_blob_zoom_header() {
         let values = vec![100, 102, 98, 200, 95];
-        let blob = encode_dense_blob(&values, ValueScale::Raw, 5);
+        let encoded = encode_dense_blob(&values, ValueScale::Raw, 5);
+        let zoom = &encoded.zoom;
 
-        // Check magic
-        assert_eq!(&blob[0..4], MAGIC);
-        // Check version
-        assert_eq!(blob[4], FORMAT_VERSION);
-        // Check flags (dense, no metadata)
-        assert_eq!(blob[5], 0);
-        // Check scale
-        assert_eq!(blob[6], 0); // Raw
-        // Check num_zoom_levels
-        assert_eq!(blob[7], ZOOM_BIN_SIZES.len() as u8);
-        // Check contig_length
-        assert_eq!(u32::from_le_bytes([blob[8], blob[9], blob[10], blob[11]]), 5);
+        assert_eq!(&zoom[0..4], ZOOM_MAGIC);
+        assert_eq!(zoom[4], 0); // Raw scale
+        assert_eq!(zoom[5], 0); // dense (not sparse)
+        assert_eq!(zoom[6], ZOOM_BIN_SIZES.len() as u8);
+        assert_eq!(u32::from_le_bytes([zoom[8], zoom[9], zoom[10], zoom[11]]), 5);
+        assert!(!encoded.chunks.is_empty());
     }
 
     #[test]
-    fn test_sparse_blob_roundtrip_header() {
+    fn test_sparse_blob_zoom_header() {
         let positions = vec![10, 50, 100];
         let values = vec![5, 3, 8];
         let flags = MetadataFlags { sparse: true, ..Default::default() };
-        let blob = encode_sparse_blob(&positions, &values, None, flags, ValueScale::Times1000, 200);
+        let encoded = encode_sparse_blob(&positions, &values, None, flags, ValueScale::Times1000, 200);
+        let zoom = &encoded.zoom;
 
-        // Check magic
-        assert_eq!(&blob[0..4], MAGIC);
-        // Check flags (sparse=true)
-        assert_eq!(blob[5] & 0x01, 1);
-        // Check scale
-        assert_eq!(blob[6], 2); // Times1000
+        assert_eq!(&zoom[0..4], ZOOM_MAGIC);
+        assert_eq!(zoom[5] & 0x01, 1); // sparse flag
+        assert_eq!(zoom[4], 2); // Times1000 scale
     }
 
     #[test]

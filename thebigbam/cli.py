@@ -6,7 +6,7 @@ from thebigbam.utils import (
     read_mapping, add_sample_metadata, add_contig_metadata, add_mag_metadata,
     add_contig_annotations,
 )
-from thebigbam.database import add_variable, calculating_data, database_getters, export_data, inspect_blob
+from thebigbam.database import add_variable, calculating_data, database_getters, export_data, inspect_blob, purge_data
 from thebigbam.plotting import start_bokeh_server
 from thebigbam.analysis import (
     mapping_patterns_per_CDS_per_contig_per_sample,
@@ -54,6 +54,8 @@ SCRIPTS = {
     'list-variables': 'List variables and metadata from DB',
 
     'inspect': 'List values taken by a feature in a given contig-sample pair (decode and display BLOB contents)',
+
+    'purge-mapping-data': 'Strip mapping-derived data from DB, keeping genome/annotation data for reprocessing with --extend',
 }
 
 def build_argparser():
@@ -144,6 +146,10 @@ def build_argparser():
     # inspect command
     sp = sub.add_parser('inspect', help=SCRIPTS['inspect'])
     inspect_blob.add_inspect_args(sp)
+
+    # purge command
+    sp = sub.add_parser('purge-mapping-data', help=SCRIPTS['purge-mapping-data'])
+    purge_data.add_purge_args(sp)
 
     # analysis subcommand group
     analysis_parser = sub.add_parser('analysis', help='Run analysis scripts on a theBIGbam database')
@@ -310,6 +316,9 @@ def main(argv=None):
         except Exception as e:
             print(f"Error listing MAG metadata: {e}")
             return 2
+
+    if args.cmd == 'purge-mapping-data':
+        return purge_data.run_purge(args)
 
     if args.cmd == 'inspect':
         return inspect_blob.run_inspect(args)

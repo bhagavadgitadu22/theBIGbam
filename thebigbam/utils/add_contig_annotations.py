@@ -3,7 +3,6 @@ import csv
 import os
 import sys
 import urllib.parse
-from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
 from Bio import SeqIO
@@ -83,8 +82,6 @@ def add_add_contig_annotations_args(parser):
                         help='Output file or directory for modified annotations')
     parser.add_argument('--force', action='store_true', default=False,
                         help='Replace existing qualifiers instead of erroring')
-    parser.add_argument('-t', '--threads', type=int, default=1,
-                        help='Number of annotation files to process in parallel (default: 1)')
 
 
 def _list_dir(directory, exts):
@@ -420,20 +417,9 @@ def run_add_contig_annotations(args):
         else:
             print(f"  {Path(annot_path).name}: no modifications, skipped", flush=True)
 
-    if args.threads > 1 and len(annot_files) > 1:
-        with ProcessPoolExecutor(max_workers=args.threads) as pool:
-            futures = {
-                pool.submit(_process_one_file, af, csv_lookup, match_by_cols, value_cols, args.force): af
-                for af in annot_files
-            }
-            for future in as_completed(futures):
-                af = futures[future]
-                fmt, data, stats = future.result()
-                _handle_result(af, fmt, data, stats)
-    else:
-        for af in annot_files:
-            fmt, data, stats = _process_one_file(af, csv_lookup, match_by_cols, value_cols, args.force)
-            _handle_result(af, fmt, data, stats)
+    for af in annot_files:
+        fmt, data, stats = _process_one_file(af, csv_lookup, match_by_cols, value_cols, args.force)
+        _handle_result(af, fmt, data, stats)
 
     unmatched_keys = set(csv_lookup.keys()) - all_matched_keys
     for key in unmatched_keys:

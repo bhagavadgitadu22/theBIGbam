@@ -34,7 +34,6 @@ def calculating_all_features_parallel(list_modules, bam_files, output_db, min_al
             sequencing_type=sequencing_type,
             min_aligned_fraction=float(min_aligned_fraction),
             min_coverage_depth=float(min_coverage_depth),
-            curve_ratio=float(coverage_percentage),
             bar_ratio=float(coverage_percentage),
             create_indexes=True,
             assembly_path=assembly_path if assembly_path else "",
@@ -313,6 +312,12 @@ def run_calculate_args(args):
             r[0] for r in conn.execute("SELECT DISTINCT Module FROM Variable").fetchall()
         } & set(MODULE_ALIASES.values()))
 
+        # Read compression parameters from DB metadata (if present)
+        db_metadata = {}
+        if conn.execute("SELECT 1 FROM information_schema.tables WHERE table_name = 'Database_metadata'").fetchone():
+            for row in conn.execute("SELECT Key, Value FROM Database_metadata").fetchall():
+                db_metadata[row[0]] = row[1]
+
         conn.close()
 
         # Check for sample name collisions
@@ -331,6 +336,35 @@ def run_calculate_args(args):
         if args.modules is not None:
             print(f"WARNING: --modules is ignored in extend mode. Using modules from existing database: {', '.join(existing_modules)}", flush=True)
         requested_modules = existing_modules
+
+        # Compression parameters: use DB values if present, otherwise accept CLI values.
+        # When DB has stored params (not purged), the user's CLI values are disregarded.
+        has_db_params = "Coverage_percentage" in db_metadata
+        if has_db_params:
+            db_min_af = float(db_metadata.get("Min_aligned_fraction", args.min_aligned_fraction))
+            db_min_cd = float(db_metadata.get("Min_coverage_depth", args.min_coverage_depth))
+            db_cov_pct = float(db_metadata.get("Coverage_percentage", args.coverage_percentage))
+            db_var_pct = float(db_metadata.get("Variation_percentage", args.variation_percentage))
+            db_min_occ = int(float(db_metadata.get("Min_occurrences", args.min_occurrences)))
+            overridden = []
+            if args.min_aligned_fraction != db_min_af:
+                overridden.append(f"--min_aligned_fraction ({args.min_aligned_fraction} -> {db_min_af:.0f})")
+            if args.min_coverage_depth != db_min_cd:
+                overridden.append(f"--min_coverage_depth ({args.min_coverage_depth} -> {db_min_cd:.0f})")
+            if args.coverage_percentage != db_cov_pct:
+                overridden.append(f"--coverage_percentage ({args.coverage_percentage} -> {db_cov_pct})")
+            if args.variation_percentage != db_var_pct:
+                overridden.append(f"--variation_percentage ({args.variation_percentage} -> {db_var_pct})")
+            if args.min_occurrences != db_min_occ:
+                overridden.append(f"--min_occurrences ({args.min_occurrences} -> {db_min_occ})")
+            if overridden:
+                print(f"WARNING: Using compression parameters from existing database. "
+                      f"Your values will be disregarded: {', '.join(overridden)}", flush=True)
+            args.min_aligned_fraction = db_min_af
+            args.min_coverage_depth = db_min_cd
+            args.coverage_percentage = db_cov_pct
+            args.variation_percentage = db_var_pct
+            args.min_occurrences = db_min_occ
 
         # Print warning
         print(

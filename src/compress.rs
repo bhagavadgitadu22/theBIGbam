@@ -279,7 +279,7 @@ pub fn add_compressed_feature_with_stats(
     config: &ProcessConfig,
 ) -> Vec<Run> {
     let plot_type = get_plot_type(feature);
-    compress_signal_with_reference(counts, reference, plot_type, config.curve_ratio, config.bar_ratio)
+    compress_signal_with_reference(counts, reference, plot_type, config.bar_ratio, config.bar_ratio)
 }
 
 #[cfg(test)]

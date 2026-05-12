@@ -80,7 +80,7 @@ mod python {
     ///         - "samples_failed": int
     ///         - "total_time": float (seconds)
     #[pyfunction]
-    #[pyo3(signature = (genbank_path, bam_files, output_db, modules, threads, sequencing_type=None, min_aligned_fraction=50.0, min_coverage_depth=0.0, curve_ratio=10.0, bar_ratio=10.0, create_indexes=true, assembly_path="", extend_db="", min_occurrences=2, enable_timing=false, view="contig", mag_manifest=vec![], variation_percentage=0.0))]
+    #[pyo3(signature = (genbank_path, bam_files, output_db, modules, threads, sequencing_type=None, min_aligned_fraction=50.0, min_coverage_depth=0.0, bar_ratio=10.0, create_indexes=true, assembly_path="", extend_db="", min_occurrences=2, enable_timing=false, view="contig", mag_manifest=vec![], variation_percentage=0.0))]
     fn process_all_samples<'py>(
         py: Python<'py>,
         genbank_path: &str,
@@ -91,7 +91,6 @@ mod python {
         sequencing_type: Option<&str>,
         min_aligned_fraction: f64,
         min_coverage_depth: f64,
-        curve_ratio: f64,
         bar_ratio: f64,
         create_indexes: bool,
         assembly_path: &str,
@@ -130,7 +129,6 @@ mod python {
             threads,
             min_aligned_fraction,
             min_coverage_depth,
-            curve_ratio,
             bar_ratio,
             sequencing_type: seq_type,
             phagetermini_config: PhageTerminiConfig::default(),

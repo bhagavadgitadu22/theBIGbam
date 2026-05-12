@@ -322,6 +322,7 @@ This makes the delta encoding step produce many zeros, which compress dramatical
 better with zstd.
 
 **Tradeoffs:**
+
 - **Database size**: substantially reduced (the main benefit)
 - **Visualization**: fine — smoothed values are visually indistinguishable at typical zoom levels
 - **Analysis precision**: slightly lossy — downstream per-position calculations may lose marginal precision
