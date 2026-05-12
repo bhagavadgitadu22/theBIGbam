@@ -671,7 +671,7 @@ impl DbWriter {
         let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
 
         if repeats.is_empty() {
-            // Autoblast ran but found no repeats — set 0% for all contigs
+            // Repeat detection ran but found no repeats — set 0% for all contigs
             conn.execute("UPDATE Contig SET Duplication_percentage = 0", [])?;
             return Ok(());
         }
@@ -1428,7 +1428,7 @@ impl DbWriter {
         }
 
         let total_contigs = hits_by_contig.len();
-        eprintln!("Computing per-position BLAST hit features for {} contigs...", total_contigs);
+        eprintln!("Computing per-position inter-contig hit features for {} contigs...", total_contigs);
 
         // Difference array for counts + Vec for identity, parallel per contig.
         use rayon::prelude::*;
@@ -1476,7 +1476,7 @@ impl DbWriter {
 
                 let n = done.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
                 if n % 5000 == 0 || n == total_contigs {
-                    eprintln!("  BLAST features: {}/{} contigs", n, total_contigs);
+                    eprintln!("  Inter-contig features: {}/{} contigs", n, total_contigs);
                 }
 
                 if pos_vec.is_empty() { None } else { Some((cid, pos_vec, count_vec, ident_vec, meta_vec)) }
@@ -3469,7 +3469,7 @@ fn merge_intervals(mut intervals: Vec<(i32, i32)>) -> Vec<(i32, i32)> {
     merged
 }
 
-/// Repeats data from self-BLAST results.
+/// Repeats data from BLAST self-alignment.
 /// Represents a repeated region within a contig.
 #[derive(Clone, Debug)]
 pub struct RepeatsData {
@@ -3550,20 +3550,8 @@ pub struct TopologyData {
 }
 
 /// Parse BLAST outfmt 6 file and return repeats data.
-///
-/// BLAST outfmt 6 columns:
-/// 1. qseqid - query sequence id (contig name)
-/// 2. sseqid - subject sequence id (same as query for self-blast)
-/// 3. pident - percentage identity
-/// 4. length - alignment length
-/// 5. mismatch - number of mismatches
-/// 6. gapopen - number of gap openings
-/// 7. qstart - query start
-/// 8. qend - query end
-/// 9. sstart - subject start
-/// 10. send - subject end
-/// 11. evalue - e-value
-/// 12. bitscore - bit score
+/// Used by the standalone `thebigbam autoblast` CLI command (Python/BLAST+).
+/// The main `calculate` pipeline uses minimap2 instead (see processing.rs).
 pub fn parse_autoblast_file(path: &Path) -> Result<Vec<RepeatsData>> {
     use std::fs::File;
     use std::io::{BufRead, BufReader};

@@ -61,7 +61,7 @@ def add_calculate_args(parser):
     parser.add_argument("-o", "--output", required=True, help="Output database file path (.db)")
     parser.add_argument("-m", "--modules", required=False, default=None, help="List of modules to compute (comma-separated). If not provided, all modules are computed. Options: coverage,misalignment,rna,longreads,pairedreads,phagetermini")
     parser.add_argument("-a", "--assembly", help="Path to assembly FASTA FILE or DIRECTORY (.fa, .fasta, .fna). Needed for autoblast when genbank lacks sequence data. With --view mag, a directory means one file per MAG (MAG name = filename stem).")
-    parser.add_argument("--view", choices=["contig", "mag"], default="contig", help="Aggregation level: 'contig' (default) processes each contig independently; 'mag' groups contigs by MAG, requires at least one of -g / -a to be a directory of per-MAG files.")
+    parser.add_argument("--view", choices=["contig", "mag"], default="contig", help="Aggregation level: 'contig' (default) processes each contig independently; 'mag' groups contigs by MAG. With a directory of per-MAG files, each file defines one MAG (MAG name = filename stem). With a single file, all its contigs form one MAG.")
     parser.add_argument('-s', '--sequencing_type', choices=['long', 'paired-short', 'single-short'], help='Sequencing type (long or short allowed)')
     parser.add_argument("--min_aligned_fraction", type=int, default=50, help="Minimum alignment-length coverage proportion for inclusion (default: 50%%). In --view mag, the threshold is applied to the MAG aggregate (length-weighted across member contigs); failing MAGs drop all member contigs together.")
     parser.add_argument("--min_coverage_depth", type=int, default=0, help="Minimum mean coverage depth for inclusion (disabled by default, e.g. 5 to filter low-depth contigs). In --view mag, the threshold is applied to the MAG aggregate (length-weighted across member contigs); failing MAGs drop all member contigs together.")
@@ -152,9 +152,6 @@ def resolve_mag_inputs(genbank_path, assembly_path, view):
 
     is_dir_mode = (gb_kind == "dir") or (asm_kind == "dir")
 
-    if view == "mag" and not is_dir_mode:
-        sys.exit("ERROR: --view mag requires at least one of -g / -a to be a directory of per-MAG files.")
-
     if view == "contig" and is_dir_mode:
         print(
             "WARNING: directory provided for -g/-a but --view is 'contig'; all contigs across the directory will be treated as a single pool. "
@@ -180,23 +177,29 @@ def resolve_mag_inputs(genbank_path, assembly_path, view):
 
     mag_manifest = []
     if view == "mag":
-        gb_by_stem = {Path(p).stem: p for p in genbank_files} if gb_kind == "dir" else {}
-        asm_by_stem = {Path(p).stem: p for p in assembly_files} if asm_kind == "dir" else {}
+        if is_dir_mode:
+            gb_by_stem = {Path(p).stem: p for p in genbank_files} if gb_kind == "dir" else {}
+            asm_by_stem = {Path(p).stem: p for p in assembly_files} if asm_kind == "dir" else {}
 
-        if gb_kind == "dir" and asm_kind == "dir":
-            stems = sorted(set(gb_by_stem) | set(asm_by_stem))
-        elif gb_kind == "dir":
-            stems = sorted(gb_by_stem)
+            if gb_kind == "dir" and asm_kind == "dir":
+                stems = sorted(set(gb_by_stem) | set(asm_by_stem))
+            elif gb_kind == "dir":
+                stems = sorted(gb_by_stem)
+            else:
+                stems = sorted(asm_by_stem)
+
+            for stem in stems:
+                gb = gb_by_stem.get(stem, "") if gb_kind == "dir" else ""
+                asm = asm_by_stem.get(stem, "") if asm_kind == "dir" else ""
+                mag_manifest.append((stem, gb, asm))
         else:
-            stems = sorted(asm_by_stem)
-
-        for stem in stems:
-            gb = gb_by_stem.get(stem, "") if gb_kind == "dir" else ""
-            asm = asm_by_stem.get(stem, "") if asm_kind == "dir" else ""
-            mag_manifest.append((stem, gb, asm))
+            gb_stem = Path(genbank_path).stem if gb_kind == "file" else None
+            asm_stem = Path(assembly_path).stem if asm_kind == "file" else None
+            stem = gb_stem or asm_stem
+            mag_manifest.append((stem, genbank_path if gb_kind == "file" else "", assembly_path if asm_kind == "file" else ""))
 
         if not mag_manifest:
-            sys.exit("ERROR: --view mag enabled but no per-MAG input files were found.")
+            sys.exit("ERROR: --view mag enabled but no input files were found.")
 
     return genbank_files, assembly_files, mag_manifest
 

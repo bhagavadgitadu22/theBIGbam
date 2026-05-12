@@ -268,7 +268,7 @@ pub struct VariableConfig {
 pub const VARIABLES: &[VariableConfig] = &[
     // Genome module - genomic properties
     // Repeat count subplot (button 1)
-    VariableConfig { name: "direct_repeat_count", subplot: "Repeat count", module: "Genome", module_order: 1, plot_type: PlotType::Curve, encoding: Encoding::Sparse, value_scale: ValueScale::Raw, color: "#c1121f", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Direct repeat count", help: Some("Direct and inverted repeats detected by self-BLAST (e.g., terminal repeats)") },
+    VariableConfig { name: "direct_repeat_count", subplot: "Repeat count", module: "Genome", module_order: 1, plot_type: PlotType::Curve, encoding: Encoding::Sparse, value_scale: ValueScale::Raw, color: "#c1121f", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Direct repeat count", help: Some("Direct and inverted repeats detected by BLAST self-alignment (e.g., terminal repeats)") },
     VariableConfig { name: "inverted_repeat_count", subplot: "Repeat count", module: "Genome", module_order: 1, plot_type: PlotType::Curve, encoding: Encoding::Sparse, value_scale: ValueScale::Raw, color: "#12C1B4", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Inverted repeat count", help: None },
     // Max repeat identity subplot (button 2)
     VariableConfig { name: "direct_repeat_identity", subplot: "Max repeat identity", module: "Genome", module_order: 2, plot_type: PlotType::Curve, encoding: Encoding::Sparse, value_scale: ValueScale::Times100, color: "#c1121f", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Max direct repeat identity", help: None },

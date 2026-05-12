@@ -61,7 +61,7 @@ These have no `Sample_id` — they describe properties of the contig itself:
 | `Contig_inverted_repeat_count`    | Same for inverted repeats.                                                                                                 |
 | `Contig_direct_repeat_identity`   | Max percent identity of overlapping direct repeats.                                                                        |
 | `Contig_inverted_repeat_identity` | Same for inverted repeats.                                                                                                 |
-| `Contig_directRepeats`            | Raw BLAST repeat hits: `(Position1, Position2, Position1prime, Position2prime, Pident)`                                    |
+| `Contig_directRepeats`            | Raw repeat hits from minimap2: `(Position1, Position2, Position1prime, Position2prime, Pident)`                            |
 | `Contig_invertedRepeats`          | Same for inverted repeats.                                                                                                 |
 
 ### Other Tables
@@ -391,3 +391,86 @@ GC content and GC skew are **not affected** (separate computation path).
 Old databases with `Feature_*` tables are **not supported** after this change.
 The Python plotting layer will skip any feature whose BLOB is not found, rather
 than falling back to legacy table queries.
+
+---
+
+## Repeat Detection and Inter-Contig Comparison
+
+### Intra-contig repeat detection (all modes)
+
+Each contig is BLASTed against itself independently to find internal repeats (direct
+and inverted). One `blastn` subprocess runs per contig, parallelized across CPU cores
+with rayon:
+
+```
+blastn -query contig.fa -subject contig.fa -evalue 1e-10 -outfmt 6
+```
+
+Trivial self-hits (identical query/subject coordinates) are discarded. Remaining hits
+are classified as direct or inverted repeats based on strand orientation and written to
+`Contig_directRepeats` / `Contig_invertedRepeats`.
+
+BLAST is used instead of minimap2 because minimap2's secondary-to-primary score ratio
+filtering (`-p`) drops all internal repeats when the primary hit is the trivial
+full-length self-alignment. This makes minimap2 fundamentally unsuitable for
+intra-contig repeat detection, especially on large sequences.
+
+### Inter-contig comparison (MAG mode only)
+
+In `--view mag`, contigs belonging to the same MAG are additionally compared against
+each other using a single minimap2 all-vs-all run:
+
+```
+minimap2 -x asm10 -c -s 100 --secondary=yes -p 0.1 -N 1000000 -t {threads} all.fa all.fa
+```
+
+PAF output is post-filtered by MAG membership (contig → MAG lookup via HashMap):
+
+- **Inter-contig hits** (`qname != tname`, same MAG): regions of homology shared between
+  two contigs within the same MAG. Written to `Contig_blast_hits`.
+- **Intra-contig hits** (`qname == tname`): discarded (handled by BLAST above).
+- **Cross-MAG hits** (different MAGs): discarded.
+
+### Storage
+
+Inter-contig hits are stored canonically with `Contig_id_1 <= Contig_id_2` to halve
+storage. A symmetric view exposes both directions:
+
+```sql
+-- Canonical storage (one row per hit pair)
+CREATE TABLE Contig_blast_hits (
+    Contig_id_1    INTEGER NOT NULL REFERENCES Contig,
+    Contig_id_2    INTEGER NOT NULL REFERENCES Contig,
+    Position1      INTEGER NOT NULL,  -- query start (1-based)
+    Position2      INTEGER NOT NULL,  -- query end (1-based)
+    Position1prime INTEGER NOT NULL,  -- target start (1-based)
+    Position2prime INTEGER NOT NULL,  -- target end (1-based)
+    Pident         INTEGER NOT NULL,  -- percent identity ×100
+    CHECK (Contig_id_1 <= Contig_id_2)
+);
+
+-- Bidirectional view for consumers
+CREATE VIEW Contig_blast_hits_symmetric AS
+    SELECT Contig_id_1 AS Contig_id, Position1, Position2,
+           Contig_id_2 AS Contig_id_other, Position1prime, Position2prime, Pident
+    FROM Contig_blast_hits
+    UNION ALL
+    SELECT Contig_id_2, Position1prime, Position2prime,
+           Contig_id_1, Position1, Position2, Pident
+    FROM Contig_blast_hits
+    WHERE Contig_id_1 <> Contig_id_2;
+```
+
+### Per-Position Features
+
+When inter-contig hits exist, two additional sparse features are computed per contig
+and stored in `Contig_blob` (contig-level, no sample dimension):
+
+| Feature                    | Subplot            | Scale | Description                                                              |
+| -------------------------- | ------------------ | ----- | ------------------------------------------------------------------------ |
+| `hit_count_within_mag`     | Hit count          | Raw   | Number of inter-contig hits covering each position (sweep-line count)    |
+| `hit_identity_within_mag`  | Max hit identity   | ×100  | Maximum percent identity across hits at each position (partner metadata) |
+
+These are computed via a difference-array sweep-line: each hit increments a range
+`[lo, hi]`, then a prefix sum produces per-position counts. Identity tracking keeps
+the max pident and the partner contig ID at each position (stored as `EventMeta`).

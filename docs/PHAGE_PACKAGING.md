@@ -30,7 +30,7 @@ Only contigs where ≥ **min_aligned_fraction** (default 90%) of positions have 
 
 ## 3. Terminal repeats (DTR/ITR) are identified:
 
-Autoblast results are filtered to keep real terminal repeats:
+Repeat detection results (BLAST self-alignment) are filtered to keep real terminal repeats:
 
 - Identity ≥ **min_identity_dtr** (default 90%)
 - One region within **max_distance_duplication** (default 100bp) of contig start

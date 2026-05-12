@@ -6,7 +6,7 @@
 conda install -c bioconda thebigbam
 ```
 
-This installs theBIGbam along with **samtools**, **minimap2**, **bwa-mem2**, and **BLAST+** — everything needed for BAM processing, read mapping, and repeat detection.
+This installs theBIGbam along with **samtools**, **minimap2**, **bwa-mem2**, and **BLAST+** — everything needed for BAM processing, read mapping, repeat detection, and inter-contig comparison.
 
 ---
 
@@ -64,10 +64,11 @@ With this installations:
 3 mapping packages are needed if you want to use `thebigbam mapping-per-sample` to map reads:
 
 - **samtools** — BAM file manipulation
-- **minimap2** — Read aligner (long reads or short reads)
+- **minimap2** — Read aligner (long reads or short reads), also used for inter-contig homology detection in MAG mode
 - **bwa-mem2** — Alternative read aligner (short reads)
+- **BLAST+** — Required for intra-contig repeat detection (terminal repeats). The pipeline will fail if `blastn` is not on PATH
 
-Additionally, **BLAST+** is needed for terminal repeat detection (autoblast). Without it, repeat detection is silently skipped.
+**minimap2** is additionally required in MAG mode (`--view mag`) for inter-contig homology detection.
 
 All of these are installed directly with option 1. Otherwise they can be installed separately via conda:
 

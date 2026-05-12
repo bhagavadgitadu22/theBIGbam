@@ -47,7 +47,7 @@ zstd = "0.13"
 # Date/time formatting for metadata
 chrono = "0.4"
 
-# Temp files for autoblast
+# Temp files for minimap2
 tempfile = "3"
 
 # PyO3 bindings (optional, enabled via "python" feature)
