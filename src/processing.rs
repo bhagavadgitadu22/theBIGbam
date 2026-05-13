@@ -102,6 +102,9 @@ pub struct ProcessConfig {
     /// When true, record per-sample phase timings and write a timing log
     /// alongside the output database. Hidden CLI flag (--time).
     pub enable_timing: bool,
+    /// When true, run BLAST-based repeat detection (autoblast in contig mode,
+    /// per-MAG blast in MAG mode). Off by default.
+    pub blast: bool,
     /// Aggregation level. `Contig` is the historical default.
     pub view_mode: ViewMode,
     /// Per-MAG input manifest. Empty in contig mode; one entry per MAG in MAG
@@ -287,9 +290,9 @@ fn detect_sample_circularity(
 fn validate_inputs(
     bam_files: &[PathBuf],
     modules: &[String],
-    genbank_path: &Path,
-    assembly_path: &Path,
-    extend_db: &Path,
+    _genbank_path: &Path,
+    _assembly_path: &Path,
+    _extend_db: &Path,
 ) -> Result<()> {
     let flags = ModuleFlags::from_modules(modules);
     let needs_md = flags.needs_md();
@@ -355,24 +358,6 @@ fn validate_inputs(
                  Or remove these modules from -m/--modules.",
                 samples_missing_md.join(", "),
             ));
-        }
-    }
-
-    // 3. Sequence check (only when modules include Phage termini, skip in extend mode
-    //    because sequences are already stored in the DB's Contig_sequence table)
-    let is_extending = !extend_db.as_os_str().is_empty();
-    if flags.phagetermini && !is_extending {
-        let has_genbank = !genbank_path.as_os_str().is_empty() && genbank_path.exists();
-        let has_assembly = !assembly_path.as_os_str().is_empty() && assembly_path.exists();
-        if !has_genbank && !has_assembly {
-            errors.push(
-                "ERROR: Phage termini module requires sequence data for terminal repeat detection.\n\
-                 Provide either:\n\
-                 \x20 - A GenBank file with embedded sequences via -g/--genbank\n\
-                 \x20 - An assembly FASTA file via -a/--assembly\n\
-                 Or remove 'Phage termini' from -m/--modules."
-                    .to_string(),
-            );
         }
     }
 
@@ -464,34 +449,6 @@ fn merge_sequences_from_fasta(contigs: &mut Vec<ContigInfo>, fasta_path: &Path) 
     Ok(())
 }
 
-/// Parse one PAF line into (qname, qstart, qend, tname, tstart, tend, pident, is_direct).
-/// Coordinates are 1-based closed. For reverse strand, target coords are swapped
-/// (tstart > tend) to match the BLAST convention used by the Termini module.
-fn parse_paf_hit(line: &str) -> Option<(String, i32, i32, String, i32, i32, f64, bool)> {
-    let f: Vec<&str> = line.split('\t').collect();
-    if f.len() < 12 { return None; }
-    let qname = f[0].to_string();
-    let qstart_0: i32 = f[2].parse().ok()?;
-    let qend_0: i32 = f[3].parse().ok()?;
-    let strand = f[4];
-    let tname = f[5].to_string();
-    let tstart_0: i32 = f[7].parse().ok()?;
-    let tend_0: i32 = f[8].parse().ok()?;
-    let matches: f64 = f[9].parse().ok()?;
-    let block_len: f64 = f[10].parse().ok()?;
-    if block_len <= 0.0 { return None; }
-    let pident = matches / block_len * 100.0;
-    let is_direct = strand == "+";
-    let qstart = qstart_0 + 1;
-    let qend = qend_0;
-    let (tstart, tend) = if is_direct {
-        (tstart_0 + 1, tend_0)
-    } else {
-        (tend_0, tstart_0 + 1)
-    };
-    Some((qname, qstart, qend, tname, tstart, tend, pident, is_direct))
-}
-
 /// Write contigs with sequences to a temp FASTA and return the temp file handle.
 fn write_contigs_fasta(contigs: &[&ContigInfo]) -> Result<tempfile::NamedTempFile> {
     let mut temp_file = tempfile::NamedTempFile::new()
@@ -508,29 +465,6 @@ fn write_contigs_fasta(contigs: &[&ContigInfo]) -> Result<tempfile::NamedTempFil
     }
     temp_file.flush()?;
     Ok(temp_file)
-}
-
-/// Run minimap2 and return stdout as String.
-/// Uses two separate file paths (target + query) so minimap2 does NOT enter
-/// all-vs-all mode and performs self-alignment for each sequence.
-fn run_minimap2(target_path: &std::path::Path, query_path: &std::path::Path, threads: usize) -> Result<String> {
-    let output = std::process::Command::new("minimap2")
-        .arg("-x").arg("asm10")
-        .arg("-c")
-        .arg("-s").arg("100")
-        .arg("--secondary=yes")
-        .arg("-p").arg("0.1")
-        .arg("-N").arg("1000000")
-        .arg("-t").arg(threads.to_string())
-        .arg(target_path)
-        .arg(query_path)
-        .stderr(std::process::Stdio::null())
-        .output()
-        .context("Failed to run minimap2")?;
-    if !output.status.success() {
-        anyhow::bail!("minimap2 exited with status {}", output.status);
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 /// Per-contig BLAST self-alignment for intra-contig repeat detection.
@@ -617,85 +551,207 @@ fn run_autoblast(contigs: &[ContigInfo], _threads: usize) -> Result<Vec<RepeatsD
     Ok(total)
 }
 
-/// Inter-contig homology detection for MAG mode using minimap2.
-/// Finds cross-contig same-MAG hits and writes them to Contig_blast_hits.
-/// Intra-contig repeats are handled separately by run_autoblast (BLAST).
+/// Per-MAG inter-contig BLAST. Writes one FASTA per MAG containing all member contigs,
+/// runs blastn query=subject, and returns (repeats, inter_contig_hits).
+///
+/// - Intra-contig hits (qid == sid, not exact self-coordinates) → RepeatsData
+/// - Inter-contig hits (qid != sid) → written to Contig_blast_hits
+///
+/// In MAG mode this REPLACES the per-contig self-BLAST: intra-contig hits emerge naturally
+/// from each MAG's all-vs-all blast output.
 fn run_mag_interblast(
     contigs: &[ContigInfo],
     mag_manifest: &[(String, Vec<String>)],
     db_writer: &DbWriter,
-    threads: usize,
-) -> Result<usize> {
-    match std::process::Command::new("minimap2").arg("--version").output() {
-        Ok(o) if o.status.success() => {}
-        _ => {
-            anyhow::bail!("minimap2 not found on PATH. Install minimap2 (e.g. `conda install -c bioconda minimap2`).");
-        }
-    }
-
-    let contigs_with_seq: Vec<&ContigInfo> = contigs.iter().filter(|c| c.sequence.is_some()).collect();
-    if contigs_with_seq.is_empty() {
-        return Ok(0);
-    }
-
-    let contig_to_mag: HashMap<&str, &str> = mag_manifest
-        .iter()
-        .flat_map(|(mag, members)| members.iter().map(move |m| (m.as_str(), mag.as_str())))
-        .collect();
-
-    eprintln!(
-        "\n### Running MAG inter-contig detection (minimap2) on {} contigs across {} MAGs...",
-        contigs_with_seq.len(), mag_manifest.len()
-    );
-
-    let target_file = write_contigs_fasta(&contigs_with_seq)?;
-    let query_file = write_contigs_fasta(&contigs_with_seq)?;
-    let stdout = run_minimap2(target_file.path(), query_file.path(), threads)?;
-
-    let mut inter: Vec<(String, String, i32, i32, i32, i32, f64)> = Vec::new();
-
-    for line in stdout.lines() {
-        let line = line.trim();
-        if line.is_empty() { continue; }
-        if let Some((qname, qstart, qend, tname, tstart, tend, pident, _is_direct)) = parse_paf_hit(line) {
-            if qname == tname { continue; }
-            let q_mag = match contig_to_mag.get(qname.as_str()) { Some(m) => *m, None => continue };
-            let t_mag = match contig_to_mag.get(tname.as_str()) { Some(m) => *m, None => continue };
-            if q_mag != t_mag { continue; }
-            inter.push((qname, tname, qstart, qend, tstart, tend, pident));
-        }
-    }
-
-    let inter_count = inter.len();
-
-    if !inter.is_empty() {
-        if let Ok(conn) = db_writer.lock_conn() {
-            use duckdb::params;
-            let mut stmt = conn.prepare(
-                "INSERT OR IGNORE INTO Contig_blast_hits
-                   (Contig_id_1, Contig_id_2, Position1, Position2, Position1prime, Position2prime, Pident)
-                 VALUES (?, ?, ?, ?, ?, ?, ?)"
-            ).ok();
-            if let Some(ref mut stmt) = stmt {
-                for (qid, sid, mut p1, mut p2, mut p1p, mut p2p, pident) in inter.iter().cloned() {
-                    let cid_q = match db_writer.get_contig_id(&qid) { Some(v) => v, None => continue };
-                    let cid_s = match db_writer.get_contig_id(&sid) { Some(v) => v, None => continue };
-                    let (cid1, cid2) = if cid_q <= cid_s {
-                        (cid_q, cid_s)
-                    } else {
-                        std::mem::swap(&mut p1, &mut p1p);
-                        std::mem::swap(&mut p2, &mut p2p);
-                        (cid_s, cid_q)
-                    };
-                    let pident_i = (pident * 100.0).round() as i32;
-                    let _ = stmt.execute(params![cid1, cid2, p1, p2, p1p, p2p, pident_i]);
-                }
+) -> Result<(Vec<RepeatsData>, usize)> {
+    for tool in &["blastn", "makeblastdb"] {
+        match std::process::Command::new(tool).arg("-version").output() {
+            Ok(output) if output.status.success() => {}
+            _ => {
+                eprintln!("Warning: {} not found on PATH. Skipping MAG inter-contig BLAST.", tool);
+                return Ok((Vec::new(), 0));
             }
         }
     }
 
-    eprintln!("MAG minimap2: {} inter-contig hits", inter_count);
-    Ok(inter_count)
+    let name_to_contig: HashMap<&str, &ContigInfo> =
+        contigs.iter().map(|c| (c.name.as_str(), c)).collect();
+
+    eprintln!("\n### Running MAG inter-contig BLAST on {} MAGs...", mag_manifest.len());
+
+    let total_repeat_count = std::sync::atomic::AtomicUsize::new(0);
+    let total_inter_count = std::sync::atomic::AtomicUsize::new(0);
+    let mags_done = std::sync::atomic::AtomicUsize::new(0);
+    let total_mags = mag_manifest.len();
+
+    let all_repeats: std::sync::Mutex<Vec<RepeatsData>> = std::sync::Mutex::new(Vec::new());
+
+    mag_manifest.par_iter().for_each(|(mag_name, member_names)| {
+        let members: Vec<&ContigInfo> = member_names
+            .iter()
+            .filter_map(|n| name_to_contig.get(n.as_str()).copied())
+            .filter(|c| c.sequence.is_some())
+            .collect();
+        if members.is_empty() {
+            mags_done.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            return;
+        }
+
+        let mut temp_file = match tempfile::NamedTempFile::new() {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!("Warning: temp file for MAG '{}': {}", mag_name, e);
+                mags_done.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                return;
+            }
+        };
+        use std::io::Write;
+        for contig in &members {
+            if writeln!(temp_file, ">{}", contig.name).is_err() { return; }
+            if let Some(seq) = contig.sequence.as_ref() {
+                for chunk in seq.chunks(80) {
+                    if temp_file.write_all(chunk).is_err() { return; }
+                    if writeln!(temp_file).is_err() { return; }
+                }
+            }
+        }
+        if temp_file.flush().is_err() { return; }
+        let temp_path = temp_file.path().to_path_buf();
+
+        let mkdb = std::process::Command::new("makeblastdb")
+            .arg("-in").arg(&temp_path)
+            .arg("-dbtype").arg("nucl")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        match mkdb {
+            Ok(s) if s.success() => {}
+            Ok(s) => {
+                eprintln!("Warning: makeblastdb failed for MAG '{}' (exit {})", mag_name, s);
+                mags_done.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                return;
+            }
+            Err(e) => {
+                eprintln!("Warning: makeblastdb failed for MAG '{}': {}", mag_name, e);
+                mags_done.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                return;
+            }
+        }
+
+        let output = match std::process::Command::new("blastn")
+            .arg("-query").arg(&temp_path)
+            .arg("-db").arg(&temp_path)
+            .arg("-evalue").arg("1e-10")
+            .arg("-outfmt").arg("6")
+            .output()
+        {
+            Ok(o) => o,
+            Err(e) => {
+                eprintln!("Warning: blastn failed for MAG '{}': {}", mag_name, e);
+                mags_done.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                return;
+            }
+        };
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            eprintln!("Warning: blastn non-zero for MAG '{}': {}", mag_name, stderr);
+            mags_done.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            return;
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let mut repeats: Vec<RepeatsData> = Vec::new();
+        let mut inter: Vec<(String, String, i32, i32, i32, i32, f64)> = Vec::new();
+        for line in stdout.lines() {
+            let line = line.trim();
+            if line.is_empty() { continue; }
+            let f: Vec<&str> = line.split('\t').collect();
+            if f.len() < 10 { continue; }
+            let qid = f[0].to_string();
+            let sid = f[1].to_string();
+            let pident: f64 = f[2].parse().unwrap_or(0.0);
+            let qstart: i32 = f[6].parse().unwrap_or(0);
+            let qend:   i32 = f[7].parse().unwrap_or(0);
+            let sstart: i32 = f[8].parse().unwrap_or(0);
+            let send:   i32 = f[9].parse().unwrap_or(0);
+
+            if qid == sid {
+                if qstart == sstart && qend == send { continue; }
+                let is_direct = (qstart < qend && sstart < send) || (qstart > qend && sstart > send);
+                repeats.push(RepeatsData {
+                    contig_name: qid,
+                    position1: qstart, position2: qend,
+                    position1prime: sstart, position2prime: send,
+                    pident, is_direct,
+                });
+            } else {
+                inter.push((qid, sid, qstart, qend, sstart, send, pident));
+            }
+        }
+
+        let n_repeats = repeats.len();
+        let n_inter = inter.len();
+
+        if let Ok(conn) = db_writer.lock_conn() {
+            use duckdb::params;
+            for dup in &repeats {
+                if let Some(contig_id) = db_writer.get_contig_id(&dup.contig_name) {
+                    let pident_int = (dup.pident * 100.0).round() as i32;
+                    let table = if dup.is_direct { "Contig_directRepeats" } else { "Contig_invertedRepeats" };
+                    let _ = conn.execute(
+                        &format!("INSERT INTO {} (Contig_id, Position1, Position2, Position1prime, Position2prime, Pident) VALUES (?, ?, ?, ?, ?, ?)", table),
+                        params![contig_id, dup.position1, dup.position2, dup.position1prime, dup.position2prime, pident_int],
+                    );
+                }
+            }
+            if !inter.is_empty() {
+                let mut stmt = conn.prepare(
+                    "INSERT OR IGNORE INTO Contig_blast_hits
+                       (Contig_id_1, Contig_id_2, Position1, Position2, Position1prime, Position2prime, Pident)
+                     VALUES (?, ?, ?, ?, ?, ?, ?)"
+                ).ok();
+                if let Some(ref mut stmt) = stmt {
+                    for (qid, sid, mut p1, mut p2, mut p1p, mut p2p, pident) in inter.iter().cloned() {
+                        let cid_q = match db_writer.get_contig_id(&qid) { Some(v) => v, None => continue };
+                        let cid_s = match db_writer.get_contig_id(&sid) { Some(v) => v, None => continue };
+                        let (cid1, cid2) = if cid_q <= cid_s {
+                            (cid_q, cid_s)
+                        } else {
+                            std::mem::swap(&mut p1, &mut p1p);
+                            std::mem::swap(&mut p2, &mut p2p);
+                            (cid_s, cid_q)
+                        };
+                        let pident_i = (pident * 100.0).round() as i32;
+                        let _ = stmt.execute(params![cid1, cid2, p1, p2, p1p, p2p, pident_i]);
+                    }
+                }
+            }
+        }
+
+        if let Some(p) = temp_path.to_str() {
+            for ext in &[".ndb", ".nhr", ".nin", ".njs", ".not", ".nsq", ".ntf", ".nto"] {
+                let _ = std::fs::remove_file(format!("{}{}", p, ext));
+            }
+        }
+
+        all_repeats.lock().unwrap().extend(repeats);
+
+        total_repeat_count.fetch_add(n_repeats, std::sync::atomic::Ordering::Relaxed);
+        total_inter_count.fetch_add(n_inter, std::sync::atomic::Ordering::Relaxed);
+        let done = mags_done.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        if done % 100 == 0 || done == total_mags {
+            eprintln!("  MAG BLAST: {}/{} MAGs", done, total_mags);
+        }
+    });
+
+    let repeat_count = total_repeat_count.load(std::sync::atomic::Ordering::Relaxed);
+    let inter_count = total_inter_count.load(std::sync::atomic::Ordering::Relaxed);
+    eprintln!(
+        "MAG BLAST: {} intra-contig repeat hits, {} inter-contig hits",
+        repeat_count, inter_count,
+    );
+    let reps = all_repeats.into_inner().unwrap();
+    Ok((reps, inter_count))
 }
 
 /// Compute median of event lengths (0 for exact match, clip/insertion length for near-match)
@@ -2263,6 +2319,7 @@ pub fn run_all_samples(
             config.variation_percentage,
             config.min_occurrences,
             config.view_mode.as_str(),
+            config.blast,
         )?;
         (writer, new_contigs_for_blast, Vec::new())
     };
@@ -2284,18 +2341,15 @@ pub fn run_all_samples(
         None
     };
 
-    // 6. If sequences available, run repeat detection and inter-contig comparison.
-    // Per-contig BLAST self-alignment detects intra-contig repeats (all modes).
-    // In MAG mode, minimap2 additionally finds inter-contig same-MAG hits.
+    // 6. If --blast enabled and sequences available, run repeat detection.
+    // Contig mode: per-contig BLAST self-alignment (autoblast).
+    // MAG mode: per-MAG BLAST handles both intra-contig repeats and inter-contig hits.
     let blast_contigs = &new_contigs_for_blast;
     let has_sequences = blast_contigs.iter().any(|c| c.sequence.is_some());
     let n_contigs_with_seq = blast_contigs.iter().filter(|c| c.sequence.is_some()).count();
 
     let t_autoblast = if config.enable_timing { Some(std::time::Instant::now()) } else { None };
-    let repeats = if has_sequences {
-        let reps = run_autoblast(blast_contigs, config.threads)?;
-        db_writer.write_repeats(&reps)?;
-
+    let repeats = if config.blast && has_sequences {
         if config.view_mode == ViewMode::Mag {
             let blast_names: HashSet<&str> = blast_contigs.iter().map(|c| c.name.as_str()).collect();
             let filtered_manifest: Vec<(String, Vec<String>)> = mag_contig_map
@@ -2309,17 +2363,24 @@ pub fn run_all_samples(
                 })
                 .filter(|(_, m)| !m.is_empty())
                 .collect();
-            let inter_count = run_mag_interblast(blast_contigs, &filtered_manifest, &db_writer, config.threads)?;
+            let (reps, inter_count) = run_mag_interblast(blast_contigs, &filtered_manifest, &db_writer)?;
+            db_writer.compute_duplication_percentages(&reps)?;
             if inter_count > 0 {
                 let t_hit_features = std::time::Instant::now();
                 db_writer.write_mag_hit_features()?;
                 eprintln!("  Per-position hit features: {:.1}s", t_hit_features.elapsed().as_secs_f64());
             }
+            reps
+        } else {
+            let reps = run_autoblast(blast_contigs, config.threads)?;
+            db_writer.write_repeats(&reps)?;
+            db_writer.compute_duplication_percentages(&reps)?;
+            reps
         }
-
-        db_writer.compute_duplication_percentages(&reps)?;
-        reps
     } else {
+        if !config.blast && has_sequences {
+            eprintln!("\n### BLAST repeat detection: skipped (use --blast to enable)");
+        }
         Vec::new()
     };
     let autoblast_secs = t_autoblast.map(|t| t.elapsed().as_secs_f64()).unwrap_or(0.0);
@@ -2415,6 +2476,9 @@ pub fn run_all_samples(
     eprintln!("Modules: {}\n", modules.join(", "));
 
     let flags = ModuleFlags::from_modules(modules);
+    if flags.phagetermini && !config.blast {
+        eprintln!("WARNING: Phage termini module is enabled without --blast. No terminal repeat (DTR/ITR) detection will be performed.\n");
+    }
     let result = process_samples_parallel(&bam_files, &contigs, flags, config, &circularity_map, db_writer, &repeats, &annotations, output_db, timing_file, autoblast_secs, gc_secs, &mag_contig_map)?;
 
     print_summary(&result, output_db);

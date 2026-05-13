@@ -80,7 +80,7 @@ mod python {
     ///         - "samples_failed": int
     ///         - "total_time": float (seconds)
     #[pyfunction]
-    #[pyo3(signature = (genbank_path, bam_files, output_db, modules, threads, sequencing_type=None, min_aligned_fraction=50.0, min_coverage_depth=0.0, bar_ratio=10.0, create_indexes=true, assembly_path="", extend_db="", min_occurrences=2, enable_timing=false, view="contig", mag_manifest=vec![], variation_percentage=0.0))]
+    #[pyo3(signature = (genbank_path, bam_files, output_db, modules, threads, sequencing_type=None, min_aligned_fraction=50.0, min_coverage_depth=0.0, bar_ratio=10.0, create_indexes=true, assembly_path="", extend_db="", min_occurrences=2, enable_timing=false, view="contig", mag_manifest=vec![], variation_percentage=0.0, blast=false))]
     fn process_all_samples<'py>(
         py: Python<'py>,
         genbank_path: &str,
@@ -100,6 +100,7 @@ mod python {
         view: &str,
         mag_manifest: Vec<(String, String, String)>,
         variation_percentage: f64,
+        blast: bool,
     ) -> PyResult<Bound<'py, PyDict>> {
         use crate::gc_content::GCParams;
         use crate::processing::{run_all_samples, MagInput, ProcessConfig, ViewMode};
@@ -139,6 +140,7 @@ mod python {
             view_mode,
             mag_manifest,
             contig_drops_counter: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            blast,
         };
 
         // Convert string paths to PathBuf

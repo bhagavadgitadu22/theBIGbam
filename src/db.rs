@@ -1527,6 +1527,7 @@ impl DbWriter {
         variation_percentage: f64,
         min_occurrences: u32,
         view_mode: &str,
+        blast: bool,
     ) -> Result<()> {
         let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
         let now = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
@@ -1557,6 +1558,7 @@ impl DbWriter {
             ("Variation_percentage", variation_percentage.to_string()),
             ("Min_occurrences", min_occurrences.to_string()),
             ("View_mode", view_mode.to_string()),
+            ("Blast_enabled", blast.to_string()),
         ];
 
         for (key, value) in &rows {

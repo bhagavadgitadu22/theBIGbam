@@ -11,7 +11,7 @@ except ImportError:
     _rust = None
 
 
-def calculating_all_features_parallel(list_modules, bam_files, output_db, min_aligned_fraction, min_coverage_depth, coverage_percentage, n_sample_cores=None, sequencing_type=None, genbank_path=None, assembly_path=None, extend_db=None, min_occurrences=2, enable_timing=False, view="contig", mag_manifest=None, variation_percentage=0.0):
+def calculating_all_features_parallel(list_modules, bam_files, output_db, min_aligned_fraction, min_coverage_depth, coverage_percentage, n_sample_cores=None, sequencing_type=None, genbank_path=None, assembly_path=None, extend_db=None, min_occurrences=2, enable_timing=False, view="contig", mag_manifest=None, variation_percentage=0.0, blast=False):
     """Process all BAM files in parallel using Rust bindings."""
     if not HAS_RUST:
         sys.exit("ERROR: Rust bindings (thebigbam_rs) are required but not available. Please install them first.")
@@ -43,6 +43,7 @@ def calculating_all_features_parallel(list_modules, bam_files, output_db, min_al
             view=view,
             mag_manifest=list(mag_manifest or []),
             variation_percentage=float(variation_percentage),
+            blast=blast,
         )
     except Exception as e:
         print(f"ERROR: Rust processing failed: {e}", flush=True)
@@ -69,6 +70,7 @@ def add_calculate_args(parser):
     parser.add_argument('--min_occurrences', type=int, default=2, help='Minimum absolute event count for sparse features (default: 2). Position kept only if value > coverage × coverage_percentage AND value > min_occurrences.')
     parser.add_argument('--variation_percentage', type=float, default=0, help='Adaptive smoothing for dense features (coverage, MAPQ, etc.): consecutive positions within this %% of each other are collapsed. 0 = disabled (exact base resolution). Good for reducing database size; OK for visualization; slightly lossy for precise analysis. Recommended: 5-10%%.')
     parser.add_argument('--extend', action='store_true', help='Extend an existing database with new samples (and optionally new contigs)')
+    parser.add_argument('--blast', action='store_true', default=False, help='Enable BLAST-based repeat detection (autoblast for contig mode, per-MAG blast for MAG mode). Off by default.')
     parser.add_argument('--time', action='store_true', default=False, help=argparse.SUPPRESS)
 
 GENBANK_EXTS = ('.gbk', '.gbff', '.gb', '.genbank', '.gff', '.gff3')
@@ -340,6 +342,14 @@ def run_calculate_args(args):
             print(f"WARNING: --modules is ignored in extend mode. Using modules from existing database: {', '.join(existing_modules)}", flush=True)
         requested_modules = existing_modules
 
+        # Inherit blast setting from existing database
+        db_blast = db_metadata.get("Blast_enabled", "false") == "true"
+        if getattr(args, 'blast', False) and not db_blast:
+            print("WARNING: --blast is ignored in extend mode. Original database was created without --blast.", flush=True)
+        elif not getattr(args, 'blast', False) and db_blast:
+            print("INFO: --blast inherited from existing database.", flush=True)
+        blast_enabled = db_blast
+
         # Compression parameters: use DB values if present, otherwise accept CLI values.
         # When DB has stored params (not purged), the user's CLI values are disregarded.
         has_db_params = "Coverage_percentage" in db_metadata
@@ -420,6 +430,7 @@ def run_calculate_args(args):
         view=view,
         mag_manifest=mag_manifest,
         variation_percentage=args.variation_percentage,
+        blast=blast_enabled if is_extending else getattr(args, 'blast', False),
     )
 
 

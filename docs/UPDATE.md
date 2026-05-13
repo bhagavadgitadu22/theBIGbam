@@ -466,10 +466,10 @@ CREATE VIEW Contig_blast_hits_symmetric AS
 When inter-contig hits exist, two additional sparse features are computed per contig
 and stored in `Contig_blob` (contig-level, no sample dimension):
 
-| Feature                    | Subplot            | Scale | Description                                                              |
-| -------------------------- | ------------------ | ----- | ------------------------------------------------------------------------ |
-| `hit_count_within_mag`     | Hit count          | Raw   | Number of inter-contig hits covering each position (sweep-line count)    |
-| `hit_identity_within_mag`  | Max hit identity   | ×100  | Maximum percent identity across hits at each position (partner metadata) |
+| Feature                   | Subplot          | Scale | Description                                                              |
+| ------------------------- | ---------------- | ----- | ------------------------------------------------------------------------ |
+| `hit_count_within_mag`    | Hit count        | Raw   | Number of inter-contig hits covering each position (sweep-line count)    |
+| `hit_identity_within_mag` | Max hit identity | ×100  | Maximum percent identity across hits at each position (partner metadata) |
 
 These are computed via a difference-array sweep-line: each hit increments a range
 `[lo, hi]`, then a prefix sum produces per-position counts. Identity tracking keeps
