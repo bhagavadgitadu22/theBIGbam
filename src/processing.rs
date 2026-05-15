@@ -78,6 +78,43 @@ pub struct MagInput {
     pub asm_path: Option<PathBuf>,
 }
 
+/// A group of contigs belonging to one MAG, ready for batch processing.
+struct MagJobGroup {
+    mag_name: String,
+    mag_id: i64,
+    mag_length: u32,
+    members: Vec<MagContigJob>,
+}
+
+/// One contig within a MAG job group.
+struct MagContigJob {
+    tid: u32,
+    contig_id: i64,
+    ref_name: String,
+    ref_length: usize,
+    offset_in_mag: u32,
+}
+
+/// Result of processing one MAG group (all member contigs + MAG-level blobs).
+struct MagGroupResult {
+    mag_name: String,
+    mag_id: i64,
+    contig_blobs: Vec<(String, String, crate::blob::EncodedBlob)>,
+    mag_blobs: Vec<(String, crate::blob::EncodedBlob)>,
+    mag_cov_stats: crate::mag_blob::MagCoverageStats,
+    presences: Vec<PresenceData>,
+    packaging: Vec<PackagingData>,
+    misassembly: Vec<MisassemblyData>,
+    microdiversity: Vec<MicrodiversityData>,
+    side_misassembly: Vec<SideMisassemblyData>,
+    topology: Vec<TopologyData>,
+    mapped_reads: u64,
+}
+
+/// Contig→MAG membership mapping, built once per run from mag_contig_map + DB IDs.
+/// Maps contig_name → (mag_name, mag_id, offset_in_mag, mag_length).
+pub type MagMemberLookup = HashMap<String, (String, i64, u32, u32)>;
+
 /// Configuration for processing.
 #[derive(Clone)]
 pub struct ProcessConfig {
@@ -1421,9 +1458,308 @@ fn add_features_from_arrays(
     (packaging_result, metrics_result)
 }
 
+/// Process one MAG group: all member contigs in sequence with one BAM reader.
+/// Accumulates dense features into MAG-scale arrays and encodes MAG blobs
+/// directly — no decode→reencode cycle.
+fn process_mag_group(
+    bam: &mut IndexedReader,
+    group: &MagJobGroup,
+    seq_type: SequencingType,
+    flags: ModuleFlags,
+    config: &ProcessConfig,
+    is_circular: bool,
+    repeats: &[RepeatsData],
+    annos_by_contig: &HashMap<i64, Vec<&FeatureAnnotation>>,
+    accum_ref: Option<&TimingAccum>,
+) -> Option<MagGroupResult> {
+    use crate::blob::{encode_dense_blob, smooth_dense_values, EncodedBlob};
+    use crate::types::{get_value_scale, Encoding, VARIABLES};
+
+    let mag_len = group.mag_length as usize;
+    if mag_len == 0 || group.members.is_empty() { return None; }
+
+    // Dense accumulators — one Vec<i32> per dense sample feature.
+    // Initialized to 0; each contig writes its slice at offset.
+    struct DenseAccum {
+        primary_reads: Vec<i32>,
+        primary_reads_plus_only: Vec<i32>,
+        primary_reads_minus_only: Vec<i32>,
+        secondary_reads: Vec<i32>,
+        supplementary_reads: Vec<i32>,
+        mapq: Vec<i32>,
+        coverage_reduced: Vec<i32>,
+    }
+    impl DenseAccum {
+        fn new(len: usize) -> Self {
+            Self {
+                primary_reads: vec![0i32; len],
+                primary_reads_plus_only: vec![0i32; len],
+                primary_reads_minus_only: vec![0i32; len],
+                secondary_reads: vec![0i32; len],
+                supplementary_reads: vec![0i32; len],
+                mapq: vec![0i32; len],
+                coverage_reduced: vec![0i32; len],
+            }
+        }
+    }
+
+    let mut accum = DenseAccum::new(mag_len);
+    let mut contig_blobs: Vec<(String, String, EncodedBlob)> = Vec::new();
+    let mut presences = Vec::new();
+    let mut all_packaging = Vec::new();
+    let mut all_misassembly = Vec::new();
+    let mut all_microdiversity = Vec::new();
+    let mut all_side_misassembly = Vec::new();
+    let mut all_topology = Vec::new();
+    let mut mapped_reads: u64 = 0;
+    let mut contig_lengths_ordered: Vec<u32> = Vec::new();
+
+    for member in &group.members {
+        let off = member.offset_in_mag as usize;
+        let clen = member.ref_length;
+        contig_lengths_ordered.push(clen as u32);
+
+        // CDS index
+        let ts = accum_ref.map(|_| std::time::Instant::now());
+        let cds_index = if flags.mapping_metrics {
+            match annos_by_contig.get(&member.contig_id) {
+                Some(slice) if !slice.is_empty() => {
+                    let idx = CdsIndex::from_contig_annotations(slice);
+                    if idx.is_empty() { None } else { Some(idx) }
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
+        if let (Some(a), Some(t)) = (accum_ref, ts) {
+            a.cds_index_ns.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        }
+
+        // Process contig streaming (no per-contig AF filtering in MAG mode)
+        let ts = accum_ref.map(|_| std::time::Instant::now());
+        let mut phase_t: Option<BamPhaseTimings> = accum_ref.map(|_| BamPhaseTimings::default());
+        let (mut arrays, coverage_pct, primary_count) = match process_contig_streaming(
+            bam, member.tid, &member.ref_name, member.ref_length, seq_type, flags,
+            is_circular, 0.0, config.phagetermini_config.min_clipping_length, &mut phase_t,
+        ) {
+            Ok(Some(result)) => result,
+            Ok(None) => {
+                if let (Some(a), Some(pt)) = (accum_ref, phase_t.as_ref()) {
+                    a.stream_fetch_seek_ns.fetch_add(pt.fetch_seek_ns, Ordering::Relaxed);
+                    a.stream_records_ns.fetch_add(pt.records_ns, Ordering::Relaxed);
+                    a.stream_process_read_ns.fetch_add(pt.process_read_ns, Ordering::Relaxed);
+                    a.stream_finalize_ns.fetch_add(pt.finalize_ns, Ordering::Relaxed);
+                }
+                if let (Some(a), Some(t)) = (accum_ref, ts) {
+                    a.streaming_ns.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                }
+                continue;
+            }
+            Err(e) => {
+                eprintln!("Error processing contig {} in MAG {}: {}", member.ref_name, group.mag_name, e);
+                continue;
+            }
+        };
+        if let (Some(a), Some(pt)) = (accum_ref, phase_t.as_ref()) {
+            a.stream_fetch_seek_ns.fetch_add(pt.fetch_seek_ns, Ordering::Relaxed);
+            a.stream_records_ns.fetch_add(pt.records_ns, Ordering::Relaxed);
+            a.stream_process_read_ns.fetch_add(pt.process_read_ns, Ordering::Relaxed);
+            a.stream_finalize_ns.fetch_add(pt.finalize_ns, Ordering::Relaxed);
+        }
+        if let (Some(a), Some(t)) = (accum_ref, ts) {
+            a.streaming_ns.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        }
+
+        // Accumulate dense features into MAG arrays at offset (pre-smoothing raw values)
+        let end = (off + clen).min(mag_len);
+        let n = end - off;
+        for i in 0..n.min(arrays.primary_reads.len()) {
+            accum.primary_reads[off + i] = arrays.primary_reads[i] as i32;
+            accum.primary_reads_plus_only[off + i] = arrays.primary_reads_plus_only[i] as i32;
+            accum.primary_reads_minus_only[off + i] = arrays.primary_reads_minus_only[i] as i32;
+            accum.secondary_reads[off + i] = arrays.secondary_reads[i] as i32;
+            accum.supplementary_reads[off + i] = arrays.supplementary_reads[i] as i32;
+            accum.coverage_reduced[off + i] = arrays.coverage_reduced[i] as i32;
+        }
+        // mapq: average per position
+        for i in 0..n.min(arrays.sum_mapq.len()) {
+            let pr = arrays.primary_reads[i];
+            accum.mapq[off + i] = if pr > 0 { (arrays.sum_mapq[i] as f64 / pr as f64 * 100.0).round() as i32 } else { 0 };
+        }
+
+        // Build per-contig presence
+        let coverage_mean = arrays.coverage_mean() as f32;
+        let coverage_median = arrays.coverage_median() as f32;
+        let coverage_trimmed_mean = arrays.coverage_trimmed_mean(0.05) as f32;
+        let above_expected = coverage_pct >= (1.0 - (-0.883 * coverage_mean as f64).exp()) * 100.0;
+        let coverage_relative_coverage_roughness = if arrays.primary_reads.len() > 1 && coverage_mean > 0.0 {
+            let nn = arrays.primary_reads.len();
+            let mean_cov = coverage_mean as f64;
+            let sq_diff: f64 = arrays.primary_reads.windows(2)
+                .map(|w| { let d = w[1] as f64 - w[0] as f64; d * d })
+                .sum::<f64>() / (nn - 1) as f64;
+            (sq_diff.sqrt() / mean_cov * 1000000.0) as f32
+        } else { 0.0 };
+        let coverage_coefficient_of_variation = if !arrays.primary_reads.is_empty() && coverage_mean > 0.0 {
+            let mean_cov = coverage_mean as f64;
+            let nn = arrays.primary_reads.len() as f64;
+            let var: f64 = arrays.primary_reads.iter()
+                .map(|&x| { let d = x as f64 - mean_cov; d * d }).sum::<f64>() / nn;
+            (var.sqrt() / mean_cov * 1_000_000.0) as f32
+        } else { 0.0 };
+
+        presences.push(PresenceData {
+            contig_name: member.ref_name.clone(),
+            coverage_pct: coverage_pct as f32,
+            above_expected_aligned_fraction: above_expected,
+            read_count: primary_count,
+            coverage_relative_coverage_roughness,
+            coverage_coefficient_of_variation,
+            coverage_mean,
+            coverage_median,
+            coverage_trimmed_mean,
+        });
+        mapped_reads += primary_count;
+
+        // Encode per-contig blobs (existing logic, unchanged)
+        let ts = accum_ref.map(|_| std::time::Instant::now());
+        let mut blob_output: Vec<(String, String, EncodedBlob)> = Vec::new();
+        let (pkg, metrics) = add_features_from_arrays(
+            &mut arrays, &member.ref_name, config, is_circular, seq_type, flags,
+            primary_count, repeats, cds_index.as_ref(), &mut blob_output,
+        );
+        contig_blobs.extend(blob_output);
+        if let Some(p) = pkg { all_packaging.push(p); }
+        if let Some((mis, micro, side, topo)) = metrics {
+            all_misassembly.push(mis);
+            all_microdiversity.push(micro);
+            all_side_misassembly.push(side);
+            all_topology.push(topo);
+        }
+        if let (Some(a), Some(t)) = (accum_ref, ts) {
+            a.feature_calc_ns.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        }
+    }
+
+    if presences.is_empty() {
+        return None;
+    }
+
+    // --- Encode dense MAG blobs from accumulators ---
+    // Apply smoothing per-contig slice to match current behavior
+    fn smooth_per_contig(values: &mut [i32], members: &[MagContigJob], variation_pct: f64) {
+        let mut off = 0usize;
+        for m in members {
+            let end = (off + m.ref_length).min(values.len());
+            smooth_dense_values(&mut values[off..end], variation_pct);
+            off = end;
+        }
+    }
+
+    let vp = config.variation_percentage;
+    let mut mag_blobs: Vec<(String, EncodedBlob)> = Vec::new();
+
+    if flags.coverage {
+        smooth_per_contig(&mut accum.primary_reads, &group.members, vp);
+        mag_blobs.push(("primary_reads".into(), encode_dense_blob(&accum.primary_reads, get_value_scale("primary_reads"), group.mag_length)));
+        smooth_per_contig(&mut accum.primary_reads_plus_only, &group.members, vp);
+        mag_blobs.push(("primary_reads_plus_only".into(), encode_dense_blob(&accum.primary_reads_plus_only, get_value_scale("primary_reads_plus_only"), group.mag_length)));
+        smooth_per_contig(&mut accum.primary_reads_minus_only, &group.members, vp);
+        mag_blobs.push(("primary_reads_minus_only".into(), encode_dense_blob(&accum.primary_reads_minus_only, get_value_scale("primary_reads_minus_only"), group.mag_length)));
+        smooth_per_contig(&mut accum.secondary_reads, &group.members, vp);
+        mag_blobs.push(("secondary_reads".into(), encode_dense_blob(&accum.secondary_reads, get_value_scale("secondary_reads"), group.mag_length)));
+        smooth_per_contig(&mut accum.supplementary_reads, &group.members, vp);
+        mag_blobs.push(("supplementary_reads".into(), encode_dense_blob(&accum.supplementary_reads, get_value_scale("supplementary_reads"), group.mag_length)));
+        smooth_per_contig(&mut accum.mapq, &group.members, vp);
+        mag_blobs.push(("mapq".into(), encode_dense_blob(&accum.mapq, get_value_scale("mapq"), group.mag_length)));
+    }
+    if flags.phagetermini {
+        smooth_per_contig(&mut accum.coverage_reduced, &group.members, vp);
+        mag_blobs.push(("coverage_reduced".into(), encode_dense_blob(&accum.coverage_reduced, get_value_scale("coverage_reduced"), group.mag_length)));
+    }
+
+    // insert_sizes / read_lengths: accumulate from per-contig blobs since they
+    // use derived values (running average, not raw counts). Use existing sparse
+    // aggregation path below — they're dense but small and the decode is cheap.
+
+    // --- Aggregate sparse MAG blobs from per-contig encoded blobs ---
+    // Reuses existing aggregation: decode per-contig blob → shift positions → encode.
+    // Sparse data is small so the decode cost is negligible.
+    for var in VARIABLES.iter() {
+        if crate::mag_blob::contig_blob_config_pub(var.name).is_some() { continue; }
+        let is_dense_already_handled = matches!(var.name,
+            "primary_reads" | "primary_reads_plus_only" | "primary_reads_minus_only" |
+            "secondary_reads" | "supplementary_reads" | "mapq" | "coverage_reduced"
+        );
+        if is_dense_already_handled { continue; }
+
+        let members_and_blobs: Vec<(crate::mag_blob::MagMember, &EncodedBlob)> = group.members.iter()
+            .filter_map(|m| {
+                let blob = contig_blobs.iter().find(|(fname, cname, _)| fname == var.name && cname == &m.ref_name);
+                blob.map(|(_, _, b)| (crate::mag_blob::MagMember { contig_id: m.contig_id, offset: m.offset_in_mag, length: m.ref_length as u32 }, b))
+            })
+            .collect();
+        if members_and_blobs.is_empty() { continue; }
+
+        let encoded = match var.encoding {
+            Encoding::Dense => crate::mag_blob::aggregate_feature_dense_inmem(&members_and_blobs, group.mag_length, var.value_scale),
+            Encoding::Sparse => crate::mag_blob::aggregate_feature_sparse_inmem(&members_and_blobs, group.mag_length, var.value_scale),
+        };
+        if !encoded.zoom.is_empty() {
+            mag_blobs.push((var.name.to_string(), encoded));
+        }
+    }
+
+    // --- MAG coverage stats from raw primary_reads accumulator ---
+    // Use the pre-smoothing values for stats. We already smoothed accum.primary_reads
+    // above, so rebuild from presences read_count for the total.
+    let total_reads_in_mag: u64 = presences.iter().map(|p| p.read_count).sum();
+    // Recompute from the smoothed primary_reads (matches current behavior where
+    // stats are computed from decoded blob values which are post-smoothing).
+    let mag_cov_stats = crate::mag_blob::compute_mag_coverage_stats_from_raw(
+        &accum.primary_reads, group.mag_length, &contig_lengths_ordered, total_reads_in_mag,
+    );
+
+    Some(MagGroupResult {
+        mag_name: group.mag_name.clone(),
+        mag_id: group.mag_id,
+        contig_blobs,
+        mag_blobs,
+        mag_cov_stats,
+        presences,
+        packaging: all_packaging,
+        misassembly: all_misassembly,
+        microdiversity: all_microdiversity,
+        side_misassembly: all_side_misassembly,
+        topology: all_topology,
+        mapped_reads,
+    })
+}
+
 /// Process one BAM file using streaming (single-pass, optimized).
 /// Parallelizes at the contig level for samples with many contigs.
 /// Returns (feature_blobs, presences, packaging, misassembly, microdiversity, side_misassembly, topology, sample_name, seq_type, total_reads, mapped_reads)
+/// Per-sample result including optional MAG-level blobs.
+pub struct SampleProcessResult {
+    pub feature_blobs: Vec<(String, String, crate::blob::EncodedBlob)>,
+    pub presences: Vec<PresenceData>,
+    pub packaging: Vec<PackagingData>,
+    pub misassembly: Vec<MisassemblyData>,
+    pub microdiversity: Vec<MicrodiversityData>,
+    pub side_misassembly: Vec<SideMisassemblyData>,
+    pub topology: Vec<TopologyData>,
+    pub sample_name: String,
+    pub seq_type: SequencingType,
+    pub total_reads: u64,
+    pub mapped_reads: u64,
+    pub is_circular: bool,
+    pub timings: Option<SampleTimings>,
+    /// MAG-level blobs, ready to write. Empty in contig mode.
+    /// Vec of (mag_name, mag_id, feature_blobs, coverage_stats).
+    pub mag_results: Vec<(String, i64, Vec<(String, crate::blob::EncodedBlob)>, crate::mag_blob::MagCoverageStats)>,
+}
+
 pub fn process_sample(
     bam_path: &Path,
     _contigs: &[ContigInfo],
@@ -1434,7 +1770,8 @@ pub fn process_sample(
     _annotations: &[FeatureAnnotation],
     contig_by_name: &HashMap<&str, usize>,
     annos_by_contig: &HashMap<i64, Vec<&FeatureAnnotation>>,
-) -> Result<(Vec<(String, String, crate::blob::EncodedBlob)>, Vec<PresenceData>, Vec<PackagingData>, Vec<MisassemblyData>, Vec<MicrodiversityData>, Vec<SideMisassemblyData>, Vec<TopologyData>, String, SequencingType, u64, u64, bool, Option<SampleTimings>)> {
+    mag_member_lookup: Option<&MagMemberLookup>,
+) -> Result<SampleProcessResult> {
     let sample_name = bam_path
         .file_stem()
         .unwrap_or_default()
@@ -1516,206 +1853,265 @@ pub fn process_sample(
     let accum_ref = accum.as_ref();
     let t_par = if time_on { Some(std::time::Instant::now()) } else { None };
 
-    // Each rayon worker chunk opens the BAM once via map_init and reuses it
-    // across all of its jobs — the reader repositions cheaply on each fetch().
-    // For a 362k-reference BAM this collapses ~362k opens to ~tens.
-    let results: Vec<_> = jobs
-        .par_iter()
-        .map_init(
-            || {
-                let ts = accum_ref.map(|_| std::time::Instant::now());
-                let reader = IndexedReader::from_path(bam_path)
+    // MAG mode: group jobs by MAG, process MAG-by-MAG (one BAM open per chunk).
+    // Contig mode: par_chunks over individual jobs (unchanged).
+    let (all_feature_blobs, all_presences, all_packaging, all_misassembly, all_microdiversity, all_side_misassembly, all_topology, mapped_reads, mag_results) = if let Some(lookup) = mag_member_lookup {
+        // Group jobs into MagJobGroups
+        let mut mag_groups_map: HashMap<String, MagJobGroup> = HashMap::new();
+        for (tid, contig_id, ref_name, ref_length) in &jobs {
+            if let Some((mag_name, mag_id, offset, mag_length)) = lookup.get(ref_name.as_str()) {
+                let group = mag_groups_map.entry(mag_name.clone()).or_insert_with(|| MagJobGroup {
+                    mag_name: mag_name.clone(),
+                    mag_id: *mag_id,
+                    mag_length: *mag_length,
+                    members: Vec::new(),
+                });
+                group.members.push(MagContigJob {
+                    tid: *tid,
+                    contig_id: *contig_id,
+                    ref_name: ref_name.clone(),
+                    ref_length: *ref_length,
+                    offset_in_mag: *offset,
+                });
+            }
+        }
+        // Sort members within each group by offset so smooth_per_contig works correctly
+        let mut mag_groups: Vec<MagJobGroup> = mag_groups_map.into_values().collect();
+        for g in &mut mag_groups {
+            g.members.sort_by_key(|m| m.offset_in_mag);
+        }
+
+        let chunk_size = (mag_groups.len() + config.threads - 1).max(1) / config.threads.max(1);
+        let mag_results_vec: Vec<MagGroupResult> = mag_groups
+            .par_chunks(chunk_size.max(1))
+            .flat_map_iter(|chunk| {
+                let ts_open = accum_ref.map(|_| std::time::Instant::now());
+                let mut bam = IndexedReader::from_path(bam_path)
                     .ok()
                     .and_then(|mut b| b.set_threads(1).ok().map(|_| b));
-                if let (Some(a), Some(t)) = (accum_ref, ts) {
+                if let (Some(a), Some(t)) = (accum_ref, ts_open) {
                     a.bam_open_ns.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
                 }
-                reader
-            },
-            |bam_opt, (tid, contig_id, ref_name, ref_length)| {
-                let bam = bam_opt.as_mut()?;
-                let tid = *tid;
-                let contig_id = *contig_id;
-                let ref_length = *ref_length;
 
-                // Sub-phase: CDS index build
-                let ts = accum_ref.map(|_| std::time::Instant::now());
-                let cds_index = if flags.mapping_metrics {
-                    match annos_by_contig.get(&contig_id) {
-                        Some(slice) if !slice.is_empty() => {
-                            let idx = CdsIndex::from_contig_annotations(slice);
-                            if idx.is_empty() { None } else { Some(idx) }
-                        }
-                        _ => None,
-                    }
-                } else {
-                    None
-                };
-                if let (Some(a), Some(t)) = (accum_ref, ts) {
-                    a.cds_index_ns.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                chunk.iter().filter_map(move |group| {
+                    let bam = bam.as_mut()?;
+                    process_mag_group(bam, group, seq_type, flags, config, is_circular, repeats, annos_by_contig, accum_ref)
+                })
+            })
+            .collect();
+
+        if let (Some(s), Some(t)) = (st.as_mut(), t_par) {
+            s.par_iter_wall = t.elapsed();
+            s.n_contigs_processed = mag_results_vec.iter().map(|r| r.presences.len()).sum();
+        }
+
+        let t0 = if time_on { Some(std::time::Instant::now()) } else { None };
+        let mut all_blobs = Vec::new();
+        let mut all_pres = Vec::new();
+        let mut all_pkg = Vec::new();
+        let mut all_mis = Vec::new();
+        let mut all_micro = Vec::new();
+        let mut all_side = Vec::new();
+        let mut all_topo = Vec::new();
+        let mut mapped: u64 = 0;
+        let mut mag_res = Vec::new();
+
+        for r in mag_results_vec {
+            all_blobs.extend(r.contig_blobs);
+            all_pres.extend(r.presences);
+            all_pkg.extend(r.packaging);
+            all_mis.extend(r.misassembly);
+            all_micro.extend(r.microdiversity);
+            all_side.extend(r.side_misassembly);
+            all_topo.extend(r.topology);
+            mapped += r.mapped_reads;
+            mag_res.push((r.mag_name, r.mag_id, r.mag_blobs, r.mag_cov_stats));
+        }
+
+        if let (Some(s), Some(t)) = (st.as_mut(), t0) {
+            s.merge_results = t.elapsed();
+        }
+
+        (all_blobs, all_pres, all_pkg, all_mis, all_micro, all_side, all_topo, mapped, mag_res)
+    } else {
+        // Contig mode: par_chunks over individual contigs
+        let chunk_size = (jobs.len() + config.threads - 1).max(1) / config.threads.max(1);
+        let results: Vec<_> = jobs
+            .par_chunks(chunk_size.max(1))
+            .flat_map_iter(|chunk| {
+                let ts_open = accum_ref.map(|_| std::time::Instant::now());
+                let mut bam = IndexedReader::from_path(bam_path)
+                    .ok()
+                    .and_then(|mut b| b.set_threads(1).ok().map(|_| b));
+                if let (Some(a), Some(t)) = (accum_ref, ts_open) {
+                    a.bam_open_ns.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
                 }
 
-                // Sub-phase: process_contig_streaming
-                let ts = accum_ref.map(|_| std::time::Instant::now());
-                let mut phase_t: Option<BamPhaseTimings> = accum_ref.map(|_| BamPhaseTimings::default());
-                // In MAG mode, per-contig thresholds are disabled — the threshold is applied
-                // at the MAG aggregate level in a post-pass after every member contig is written.
-                let effective_min_af = if config.view_mode == ViewMode::Mag {
-                    0.0
-                } else {
-                    config.min_aligned_fraction
-                };
-                let (mut arrays, coverage_pct, primary_count) = match process_contig_streaming(bam, tid, ref_name, ref_length, seq_type, flags, is_circular, effective_min_af, config.phagetermini_config.min_clipping_length, &mut phase_t) {
-                    Ok(Some(result)) => result,
-                    Ok(None) => {
-                        // Flush phase_timings even on early-return so coverage-filtered
-                        // contigs still show up in the log.
-                        if let (Some(a), Some(pt)) = (accum_ref, phase_t.as_ref()) {
-                            a.stream_fetch_seek_ns.fetch_add(pt.fetch_seek_ns, Ordering::Relaxed);
-                            a.stream_records_ns.fetch_add(pt.records_ns, Ordering::Relaxed);
-                            a.stream_process_read_ns.fetch_add(pt.process_read_ns, Ordering::Relaxed);
-                            a.stream_finalize_ns.fetch_add(pt.finalize_ns, Ordering::Relaxed);
+                chunk.iter().filter_map(move |(tid, contig_id, ref_name, ref_length)| {
+                    let bam = bam.as_mut()?;
+                    let tid = *tid;
+                    let contig_id = *contig_id;
+                    let ref_length = *ref_length;
+
+                    let ts = accum_ref.map(|_| std::time::Instant::now());
+                    let cds_index = if flags.mapping_metrics {
+                        match annos_by_contig.get(&contig_id) {
+                            Some(slice) if !slice.is_empty() => {
+                                let idx = CdsIndex::from_contig_annotations(slice);
+                                if idx.is_empty() { None } else { Some(idx) }
+                            }
+                            _ => None,
                         }
-                        if let (Some(a), Some(t)) = (accum_ref, ts) {
-                            a.streaming_ns.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                    } else {
+                        None
+                    };
+                    if let (Some(a), Some(t)) = (accum_ref, ts) {
+                        a.cds_index_ns.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                    }
+
+                    let ts = accum_ref.map(|_| std::time::Instant::now());
+                    let mut phase_t: Option<BamPhaseTimings> = accum_ref.map(|_| BamPhaseTimings::default());
+                    let (mut arrays, coverage_pct, primary_count) = match process_contig_streaming(bam, tid, ref_name, ref_length, seq_type, flags, is_circular, config.min_aligned_fraction, config.phagetermini_config.min_clipping_length, &mut phase_t) {
+                        Ok(Some(result)) => result,
+                        Ok(None) => {
+                            if let (Some(a), Some(pt)) = (accum_ref, phase_t.as_ref()) {
+                                a.stream_fetch_seek_ns.fetch_add(pt.fetch_seek_ns, Ordering::Relaxed);
+                                a.stream_records_ns.fetch_add(pt.records_ns, Ordering::Relaxed);
+                                a.stream_process_read_ns.fetch_add(pt.process_read_ns, Ordering::Relaxed);
+                                a.stream_finalize_ns.fetch_add(pt.finalize_ns, Ordering::Relaxed);
+                            }
+                            if let (Some(a), Some(t)) = (accum_ref, ts) {
+                                a.streaming_ns.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                            }
+                            if config.min_aligned_fraction > 0.0 {
+                                config.contig_drops_counter.fetch_add(1, Ordering::Relaxed);
+                            }
+                            return None;
                         }
-                        // Count contig-mode drops (the inner streaming returned None because
-                        // the aligned-fraction threshold was exceeded).
-                        if config.view_mode == ViewMode::Contig && effective_min_af > 0.0 {
-                            config.contig_drops_counter.fetch_add(1, Ordering::Relaxed);
+                        Err(e) => {
+                            eprintln!("Error processing contig {} in {}: {}", ref_name, bam_path.display(), e);
+                            return None;
                         }
+                    };
+                    if let (Some(a), Some(pt)) = (accum_ref, phase_t.as_ref()) {
+                        a.stream_fetch_seek_ns.fetch_add(pt.fetch_seek_ns, Ordering::Relaxed);
+                        a.stream_records_ns.fetch_add(pt.records_ns, Ordering::Relaxed);
+                        a.stream_process_read_ns.fetch_add(pt.process_read_ns, Ordering::Relaxed);
+                        a.stream_finalize_ns.fetch_add(pt.finalize_ns, Ordering::Relaxed);
+                    }
+                    if let (Some(a), Some(t)) = (accum_ref, ts) {
+                        a.streaming_ns.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                    }
+
+                    let coverage_mean = arrays.coverage_mean() as f32;
+                    if config.min_coverage_depth > 0.0
+                        && (coverage_mean as f64) < config.min_coverage_depth
+                    {
+                        config.contig_drops_counter.fetch_add(1, Ordering::Relaxed);
                         return None;
                     }
-                    Err(e) => {
-                        eprintln!("Error processing contig {} in {}: {}", ref_name, bam_path.display(), e);
-                        return None;
+
+                    let ts = accum_ref.map(|_| std::time::Instant::now());
+                    let mut feature_blobs: Vec<(String, String, crate::blob::EncodedBlob)> = Vec::new();
+                    let (packaging_info, metrics_info) = add_features_from_arrays(&mut arrays, ref_name, config, is_circular, seq_type, flags, primary_count, repeats, cds_index.as_ref(), &mut feature_blobs);
+                    let coverage_median = arrays.coverage_median() as f32;
+                    let coverage_trimmed_mean = arrays.coverage_trimmed_mean(0.05) as f32;
+
+                    let above_expected = coverage_pct >= (1.0 - (-0.883 * coverage_mean as f64).exp()) * 100.0;
+
+                    let coverage_relative_coverage_roughness = if arrays.primary_reads.len() > 1 && coverage_mean > 0.0 {
+                        let n = arrays.primary_reads.len();
+                        let mean_cov = coverage_mean as f64;
+                        let sum_squared_diff: f64 = arrays.primary_reads
+                            .windows(2)
+                            .map(|w| {
+                                let diff = w[1] as f64 - w[0] as f64;
+                                diff * diff
+                            })
+                            .sum::<f64>() / (n - 1) as f64;
+                        let root_diff = sum_squared_diff.sqrt() / mean_cov;
+                        (root_diff * 1000000.0) as f32
+                    } else {
+                        0.0
+                    };
+
+                    let coverage_coefficient_of_variation = if !arrays.primary_reads.is_empty() && coverage_mean > 0.0 {
+                        let mean_cov = coverage_mean as f64;
+                        let n = arrays.primary_reads.len() as f64;
+                        let variance: f64 = arrays.primary_reads
+                            .iter()
+                            .map(|&x| {
+                                let diff = x as f64 - mean_cov;
+                                diff * diff
+                            })
+                            .sum::<f64>() / n;
+                        let cv = variance.sqrt() / mean_cov;
+                        (cv * 1_000_000.0) as f32
+                    } else {
+                        0.0
+                    };
+
+                    let presence = PresenceData {
+                        contig_name: ref_name.clone(),
+                        coverage_pct: coverage_pct as f32,
+                        above_expected_aligned_fraction: above_expected,
+                        read_count: primary_count,
+                        coverage_relative_coverage_roughness,
+                        coverage_coefficient_of_variation,
+                        coverage_mean,
+                        coverage_median,
+                        coverage_trimmed_mean,
+                    };
+
+                    if let (Some(a), Some(t)) = (accum_ref, ts) {
+                        a.feature_calc_ns.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
                     }
-                };
-                if let (Some(a), Some(pt)) = (accum_ref, phase_t.as_ref()) {
-                    a.stream_fetch_seek_ns.fetch_add(pt.fetch_seek_ns, Ordering::Relaxed);
-                    a.stream_records_ns.fetch_add(pt.records_ns, Ordering::Relaxed);
-                    a.stream_process_read_ns.fetch_add(pt.process_read_ns, Ordering::Relaxed);
-                    a.stream_finalize_ns.fetch_add(pt.finalize_ns, Ordering::Relaxed);
-                }
-                if let (Some(a), Some(t)) = (accum_ref, ts) {
-                    a.streaming_ns.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
-                }
 
-                // Early-exit: skip contigs with low mean coverage depth (only when threshold > 0).
-                // Disabled in MAG mode — enforced in a post-pass on the MAG aggregate.
-                let coverage_mean = arrays.coverage_mean() as f32;
-                if config.view_mode == ViewMode::Contig
-                    && config.min_coverage_depth > 0.0
-                    && (coverage_mean as f64) < config.min_coverage_depth
-                {
-                    config.contig_drops_counter.fetch_add(1, Ordering::Relaxed);
-                    return None;
-                }
+                    Some((feature_blobs, presence, packaging_info, metrics_info, primary_count))
+                })
+            })
+            .collect();
 
-                // Sub-phase: feature calculation
-                let ts = accum_ref.map(|_| std::time::Instant::now());
-                let mut feature_blobs: Vec<(String, String, crate::blob::EncodedBlob)> = Vec::new();
-                let (packaging_info, metrics_info) = add_features_from_arrays(&mut arrays, ref_name, config, is_circular, seq_type, flags, primary_count, repeats, cds_index.as_ref(), &mut feature_blobs);
-                let coverage_median = arrays.coverage_median() as f32;
-                let coverage_trimmed_mean = arrays.coverage_trimmed_mean(0.05) as f32;
-
-                // Above expected aligned fraction: exact_af >= (1 - e^(-0.883 × coverage_mean)) × 100
-                let above_expected = coverage_pct >= (1.0 - (-0.883 * coverage_mean as f64).exp()) * 100.0;
-
-                // Calculate coverage variation using Fano factor style normalization
-                let coverage_relative_coverage_roughness = if arrays.primary_reads.len() > 1 && coverage_mean > 0.0 {
-                    let n = arrays.primary_reads.len();
-                    let mean_cov = coverage_mean as f64;
-                    let sum_squared_diff: f64 = arrays.primary_reads
-                        .windows(2)
-                        .map(|w| {
-                            let diff = w[1] as f64 - w[0] as f64;
-                            diff * diff
-                        })
-                        .sum::<f64>() / (n - 1) as f64;
-                    let root_diff = sum_squared_diff.sqrt() / mean_cov;
-                    (root_diff * 1000000.0) as f32
-                } else {
-                    0.0
-                };
-
-                // Coverage SD: Coefficient of Variation (CV) = std_dev / mean
-                let coverage_coefficient_of_variation = if arrays.primary_reads.len() > 0 && coverage_mean > 0.0 {
-                    let mean_cov = coverage_mean as f64;
-                    let n = arrays.primary_reads.len() as f64;
-                    let variance: f64 = arrays.primary_reads
-                        .iter()
-                        .map(|&x| {
-                            let diff = x as f64 - mean_cov;
-                            diff * diff
-                        })
-                        .sum::<f64>() / n;
-                    let cv = variance.sqrt() / mean_cov;
-                    (cv * 1_000_000.0) as f32
-                } else {
-                    0.0
-                };
-
-                let presence = PresenceData {
-                    contig_name: ref_name.clone(),
-                    coverage_pct: coverage_pct as f32,
-                    above_expected_aligned_fraction: above_expected,
-                    read_count: primary_count,
-                    coverage_relative_coverage_roughness,
-                    coverage_coefficient_of_variation,
-                    coverage_mean,
-                    coverage_median,
-                    coverage_trimmed_mean,
-                };
-
-                if let (Some(a), Some(t)) = (accum_ref, ts) {
-                    a.feature_calc_ns.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
-                }
-
-                Some((feature_blobs, presence, packaging_info, metrics_info, primary_count))
-            },
-        )
-        .filter_map(|x| x)
-        .collect();
-
-    if let (Some(s), Some(t)) = (st.as_mut(), t_par) {
-        s.par_iter_wall = t.elapsed();
-        s.n_contigs_processed = results.len();
-    }
-
-    // --- Phase: merge_results ---
-    let t0 = if time_on { Some(std::time::Instant::now()) } else { None };
-
-    // Merge results from all contigs
-    let mut all_feature_blobs: Vec<(String, String, crate::blob::EncodedBlob)> = Vec::new();
-    let mut all_presences = Vec::new();
-    let mut all_packaging = Vec::new();
-    let mut all_misassembly = Vec::new();
-    let mut all_microdiversity = Vec::new();
-    let mut all_side_misassembly = Vec::new();
-    let mut all_topology = Vec::new();
-    let mut mapped_reads: u64 = 0;
-
-    for (blobs, presence, packaging, metrics, primary_count) in results {
-        all_feature_blobs.extend(blobs);
-        all_presences.push(presence);
-        mapped_reads += primary_count;
-        if let Some(pkg) = packaging {
-            all_packaging.push(pkg);
+        if let (Some(s), Some(t)) = (st.as_mut(), t_par) {
+            s.par_iter_wall = t.elapsed();
+            s.n_contigs_processed = results.len();
         }
-        if let Some((mis, micro, side, topo)) = metrics {
-            all_misassembly.push(mis);
-            all_microdiversity.push(micro);
-            all_side_misassembly.push(side);
-            all_topology.push(topo);
-        }
-    }
 
-    // Unique reads = primary mapped + unmapped (one count per distinct read).
+        let t0 = if time_on { Some(std::time::Instant::now()) } else { None };
+        let mut all_blobs: Vec<(String, String, crate::blob::EncodedBlob)> = Vec::new();
+        let mut all_pres = Vec::new();
+        let mut all_pkg = Vec::new();
+        let mut all_mis = Vec::new();
+        let mut all_micro = Vec::new();
+        let mut all_side = Vec::new();
+        let mut all_topo = Vec::new();
+        let mut mapped: u64 = 0;
+
+        for (blobs, presence, packaging, metrics, primary_count) in results {
+            all_blobs.extend(blobs);
+            all_pres.push(presence);
+            mapped += primary_count;
+            if let Some(pkg) = packaging {
+                all_pkg.push(pkg);
+            }
+            if let Some((mis, micro, side, topo)) = metrics {
+                all_mis.push(mis);
+                all_micro.push(micro);
+                all_side.push(side);
+                all_topo.push(topo);
+            }
+        }
+
+        if let (Some(s), Some(t)) = (st.as_mut(), t0) {
+            s.merge_results = t.elapsed();
+        }
+
+        (all_blobs, all_pres, all_pkg, all_mis, all_micro, all_side, all_topo, mapped, vec![])
+    };
+
     let total_reads = mapped_reads + unmapped_reads;
 
-    if let (Some(s), Some(t)) = (st.as_mut(), t0) {
-        s.merge_results = t.elapsed();
+    if let Some(s) = st.as_mut() {
         s.total_reads = total_reads;
         if let Some(a) = accum.as_ref() {
             s.bam_open_ns = a.bam_open_ns.load(Ordering::Relaxed);
@@ -1729,7 +2125,22 @@ pub fn process_sample(
         }
     }
 
-    Ok((all_feature_blobs, all_presences, all_packaging, all_misassembly, all_microdiversity, all_side_misassembly, all_topology, sample_name, seq_type, total_reads, mapped_reads, is_circular, st))
+    Ok(SampleProcessResult {
+        feature_blobs: all_feature_blobs,
+        presences: all_presences,
+        packaging: all_packaging,
+        misassembly: all_misassembly,
+        microdiversity: all_microdiversity,
+        side_misassembly: all_side_misassembly,
+        topology: all_topology,
+        sample_name,
+        seq_type,
+        total_reads,
+        mapped_reads,
+        is_circular,
+        timings: st,
+        mag_results,
+    })
 }
 
 /// Extract contig information from BAM file headers.
@@ -2521,10 +2932,14 @@ fn filter_failing_mags(
     (drop_set, n_dropped)
 }
 
+type MagResultVec = Vec<(String, i64, Vec<(String, crate::blob::EncodedBlob)>, crate::mag_blob::MagCoverageStats)>;
+
 /// Apply a contig drop set to all per-sample data vectors, removing entries
-/// whose contig_name is in `drop`.
+/// whose contig_name is in `drop`. Also filters `mag_results` by resolving
+/// which MAGs had their contigs dropped via `mag_contig_map`.
 fn apply_mag_filter(
     drop: &HashSet<String>,
+    mag_contig_map: &[(String, Vec<String>)],
     presences: Vec<PresenceData>,
     packaging: Vec<PackagingData>,
     misassembly: Vec<MisassemblyData>,
@@ -2532,6 +2947,7 @@ fn apply_mag_filter(
     side_misassembly: Vec<SideMisassemblyData>,
     topology: Vec<TopologyData>,
     feature_blobs: Vec<(String, String, crate::blob::EncodedBlob)>,
+    mag_results: MagResultVec,
 ) -> (
     Vec<PresenceData>,
     Vec<PackagingData>,
@@ -2540,7 +2956,12 @@ fn apply_mag_filter(
     Vec<SideMisassemblyData>,
     Vec<TopologyData>,
     Vec<(String, String, crate::blob::EncodedBlob)>,
+    MagResultVec,
 ) {
+    let dropped_mag_names: HashSet<&str> = mag_contig_map.iter()
+        .filter(|(_, members)| members.iter().any(|c| drop.contains(c)))
+        .map(|(name, _)| name.as_str())
+        .collect();
     (
         presences.into_iter().filter(|p| !drop.contains(&p.contig_name)).collect(),
         packaging.into_iter().filter(|p| !drop.contains(&p.contig_name)).collect(),
@@ -2549,7 +2970,29 @@ fn apply_mag_filter(
         side_misassembly.into_iter().filter(|p| !drop.contains(&p.contig_name)).collect(),
         topology.into_iter().filter(|p| !drop.contains(&p.contig_name)).collect(),
         feature_blobs.into_iter().filter(|(_, cname, _)| !drop.contains(cname)).collect(),
+        mag_results.into_iter().filter(|(name, _, _, _)| !dropped_mag_names.contains(name.as_str())).collect(),
     )
+}
+
+fn write_mag_results(
+    db_writer: &DbWriter,
+    sample_name: &str,
+    sample_id: i64,
+    mag_results: &MagResultVec,
+) -> u64 {
+    if mag_results.is_empty() { return 0; }
+    let mag_t = std::time::Instant::now();
+    if let Ok(conn) = db_writer.lock_conn() {
+        for (mag_name, mag_id, blobs, stats) in mag_results {
+            if let Err(e) = db_writer.write_mag_blobs(&conn, *mag_id, sample_id, blobs) {
+                eprintln!("\n### ERROR writing MAG blobs for {} MAG {}: {:?}", sample_name, mag_name, e);
+            }
+            if let Err(e) = db_writer.write_mag_coverage(&conn, *mag_id, sample_id, stats) {
+                eprintln!("\n### ERROR writing MAG coverage for {} MAG {}: {:?}", sample_name, mag_name, e);
+            }
+        }
+    }
+    mag_t.elapsed().as_nanos() as u64
 }
 
 /// Holds processed sample data ready for database writing.
@@ -2568,6 +3011,8 @@ struct SampleResult {
     side_misassembly: Vec<SideMisassemblyData>,
     topology: Vec<TopologyData>,
     timings: Option<SampleTimings>,
+    /// MAG-level blobs ready to write. Empty in contig mode.
+    mag_results: Vec<(String, i64, Vec<(String, crate::blob::EncodedBlob)>, crate::mag_blob::MagCoverageStats)>,
 }
 
 fn process_samples_parallel(
@@ -2664,6 +3109,13 @@ fn process_samples_parallel(
         .map(|c| (c.name.clone(), c.length))
         .collect();
 
+    // Build MagMemberLookup before writer thread takes db_writer
+    let mag_member_lookup: Option<MagMemberLookup> = if is_mag_mode {
+        Some(crate::mag_blob::build_mag_member_lookup(&db_writer)?)
+    } else {
+        None
+    };
+
     // Spawn dedicated writer thread
     let writer_handle = thread::spawn(move || -> Result<(usize, std::time::Duration, Vec<SampleTimings>, usize)> {
         let write_start = std::time::Instant::now();
@@ -2672,27 +3124,24 @@ fn process_samples_parallel(
         let mut all_timings: Vec<SampleTimings> = Vec::new();
         let mut timing_file = timing_file;
 
-        // Build the contig→MAG lookup once. Empty in non-MAG mode.
-        let mag_lookup = crate::mag_blob::build_mag_lookup(&db_writer)?;
-
         // Receive and write samples as they arrive
         for result in rx {
             written_count += 1;
 
             // MAG-level threshold pre-filter: drop contigs from failing MAGs
-            let (presences, packaging, misassembly, microdiversity, side_misassembly, topology, feature_blobs) =
+            let (presences, packaging, misassembly, microdiversity, side_misassembly, topology, feature_blobs, mag_results) =
                 if is_mag_mode && !mag_map_owned.is_empty() {
                     let (drop_set, n_dropped) = filter_failing_mags(
                         &result.presences, &mag_map_owned, &contig_length_map, min_af, min_cov,
                     );
                     mag_drops += n_dropped;
                     if !drop_set.is_empty() {
-                        apply_mag_filter(&drop_set, result.presences, result.packaging, result.misassembly, result.microdiversity, result.side_misassembly, result.topology, result.feature_blobs)
+                        apply_mag_filter(&drop_set, &mag_map_owned, result.presences, result.packaging, result.misassembly, result.microdiversity, result.side_misassembly, result.topology, result.feature_blobs, result.mag_results)
                     } else {
-                        (result.presences, result.packaging, result.misassembly, result.microdiversity, result.side_misassembly, result.topology, result.feature_blobs)
+                        (result.presences, result.packaging, result.misassembly, result.microdiversity, result.side_misassembly, result.topology, result.feature_blobs, result.mag_results)
                     }
                 } else {
-                    (result.presences, result.packaging, result.misassembly, result.microdiversity, result.side_misassembly, result.topology, result.feature_blobs)
+                    (result.presences, result.packaging, result.misassembly, result.microdiversity, result.side_misassembly, result.topology, result.feature_blobs, result.mag_results)
                 };
 
             if presences.is_empty() {
@@ -2745,16 +3194,7 @@ fn process_samples_parallel(
                     eprintln!("Writing:    [{}/{}] {}", written_count, total_writer, msg);
                 }
             } else {
-                // Per-sample MAG-blob aggregation (no-op when not in MAG mode).
-                if !mag_lookup.is_empty() {
-                    let mag_t = std::time::Instant::now();
-                    if let Err(e) = crate::mag_blob::build_mag_blobs_for_sample(
-                        &db_writer, sample_id, &feature_blobs, &mag_lookup,
-                    ) {
-                        eprintln!("\n### ERROR aggregating MAG blobs for {}: {:?}", result.sample_name, e);
-                    }
-                    mag_agg_ns = mag_t.elapsed().as_nanos() as u64;
-                }
+                mag_agg_ns = write_mag_results(&db_writer, &result.sample_name, sample_id, &mag_results);
                 write_pb_clone.set_message(result.sample_name.clone());
                 if !is_tty_writer {
                     eprintln!("Writing:    [{}/{}] {}", written_count, total_writer, result.sample_name);
@@ -2805,40 +3245,40 @@ fn process_samples_parallel(
 
     // Process samples in parallel, sending to channel immediately
     // send() blocks if channel is full (backpressure)
+    let mag_member_lookup_ref = mag_member_lookup.as_ref();
     bam_files.par_iter().for_each(|bam_path| {
         let sample_start = std::time::Instant::now();
 
         let sample_circular = circularity_map.get(bam_path).copied().unwrap_or(false);
-        match process_sample(bam_path, contigs, flags, config, sample_circular, repeats, annotations, &contig_by_name, &annos_by_contig) {
-            Ok((feature_blobs, presences, packaging, misassembly, microdiversity, side_misassembly, topology, sample_name, sequencing_type, total_reads, mapped_reads, is_circular, mut timings)) => {
+        match process_sample(bam_path, contigs, flags, config, sample_circular, repeats, annotations, &contig_by_name, &annos_by_contig, mag_member_lookup_ref) {
+            Ok(mut r) => {
                 let sample_time = sample_start.elapsed().as_secs_f64();
-                // Fill the total processing time (DB write will be added by writer thread)
-                if let Some(ref mut t) = timings {
+                if let Some(ref mut t) = r.timings {
                     t.total = sample_start.elapsed();
                 }
                 completed_count.fetch_add(1, Ordering::SeqCst);
-                let msg = format!("{} ({:.2}s)", sample_name, sample_time);
+                let msg = format!("{} ({:.2}s)", r.sample_name, sample_time);
                 process_pb.set_message(msg.clone());
                 process_pb.inc(1);
                 if !is_tty {
                     eprintln!("Processing: {}", msg);
                 }
 
-                // Send to writer thread (blocks if channel full)
                 let _ = tx.send(SampleResult {
-                    sample_name,
-                    sequencing_type,
-                    total_reads,
-                    mapped_reads,
-                    is_circular,
-                    feature_blobs,
-                    presences,
-                    packaging,
-                    misassembly,
-                    microdiversity,
-                    side_misassembly,
-                    topology,
-                    timings,
+                    sample_name: r.sample_name,
+                    sequencing_type: r.seq_type,
+                    total_reads: r.total_reads,
+                    mapped_reads: r.mapped_reads,
+                    is_circular: r.is_circular,
+                    feature_blobs: r.feature_blobs,
+                    presences: r.presences,
+                    packaging: r.packaging,
+                    misassembly: r.misassembly,
+                    microdiversity: r.microdiversity,
+                    side_misassembly: r.side_misassembly,
+                    topology: r.topology,
+                    timings: r.timings,
+                    mag_results: r.mag_results,
                 });
             }
             Err(e) => {
@@ -2947,7 +3387,11 @@ fn process_samples_sequential(
     let mut all_timings: Vec<SampleTimings> = Vec::new();
     let mut timing_file = timing_file;
 
-    let mag_lookup = crate::mag_blob::build_mag_lookup(&db_writer)?;
+    let mag_member_lookup: Option<MagMemberLookup> = if is_mag_mode {
+        Some(crate::mag_blob::build_mag_member_lookup(&db_writer)?)
+    } else {
+        None
+    };
 
     // Build shared lookups once — avoids rebuilding per sample (critical for 2M+ contigs).
     let contig_by_name: HashMap<&str, usize> = {
@@ -2976,37 +3420,37 @@ fn process_samples_sequential(
         let sample_start = std::time::Instant::now();
 
         let sample_circular = circularity_map.get(bam_path).copied().unwrap_or(false);
-        match process_sample(bam_path, contigs, flags, config, sample_circular, repeats, annotations, &contig_by_name, &annos_by_contig) {
-            Ok((feature_blobs, presences, packaging, misassembly, microdiversity, side_misassembly, topology, sample_name, sequencing_type, total_reads, mapped_reads, is_circular, mut timings)) => {
+        match process_sample(bam_path, contigs, flags, config, sample_circular, repeats, annotations, &contig_by_name, &annos_by_contig, mag_member_lookup.as_ref()) {
+            Ok(mut r) => {
                 let process_elapsed = sample_start.elapsed();
                 processing_time_total += process_elapsed;
 
                 let write_start = std::time::Instant::now();
 
                 // MAG-level threshold pre-filter
-                let (presences, packaging, misassembly, microdiversity, side_misassembly, topology, feature_blobs) =
+                let (presences, packaging, misassembly, microdiversity, side_misassembly, topology, feature_blobs, mag_results) =
                     if is_mag_mode && !mag_contig_map.is_empty() {
                         let (drop_set, n_dropped) = filter_failing_mags(
-                            &presences, mag_contig_map, &contig_length_map,
+                            &r.presences, mag_contig_map, &contig_length_map,
                             config.min_aligned_fraction, config.min_coverage_depth,
                         );
                         mag_drops += n_dropped;
                         if !drop_set.is_empty() {
-                            apply_mag_filter(&drop_set, presences, packaging, misassembly, microdiversity, side_misassembly, topology, feature_blobs)
+                            apply_mag_filter(&drop_set, mag_contig_map, r.presences, r.packaging, r.misassembly, r.microdiversity, r.side_misassembly, r.topology, r.feature_blobs, r.mag_results)
                         } else {
-                            (presences, packaging, misassembly, microdiversity, side_misassembly, topology, feature_blobs)
+                            (r.presences, r.packaging, r.misassembly, r.microdiversity, r.side_misassembly, r.topology, r.feature_blobs, r.mag_results)
                         }
                     } else {
-                        (presences, packaging, misassembly, microdiversity, side_misassembly, topology, feature_blobs)
+                        (r.presences, r.packaging, r.misassembly, r.microdiversity, r.side_misassembly, r.topology, r.feature_blobs, r.mag_results)
                     };
 
                 if presences.is_empty() {
-                    if mapped_reads > 0 {
+                    if r.mapped_reads > 0 {
                         eprintln!(
                             "WARNING: Sample '{}': {} mapped reads but all contigs filtered out \
                              (min_aligned_fraction={:.1}%, min_coverage_depth={:.1}). \
                              Lowering thresholds may recover this sample.",
-                            sample_name, mapped_reads,
+                            r.sample_name, r.mapped_reads,
                             config.min_aligned_fraction, config.min_coverage_depth,
                         );
                     }
@@ -3015,10 +3459,10 @@ fn process_samples_sequential(
                 }
 
                 // Insert sample
-                let sample_id = match db_writer.insert_sample(&sample_name, sequencing_type.as_str(), total_reads, mapped_reads, is_circular) {
+                let sample_id = match db_writer.insert_sample(&r.sample_name, r.seq_type.as_str(), r.total_reads, r.mapped_reads, r.is_circular) {
                     Ok(id) => id,
                     Err(e) => {
-                        eprintln!("\nError inserting sample {}: {}", sample_name, e);
+                        eprintln!("\nError inserting sample {}: {}", r.sample_name, e);
                         failed += 1;
                         pb.inc(1);
                         continue;
@@ -3028,7 +3472,7 @@ fn process_samples_sequential(
                 // Write sample data
                 let mut mag_agg_ns: u64 = 0;
                 if let Err(e) = db_writer.write_sample_data(
-                    &sample_name,
+                    &r.sample_name,
                     &presences,
                     &packaging,
                     &misassembly,
@@ -3036,27 +3480,19 @@ fn process_samples_sequential(
                     &side_misassembly,
                     &topology,
                     &feature_blobs,
-                    is_circular,
+                    r.is_circular,
                 ) {
-                    eprintln!("\nError writing data for {}: {}", sample_name, e);
+                    eprintln!("\nError writing data for {}: {}", r.sample_name, e);
                     failed += 1;
                 } else {
-                    if !mag_lookup.is_empty() {
-                        let mag_t = std::time::Instant::now();
-                        if let Err(e) = crate::mag_blob::build_mag_blobs_for_sample(
-                            &db_writer, sample_id, &feature_blobs, &mag_lookup,
-                        ) {
-                            eprintln!("\n### ERROR aggregating MAG blobs for {}: {:?}", sample_name, e);
-                        }
-                        mag_agg_ns = mag_t.elapsed().as_nanos() as u64;
-                    }
+                    mag_agg_ns = write_mag_results(&db_writer, &r.sample_name, sample_id, &mag_results);
                     processed += 1;
                 }
 
                 writing_time_total += write_start.elapsed();
 
                 // Write per-sample timings incrementally to the log file
-                if let Some(ref mut t) = timings {
+                if let Some(ref mut t) = r.timings {
                     t.db_write = write_start.elapsed();
                     t.mag_aggregation_ns = mag_agg_ns;
                     t.total = sample_start.elapsed();
@@ -3067,7 +3503,7 @@ fn process_samples_sequential(
                 }
 
                 let total_sample_time = sample_start.elapsed().as_secs_f64();
-                let msg = format!("{} ({:.2}s)", sample_name, total_sample_time);
+                let msg = format!("{} ({:.2}s)", r.sample_name, total_sample_time);
                 pb.set_message(msg.clone());
                 pb.inc(1);
                 if !is_tty {

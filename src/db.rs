@@ -651,8 +651,8 @@ impl DbWriter {
         Ok(())
     }
 
-    /// Write one MAG-level coverage summary row, recomputed from raw
-    /// per-position data (see `mag_blob::compute_mag_coverage_stats`).
+    /// Write one MAG-level coverage summary row, computed from raw
+    /// per-position data (see `mag_blob::compute_mag_coverage_stats_from_raw`).
     pub fn write_mag_coverage(
         &self,
         conn: &Connection,
@@ -2026,8 +2026,7 @@ fn create_core_tables(conn: &Connection, has_bam: bool, is_mag_mode: bool) -> Re
         .context("Failed to create MAG_blob table")?;
 
         // MAG-level coverage metrics recomputed from raw per-position coverage
-        // during build_mag_blobs_for_sample. Replaces the mathematically-wrong
-        // length-weighted / BOOL_OR aggregation previously done in the view.
+        // during MAG-by-MAG processing. Written directly by the writer thread.
         conn.execute(
             "CREATE TABLE MAG_coverage (
                 MAG_id                               INTEGER NOT NULL REFERENCES MAG(MAG_id),
@@ -3277,8 +3276,7 @@ fn create_views(conn: &Connection, has_bam: bool, is_mag_mode: bool) -> Result<(
     if has_bam && is_mag_mode {
         // Per-MAG aggregates. Counts: SUM. Per-100kbp: recomputed from
         // SUM(count) × 100000 / SUM(Contig_length). Coverage metrics come
-        // from the MAG_coverage table, which is populated during
-        // build_mag_blobs_for_sample from raw per-position coverage.
+        // from the MAG_coverage table, populated during MAG-by-MAG processing.
 
         conn.execute(
             "CREATE VIEW Explicit_coverage_per_MAG AS

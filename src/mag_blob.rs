@@ -7,12 +7,15 @@
 //! preserving the DNAFeaturesViewer y_range in the gene map and guaranteeing
 //! every member contig contributes at least one zoom bin regardless of length.
 //!
-//! Two entry points, both running inline with normal sample processing:
+//! Entry points:
 //! - `build_mag_contig_blobs_all` — sample-independent. Runs once in
 //!   pre-sample setup, after every Contig_blob source has been written.
-//! - `build_mag_blobs_for_sample` — sample-specific. Runs in the writer
-//!   thread immediately after each sample's Feature_blob rows are written.
-//!   Decodes from the in-memory `EncodedBlob.chunks` rather than re-querying.
+//! - `build_mag_member_lookup` — builds contig→MAG mapping for the
+//!   processing side to group jobs by MAG.
+//! - `aggregate_feature_dense_inmem` / `aggregate_feature_sparse_inmem` —
+//!   used by `process_mag_group` (in `processing.rs`) for remaining features.
+//! - `compute_mag_coverage_stats_from_raw` — MAG coverage stats from raw
+//!   accumulated per-position values (no decode needed).
 
 use std::collections::HashMap;
 
@@ -66,81 +69,47 @@ fn contig_blob_config(name: &str) -> Option<ContigBlobConfig> {
     }
 }
 
+pub fn contig_blob_config_pub(name: &str) -> Option<()> {
+    contig_blob_config(name).map(|_| ())
+}
+
 pub struct MagMember {
     pub contig_id: i64,
     pub offset: u32,
     pub length: u32,
 }
 
-/// Per-contig MAG attribution, built once in the writer thread and shared
-/// across every per-sample MAG-aggregation call. `mag_length` is duplicated
-/// across each contig entry of a MAG for O(1) lookup without a second map.
-#[derive(Clone, Default)]
-pub struct MagLookup {
-    /// contig_id → (mag_id, offset_in_mag, mag_length, contig_length)
-    by_contig: HashMap<i64, (i64, u32, u32, u32)>,
-    /// contig_name → contig_id
-    name_to_id: HashMap<String, i64>,
-}
-
-impl MagLookup {
-    pub fn is_empty(&self) -> bool {
-        self.by_contig.is_empty()
-    }
-
-    fn contig_length(&self, cid: i64) -> u32 {
-        self.by_contig.get(&cid).map(|t| t.3).unwrap_or(0)
-    }
-}
-
-/// Build the contig→MAG lookup once per writer-thread session. Safe to call
-/// outside MAG mode (returns empty).
-pub fn build_mag_lookup(db_writer: &DbWriter) -> Result<MagLookup> {
+/// Build contig_name → (mag_name, mag_id, offset_in_mag, mag_length) lookup.
+/// Used by the processing side to group jobs by MAG before par_iter.
+pub fn build_mag_member_lookup(db_writer: &DbWriter) -> Result<crate::processing::MagMemberLookup> {
     if !db_writer.is_mag_mode() {
-        return Ok(MagLookup::default());
+        return Ok(HashMap::new());
     }
     let conn = db_writer.lock_conn()?;
-    build_mag_lookup_from_conn(&conn)
-}
-
-fn build_mag_lookup_from_conn(conn: &Connection) -> Result<MagLookup> {
-    let has_assoc: bool = conn.query_row(
-        "SELECT COUNT(*) > 0 FROM information_schema.tables
-         WHERE table_name = 'MAG_contigs_association'",
-        [],
-        |r| r.get(0),
-    ).unwrap_or(false);
-    if !has_assoc {
-        return Ok(MagLookup::default());
-    }
-
     let mut stmt = conn.prepare(
-        "SELECT mca.MAG_id, mca.Contig_id, mca.Offset_in_MAG,
-                c.Contig_length, c.Contig_name,
+        "SELECT c.Contig_name, m.MAG_name, mca.MAG_id, mca.Offset_in_MAG,
                 mag_len.MAG_length
          FROM MAG_contigs_association mca
          JOIN Contig c ON c.Contig_id = mca.Contig_id
+         JOIN MAG m ON m.MAG_id = mca.MAG_id
          JOIN (
-             SELECT MAG_id, SUM(Contig_length) AS MAG_length
+             SELECT mca2.MAG_id, SUM(c2.Contig_length) AS MAG_length
              FROM MAG_contigs_association mca2
              JOIN Contig c2 ON c2.Contig_id = mca2.Contig_id
-             GROUP BY MAG_id
+             GROUP BY mca2.MAG_id
          ) mag_len ON mag_len.MAG_id = mca.MAG_id"
     )?;
     let rows = stmt.query_map([], |r| Ok((
-        r.get::<_, i64>(0)?,
-        r.get::<_, i64>(1)?,
+        r.get::<_, String>(0)?,
+        r.get::<_, String>(1)?,
         r.get::<_, i64>(2)?,
         r.get::<_, i64>(3)?,
-        r.get::<_, String>(4)?,
-        r.get::<_, i64>(5)?,
+        r.get::<_, i64>(4)?,
     )))?;
-
-    let mut out = MagLookup::default();
+    let mut out = HashMap::new();
     for row in rows {
-        let (mag_id, cid, off, clen, cname, mlen) = row?;
-        out.by_contig.insert(cid, (mag_id, off as u32, mlen as u32, clen as u32));
-        out.name_to_id.insert(cname, cid);
+        let (contig_name, mag_name, mag_id, offset, mag_length) = row?;
+        out.insert(contig_name, (mag_name, mag_id, offset as u32, mag_length as u32));
     }
     Ok(out)
 }
@@ -162,136 +131,6 @@ pub fn build_mag_contig_blobs_all(db_writer: &DbWriter) -> Result<()> {
         build_mag_contig_blobs(db_writer, &conn, *mag_id, members, mag_length)?;
     }
     Ok(())
-}
-
-/// Sample-specific aggregation: Feature_blob → MAG_blob, scoped to one
-/// sample's just-computed in-memory blobs. Decodes chunks straight from
-/// `feature_blobs[i].2.chunks` (no DuckDB round-trip).
-pub fn build_mag_blobs_for_sample(
-    db_writer: &DbWriter,
-    sample_id: i64,
-    feature_blobs: &[(String, String, EncodedBlob)],
-    lookup: &MagLookup,
-) -> Result<()> {
-    if !db_writer.is_mag_mode() || lookup.is_empty() || feature_blobs.is_empty() {
-        return Ok(());
-    }
-
-    // Group (feature_name → mag_id → Vec<(member, &EncodedBlob)>).
-    // We materialize MagMember per group so the existing aggregator helpers
-    // work unchanged.
-    type FeatureGroups<'a> = HashMap<String, HashMap<i64, Vec<(MagMember, &'a EncodedBlob)>>>;
-    let mut groups: FeatureGroups = HashMap::new();
-    let mut mag_lengths: HashMap<i64, u32> = HashMap::new();
-
-    for (feature_name, contig_name, blob) in feature_blobs {
-        // Skip Contig_blob features — handled by build_mag_contig_blobs_all.
-        if contig_blob_config(feature_name).is_some() {
-            continue;
-        }
-        let cid = match lookup.name_to_id.get(contig_name) {
-            Some(v) => *v,
-            None => continue,
-        };
-        let (mag_id, offset, mag_length, _clen) = match lookup.by_contig.get(&cid) {
-            Some(v) => *v,
-            None => continue,
-        };
-        mag_lengths.insert(mag_id, mag_length);
-        groups
-            .entry(feature_name.clone())
-            .or_insert_with(HashMap::new)
-            .entry(mag_id)
-            .or_insert_with(Vec::new)
-            .push((MagMember { contig_id: cid, offset, length: lookup.contig_length(cid) }, blob));
-    }
-
-    // Encode + write per (mag_id, feature). Group writes per (mag_id) so we
-    // call write_mag_blobs once per MAG with the full feature batch.
-    let mut by_mag: HashMap<i64, Vec<(String, EncodedBlob)>> = HashMap::new();
-    // Side-channel: MAG-level coverage stats, recomputed from raw per-position
-    // values while we're already decoding the `coverage` feature.
-    let mut mag_cov_stats: HashMap<i64, MagCoverageStats> = HashMap::new();
-
-    for (feature_name, per_mag) in groups {
-        // Variable lookup for encoding metadata.
-        let var = match VARIABLES.iter().find(|v| v.name == feature_name) {
-            Some(v) => v,
-            None => continue,
-        };
-        for (mag_id, members_and_blobs) in per_mag {
-            let mag_length = *mag_lengths.get(&mag_id).unwrap_or(&0);
-            if mag_length == 0 {
-                continue;
-            }
-            if feature_name == "primary_reads" {
-                mag_cov_stats.insert(
-                    mag_id,
-                    compute_mag_coverage_stats(&members_and_blobs, mag_length),
-                );
-            }
-            let encoded = match var.encoding {
-                Encoding::Dense => aggregate_feature_dense_inmem(
-                    &members_and_blobs, mag_length, var.value_scale,
-                ),
-                Encoding::Sparse => aggregate_feature_sparse_inmem(
-                    &members_and_blobs, mag_length, var.value_scale,
-                ),
-            };
-            if !encoded.zoom.is_empty() {
-                by_mag.entry(mag_id).or_insert_with(Vec::new)
-                    .push((feature_name.clone(), encoded));
-            }
-        }
-    }
-
-    if by_mag.is_empty() && mag_cov_stats.is_empty() {
-        return Ok(());
-    }
-
-    let conn = db_writer.lock_conn()?;
-    for (mag_id, blobs) in &by_mag {
-        if !blobs.is_empty() {
-            db_writer.write_mag_blobs(&conn, *mag_id, sample_id, blobs)?;
-        }
-    }
-
-    // Pull Read_count for every contig in this sample once, then sum per MAG.
-    if !mag_cov_stats.is_empty() {
-        let read_counts = load_sample_read_counts(&conn, sample_id)?;
-        for (mag_id, stats) in mag_cov_stats.iter_mut() {
-            let mut total: u64 = 0;
-            for (cid, (mid, _, _, _)) in lookup.by_contig.iter() {
-                if *mid == *mag_id {
-                    if let Some(rc) = read_counts.get(cid) {
-                        total += *rc;
-                    }
-                }
-            }
-            stats.read_count = total;
-            db_writer.write_mag_coverage(&conn, *mag_id, sample_id, stats)?;
-        }
-    }
-    Ok(())
-}
-
-fn load_sample_read_counts(
-    conn: &Connection,
-    sample_id: i64,
-) -> Result<HashMap<i64, u64>> {
-    let mut stmt = conn.prepare(
-        "SELECT Contig_id, Read_count FROM Coverage WHERE Sample_id = ?"
-    )?;
-    let rows = stmt.query_map(params![sample_id], |r| Ok((
-        r.get::<_, i64>(0)?,
-        r.get::<_, i64>(1)?,
-    )))?;
-    let mut out: HashMap<i64, u64> = HashMap::new();
-    for row in rows {
-        let (cid, rc) = row?;
-        out.insert(cid, rc.max(0) as u64);
-    }
-    Ok(out)
 }
 
 // ---------------------------------------------------------------------------
@@ -353,7 +192,7 @@ fn chunks_with_idx(blob: &EncodedBlob) -> Vec<(i32, Vec<u8>)> {
         .collect()
 }
 
-fn aggregate_feature_dense_inmem(
+pub fn aggregate_feature_dense_inmem(
     members_and_blobs: &[(MagMember, &EncodedBlob)],
     mag_length: u32,
     scale: ValueScale,
@@ -382,7 +221,7 @@ fn aggregate_feature_dense_inmem(
     encoded
 }
 
-fn aggregate_feature_sparse_inmem(
+pub fn aggregate_feature_sparse_inmem(
     members_and_blobs: &[(MagMember, &EncodedBlob)],
     mag_length: u32,
     scale: ValueScale,
@@ -606,62 +445,51 @@ pub struct MagCoverageStats {
     pub coverage_roughness_x1e6: i32,
 }
 
-/// Compute MAG-level coverage metrics from per-member in-memory blobs.
-///
-/// Cross-contig boundary jumps are excluded from Σ(Δ²) by accumulating per
-/// contig. Median and trimmed mean are true order statistics computed over
-/// the concatenated per-position array (contig ordering does not affect
-/// order statistics).
-fn compute_mag_coverage_stats(
-    members_and_blobs: &[(MagMember, &EncodedBlob)],
+/// Compute MAG-level coverage stats from pre-accumulated raw per-position
+/// i32 values, split by contig boundaries. `contig_lengths` gives the length
+/// of each member contig in MAG order so cross-contig jumps are excluded from
+/// the roughness metric.
+pub fn compute_mag_coverage_stats_from_raw(
+    mag_values: &[i32],
     mag_length: u32,
+    contig_lengths: &[u32],
+    total_read_count: u64,
 ) -> MagCoverageStats {
+    if mag_values.is_empty() {
+        return MagCoverageStats {
+            mag_length, aligned_fraction_pct_x10: 0, above_expected: false,
+            read_count: total_read_count, coverage_mean_x10: 0, coverage_median_x10: 0,
+            coverage_trimmed_mean_x10: 0, coverage_cv_x1e6: 0, coverage_roughness_x1e6: 0,
+        };
+    }
     let mut sum_x: u128 = 0;
     let mut sum_x2: u128 = 0;
     let mut sum_sq_diff: u128 = 0;
-    let mut n_positions: u64 = 0;
     let mut n_covered: u64 = 0;
+    let n_positions = mag_values.len() as u64;
     let mut n_contigs_with_data: u32 = 0;
-    let mut all_values: Vec<i32> = Vec::new();
 
-    for (m, blob) in members_and_blobs {
-        if blob.chunks.is_empty() || m.length == 0 { continue; }
-        let chunks = chunks_with_idx(blob);
-        let values = decode_dense_from_chunks(&chunks, m.length);
-        if values.is_empty() { continue; }
-        n_contigs_with_data += 1;
-        n_positions += values.len() as u64;
-
-        // Single pass: Σx, Σx², n_covered; Σ(Δx)² over windows(2) stays
-        // within this contig so junctions don't contaminate.
-        let mut prev: Option<i32> = None;
-        for &v in &values {
-            let vv = v.max(0);
-            sum_x += vv as u128;
-            sum_x2 += (vv as u128) * (vv as u128);
-            if vv >= 1 { n_covered += 1; }
-            if let Some(p) = prev {
-                let d = (vv as i64 - p as i64) as i128;
-                sum_sq_diff += (d * d) as u128;
+    let mut offset = 0usize;
+    for &clen in contig_lengths {
+        let end = (offset + clen as usize).min(mag_values.len());
+        let slice = &mag_values[offset..end];
+        if !slice.is_empty() {
+            let has_data = slice.iter().any(|&v| v > 0);
+            if has_data { n_contigs_with_data += 1; }
+            let mut prev: Option<i32> = None;
+            for &v in slice {
+                let vv = v.max(0);
+                sum_x += vv as u128;
+                sum_x2 += (vv as u128) * (vv as u128);
+                if vv >= 1 { n_covered += 1; }
+                if let Some(p) = prev {
+                    let d = (vv as i64 - p as i64) as i128;
+                    sum_sq_diff += (d * d) as u128;
+                }
+                prev = Some(vv);
             }
-            prev = Some(vv);
         }
-
-        all_values.extend_from_slice(&values);
-    }
-
-    if n_positions == 0 || all_values.is_empty() {
-        return MagCoverageStats {
-            mag_length,
-            aligned_fraction_pct_x10: 0,
-            above_expected: false,
-            read_count: 0,
-            coverage_mean_x10: 0,
-            coverage_median_x10: 0,
-            coverage_trimmed_mean_x10: 0,
-            coverage_cv_x1e6: 0,
-            coverage_roughness_x1e6: 0,
-        };
+        offset = end;
     }
 
     let n_f = n_positions as f64;
@@ -670,37 +498,28 @@ fn compute_mag_coverage_stats(
     let above_expected = mean_raw > 0.0
         && af_raw >= (1.0 - (-0.883 * mean_raw).exp()) * 100.0;
 
-    // Sort once, then read median + trimmed-mean slice as order statistics.
-    // n is bounded by the MAG length so this is cheap per (MAG, sample).
-    all_values.sort_unstable();
-    let n = all_values.len();
-    let median_raw = all_values[n / 2] as f64;
-
+    let mut sorted = mag_values.to_vec();
+    sorted.sort_unstable();
+    let n = sorted.len();
+    let median_raw = sorted[n / 2] as f64;
     let lo = (n as f64 * 0.05).floor() as usize;
     let hi = ((n as f64 * 0.95).ceil() as usize).min(n);
     let trimmed_raw = if hi > lo {
-        let slice = &all_values[lo..hi];
-        slice.iter().map(|&v| v as f64).sum::<f64>() / slice.len() as f64
-    } else {
-        0.0
-    };
+        sorted[lo..hi].iter().map(|&v| v as f64).sum::<f64>() / (hi - lo) as f64
+    } else { 0.0 };
 
-    let variance = (sum_x2 as f64 / n_f) - (mean_raw * mean_raw);
-    let variance = variance.max(0.0);
+    let variance = ((sum_x2 as f64 / n_f) - (mean_raw * mean_raw)).max(0.0);
     let cv_raw = if mean_raw > 0.0 { variance.sqrt() / mean_raw } else { 0.0 };
-
     let rough_denom = (n_positions as i64) - (n_contigs_with_data as i64);
     let roughness_raw = if mean_raw > 0.0 && rough_denom > 0 {
         (sum_sq_diff as f64 / rough_denom as f64).sqrt() / mean_raw
-    } else {
-        0.0
-    };
+    } else { 0.0 };
 
     MagCoverageStats {
         mag_length,
         aligned_fraction_pct_x10: (af_raw * 10.0).round() as i32,
         above_expected,
-        read_count: 0, // filled in by caller after bulk Coverage lookup
+        read_count: total_read_count,
         coverage_mean_x10: (mean_raw * 10.0).round() as i32,
         coverage_median_x10: (median_raw * 10.0).round() as i32,
         coverage_trimmed_mean_x10: (trimmed_raw * 10.0).round() as i32,
