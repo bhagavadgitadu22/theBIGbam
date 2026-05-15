@@ -37,6 +37,8 @@ pub struct DbWriter {
     contig_name_to_id: HashMap<String, i64>,
     sample_name_to_id: Mutex<HashMap<String, i64>>,
     next_sample_id: Mutex<i64>,
+    next_packaging_id: Mutex<i64>,
+    next_terminus_id: Mutex<i64>,
 }
 
 impl DbWriter {
@@ -98,6 +100,8 @@ impl DbWriter {
             contig_name_to_id,
             sample_name_to_id: Mutex::new(HashMap::new()),
             next_sample_id: Mutex::new(1),
+            next_packaging_id: Mutex::new(1),
+            next_terminus_id: Mutex::new(1),
         })
     }
 
@@ -226,6 +230,16 @@ impl DbWriter {
             conn.execute(&format!("DROP VIEW IF EXISTS {}", view), [])?;
         }
 
+        // Initialize next packaging/terminus IDs from existing data
+        let next_packaging_id: i64 = conn.query_row(
+            "SELECT COALESCE(MAX(Packaging_id), 0) + 1 FROM Phage_mechanisms",
+            [], |row| row.get(0),
+        ).unwrap_or(1);
+        let next_terminus_id: i64 = conn.query_row(
+            "SELECT COALESCE(MAX(Terminus_id), 0) + 1 FROM Phage_termini",
+            [], |row| row.get(0),
+        ).unwrap_or(1);
+
         Ok(Self {
             conn: Mutex::new(conn),
             has_bam,
@@ -233,6 +247,8 @@ impl DbWriter {
             contig_name_to_id,
             sample_name_to_id: Mutex::new(sample_name_to_id),
             next_sample_id: Mutex::new(max_sample_id + 1),
+            next_packaging_id: Mutex::new(next_packaging_id),
+            next_terminus_id: Mutex::new(next_terminus_id),
         })
     }
 
@@ -333,19 +349,12 @@ impl DbWriter {
     }
 
     fn write_packaging(&self, conn: &Connection, sample_id: i64, packaging: &[PackagingData], circular: bool) -> Result<()> {
-        // Track next packaging_id and terminus_id
-        // Query current max to ensure unique IDs
-        let mut packaging_id: i64 = conn.query_row(
-            "SELECT COALESCE(MAX(Packaging_id), 0) FROM Phage_mechanisms",
-            [],
-            |row| row.get(0),
-        ).unwrap_or(0) + 1;
-
-        let mut terminus_id: i64 = conn.query_row(
-            "SELECT COALESCE(MAX(Terminus_id), 0) FROM Phage_termini",
-            [],
-            |row| row.get(0),
-        ).unwrap_or(0) + 1;
+        let mut pkg_guard = self.next_packaging_id.lock()
+            .map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
+        let mut term_guard = self.next_terminus_id.lock()
+            .map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
+        let mut packaging_id = *pkg_guard;
+        let mut terminus_id = *term_guard;
 
         let mut mechanism_appender = conn.appender("Phage_mechanisms")
             .context("Failed to create Phage_mechanisms appender")?;
@@ -466,6 +475,9 @@ impl DbWriter {
 
         mechanism_appender.flush().context("Failed to flush Phage_mechanisms appender")?;
         termini_appender.flush().context("Failed to flush Phage_termini appender")?;
+
+        *pkg_guard = packaging_id;
+        *term_guard = terminus_id;
         Ok(())
     }
 

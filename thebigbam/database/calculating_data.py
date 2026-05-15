@@ -88,6 +88,10 @@ def _scan_contig_names(path):
                     parts = line.split()
                     if len(parts) >= 2:
                         names.append(parts[1])
+                elif line.startswith('VERSION'):
+                    parts = line.split()
+                    if len(parts) >= 2 and parts[1] not in names:
+                        names.append(parts[1])
     elif lower.endswith(('.gff', '.gff3')):
         seq_region_seen = False
         feature_seqids = []

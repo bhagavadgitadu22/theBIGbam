@@ -22,7 +22,7 @@ use std::sync::Arc;
 use std::sync::mpsc::sync_channel;
 use std::thread;
 
-use crate::bam_reader::{detect_sequencing_type, get_unmapped_read_count, process_contig_streaming, BamPhaseTimings};
+use crate::bam_reader::{detect_sequencing_type, process_contig_streaming, BamPhaseTimings};
 use crate::compress::{
     Run,
     add_compressed_feature_with_stats,
@@ -435,6 +435,7 @@ fn merge_sequences_from_fasta(contigs: &mut Vec<ContigInfo>, fasta_path: &Path) 
         } else {
             contigs.push(ContigInfo {
                 name: name.clone(),
+                aliases: vec![],
                 length: seq.len(),
                 sequence: Some(seq.clone()),
             });
@@ -1425,12 +1426,14 @@ fn add_features_from_arrays(
 /// Returns (feature_blobs, presences, packaging, misassembly, microdiversity, side_misassembly, topology, sample_name, seq_type, total_reads, mapped_reads)
 pub fn process_sample(
     bam_path: &Path,
-    contigs: &[ContigInfo],
+    _contigs: &[ContigInfo],
     flags: ModuleFlags,
     config: &ProcessConfig,
     is_circular: bool,
     repeats: &[RepeatsData],
-    annotations: &[crate::types::FeatureAnnotation],
+    _annotations: &[FeatureAnnotation],
+    contig_by_name: &HashMap<&str, usize>,
+    annos_by_contig: &HashMap<i64, Vec<&FeatureAnnotation>>,
 ) -> Result<(Vec<(String, String, crate::blob::EncodedBlob)>, Vec<PresenceData>, Vec<PackagingData>, Vec<MisassemblyData>, Vec<MicrodiversityData>, Vec<SideMisassemblyData>, Vec<TopologyData>, String, SequencingType, u64, u64, bool, Option<SampleTimings>)> {
     let sample_name = bam_path
         .file_stem()
@@ -1451,7 +1454,7 @@ pub fn process_sample(
     // Open the BAM once in the single-threaded prelude. We keep it alive through
     // the pre-filter phase below so the par_iter never needs to re-read the
     // header — a reopen costs ~50-200 ms for BAMs with many references.
-    let temp_bam = IndexedReader::from_path(bam_path)
+    let mut temp_bam = IndexedReader::from_path(bam_path)
         .with_context(|| format!("Failed to open indexed BAM: {}", bam_path.display()))?;
     let n_refs = temp_bam.header().target_count();
 
@@ -1467,56 +1470,31 @@ pub fn process_sample(
         s.n_contigs_in_bam = n_refs as usize;
     }
 
-    // --- Phase: unmapped_read_count ---
+    // --- Phase: unmapped_read_count + per-tid mapped counts ---
     let t0 = if time_on { Some(std::time::Instant::now()) } else { None };
 
-    // Get unmapped read count from BAM index (fast, no iteration).
-    // Total reads (unique) is computed later as mapped_reads (primary only) + unmapped_reads,
-    // which dedupes multi-alignment reads — the index's `mapped` counts alignment records.
-    let unmapped_reads = get_unmapped_read_count(bam_path)?;
+    // Get per-tid stats from the BAM index in one call (avoids a second BAM open).
+    // Each entry: (tid, length, mapped_records, unmapped_records).
+    let idx_stats = temp_bam.index_stats()
+        .with_context(|| format!("Failed to get index stats from: {}", bam_path.display()))?;
+    let unmapped_reads: u64 = idx_stats.iter().map(|(_, _, _, unmapped)| *unmapped).sum();
+    let mapped_per_tid: Vec<u64> = idx_stats.iter().map(|(_, _, mapped, _)| *mapped).collect();
 
     if let (Some(s), Some(t)) = (st.as_mut(), t0) {
         s.total_read_count = t.elapsed();
     }
 
-    // --- Phase: build_lookups ---
-    let t0 = if time_on { Some(std::time::Instant::now()) } else { None };
-
-    // Build name -> index lookup once; avoids O(n_refs * n_contigs) linear scans
-    // in the per-contig par_iter below (critical for projects with ~500k contigs).
-    let contig_by_name: HashMap<&str, usize> = contigs
-        .iter()
-        .enumerate()
-        .map(|(idx, c)| (c.name.as_str(), idx))
-        .collect();
-
-    // Pre-group annotations by contig_id once (only when mapping_metrics is on).
-    // Avoids the O(n_annotations) linear filter inside CdsIndex::from_annotations
-    // on every contig. For ~500k contigs x ~15M annotations this is a ~500k-fold
-    // reduction in comparisons.
-    let annos_by_contig: HashMap<i64, Vec<&FeatureAnnotation>> = if flags.mapping_metrics
-        && !annotations.is_empty()
-    {
-        let mut map: HashMap<i64, Vec<&FeatureAnnotation>> = HashMap::new();
-        for a in annotations.iter() {
-            map.entry(a.contig_id).or_default().push(a);
-        }
-        map
-    } else {
-        HashMap::new()
-    };
-
-    if let (Some(s), Some(t)) = (st.as_mut(), t0) {
-        s.build_lookups = t.elapsed();
-    }
-
     // --- Phase: filter_tids (single-threaded) ---
     // Walk the BAM header once and materialise only the tids whose reference
-    // name is also a known contig. This spares the par_iter from opening the
-    // BAM for thousands of references we'd immediately discard.
+    // name is also a known contig AND that have at least one mapped read.
+    // Skipping empty contigs avoids millions of wasted rayon jobs for large
+    // metagenomic datasets where most contigs have 0 reads in a given sample.
     let t_filter = if time_on { Some(std::time::Instant::now()) } else { None };
     let jobs: Vec<(u32, i64, String, usize)> = (0..n_refs)
         .filter_map(|tid| {
+            if mapped_per_tid.get(tid as usize).copied().unwrap_or(0) == 0 {
+                return None;
+            }
             let ref_name = std::str::from_utf8(temp_bam.header().tid2name(tid)).ok()?;
             let contig_idx = contig_by_name.get(ref_name)?;
             let ref_length = temp_bam.header().target_len(tid).unwrap_or(0) as usize;
@@ -1788,6 +1766,7 @@ fn extract_contigs_from_bams(bam_files: &[PathBuf], _circularity_map: &HashMap<P
         .into_iter()
         .map(|(name, length)| ContigInfo {
             name,
+            aliases: vec![],
             length,
             sequence: None, // BAM headers don't contain sequence data
         })
@@ -1889,6 +1868,7 @@ pub fn run_all_samples(
                         member_names.push(name.clone());
                         all_contigs.push(ContigInfo {
                             name,
+                            aliases: vec![],
                             length: seq.len(),
                             sequence: Some(seq),
                         });
@@ -2059,6 +2039,7 @@ pub fn run_all_samples(
                 existing_contig_names.insert(name.clone());
                 existing_contigs.push(ContigInfo {
                     name,
+                    aliases: vec![],
                     length: length as usize,
                     sequence: seq.map(|s| s.into_bytes()),
                 });
@@ -2597,7 +2578,7 @@ fn process_samples_parallel(
     circularity_map: &HashMap<PathBuf, bool>,
     db_writer: DbWriter,
     repeats: &[RepeatsData],
-    annotations: &[crate::types::FeatureAnnotation],
+    annotations: &[FeatureAnnotation],
     output_db: &Path,
     timing_file: Option<fs::File>,
     autoblast_secs: f64,
@@ -2715,6 +2696,15 @@ fn process_samples_parallel(
                 };
 
             if presences.is_empty() {
+                if result.mapped_reads > 0 {
+                    eprintln!(
+                        "WARNING: Sample '{}': {} mapped reads but all contigs filtered out \
+                         (min_aligned_fraction={:.1}%, min_coverage_depth={:.1}). \
+                         Lowering thresholds may recover this sample.",
+                        result.sample_name, result.mapped_reads,
+                        min_af, min_cov,
+                    );
+                }
                 write_pb_clone.inc(1);
                 continue;
             }
@@ -2790,13 +2780,36 @@ fn process_samples_parallel(
         Ok((written_count, write_start.elapsed(), all_timings, mag_drops))
     });
 
+    // Build shared lookups once — avoids rebuilding per sample (critical for 2M+ contigs).
+    let contig_by_name: HashMap<&str, usize> = {
+        let mut map = HashMap::new();
+        for (idx, c) in contigs.iter().enumerate() {
+            map.insert(c.name.as_str(), idx);
+            for alias in &c.aliases {
+                map.entry(alias.as_str()).or_insert(idx);
+            }
+        }
+        map
+    };
+    let annos_by_contig: HashMap<i64, Vec<&FeatureAnnotation>> = if flags.mapping_metrics
+        && !annotations.is_empty()
+    {
+        let mut map: HashMap<i64, Vec<&FeatureAnnotation>> = HashMap::new();
+        for a in annotations.iter() {
+            map.entry(a.contig_id).or_default().push(a);
+        }
+        map
+    } else {
+        HashMap::new()
+    };
+
     // Process samples in parallel, sending to channel immediately
     // send() blocks if channel is full (backpressure)
     bam_files.par_iter().for_each(|bam_path| {
         let sample_start = std::time::Instant::now();
 
         let sample_circular = circularity_map.get(bam_path).copied().unwrap_or(false);
-        match process_sample(bam_path, contigs, flags, config, sample_circular, repeats, annotations) {
+        match process_sample(bam_path, contigs, flags, config, sample_circular, repeats, annotations, &contig_by_name, &annos_by_contig) {
             Ok((feature_blobs, presences, packaging, misassembly, microdiversity, side_misassembly, topology, sample_name, sequencing_type, total_reads, mapped_reads, is_circular, mut timings)) => {
                 let sample_time = sample_start.elapsed().as_secs_f64();
                 // Fill the total processing time (DB write will be added by writer thread)
@@ -2897,7 +2910,7 @@ fn process_samples_sequential(
     db_writer: DbWriter,
     is_tty: bool,
     repeats: &[RepeatsData],
-    annotations: &[crate::types::FeatureAnnotation],
+    annotations: &[FeatureAnnotation],
     _output_db: &Path,
     timing_file: Option<fs::File>,
     autoblast_secs: f64,
@@ -2936,11 +2949,34 @@ fn process_samples_sequential(
 
     let mag_lookup = crate::mag_blob::build_mag_lookup(&db_writer)?;
 
+    // Build shared lookups once — avoids rebuilding per sample (critical for 2M+ contigs).
+    let contig_by_name: HashMap<&str, usize> = {
+        let mut map = HashMap::new();
+        for (idx, c) in contigs.iter().enumerate() {
+            map.insert(c.name.as_str(), idx);
+            for alias in &c.aliases {
+                map.entry(alias.as_str()).or_insert(idx);
+            }
+        }
+        map
+    };
+    let annos_by_contig: HashMap<i64, Vec<&FeatureAnnotation>> = if flags.mapping_metrics
+        && !annotations.is_empty()
+    {
+        let mut map: HashMap<i64, Vec<&FeatureAnnotation>> = HashMap::new();
+        for a in annotations.iter() {
+            map.entry(a.contig_id).or_default().push(a);
+        }
+        map
+    } else {
+        HashMap::new()
+    };
+
     for bam_path in bam_files {
         let sample_start = std::time::Instant::now();
 
         let sample_circular = circularity_map.get(bam_path).copied().unwrap_or(false);
-        match process_sample(bam_path, contigs, flags, config, sample_circular, repeats, annotations) {
+        match process_sample(bam_path, contigs, flags, config, sample_circular, repeats, annotations, &contig_by_name, &annos_by_contig) {
             Ok((feature_blobs, presences, packaging, misassembly, microdiversity, side_misassembly, topology, sample_name, sequencing_type, total_reads, mapped_reads, is_circular, mut timings)) => {
                 let process_elapsed = sample_start.elapsed();
                 processing_time_total += process_elapsed;
@@ -2965,6 +3001,15 @@ fn process_samples_sequential(
                     };
 
                 if presences.is_empty() {
+                    if mapped_reads > 0 {
+                        eprintln!(
+                            "WARNING: Sample '{}': {} mapped reads but all contigs filtered out \
+                             (min_aligned_fraction={:.1}%, min_coverage_depth={:.1}). \
+                             Lowering thresholds may recover this sample.",
+                            sample_name, mapped_reads,
+                            config.min_aligned_fraction, config.min_coverage_depth,
+                        );
+                    }
                     pb.inc(1);
                     continue;
                 }

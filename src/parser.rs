@@ -241,6 +241,14 @@ pub fn parse_genbank(
             .clone()
             .or_else(|| seq.version.clone())
             .unwrap_or_else(|| format!("contig_{}", contig_id));
+        let mut aliases = Vec::new();
+        if seq.name.is_some() {
+            if let Some(ver) = &seq.version {
+                if *ver != name {
+                    aliases.push(ver.clone());
+                }
+            }
+        }
         let length = seq.seq.len();
 
         // Extract sequence bytes for GC content computation
@@ -252,6 +260,7 @@ pub fn parse_genbank(
 
         contigs.push(ContigInfo {
             name: name.clone(),
+            aliases,
             length,
             sequence,
         });
@@ -658,6 +667,7 @@ pub fn parse_gff3(
 
         contigs.push(ContigInfo {
             name: name.clone(),
+            aliases: vec![],
             length,
             sequence: None, // Filled from ##FASTA section below if present
         });
@@ -673,6 +683,7 @@ pub fn parse_gff3(
             contig_id_map.insert(name.clone(), contig_id);
             contigs.push(ContigInfo {
                 name: name.clone(),
+                aliases: vec![],
                 length: seq.len(),
                 sequence: Some(seq.clone()),
             });

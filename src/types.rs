@@ -456,6 +456,8 @@ pub fn feature_name_to_id(name: &str) -> Option<i16> {
 pub struct ContigInfo {
     /// Unique identifier for the contig (e.g., "phage_lambda", "contig_1")
     pub name: String,
+    /// Alternative names that should also match (e.g. VERSION when LOCUS was chosen)
+    pub aliases: Vec<String>,
     /// Length in base pairs
     pub length: usize,
     /// Sequence data for GC content computation (optional, may be large)

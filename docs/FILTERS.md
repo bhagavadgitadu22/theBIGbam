@@ -37,7 +37,7 @@ Those metrics are available only if a Genbank file was provided (or at least an 
 | Metric                              | Definition                                                                                                                                |
 | ----------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
 | Contig_length                       | Length of the contig sequence, in base pairs (bp)                                                                                         |
-| Duplication_percentage              | Proportion of the contig covered by repeats (stored as integer x10; e.g. 125 = 12.5%), calculated from BLAST self-alignment             |
+| Duplication_percentage              | Proportion of the contig covered by repeats (stored as integer x10; e.g. 125 = 12.5%), calculated from BLAST self-alignment               |
 | GC_mean                             | Mean GC content (%) calculated across the contig using non-overlapping 500 bp sliding windows                                             |
 | GC_sd                               | Standard deviation of GC content (stored as integer x100; e.g. 350 = 3.50)                                                                |
 | GC_skew_amplitude                   | Amplitude of GC skew, i.e. *max(GC skew) - min(GC skew)* (stored as integer x100), calculated across non-overlapping 1kbp sliding windows |

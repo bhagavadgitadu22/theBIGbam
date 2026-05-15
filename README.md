@@ -217,7 +217,7 @@ First, the database is organised per contig per sample (qualified as a contig/sa
 
 - **--min_coverage_depth** sets the minimum mean coverage depth required for contig inclusion (default 0, i.e. disabled — set to e.g. 5 to filter out contigs with very low depth that produce noisy signals). In MAG view, **--min_coverage_depth** applies to the MAG instead of each contig.
 
-To further reduce the size of the database, values per feature are compressed rather than saving all positions. The type of compression depends on the type of plots:
+To further reduce the size of the database, values per feature are filtered rather than saving all positions. The type of compression depends on the type of plots:
 
 - Only positions with values above a defined percentage of the local coverage are retained for Bar plots (Misalignment and Phage termini module except for "Coverage reduced" feature). For each position, values are compared to the local coverage and discarded if they fall below the **--coverage_percentage** threshold (default 10%), ensuring that only meaningful peaks are preserved. In addition, an event must occur more than **--min_occurrences** to be considered (default 2).
 
