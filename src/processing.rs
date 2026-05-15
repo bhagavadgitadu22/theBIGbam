@@ -2415,7 +2415,7 @@ pub fn run_all_samples(
     }
 
     // Aggregate per-contig blobs into MAG-scale blobs once. Sample-independent.
-    let mag_contig_blob_secs = if config.view_mode == ViewMode::Mag {
+    let mag_contig_blob_secs = if config.view_mode == ViewMode::Mag && !mag_contig_map.is_empty() {
         let t = std::time::Instant::now();
         crate::mag_blob::build_mag_contig_blobs_all(&db_writer)?;
         let secs = t.elapsed().as_secs_f64();
