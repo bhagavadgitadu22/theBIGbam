@@ -52,13 +52,17 @@ def purge_mapping_data(input_db, output_db):
         schema_path = os.path.join(tmpdir, "schema.sql")
         load_path = os.path.join(tmpdir, "load.sql")
 
-        # Remove Explicit_ views from schema and strip mapping-table data from load
+        # Remove recreatable views from schema and strip mapping-table data from load
         with open(schema_path) as f:
             schema_lines = f.readlines()
         with open(schema_path, "w") as f:
             for line in schema_lines:
-                if not line.lstrip().startswith("CREATE VIEW Explicit_"):
-                    f.write(line)
+                stripped = line.lstrip()
+                if stripped.startswith("CREATE VIEW Explicit_"):
+                    continue
+                if stripped.startswith("CREATE VIEW Contig_blast_hits_symmetric"):
+                    continue
+                f.write(line)
 
         mapping_lower = {t.lower() for t in MAPPING_TABLES}
         with open(load_path) as f:

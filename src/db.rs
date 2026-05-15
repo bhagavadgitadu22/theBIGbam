@@ -226,6 +226,8 @@ impl DbWriter {
             "Explicit_coverage", "Explicit_misassembly", "Explicit_microdiversity",
             "Explicit_side_misassembly", "Explicit_topology",
             "Explicit_phage_mechanisms", "Explicit_phage_termini",
+            "Explicit_coverage_per_MAG", "Explicit_misassembly_per_MAG",
+            "Explicit_microdiversity_per_MAG", "Contig_blast_hits_symmetric",
         ] {
             conn.execute(&format!("DROP VIEW IF EXISTS {}", view), [])?;
         }
@@ -3431,8 +3433,8 @@ fn cleanup_unused_variables(conn: &Connection) -> Result<()> {
 /// Prevents empty sections in the Filtering/Summary UI when modules weren't calculated.
 fn drop_empty_tables(conn: &Connection) -> Result<()> {
     let table_view_map: &[(&str, &[&str])] = &[
-        ("Misassembly", &["Explicit_misassembly"]),
-        ("Microdiversity", &["Explicit_microdiversity"]),
+        ("Misassembly", &["Explicit_misassembly", "Explicit_misassembly_per_MAG"]),
+        ("Microdiversity", &["Explicit_microdiversity", "Explicit_microdiversity_per_MAG"]),
         ("Side_misassembly", &["Explicit_side_misassembly"]),
         ("Topology", &["Explicit_topology"]),
         ("Phage_termini", &["Explicit_phage_termini"]),
