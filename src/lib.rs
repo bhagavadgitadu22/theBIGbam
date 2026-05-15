@@ -120,7 +120,7 @@ mod python {
             })
             .collect();
 
-        if view_mode == ViewMode::Mag && mag_manifest.is_empty() {
+        if view_mode == ViewMode::Mag && mag_manifest.is_empty() && extend_db.is_empty() {
             return Err(pyo3::exceptions::PyValueError::new_err(
                 "view='mag' requires a non-empty mag_manifest",
             ));
