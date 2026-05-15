@@ -205,9 +205,13 @@ pub struct SampleTimings {
     pub stream_records_ns: u64,
     pub stream_process_read_ns: u64,
     pub stream_finalize_ns: u64,
+    // MAG blob encoding inside par_iter (nanoseconds, summed across threads).
+    pub mag_encoding_ns: u64,
     // Filled by the sample-level caller, not process_sample itself.
     pub db_write: std::time::Duration,
-    pub mag_aggregation_ns: u64,
+    pub insert_sample_ns: u64,
+    pub write_contig_data_ns: u64,
+    pub mag_write_ns: u64,
     pub total: std::time::Duration,
 }
 
@@ -221,6 +225,7 @@ struct TimingAccum {
     stream_records_ns: AtomicU64,
     stream_process_read_ns: AtomicU64,
     stream_finalize_ns: AtomicU64,
+    mag_encoding_ns: AtomicU64,
 }
 
 impl TimingAccum {
@@ -234,6 +239,7 @@ impl TimingAccum {
             stream_records_ns: AtomicU64::new(0),
             stream_process_read_ns: AtomicU64::new(0),
             stream_finalize_ns: AtomicU64::new(0),
+            mag_encoding_ns: AtomicU64::new(0),
         }
     }
 }
@@ -1657,6 +1663,8 @@ fn process_mag_group(
         }
     }
 
+    let ts_mag_enc = accum_ref.map(|_| std::time::Instant::now());
+
     let vp = config.variation_percentage;
     let mut mag_blobs: Vec<(String, EncodedBlob)> = Vec::new();
 
@@ -1720,6 +1728,10 @@ fn process_mag_group(
     let mag_cov_stats = crate::mag_blob::compute_mag_coverage_stats_from_raw(
         &accum.primary_reads, group.mag_length, &contig_lengths_ordered, total_reads_in_mag,
     );
+
+    if let (Some(a), Some(t)) = (accum_ref, ts_mag_enc) {
+        a.mag_encoding_ns.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    }
 
     Some(MagGroupResult {
         mag_name: group.mag_name.clone(),
@@ -2122,6 +2134,7 @@ pub fn process_sample(
             s.stream_records_ns = a.stream_records_ns.load(Ordering::Relaxed);
             s.stream_process_read_ns = a.stream_process_read_ns.load(Ordering::Relaxed);
             s.stream_finalize_ns = a.stream_finalize_ns.load(Ordering::Relaxed);
+            s.mag_encoding_ns = a.mag_encoding_ns.load(Ordering::Relaxed);
         }
     }
 
@@ -3159,6 +3172,8 @@ fn process_samples_parallel(
             }
 
             // Insert sample
+            let sample_write_start = std::time::Instant::now();
+            let t_insert = std::time::Instant::now();
             let sample_id = match db_writer.insert_sample(&result.sample_name, result.sequencing_type.as_str(), result.total_reads, result.mapped_reads, result.is_circular) {
                 Ok(id) => id,
                 Err(e) => {
@@ -3172,10 +3187,12 @@ fn process_samples_parallel(
                     continue;
                 }
             };
+            let insert_ns = t_insert.elapsed().as_nanos() as u64;
 
             // Write all data for this sample
-            let sample_write_start = std::time::Instant::now();
-            let mut mag_agg_ns: u64 = 0;
+            let mut contig_data_ns: u64 = 0;
+            let mut mag_write_ns: u64 = 0;
+            let t_contig = std::time::Instant::now();
             if let Err(e) = db_writer.write_sample_data(
                 &result.sample_name,
                 &presences,
@@ -3194,7 +3211,8 @@ fn process_samples_parallel(
                     eprintln!("Writing:    [{}/{}] {}", written_count, total_writer, msg);
                 }
             } else {
-                mag_agg_ns = write_mag_results(&db_writer, &result.sample_name, sample_id, &mag_results);
+                contig_data_ns = t_contig.elapsed().as_nanos() as u64;
+                mag_write_ns = write_mag_results(&db_writer, &result.sample_name, sample_id, &mag_results);
                 write_pb_clone.set_message(result.sample_name.clone());
                 if !is_tty_writer {
                     eprintln!("Writing:    [{}/{}] {}", written_count, total_writer, result.sample_name);
@@ -3205,7 +3223,9 @@ fn process_samples_parallel(
             // Write per-sample timings incrementally to the log file
             if let Some(mut t) = result.timings {
                 t.db_write = sample_write_start.elapsed();
-                t.mag_aggregation_ns = mag_agg_ns;
+                t.insert_sample_ns = insert_ns;
+                t.write_contig_data_ns = contig_data_ns;
+                t.mag_write_ns = mag_write_ns;
                 if let Some(ref mut f) = timing_file {
                     let _ = write_sample_timing(f, &t, timing_threads);
                 }
@@ -3459,6 +3479,7 @@ fn process_samples_sequential(
                 }
 
                 // Insert sample
+                let t_insert = std::time::Instant::now();
                 let sample_id = match db_writer.insert_sample(&r.sample_name, r.seq_type.as_str(), r.total_reads, r.mapped_reads, r.is_circular) {
                     Ok(id) => id,
                     Err(e) => {
@@ -3468,9 +3489,12 @@ fn process_samples_sequential(
                         continue;
                     }
                 };
+                let insert_ns = t_insert.elapsed().as_nanos() as u64;
 
                 // Write sample data
-                let mut mag_agg_ns: u64 = 0;
+                let mut contig_data_ns: u64 = 0;
+                let mut mag_write_ns: u64 = 0;
+                let t_contig = std::time::Instant::now();
                 if let Err(e) = db_writer.write_sample_data(
                     &r.sample_name,
                     &presences,
@@ -3485,7 +3509,8 @@ fn process_samples_sequential(
                     eprintln!("\nError writing data for {}: {}", r.sample_name, e);
                     failed += 1;
                 } else {
-                    mag_agg_ns = write_mag_results(&db_writer, &r.sample_name, sample_id, &mag_results);
+                    contig_data_ns = t_contig.elapsed().as_nanos() as u64;
+                    mag_write_ns = write_mag_results(&db_writer, &r.sample_name, sample_id, &mag_results);
                     processed += 1;
                 }
 
@@ -3494,7 +3519,9 @@ fn process_samples_sequential(
                 // Write per-sample timings incrementally to the log file
                 if let Some(ref mut t) = r.timings {
                     t.db_write = write_start.elapsed();
-                    t.mag_aggregation_ns = mag_agg_ns;
+                    t.insert_sample_ns = insert_ns;
+                    t.write_contig_data_ns = contig_data_ns;
+                    t.mag_write_ns = mag_write_ns;
                     t.total = sample_start.elapsed();
                     if let Some(ref mut f) = timing_file {
                         let _ = write_sample_timing(f, t, config.threads);
@@ -3603,9 +3630,8 @@ fn write_sample_timing(f: &mut fs::File, t: &SampleTimings, threads: usize) -> R
     writeln!(f, "  Par-iter wall        : {:>10.3} s", t.par_iter_wall.as_secs_f64())?;
     writeln!(f, "  Merge contig results : {:>10.3} s", t.merge_results.as_secs_f64())?;
     writeln!(f, "  DB write             : {:>10.3} s", t.db_write.as_secs_f64())?;
-    writeln!(f, "  MAG aggregation      : {:>10.3} s", ns_to_s(t.mag_aggregation_ns))?;
     writeln!(f, "  TOTAL per sample     : {:>10.3} s", t.total.as_secs_f64())?;
-    writeln!(f, "  ---- Par-iter sub-phase sums (CPU-seconds across threads) ----")?;
+    writeln!(f, "  ---- Par-iter sub-phase sums (CPU-seconds across {} threads) ----", threads)?;
     writeln!(f, "  BAM reader open      : {:>10.3} s", ns_to_s(t.bam_open_ns))?;
     writeln!(f, "  CDS index build      : {:>10.3} s", ns_to_s(t.cds_index_ns))?;
     writeln!(f, "  process_contig_stream: {:>10.3} s", ns_to_s(t.streaming_ns))?;
@@ -3614,10 +3640,15 @@ fn write_sample_timing(f: &mut fs::File, t: &SampleTimings, threads: usize) -> R
     writeln!(f, "    . process_read     : {:>10.3} s", ns_to_s(t.stream_process_read_ns))?;
     writeln!(f, "    . finalize+cov     : {:>10.3} s", ns_to_s(t.stream_finalize_ns))?;
     writeln!(f, "  Feature calculation  : {:>10.3} s", ns_to_s(t.feature_calc_ns))?;
+    writeln!(f, "  MAG blob encoding    : {:>10.3} s", ns_to_s(t.mag_encoding_ns))?;
     let sub_sum_ns = t.bam_open_ns + t.cds_index_ns
-                   + t.streaming_ns + t.feature_calc_ns;
+                   + t.streaming_ns + t.feature_calc_ns + t.mag_encoding_ns;
     writeln!(f, "  (sum of above)       : {:>10.3} s  ({}x threads -> wall ~ {:.1} s)",
              ns_to_s(sub_sum_ns), threads, ns_to_s(sub_sum_ns) / threads as f64)?;
+    writeln!(f, "  ---- DB write sub-phases ----")?;
+    writeln!(f, "  Insert sample        : {:>10.3} s", ns_to_s(t.insert_sample_ns))?;
+    writeln!(f, "  Write contig data    : {:>10.3} s", ns_to_s(t.write_contig_data_ns))?;
+    writeln!(f, "  Write MAG data       : {:>10.3} s", ns_to_s(t.mag_write_ns))?;
     writeln!(f)?;
     Ok(())
 }
@@ -3651,7 +3682,6 @@ fn finish_timing_log(
     writeln!(f, "  Par-iter wall        : {:>10.3} s", sum_dur(|t| t.par_iter_wall))?;
     writeln!(f, "  Merge contig results : {:>10.3} s", sum_dur(|t| t.merge_results))?;
     writeln!(f, "  DB write             : {:>10.3} s", sum_dur(|t| t.db_write))?;
-    writeln!(f, "  MAG aggregation      : {:>10.3} s", sum_ns(|t| t.mag_aggregation_ns))?;
     writeln!(f, "  Total per-sample sum : {:>10.3} s", sum_dur(|t| t.total))?;
     writeln!(f, "  Wall-clock (calc)    : {:>10.3} s", total_wall.as_secs_f64())?;
     writeln!(f, "  ---- Par-iter sub-phase sums ----")?;
@@ -3663,6 +3693,11 @@ fn finish_timing_log(
     writeln!(f, "    . process_read     : {:>10.3} s", sum_ns(|t| t.stream_process_read_ns))?;
     writeln!(f, "    . finalize+cov     : {:>10.3} s", sum_ns(|t| t.stream_finalize_ns))?;
     writeln!(f, "  Feature calculation  : {:>10.3} s", sum_ns(|t| t.feature_calc_ns))?;
+    writeln!(f, "  MAG blob encoding    : {:>10.3} s", sum_ns(|t| t.mag_encoding_ns))?;
+    writeln!(f, "  ---- DB write sub-phase sums ----")?;
+    writeln!(f, "  Insert sample        : {:>10.3} s", sum_ns(|t| t.insert_sample_ns))?;
+    writeln!(f, "  Write contig data    : {:>10.3} s", sum_ns(|t| t.write_contig_data_ns))?;
+    writeln!(f, "  Write MAG data       : {:>10.3} s", sum_ns(|t| t.mag_write_ns))?;
     Ok(())
 }
 
