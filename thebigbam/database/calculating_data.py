@@ -198,14 +198,11 @@ def resolve_mag_inputs(genbank_path, assembly_path, view):
                 gb = gb_by_stem.get(stem, "") if gb_kind == "dir" else ""
                 asm = asm_by_stem.get(stem, "") if asm_kind == "dir" else ""
                 mag_manifest.append((stem, gb, asm))
-        else:
+        elif gb_kind is not None or asm_kind is not None:
             gb_stem = Path(genbank_path).stem if gb_kind == "file" else None
             asm_stem = Path(assembly_path).stem if asm_kind == "file" else None
             stem = gb_stem or asm_stem
             mag_manifest.append((stem, genbank_path if gb_kind == "file" else "", assembly_path if asm_kind == "file" else ""))
-
-        if not mag_manifest:
-            sys.exit("ERROR: --view mag enabled but no input files were found.")
 
     return genbank_files, assembly_files, mag_manifest
 

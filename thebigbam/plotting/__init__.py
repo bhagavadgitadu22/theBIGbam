@@ -1,1 +1,3 @@
-# Plotting operations package
+import matplotlib
+matplotlib.use('Agg')
+
