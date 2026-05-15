@@ -48,6 +48,7 @@ pub fn compute_all_metrics(
     mismatches: &[u64],
     deletions: &[u64],
     contig_name: &str,
+    contig_id: i64,
     contig_length: usize,
     // Circularity inputs
     circularising_reads_count: u64,
@@ -291,6 +292,7 @@ pub fn compute_all_metrics(
     };
 
     let side = SideMisassemblyData {
+        contig_id,
         contig_name: contig_name.to_string(),
         coverage_first_position: primary_reads.first().copied().unwrap_or(0),
         contig_start_collapse_percentage: left_result.map(|(p, _, _)| (p * 1000.0).round() as i32),
@@ -353,6 +355,7 @@ pub fn compute_all_metrics(
     };
 
     let topology = TopologyData {
+        contig_id,
         contig_name: contig_name.to_string(),
         circularising_reads,
         circularising_reads_percentage,
@@ -362,6 +365,7 @@ pub fn compute_all_metrics(
     };
 
     let misassembly = MisassemblyData {
+        contig_id,
         contig_name: contig_name.to_string(),
         mismatches_count: mis_mm,
         deletions_count: mis_del,
@@ -372,6 +376,7 @@ pub fn compute_all_metrics(
     };
 
     let microdiversity = MicrodiversityData {
+        contig_id,
         contig_name: contig_name.to_string(),
         mismatches_count: micro_mm,
         deletions_count: micro_del,

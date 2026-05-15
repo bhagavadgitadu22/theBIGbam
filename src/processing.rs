@@ -99,7 +99,7 @@ struct MagContigJob {
 struct MagGroupResult {
     mag_name: String,
     mag_id: i64,
-    contig_blobs: Vec<(String, String, crate::blob::EncodedBlob)>,
+    contig_blobs: Vec<(String, i64, crate::blob::EncodedBlob)>,
     mag_blobs: Vec<(String, crate::blob::EncodedBlob)>,
     mag_cov_stats: crate::mag_blob::MagCoverageStats,
     presences: Vec<PresenceData>,
@@ -831,6 +831,7 @@ fn compute_area_median_clippings(
 fn add_features_from_arrays(
     arrays: &mut FeatureArrays,
     contig_name: &str,
+    contig_id: i64,
     config: &ProcessConfig,
     is_circular: bool,
     seq_type: SequencingType,
@@ -838,7 +839,7 @@ fn add_features_from_arrays(
     primary_count: u64,
     repeats: &[RepeatsData],
     cds_index: Option<&CdsIndex>,
-    blob_output: &mut Vec<(String, String, crate::blob::EncodedBlob)>,
+    blob_output: &mut Vec<(String, i64, crate::blob::EncodedBlob)>,
 ) -> (Option<PackagingData>, Option<(MisassemblyData, MicrodiversityData, SideMisassemblyData, TopologyData)>) {
     use crate::blob::{encode_dense_blob, smooth_dense_values, encode_sparse_blob, EventMeta, MetadataFlags,
                        codon_category_to_id, codon_to_id, aa_to_id};
@@ -890,6 +891,7 @@ fn add_features_from_arrays(
 
     // Coverage (always compress self-referentially)
     let primary_reads_f64: Vec<f64> = arrays.primary_reads.iter().map(|&x| x as f64).collect();
+    let cid = contig_id;
     if flags.coverage {
         // MAPQ - average mapping quality per position (needed for blob encoding below)
         let mapq_f64: Vec<f64> = arrays.sum_mapq.iter()
@@ -899,39 +901,38 @@ fn add_features_from_arrays(
 
         // === BLOB encoding for dense coverage features ===
         let clen = contig_length as u32;
-        let cn = contig_name.to_string();
 
         // primary_reads: raw i32
         let mut pr_i32: Vec<i32> = arrays.primary_reads.iter().map(|&x| x as i32).collect();
         smooth_dense_values(&mut pr_i32, config.variation_percentage);
         debug_assert_eq!(get_encoding("primary_reads"), Encoding::Dense);
-        blob_output.push(("primary_reads".into(), cn.clone(), encode_dense_blob(&pr_i32, get_value_scale("primary_reads"), clen)));
+        blob_output.push(("primary_reads".into(), cid, encode_dense_blob(&pr_i32, get_value_scale("primary_reads"), clen)));
 
         // plus/minus strand
         let mut pp_i32: Vec<i32> = arrays.primary_reads_plus_only.iter().map(|&x| x as i32).collect();
         smooth_dense_values(&mut pp_i32, config.variation_percentage);
         debug_assert_eq!(get_encoding("primary_reads_plus_only"), Encoding::Dense);
-        blob_output.push(("primary_reads_plus_only".into(), cn.clone(), encode_dense_blob(&pp_i32, get_value_scale("primary_reads_plus_only"), clen)));
+        blob_output.push(("primary_reads_plus_only".into(), cid, encode_dense_blob(&pp_i32, get_value_scale("primary_reads_plus_only"), clen)));
         let mut pm_i32: Vec<i32> = arrays.primary_reads_minus_only.iter().map(|&x| x as i32).collect();
         smooth_dense_values(&mut pm_i32, config.variation_percentage);
         debug_assert_eq!(get_encoding("primary_reads_minus_only"), Encoding::Dense);
-        blob_output.push(("primary_reads_minus_only".into(), cn.clone(), encode_dense_blob(&pm_i32, get_value_scale("primary_reads_minus_only"), clen)));
+        blob_output.push(("primary_reads_minus_only".into(), cid, encode_dense_blob(&pm_i32, get_value_scale("primary_reads_minus_only"), clen)));
 
         // secondary, supplementary
         let mut sec_i32: Vec<i32> = arrays.secondary_reads.iter().map(|&x| x as i32).collect();
         smooth_dense_values(&mut sec_i32, config.variation_percentage);
         debug_assert_eq!(get_encoding("secondary_reads"), Encoding::Dense);
-        blob_output.push(("secondary_reads".into(), cn.clone(), encode_dense_blob(&sec_i32, get_value_scale("secondary_reads"), clen)));
+        blob_output.push(("secondary_reads".into(), cid, encode_dense_blob(&sec_i32, get_value_scale("secondary_reads"), clen)));
         let mut sup_i32: Vec<i32> = arrays.supplementary_reads.iter().map(|&x| x as i32).collect();
         smooth_dense_values(&mut sup_i32, config.variation_percentage);
         debug_assert_eq!(get_encoding("supplementary_reads"), Encoding::Dense);
-        blob_output.push(("supplementary_reads".into(), cn.clone(), encode_dense_blob(&sup_i32, get_value_scale("supplementary_reads"), clen)));
+        blob_output.push(("supplementary_reads".into(), cid, encode_dense_blob(&sup_i32, get_value_scale("supplementary_reads"), clen)));
 
         // MAPQ: stored as ×100 integer
         let mut mapq_i32: Vec<i32> = mapq_f64.iter().map(|&x| (x * 100.0).round() as i32).collect();
         smooth_dense_values(&mut mapq_i32, config.variation_percentage);
         debug_assert_eq!(get_encoding("mapq"), Encoding::Dense);
-        blob_output.push(("mapq".into(), cn.clone(), encode_dense_blob(&mapq_i32, get_value_scale("mapq"), clen)));
+        blob_output.push(("mapq".into(), cid, encode_dense_blob(&mapq_i32, get_value_scale("mapq"), clen)));
     }
 
     // Assemblycheck features
@@ -976,7 +977,6 @@ fn add_features_from_arrays(
             
     // Shared constants for sparse feature encoding (used by mapping_metrics + rna modules)
     let clen = contig_length as u32;
-    let cn = contig_name.to_string();
     let bar_threshold = config.bar_ratio * 0.01;
     let min_occ = config.min_occurrences;
 
@@ -1049,7 +1049,7 @@ fn add_features_from_arrays(
             }).collect();
             let flags = MetadataFlags { sparse: true, has_stats: false, has_sequence: true, has_codons: true, has_partner: false };
             debug_assert_eq!(get_encoding("mismatches"), Encoding::Sparse);
-            blob_output.push(("mismatches".into(), cn.clone(),
+            blob_output.push(("mismatches".into(), cid,
                 encode_sparse_blob(&pos, &vals, Some(&meta), flags, get_value_scale("mismatches"), clen)));
         }
 
@@ -1058,7 +1058,7 @@ fn add_features_from_arrays(
             let (pos, vals) = filter_sparse(&deletions_f64, &primary_reads_f64);
             let flags = MetadataFlags { sparse: true, ..Default::default() };
             debug_assert_eq!(get_encoding("deletions"), Encoding::Sparse);
-            blob_output.push(("deletions".into(), cn.clone(),
+            blob_output.push(("deletions".into(), cid,
                 encode_sparse_blob(&pos, &vals, None, flags, get_value_scale("deletions"), clen)));
         }
 
@@ -1081,7 +1081,7 @@ fn add_features_from_arrays(
             }).collect();
             let flags = MetadataFlags { sparse: true, has_stats: true, has_sequence: true, has_codons: false, has_partner: false };
             debug_assert_eq!(get_encoding("insertions"), Encoding::Sparse);
-            blob_output.push(("insertions".into(), cn.clone(),
+            blob_output.push(("insertions".into(), cid,
                 encode_sparse_blob(&pos, &vals, Some(&meta), flags, get_value_scale("insertions"), clen)));
         }
 
@@ -1118,7 +1118,7 @@ fn add_features_from_arrays(
             }).collect();
             let flags = MetadataFlags { sparse: true, has_stats: true, has_sequence: true, has_codons: false, has_partner: false };
             debug_assert_eq!(get_encoding("left_clippings"), Encoding::Sparse);
-            blob_output.push(("left_clippings".into(), cn.clone(),
+            blob_output.push(("left_clippings".into(), cid,
                 encode_sparse_blob(&pos, &vals, Some(&meta), flags, get_value_scale("left_clippings"), clen)));
         }
 
@@ -1155,7 +1155,7 @@ fn add_features_from_arrays(
             }).collect();
             let flags = MetadataFlags { sparse: true, has_stats: true, has_sequence: true, has_codons: false, has_partner: false };
             debug_assert_eq!(get_encoding("right_clippings"), Encoding::Sparse);
-            blob_output.push(("right_clippings".into(), cn.clone(),
+            blob_output.push(("right_clippings".into(), cid,
                 encode_sparse_blob(&pos, &vals, Some(&meta), flags, get_value_scale("right_clippings"), clen)));
         }
     }
@@ -1175,7 +1175,7 @@ fn add_features_from_arrays(
         }
         let flags = MetadataFlags { sparse: true, ..Default::default() };
         debug_assert_eq!(get_encoding("splicings"), Encoding::Sparse);
-        blob_output.push(("splicings".into(), cn.clone(),
+        blob_output.push(("splicings".into(), cid,
             encode_sparse_blob(&spl_pos, &spl_vals, None, flags, get_value_scale("splicings"), clen)));
     }
 
@@ -1195,7 +1195,6 @@ fn add_features_from_arrays(
 
         // === BLOB encoding for paired-reads features ===
         let clen = contig_length as u32;
-        let cn = contig_name.to_string();
         let bar_threshold = config.bar_ratio * 0.01;
         let min_occ = config.min_occurrences;
 
@@ -1218,24 +1217,24 @@ fn add_features_from_arrays(
         let (pos, vals) = filter_sparse_pr(&non_inward_f64, &primary_reads_f64);
         let sp_flags = MetadataFlags { sparse: true, ..Default::default() };
         debug_assert_eq!(get_encoding("non_inward_pairs"), Encoding::Sparse);
-        blob_output.push(("non_inward_pairs".into(), cn.clone(),
+        blob_output.push(("non_inward_pairs".into(), cid,
             encode_sparse_blob(&pos, &vals, None, sp_flags, get_value_scale("non_inward_pairs"), clen)));
 
         let (pos, vals) = filter_sparse_pr(&mate_unmapped_f64, &primary_reads_f64);
         debug_assert_eq!(get_encoding("mate_not_mapped"), Encoding::Sparse);
-        blob_output.push(("mate_not_mapped".into(), cn.clone(),
+        blob_output.push(("mate_not_mapped".into(), cid,
             encode_sparse_blob(&pos, &vals, None, sp_flags, get_value_scale("mate_not_mapped"), clen)));
 
         let (pos, vals) = filter_sparse_pr(&mate_other_contig_f64, &primary_reads_f64);
         debug_assert_eq!(get_encoding("mate_on_another_contig"), Encoding::Sparse);
-        blob_output.push(("mate_on_another_contig".into(), cn.clone(),
+        blob_output.push(("mate_on_another_contig".into(), cid,
             encode_sparse_blob(&pos, &vals, None, sp_flags, get_value_scale("mate_on_another_contig"), clen)));
 
         // insert_sizes: dense curve
         let mut is_i32: Vec<i32> = values.iter().map(|&x| (x * 10.0).round() as i32).collect();
         smooth_dense_values(&mut is_i32, config.variation_percentage);
         debug_assert_eq!(get_encoding("insert_sizes"), Encoding::Dense);
-        blob_output.push(("insert_sizes".into(), cn.clone(), encode_dense_blob(&is_i32, get_value_scale("insert_sizes"), clen)));
+        blob_output.push(("insert_sizes".into(), cid, encode_dense_blob(&is_i32, get_value_scale("insert_sizes"), clen)));
     }
 
     // Long-reads module
@@ -1249,11 +1248,10 @@ fn add_features_from_arrays(
 
         // === BLOB encoding for long-reads features ===
         let clen = contig_length as u32;
-        let cn = contig_name.to_string();
         let mut rl_i32: Vec<i32> = values.iter().map(|&x| (x * 10.0).round() as i32).collect();
         smooth_dense_values(&mut rl_i32, config.variation_percentage);
         debug_assert_eq!(get_encoding("read_lengths"), Encoding::Dense);
-        blob_output.push(("read_lengths".into(), cn, encode_dense_blob(&rl_i32, get_value_scale("read_lengths"), clen)));
+        blob_output.push(("read_lengths".into(), cid, encode_dense_blob(&rl_i32, get_value_scale("read_lengths"), clen)));
     }
 
     // Phagetermini features
@@ -1276,7 +1274,6 @@ fn add_features_from_arrays(
         // === BLOB encoding for phagetermini features ===
         {
             let clen = contig_length as u32;
-            let cn = contig_name.to_string();
             let bar_threshold = config.bar_ratio * 0.01;
             let min_occ = config.min_occurrences;
 
@@ -1284,7 +1281,7 @@ fn add_features_from_arrays(
             let mut cr_i32: Vec<i32> = arrays.coverage_reduced.iter().map(|&x| x as i32).collect();
             smooth_dense_values(&mut cr_i32, config.variation_percentage);
             debug_assert_eq!(get_encoding("coverage_reduced"), Encoding::Dense);
-            blob_output.push(("coverage_reduced".into(), cn.clone(), encode_dense_blob(&cr_i32, get_value_scale("coverage_reduced"), clen)));
+            blob_output.push(("coverage_reduced".into(), cid, encode_dense_blob(&cr_i32, get_value_scale("coverage_reduced"), clen)));
 
             // reads_starts: sparse with median + sequence
             let cov_reduced_f64: Vec<f64> = arrays.coverage_reduced.iter().map(|&x| x as f64).collect();
@@ -1312,7 +1309,7 @@ fn add_features_from_arrays(
             }).collect();
             let pt_flags = MetadataFlags { sparse: true, has_stats: false, has_sequence: true, has_codons: false, has_partner: false };
             debug_assert_eq!(get_encoding("reads_starts"), Encoding::Sparse);
-            blob_output.push(("reads_starts".into(), cn.clone(),
+            blob_output.push(("reads_starts".into(), cid,
                 encode_sparse_blob(&rs_pos, &rs_vals, Some(&rs_meta), pt_flags, get_value_scale("reads_starts"), clen)));
 
             // reads_ends: sparse with median + sequence
@@ -1339,7 +1336,7 @@ fn add_features_from_arrays(
                 em
             }).collect();
             debug_assert_eq!(get_encoding("reads_ends"), Encoding::Sparse);
-            blob_output.push(("reads_ends".into(), cn.clone(),
+            blob_output.push(("reads_ends".into(), cid,
                 encode_sparse_blob(&re_pos, &re_vals, Some(&re_meta), pt_flags, get_value_scale("reads_ends"), clen)));
         }
 
@@ -1415,6 +1412,7 @@ fn add_features_from_arrays(
             // All termini (both kept and discarded) are included with filtering metadata
             if mechanism != "No_packaging" {
                 Some(PackagingData {
+                    contig_id,
                     contig_name: contig_name.to_string(),
                     mechanism,
                     left_termini,
@@ -1445,6 +1443,7 @@ fn add_features_from_arrays(
             &arrays.mismatches,
             &arrays.deletions,
             contig_name,
+            contig_id,
             contig_length,
             arrays.circularising_reads_count,
             arrays.circularising_inserts_count,
@@ -1510,7 +1509,7 @@ fn process_mag_group(
     }
 
     let mut accum = DenseAccum::new(mag_len);
-    let mut contig_blobs: Vec<(String, String, EncodedBlob)> = Vec::new();
+    let mut contig_blobs: Vec<(String, i64, EncodedBlob)> = Vec::new();
     let mut presences = Vec::new();
     let mut all_packaging = Vec::new();
     let mut all_misassembly = Vec::new();
@@ -1616,6 +1615,7 @@ fn process_mag_group(
         } else { 0.0 };
 
         presences.push(PresenceData {
+            contig_id: member.contig_id,
             contig_name: member.ref_name.clone(),
             coverage_pct: coverage_pct as f32,
             above_expected_aligned_fraction: above_expected,
@@ -1630,9 +1630,9 @@ fn process_mag_group(
 
         // Encode per-contig blobs (existing logic, unchanged)
         let ts = accum_ref.map(|_| std::time::Instant::now());
-        let mut blob_output: Vec<(String, String, EncodedBlob)> = Vec::new();
+        let mut blob_output: Vec<(String, i64, EncodedBlob)> = Vec::new();
         let (pkg, metrics) = add_features_from_arrays(
-            &mut arrays, &member.ref_name, config, is_circular, seq_type, flags,
+            &mut arrays, &member.ref_name, member.contig_id, config, is_circular, seq_type, flags,
             primary_count, repeats, cds_index.as_ref(), &mut blob_output,
         );
         contig_blobs.extend(blob_output);
@@ -1704,7 +1704,7 @@ fn process_mag_group(
 
         let members_and_blobs: Vec<(crate::mag_blob::MagMember, &EncodedBlob)> = group.members.iter()
             .filter_map(|m| {
-                let blob = contig_blobs.iter().find(|(fname, cname, _)| fname == var.name && cname == &m.ref_name);
+                let blob = contig_blobs.iter().find(|(fname, cid, _)| fname == var.name && *cid == m.contig_id);
                 blob.map(|(_, _, b)| (crate::mag_blob::MagMember { contig_id: m.contig_id, offset: m.offset_in_mag, length: m.ref_length as u32 }, b))
             })
             .collect();
@@ -1754,7 +1754,7 @@ fn process_mag_group(
 /// Returns (feature_blobs, presences, packaging, misassembly, microdiversity, side_misassembly, topology, sample_name, seq_type, total_reads, mapped_reads)
 /// Per-sample result including optional MAG-level blobs.
 pub struct SampleProcessResult {
-    pub feature_blobs: Vec<(String, String, crate::blob::EncodedBlob)>,
+    pub feature_blobs: Vec<(String, i64, crate::blob::EncodedBlob)>,
     pub presences: Vec<PresenceData>,
     pub packaging: Vec<PackagingData>,
     pub misassembly: Vec<MisassemblyData>,
@@ -2024,8 +2024,8 @@ pub fn process_sample(
                     }
 
                     let ts = accum_ref.map(|_| std::time::Instant::now());
-                    let mut feature_blobs: Vec<(String, String, crate::blob::EncodedBlob)> = Vec::new();
-                    let (packaging_info, metrics_info) = add_features_from_arrays(&mut arrays, ref_name, config, is_circular, seq_type, flags, primary_count, repeats, cds_index.as_ref(), &mut feature_blobs);
+                    let mut feature_blobs: Vec<(String, i64, crate::blob::EncodedBlob)> = Vec::new();
+                    let (packaging_info, metrics_info) = add_features_from_arrays(&mut arrays, ref_name, contig_id, config, is_circular, seq_type, flags, primary_count, repeats, cds_index.as_ref(), &mut feature_blobs);
                     let coverage_median = arrays.coverage_median() as f32;
                     let coverage_trimmed_mean = arrays.coverage_trimmed_mean(0.05) as f32;
 
@@ -2064,6 +2064,7 @@ pub fn process_sample(
                     };
 
                     let presence = PresenceData {
+                        contig_id,
                         contig_name: ref_name.clone(),
                         coverage_pct: coverage_pct as f32,
                         above_expected_aligned_fraction: above_expected,
@@ -2090,7 +2091,7 @@ pub fn process_sample(
         }
 
         let t0 = if time_on { Some(std::time::Instant::now()) } else { None };
-        let mut all_blobs: Vec<(String, String, crate::blob::EncodedBlob)> = Vec::new();
+        let mut all_blobs: Vec<(String, i64, crate::blob::EncodedBlob)> = Vec::new();
         let mut all_pres = Vec::new();
         let mut all_pkg = Vec::new();
         let mut all_mis = Vec::new();
@@ -2959,7 +2960,7 @@ fn apply_mag_filter(
     microdiversity: Vec<MicrodiversityData>,
     side_misassembly: Vec<SideMisassemblyData>,
     topology: Vec<TopologyData>,
-    feature_blobs: Vec<(String, String, crate::blob::EncodedBlob)>,
+    feature_blobs: Vec<(String, i64, crate::blob::EncodedBlob)>,
     mag_results: MagResultVec,
 ) -> (
     Vec<PresenceData>,
@@ -2968,9 +2969,13 @@ fn apply_mag_filter(
     Vec<MicrodiversityData>,
     Vec<SideMisassemblyData>,
     Vec<TopologyData>,
-    Vec<(String, String, crate::blob::EncodedBlob)>,
+    Vec<(String, i64, crate::blob::EncodedBlob)>,
     MagResultVec,
 ) {
+    let drop_ids: HashSet<i64> = presences.iter()
+        .filter(|p| drop.contains(&p.contig_name))
+        .map(|p| p.contig_id)
+        .collect();
     let dropped_mag_names: HashSet<&str> = mag_contig_map.iter()
         .filter(|(_, members)| members.iter().any(|c| drop.contains(c)))
         .map(|(name, _)| name.as_str())
@@ -2982,7 +2987,7 @@ fn apply_mag_filter(
         microdiversity.into_iter().filter(|p| !drop.contains(&p.contig_name)).collect(),
         side_misassembly.into_iter().filter(|p| !drop.contains(&p.contig_name)).collect(),
         topology.into_iter().filter(|p| !drop.contains(&p.contig_name)).collect(),
-        feature_blobs.into_iter().filter(|(_, cname, _)| !drop.contains(cname)).collect(),
+        feature_blobs.into_iter().filter(|(_, cid, _)| !drop_ids.contains(cid)).collect(),
         mag_results.into_iter().filter(|(name, _, _, _)| !dropped_mag_names.contains(name.as_str())).collect(),
     )
 }
@@ -3016,7 +3021,7 @@ struct SampleResult {
     mapped_reads: u64,
     is_circular: bool,
     /// Compressed BLOB data: Vec<(feature_name, contig_name, encoded_blob)>
-    feature_blobs: Vec<(String, String, crate::blob::EncodedBlob)>,
+    feature_blobs: Vec<(String, i64, crate::blob::EncodedBlob)>,
     presences: Vec<PresenceData>,
     packaging: Vec<PackagingData>,
     misassembly: Vec<MisassemblyData>,

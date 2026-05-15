@@ -27,6 +27,43 @@ use crate::gc_content::{GCSkewStats, GCStats, DEFAULT_GC_CONTENT_WINDOW_SIZE, DE
 use crate::types::{feature_name_to_id, ContigInfo, FeatureAnnotation, PackagingData, PresenceData, VARIABLES};
 // Re-export new metric data structs (defined below in this file)
 
+fn configure_for_bulk_writes(conn: &Connection) {
+    let _ = conn.execute_batch("SET threads TO 1");
+    let _ = conn.execute_batch("SET wal_autocheckpoint='4GB'");
+}
+
+fn build_contig_length_cache(conn: &Connection) -> HashMap<i64, i32> {
+    let mut map = HashMap::new();
+    if let Ok(mut stmt) = conn.prepare("SELECT Contig_id, Contig_length FROM Contig") {
+        if let Ok(rows) = stmt.query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i32>(1)?))) {
+            for row in rows.flatten() {
+                map.insert(row.0, row.1);
+            }
+        }
+    }
+    map
+}
+
+fn build_terminase_cache(conn: &Connection) -> HashMap<i64, Vec<(i32, i32)>> {
+    let mut map: HashMap<i64, Vec<(i32, i32)>> = HashMap::new();
+    let sql = r#"
+        SELECT ca."Contig_id", ca."Start", ca."End"
+        FROM Contig_annotation_core ca
+        JOIN Annotation_qualifier aq ON aq.Annotation_id = ca.Annotation_id
+        WHERE aq."Key" = 'product' AND aq."Value" LIKE '%terminase%'
+    "#;
+    if let Ok(mut stmt) = conn.prepare(sql) {
+        if let Ok(rows) = stmt.query_map([], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, i32>(1)?, row.get::<_, i32>(2)?))
+        }) {
+            for row in rows.flatten() {
+                map.entry(row.0).or_default().push((row.1, row.2));
+            }
+        }
+    }
+    map
+}
+
 /// Thread-safe database connection wrapper for sequential writes.
 pub struct DbWriter {
     conn: Mutex<Connection>,
@@ -35,6 +72,8 @@ pub struct DbWriter {
     /// tables, per-MAG explicit views, and the inter-contig blast-hits table.
     is_mag_mode: bool,
     contig_name_to_id: HashMap<String, i64>,
+    contig_id_to_length: HashMap<i64, i32>,
+    terminase_cache: HashMap<i64, Vec<(i32, i32)>>,
     sample_name_to_id: Mutex<HashMap<String, i64>>,
     next_sample_id: Mutex<i64>,
     next_packaging_id: Mutex<i64>,
@@ -63,6 +102,7 @@ impl DbWriter {
 
         let conn = Connection::open(db_path)
             .with_context(|| format!("Failed to create database: {}", db_path.display()))?;
+        configure_for_bulk_writes(&conn);
 
         // Create tables
         create_core_tables(&conn, has_bam, is_mag_mode)?;
@@ -93,11 +133,21 @@ impl DbWriter {
             .map(|(i, c)| (c.name.clone(), (i + 1) as i64))
             .collect();
 
+        let contig_id_to_length: HashMap<i64, i32> = contigs
+            .iter()
+            .enumerate()
+            .map(|(i, c)| ((i + 1) as i64, c.length as i32))
+            .collect();
+
+        let terminase_cache = build_terminase_cache(&conn);
+
         Ok(Self {
             conn: Mutex::new(conn),
             has_bam,
             is_mag_mode,
             contig_name_to_id,
+            contig_id_to_length,
+            terminase_cache,
             sample_name_to_id: Mutex::new(HashMap::new()),
             next_sample_id: Mutex::new(1),
             next_packaging_id: Mutex::new(1),
@@ -115,6 +165,7 @@ impl DbWriter {
     ) -> Result<Self> {
         let conn = Connection::open(db_path)
             .with_context(|| format!("Failed to open database: {}", db_path.display()))?;
+        configure_for_bulk_writes(&conn);
 
         // Read view_mode from existing metadata (defaults to 'contig' for legacy DBs).
         let is_mag_mode = {
@@ -242,11 +293,16 @@ impl DbWriter {
             [], |row| row.get(0),
         ).unwrap_or(1);
 
+        let contig_id_to_length = build_contig_length_cache(&conn);
+        let terminase_cache = build_terminase_cache(&conn);
+
         Ok(Self {
             conn: Mutex::new(conn),
             has_bam,
             is_mag_mode,
             contig_name_to_id,
+            contig_id_to_length,
+            terminase_cache,
             sample_name_to_id: Mutex::new(sample_name_to_id),
             next_sample_id: Mutex::new(max_sample_id + 1),
             next_packaging_id: Mutex::new(next_packaging_id),
@@ -293,7 +349,7 @@ impl DbWriter {
         microdiversity: &[MicrodiversityData],
         side_misassembly: &[SideMisassemblyData],
         topology: &[TopologyData],
-        feature_blobs: &[(String, String, crate::blob::EncodedBlob)],
+        feature_blobs: &[(String, i64, crate::blob::EncodedBlob)],
         circular: bool,
     ) -> Result<()> {
         let sample_id = {
@@ -333,17 +389,15 @@ impl DbWriter {
             .context("Failed to create Coverage appender")?;
 
         for p in presences {
-            if let Some(&contig_id) = self.contig_name_to_id.get(&p.contig_name) {
-                let cov_pct = (p.coverage_pct * 10.0).round() as i32;
-                let above_expected = p.above_expected_aligned_fraction;
-                let read_count = p.read_count as i64;
-                let cov_mean = (p.coverage_mean * 10.0).round() as i32;
-                let cov_median = (p.coverage_median * 10.0).round() as i32;
-                let cov_trimmed_mean = (p.coverage_trimmed_mean * 10.0).round() as i32;
-                let cov_sd = p.coverage_coefficient_of_variation.round() as i32;
-                let cov_var = p.coverage_relative_coverage_roughness.round() as i32;
-                appender.append_row(params![contig_id, sample_id, cov_pct, above_expected, read_count, cov_mean, cov_median, cov_trimmed_mean, cov_sd, cov_var])?;
-            }
+            let cov_pct = (p.coverage_pct * 10.0).round() as i32;
+            let above_expected = p.above_expected_aligned_fraction;
+            let read_count = p.read_count as i64;
+            let cov_mean = (p.coverage_mean * 10.0).round() as i32;
+            let cov_median = (p.coverage_median * 10.0).round() as i32;
+            let cov_trimmed_mean = (p.coverage_trimmed_mean * 10.0).round() as i32;
+            let cov_sd = p.coverage_coefficient_of_variation.round() as i32;
+            let cov_var = p.coverage_relative_coverage_roughness.round() as i32;
+            appender.append_row(params![p.contig_id, sample_id, cov_pct, above_expected, read_count, cov_mean, cov_median, cov_trimmed_mean, cov_sd, cov_var])?;
         }
 
         appender.flush().context("Failed to flush Coverage appender")?;
@@ -364,25 +418,17 @@ impl DbWriter {
             .context("Failed to create Phage_termini appender")?;
 
         for pkg in packaging {
-            if let Some(&contig_id) = self.contig_name_to_id.get(&pkg.contig_name) {
-                // Collect kept terminus center positions for terminase distance calculation
+                let contig_id = pkg.contig_id;
                 let kept_terminus_positions: Vec<i32> = pkg.left_termini.iter()
                     .chain(pkg.right_termini.iter())
                     .filter(|t| t.passed_poisson_test && t.passed_clipping_test)
                     .map(|t| t.center_pos)
                     .collect();
 
-                // Get genome length for circular distance calculation
-                let genome_length: i32 = conn.query_row(
-                    "SELECT Contig_length FROM Contig WHERE Contig_id = ?",
-                    params![contig_id],
-                    |row| row.get(0),
-                ).unwrap_or(0);
+                let genome_length = self.contig_id_to_length.get(&contig_id).copied().unwrap_or(0);
 
-                // Calculate terminase_distance: minimal distance from any kept terminus
-                // center to any terminase gene annotation
-                let terminase_distance = calculate_terminase_distance(
-                    conn, contig_id, &kept_terminus_positions, genome_length, circular,
+                let terminase_distance = calculate_terminase_distance_cached(
+                    &self.terminase_cache, contig_id, &kept_terminus_positions, genome_length, circular,
                 );
 
                 // Format median clippings as comma-separated integer strings
@@ -472,7 +518,6 @@ impl DbWriter {
                 }
 
                 packaging_id += 1;
-            }
         }
 
         mechanism_appender.flush().context("Failed to flush Phage_mechanisms appender")?;
@@ -488,13 +533,11 @@ impl DbWriter {
             .context("Failed to create Misassembly appender")?;
 
         for d in data {
-            if let Some(&contig_id) = self.contig_name_to_id.get(&d.contig_name) {
-                appender.append_row(params![
-                    contig_id, sample_id,
-                    d.mismatches_count, d.deletions_count, d.insertions_count, d.clippings_count,
-                    d.collapse_bp, d.expansion_bp
-                ])?;
-            }
+            appender.append_row(params![
+                d.contig_id, sample_id,
+                d.mismatches_count, d.deletions_count, d.insertions_count, d.clippings_count,
+                d.collapse_bp, d.expansion_bp
+            ])?;
         }
 
         appender.flush().context("Failed to flush Misassembly appender")?;
@@ -506,13 +549,11 @@ impl DbWriter {
             .context("Failed to create Microdiversity appender")?;
 
         for d in data {
-            if let Some(&contig_id) = self.contig_name_to_id.get(&d.contig_name) {
-                appender.append_row(params![
-                    contig_id, sample_id,
-                    d.mismatches_count, d.deletions_count, d.insertions_count, d.clippings_count,
-                    d.microdiverse_bp_on_reference, d.microdiverse_bp_on_reads
-                ])?;
-            }
+            appender.append_row(params![
+                d.contig_id, sample_id,
+                d.mismatches_count, d.deletions_count, d.insertions_count, d.clippings_count,
+                d.microdiverse_bp_on_reference, d.microdiverse_bp_on_reads
+            ])?;
         }
 
         appender.flush().context("Failed to flush Microdiversity appender")?;
@@ -524,17 +565,15 @@ impl DbWriter {
             .context("Failed to create Side_misassembly appender")?;
 
         for d in data {
-            if let Some(&contig_id) = self.contig_name_to_id.get(&d.contig_name) {
-                let misjoint = d.contig_end_misjoint_mates.map(|v| v as i64);
-                appender.append_row(params![
-                    contig_id, sample_id,
-                    d.coverage_first_position as i64,
-                    d.contig_start_collapse_percentage, d.contig_start_collapse_bp, d.contig_start_expansion_bp,
-                    d.coverage_last_position as i64,
-                    d.contig_end_collapse_percentage, d.contig_end_collapse_bp, d.contig_end_expansion_bp,
-                    misjoint
-                ])?;
-            }
+            let misjoint = d.contig_end_misjoint_mates.map(|v| v as i64);
+            appender.append_row(params![
+                d.contig_id, sample_id,
+                d.coverage_first_position as i64,
+                d.contig_start_collapse_percentage, d.contig_start_collapse_bp, d.contig_start_expansion_bp,
+                d.coverage_last_position as i64,
+                d.contig_end_collapse_percentage, d.contig_end_collapse_bp, d.contig_end_expansion_bp,
+                misjoint
+            ])?;
         }
 
         appender.flush().context("Failed to flush Side_misassembly appender")?;
@@ -546,17 +585,15 @@ impl DbWriter {
             .context("Failed to create Topology appender")?;
 
         for d in data {
-            if let Some(&contig_id) = self.contig_name_to_id.get(&d.contig_name) {
-                let circ_reads = d.circularising_reads.map(|v| v as i64);
-                let circ_pct = d.circularising_reads_percentage;
-                let median_circ_len = d.median_circularising_len;
-                let circ_inserts = d.circularising_inserts.map(|v| v as i64);
-                let circ_dev = d.circularising_insert_size_deviation;
-                appender.append_row(params![
-                    contig_id, sample_id,
-                    circ_reads, circ_pct, median_circ_len, circ_inserts, circ_dev
-                ])?;
-            }
+            let circ_reads = d.circularising_reads.map(|v| v as i64);
+            let circ_pct = d.circularising_reads_percentage;
+            let median_circ_len = d.median_circularising_len;
+            let circ_inserts = d.circularising_inserts.map(|v| v as i64);
+            let circ_dev = d.circularising_insert_size_deviation;
+            appender.append_row(params![
+                d.contig_id, sample_id,
+                circ_reads, circ_pct, median_circ_len, circ_inserts, circ_dev
+            ])?;
         }
 
         appender.flush().context("Failed to flush Topology appender")?;
@@ -565,9 +602,9 @@ impl DbWriter {
 
     /// Write feature BLOBs to the Feature_blob table.
     ///
-    /// Each tuple is (feature_name, contig_name, blob_bytes).
+    /// Each tuple is (feature_name, contig_id, encoded_blob).
     /// Feature names are mapped to feature_ids via VARIABLES index.
-    pub fn write_feature_blobs(&self, conn: &Connection, sample_id: i64, blobs: &[(String, String, crate::blob::EncodedBlob)]) -> Result<()> {
+    pub fn write_feature_blobs(&self, conn: &Connection, sample_id: i64, blobs: &[(String, i64, crate::blob::EncodedBlob)]) -> Result<()> {
         if blobs.is_empty() {
             return Ok(());
         }
@@ -577,18 +614,13 @@ impl DbWriter {
         let mut chunk_appender = conn.appender("Feature_blob_chunk")
             .context("Failed to create Feature_blob_chunk appender")?;
 
-        for (feature_name, contig_name, encoded) in blobs {
-            // Skip empty blobs (all-zero dense or no-event sparse)
+        for (feature_name, contig_id, encoded) in blobs {
             if encoded.zoom.is_empty() {
                 continue;
             }
-            if let (Some(&contig_id), Some(fid)) = (
-                self.contig_name_to_id.get(contig_name),
-                feature_name_to_id(feature_name),
-            ) {
+            if let Some(fid) = feature_name_to_id(feature_name) {
                 appender.append_row(params![contig_id, sample_id, fid as i32, encoded.zoom.as_slice()])?;
 
-                // Write individual base-resolution chunks for fast zoomed-in queries
                 for (chunk_idx, chunk_data) in encoded.chunks.iter().enumerate() {
                     chunk_appender.append_row(params![
                         contig_id, sample_id, fid as i32, chunk_idx as i16, chunk_data.as_slice()
@@ -1719,8 +1751,8 @@ fn update_sample_counts(conn: &Connection, is_mag_mode: bool) -> Result<()> {
 /// and any terminase gene annotation for a given contig.
 /// Returns None if no terminase genes are found or no terminus positions are provided.
 /// When circular=true, uses circular distance (min of linear or wrap-around).
-fn calculate_terminase_distance(
-    conn: &Connection,
+fn calculate_terminase_distance_cached(
+    cache: &HashMap<i64, Vec<(i32, i32)>>,
     contig_id: i64,
     terminus_positions: &[i32],
     genome_length: i32,
@@ -1730,39 +1762,21 @@ fn calculate_terminase_distance(
         return None;
     }
 
-    // Query terminase gene annotations for this contig
-    let mut stmt = conn.prepare(
-        "SELECT ca.\"Start\", ca.\"End\"
-         FROM Contig_annotation_core ca
-         JOIN Annotation_qualifier aq ON aq.Annotation_id = ca.Annotation_id
-         WHERE ca.Contig_id = ? AND aq.\"Key\" = 'product' AND aq.\"Value\" LIKE '%terminase%'"
-    ).ok()?;
-
-    let terminase_genes: Vec<(i32, i32)> = stmt
-        .query_map(params![contig_id], |row| {
-            Ok((row.get::<_, i32>(0)?, row.get::<_, i32>(1)?))
-        })
-        .ok()?
-        .filter_map(|r| r.ok())
-        .collect();
-
+    let terminase_genes = cache.get(&contig_id)?;
     if terminase_genes.is_empty() {
         return None;
     }
 
-    // Calculate minimum distance from any terminus to any terminase gene edge
     let mut min_dist = i32::MAX;
     for &term_pos in terminus_positions {
-        for &(gene_start, gene_end) in &terminase_genes {
-            // Distance to nearest edge of the gene (linear)
+        for &(gene_start, gene_end) in terminase_genes {
             let linear_dist = if term_pos < gene_start {
                 gene_start - term_pos
             } else if term_pos > gene_end {
                 term_pos - gene_end
             } else {
-                0 // terminus is within the gene
+                0
             };
-            // For circular genomes, consider wrap-around distance
             let dist = if circular && linear_dist > 0 {
                 linear_dist.min(genome_length - linear_dist)
             } else {
@@ -3516,6 +3530,7 @@ pub struct GCContentData {
 /// Misassembly data for a contig (≥50% prevalence threshold).
 #[derive(Clone, Debug)]
 pub struct MisassemblyData {
+    pub contig_id: i64,
     pub contig_name: String,
     pub mismatches_count: i64,
     pub deletions_count: i64,
@@ -3528,6 +3543,7 @@ pub struct MisassemblyData {
 /// Microdiversity data for a contig (≥10% prevalence threshold).
 #[derive(Clone, Debug)]
 pub struct MicrodiversityData {
+    pub contig_id: i64,
     pub contig_name: String,
     pub mismatches_count: i64,
     pub deletions_count: i64,
@@ -3540,6 +3556,7 @@ pub struct MicrodiversityData {
 /// Side misassembly data for a contig (left/right clipping events with ≥50% prevalence).
 #[derive(Clone, Debug)]
 pub struct SideMisassemblyData {
+    pub contig_id: i64,
     pub contig_name: String,
     pub coverage_first_position: u64,
     pub contig_start_collapse_percentage: Option<i32>,
@@ -3555,6 +3572,7 @@ pub struct SideMisassemblyData {
 /// Topology data for a contig (circularisation metrics).
 #[derive(Clone, Debug)]
 pub struct TopologyData {
+    pub contig_id: i64,
     pub contig_name: String,
     pub circularising_reads: Option<u64>,
     pub circularising_reads_percentage: Option<i32>,

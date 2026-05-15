@@ -439,7 +439,18 @@ pub fn variables_for_module(module: &str) -> impl Iterator<Item = &'static Varia
 /// Returns None if the feature is not found in VARIABLES.
 #[inline]
 pub fn feature_name_to_id(name: &str) -> Option<i16> {
-    VARIABLES.iter().position(|v| v.name == name).map(|i| (i + 1) as i16)
+    feature_id_map().get(name).copied()
+}
+
+/// Pre-built HashMap for O(1) feature name → feature_id lookups.
+pub fn feature_id_map() -> &'static std::collections::HashMap<&'static str, i16> {
+    use std::sync::OnceLock;
+    static MAP: OnceLock<std::collections::HashMap<&'static str, i16>> = OnceLock::new();
+    MAP.get_or_init(|| {
+        VARIABLES.iter().enumerate()
+            .map(|(i, v)| (v.name, (i + 1) as i16))
+            .collect()
+    })
 }
 
 // ============================================================================
@@ -511,7 +522,7 @@ pub struct FeatureAnnotation {
 /// Stores coverage metrics used to assess read depth and abundance.
 #[derive(Clone, Debug)]
 pub struct PresenceData {
-    /// The contig name
+    pub contig_id: i64,
     pub contig_name: String,
     /// Percentage of bases with at least 1x coverage (0-100)
     pub coverage_pct: f32,
@@ -579,7 +590,7 @@ pub struct TerminusArea {
 /// This is stored separately from PresenceData.
 #[derive(Clone, Debug)]
 pub struct PackagingData {
-    /// The contig name
+    pub contig_id: i64,
     pub contig_name: String,
     /// Phage packaging mechanism (e.g., "PAC", "COS", "DTR_short_5'", etc.)
     pub mechanism: String,
