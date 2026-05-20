@@ -724,25 +724,20 @@ def create_layout(db_path, enable_timing=False):
 
     # Views (One sample / All samples) callback: show/hide sample-related controls
     def on_view_change(attr, old, new):
+        if enable_timing:
+            t_view = time.perf_counter()
         is_all = (new == 1)  # True means All samples
 
         from bokeh.io import curdoc
         doc = curdoc()
         doc.hold('combine')
-        # Lock callbacks during view change to prevent cascading updates
         global_toggle_lock['locked'] = True
         try:
-            # Toggle Sample section - hide entirely in All Samples view
-            separator_samples.visible = not is_all
-            sample_title.visible = not is_all
-            above_sample_content.visible = not is_all
-            widgets['sample_select'].visible = not is_all
-
-            # Toggle visibility between the two variables sections
-            # Each section maintains its own state independently
+            sample_section.visible = not is_all
             variables_section_one.visible = not is_all
             variables_section_all.visible = is_all
             sample_params_header.visible = is_all
+            sample_params_content.visible = False
 
             # Refresh options while still locked (suppresses cascading callbacks)
             # Don't invalidate filtering cache - filtering is shared between views and hasn't changed
@@ -750,15 +745,43 @@ def create_layout(db_path, enable_timing=False):
             if not is_all:
                 refresh_sample_options_unlocked()
             refresh_mag_options_unlocked()
+            update_section_titles()
+            if enable_timing:
+                print(f"[timing] on_view_change (server): {time.perf_counter() - t_view:.3f}s", flush=True)
+                _timing_state['t_sent'] = time.perf_counter()
+                _timing_state['label'] = 'view_change'
+                _timing_ping.value = f"view_{time.perf_counter()}"
         finally:
             global_toggle_lock['locked'] = False
-        update_section_titles()
-        doc.unhold()
+            doc.unhold()
 
     ## Apply button function
     def apply_clicked():
+        main_placeholder.loading = True
+        from bokeh.io import curdoc
+        curdoc().add_next_tick_callback(_do_apply)
+
+    def _do_apply():
+        import gc
+        from bokeh.io import curdoc
+        doc = curdoc()
+        doc.hold('combine')
         try:
+            current_plot_state['shared_xrange'] = None
+            main_placeholder.objects = []
+            gc.collect()
+
             if enable_timing:
+                try:
+                    with open('/proc/self/status') as _f:
+                        for _line in _f:
+                            if _line.startswith('VmRSS:'):
+                                mem_mb = int(_line.split()[1]) / 1024
+                                break
+                except OSError:
+                    import resource
+                    mem_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+                print(f"[timing] Memory (current RSS) at APPLY start: {mem_mb:.0f} MB", flush=True)
                 t_apply_start = time.perf_counter()
             contig = widgets['contig_select'].value
             has_samples = widgets['has_samples']
@@ -942,9 +965,11 @@ def create_layout(db_path, enable_timing=False):
                     custom_colors=custom_colors if custom_colors else None,
                     is_all=is_all,
                     allowed_samples=mag_allowed_samples,
+                    max_samples=int(max_samples_input.value),
                 )
                 if enable_timing:
                     print(f"[timing] generate_bokeh_plot_mag_view (DB queries + plotting): {time.perf_counter() - t_plot:.3f}s", flush=True)
+                    print(f"[timing] Bokeh model count in grid: {len(grid.references())}", flush=True)
 
                 new_xrange = _get_shared_xrange(grid)
                 if mag_preserve_xrange and new_xrange is not None:
@@ -1095,10 +1120,12 @@ def create_layout(db_path, enable_timing=False):
                     sequence_size=sequence_size, translated_sequence_size=translated_sequence_size, order_by_column=order_by, max_base_resolution=max_binning,
                     max_genemap_window=max_genemap_window, min_relative_value=min_coverage_freq,
                     feature_label_key=feature_label_key,
-                    custom_colors=custom_colors if custom_colors else None
+                    custom_colors=custom_colors if custom_colors else None,
+                    max_samples=int(max_samples_input.value)
                 )
                 if enable_timing:
                     print(f"[timing] generate_bokeh_plot_all_samples (DB queries + plotting): {time.perf_counter() - t_plot:.3f}s", flush=True)
+                    print(f"[timing] Bokeh model count in grid: {len(grid.references())}", flush=True)
             else:
                 # One-sample view: collect possibly-many requested features and call per-sample plot
                 requested_features = []
@@ -1136,6 +1163,7 @@ def create_layout(db_path, enable_timing=False):
                 )
                 if enable_timing:
                     print(f"[timing] generate_bokeh_plot_per_sample (DB queries + plotting): {time.perf_counter() - t_plot:.3f}s", flush=True)
+                    print(f"[timing] Bokeh model count in grid: {len(grid.references())}", flush=True)
 
             # Restore preserved x-range and update state
             new_xrange = _get_shared_xrange(grid)
@@ -1194,6 +1222,23 @@ def create_layout(db_path, enable_timing=False):
             tb = traceback.format_exc()
             print(f"[start_bokeh_server] Exception: {tb}", flush=True)
             main_placeholder.objects = [pn.pane.HTML(f"<pre>Error building plot:\n{tb}</pre>")]
+        finally:
+            if enable_timing:
+                try:
+                    with open('/proc/self/status') as _f:
+                        for _line in _f:
+                            if _line.startswith('VmRSS:'):
+                                mem_mb = int(_line.split()[1]) / 1024
+                                break
+                except OSError:
+                    import resource
+                    mem_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+                print(f"[timing] Memory (current RSS) at APPLY end: {mem_mb:.0f} MB", flush=True)
+                _timing_state['t_sent'] = time.perf_counter()
+                _timing_state['label'] = 'APPLY'
+                _timing_ping.value = f"apply_{time.perf_counter()}"
+            main_placeholder.loading = False
+            doc.unhold()
 
     ## Peruse button callback function
     def peruse_clicked():
@@ -1273,6 +1318,31 @@ def create_layout(db_path, enable_timing=False):
         'data_xstart': None,
         'data_xend': None,
     }
+
+    # Client-side timing relay (--time mode only)
+    _timing_state = {}
+    if enable_timing:
+        from bokeh.models import TextInput as _TimingTextInput
+        from bokeh.models.callbacks import CustomJS as _TimingCustomJS
+        _timing_ping = _TimingTextInput(value="", visible=False)
+        _timing_ack = _TimingTextInput(value="", visible=False)
+        _timing_ping.js_on_change('value', _TimingCustomJS(args=dict(ack=_timing_ack), code="""
+            try {
+                if (cb_obj.value) {
+                    requestAnimationFrame(() => {
+                        requestAnimationFrame(() => {
+                            ack.value = cb_obj.value;
+                        });
+                    });
+                }
+            } catch(e) {}
+        """))
+        def _on_timing_ack(attr, old, new):
+            if new and 't_sent' in _timing_state:
+                elapsed = time.perf_counter() - _timing_state['t_sent']
+                label = _timing_state.get('label', 'unknown')
+                print(f"[timing] Client-side render '{label}' (round-trip): {elapsed:.3f}s", flush=True)
+        _timing_ack.on_change('value', _on_timing_ack)
 
     def _get_shared_xrange(grid):
         """Extract the shared Range1d from a gridplot's first figure."""
@@ -1476,10 +1546,10 @@ def create_layout(db_path, enable_timing=False):
             refresh_contig_options_unlocked()
             refresh_sample_options_unlocked()
             refresh_mag_options_unlocked()
+            update_section_titles()
         finally:
             global_toggle_lock['locked'] = False
-        update_section_titles()
-        doc.unhold()
+            doc.unhold()
 
     def create_query_row(section_data):
         """Create a single query row with cascading selects, comparison, dynamic input and remove button."""
@@ -1832,17 +1902,14 @@ def create_layout(db_path, enable_timing=False):
         global_toggle_lock['locked'] = True
         try:
             if widgets['has_mags']:
-                # MAG mode: sample → MAGs → contigs chain.
-                # Filter MAGs first (may clear an invalid MAG selection),
-                # then update contig list based on the (now-current) MAG value.
                 refresh_mag_options_unlocked()
                 refresh_contig_options_unlocked()
             else:
                 refresh_contig_options_unlocked()
+            update_section_titles()
         finally:
             global_toggle_lock['locked'] = False
-        update_section_titles()
-        doc.unhold()
+            doc.unhold()
     widgets['sample_select'].param.watch(_on_sample_change, 'value')
 
 
@@ -1875,30 +1942,26 @@ def create_layout(db_path, enable_timing=False):
         new = event.new
         global_toggle_lock['locked'] = True
         try:
-            # In MAG mode the sample filter is driven by the MAG, not the contig directly.
-            # on_contig_sync_mag will fire next and update the MAG + refresh samples.
             if not widgets['has_mags']:
                 refresh_sample_options_unlocked()
+            update_section_titles()
+            if widgets['has_mags'] and widgets['view_radio'].active == 0:
+                selected_mag = widgets['mag_select'].value
+                offsets = widgets['mag_to_contig_offsets'].get(selected_mag, {})
+                if new and selected_mag and new in offsets:
+                    off = offsets[new]
+                    c_len = widgets['contig_lengths'].get(new, 0)
+                    from_position_input.value = str(off + 1)
+                    to_position_input.value = str(off + c_len)
+            elif new and new in widgets['contig_lengths']:
+                from_position_input.value = "1"
+                to_position_input.value = str(widgets['contig_lengths'][new])
+            else:
+                from_position_input.value = "1"
+                to_position_input.value = ""
         finally:
             global_toggle_lock['locked'] = False
-        update_section_titles()
-        # Update position inputs when contig changes
-        if widgets['has_mags'] and widgets['view_radio'].active == 0:
-            # MAG view: zoom From/To to the selected contig's range in MAG space
-            selected_mag = widgets['mag_select'].value
-            offsets = widgets['mag_to_contig_offsets'].get(selected_mag, {})
-            if new and selected_mag and new in offsets:
-                off = offsets[new]
-                c_len = widgets['contig_lengths'].get(new, 0)
-                from_position_input.value = str(off + 1)
-                to_position_input.value = str(off + c_len)
-        elif new and new in widgets['contig_lengths']:
-            from_position_input.value = "1"
-            to_position_input.value = str(widgets['contig_lengths'][new])
-        else:
-            from_position_input.value = "1"
-            to_position_input.value = ""
-        doc.unhold()
+            doc.unhold()
 
     widgets['contig_select'].param.watch(on_contig_change, 'value')
 
@@ -1913,22 +1976,19 @@ def create_layout(db_path, enable_timing=False):
             new = event.new
             global_toggle_lock['locked'] = True
             try:
-                # Contigs: children of selected MAG
                 refresh_contig_options_unlocked()
-                # Samples: filter to those containing this MAG
                 refresh_sample_options_unlocked()
+                update_section_titles()
+                if widgets['view_radio'].active == 0 and new:
+                    total = sum(
+                        widgets['contig_lengths'].get(c, 0)
+                        for c in widgets['mag_to_contigs'].get(new, [])
+                    )
+                    from_position_input.value = "1"
+                    to_position_input.value = str(total)
             finally:
                 global_toggle_lock['locked'] = False
-            update_section_titles()
-            # In MAG view: set From/To to the full new MAG length
-            if widgets['view_radio'].active == 0 and new:
-                total = sum(
-                    widgets['contig_lengths'].get(c, 0)
-                    for c in widgets['mag_to_contigs'].get(new, [])
-                )
-                from_position_input.value = "1"
-                to_position_input.value = str(total)
-            doc.unhold()
+                doc.unhold()
 
         widgets['mag_select'].param.watch(on_mag_change, 'value')
 
@@ -1943,32 +2003,24 @@ def create_layout(db_path, enable_timing=False):
             contig_to_mag = widgets['contig_to_mag']
             new = event.new
             mag_select = widgets['mag_select']
-            if new and new in contig_to_mag:
-                parent = contig_to_mag[new]
-                changed_mag = (mag_select.value != parent)
-                global_toggle_lock['locked'] = True
-                try:
-                    if changed_mag:
+            global_toggle_lock['locked'] = True
+            try:
+                if new and new in contig_to_mag:
+                    parent = contig_to_mag[new]
+                    if mag_select.value != parent:
                         mag_select.value = parent
-                    # Refresh samples for the (possibly new) parent MAG
                     refresh_sample_options_unlocked()
-                finally:
-                    global_toggle_lock['locked'] = False
-                if changed_mag:
                     update_section_titles()
-            elif not new:
-                # Contig cleared: restore full sample list in MAG mode
-                global_toggle_lock['locked'] = True
-                try:
+                elif not new:
                     refresh_sample_options_unlocked()
-                finally:
-                    global_toggle_lock['locked'] = False
-                update_section_titles()
-            doc.unhold()
+                    update_section_titles()
+            finally:
+                global_toggle_lock['locked'] = False
+                doc.unhold()
 
         widgets['contig_select'].param.watch(on_contig_sync_mag, 'value')
 
-        def on_view_change(attr, old, new):
+        def on_mag_contig_view_change(attr, old, new):
             is_mag_view = (new == 0)
             if is_mag_view:
                 selected_mag = widgets['mag_select'].value
@@ -1993,7 +2045,7 @@ def create_layout(db_path, enable_timing=False):
                     from_position_input.value = "1"
                     to_position_input.value = str(widgets['contig_lengths'][selected_contig])
 
-        widgets['view_radio'].on_change('active', on_view_change)
+        widgets['view_radio'].on_change('active', on_mag_contig_view_change)
 
 
     if enable_timing:
@@ -2675,14 +2727,6 @@ def create_layout(db_path, enable_timing=False):
     plotting_params_title = Div(text="<span style='font-size: 1.2em;'><b>Plotting parameters</b></span>", align="center")
     plotting_params_header = row(plotting_params_title, sizing_mode="stretch_width", align="center")
 
-    # Sample paramaters (only useful in All Samples view)
-    sample_order_label = Div(text="Order samples by:", margin=(5, 5, 5, 0))
-    sample_order_select = Select(value="Sample name", options=sample_order_columns, sizing_mode="stretch_width", margin=(0, 5, 0, 5))
-    sample_order_row = row(sample_order_label, sample_order_select, sizing_mode="stretch_width", margin=(5, 0, 5, 0))
-
-    same_y_scale_cbg = CheckboxGroup(labels=["Use same y scale for all samples"], active=[], margin=(5, 0, 5, 0))
-    same_y_scale_row = row(same_y_scale_cbg, sizing_mode="stretch_width")
-    
     ## Plotting parameters useful in both views
     min_coverage_freq_input = Spinner(value=0.0, low=0.0, high=1.0, step=0.01, width=100, margin=(0, 2, 0, 0))
     min_coverage_freq_label = Div(text="Minimum frequency for coverage-related features", margin=(5, 0, 5, 5))
@@ -2712,19 +2756,19 @@ def create_layout(db_path, enable_timing=False):
     max_window_toggle_btn.on_click(make_toggle_callback(max_window_toggle_btn, max_window_content))
 
     # Subsection: Plot heights
-    genemap_height_input = Spinner(value=100, low=10, high=1000, step=10, width=80, margin=(0, 2, 0, 0))
+    genemap_height_input = Spinner(value=100, low=10, high=1000, step=10, width=100, margin=(0, 2, 0, 0))
     genemap_height_label = Div(text="Of gene map (px)", margin=(5, 0, 5, 5))
     genemap_height_row = row(genemap_height_input, genemap_height_label, sizing_mode="stretch_width", margin=(0, 0, 5, 0))
 
-    sequence_height_input = Spinner(value=50, low=10, high=1000, step=10, width=80, margin=(0, 2, 0, 0))
+    sequence_height_input = Spinner(value=50, low=10, high=1000, step=10, width=100, margin=(0, 2, 0, 0))
     sequence_height_label = Div(text="Of nucleotide sequence (px)", margin=(5, 0, 5, 5))
     sequence_height_row = row(sequence_height_input, sequence_height_label, sizing_mode="stretch_width", margin=(0, 0, 5, 0))
 
-    translated_sequence_height_input = Spinner(value=50, low=10, high=1000, step=10, width=80, margin=(0, 2, 0, 0))
+    translated_sequence_height_input = Spinner(value=50, low=10, high=1000, step=10, width=100, margin=(0, 2, 0, 0))
     translated_sequence_height_label = Div(text="Of translated sequence (px)", margin=(5, 0, 5, 5))
     translated_sequence_height_row = row(translated_sequence_height_input, translated_sequence_height_label, sizing_mode="stretch_width", margin=(0, 0, 5, 0))
 
-    subplot_height_input = Spinner(value=100, low=10, high=1000, step=10, width=80, margin=(0, 2, 0, 0))
+    subplot_height_input = Spinner(value=100, low=10, high=1000, step=10, width=100, margin=(0, 2, 0, 0))
     subplot_height_label = Div(text="Per feature plot (px)", margin=(5, 0, 5, 5))
     subplot_height_row = row(subplot_height_input, subplot_height_label, sizing_mode="stretch_width")
 
@@ -2738,14 +2782,26 @@ def create_layout(db_path, enable_timing=False):
     )
     plot_heights_toggle_btn.on_click(make_toggle_callback(plot_heights_toggle_btn, plot_heights_content))
 
-    # Subsection: Sample parameters (All Samples view only)
+    # Sample parameters (only useful in All Samples view)
     sample_params_toggle_btn = Button(label="▶", width=20, height=20, button_type="primary", align="center", margin=0, stylesheets=[toggle_stylesheet])
     sample_params_toggle_btn.styles = {'padding': '0px', 'line-height': '20px'}
     sample_params_title = Div(text="Sample parameters", align="center")
     sample_params_header = row(sample_params_toggle_btn, sample_params_title, sizing_mode="stretch_width", align="center", margin=(5, 0, 0, 0))
     sample_params_header.visible = False  # Only shown in All Samples mode
+
+    max_samples_input = Spinner(value=20, low=1, high=500, step=5, width=100, margin=(0, 2, 0, 0))
+    max_samples_label = Div(text="Max number of samples plotted", margin=(5, 0, 5, 5))
+    max_samples_row = row(max_samples_input, max_samples_label, sizing_mode="stretch_width", margin=(5, 0, 5, 0))
+    
+    sample_order_label = Div(text="Order samples by", margin=(5, 5, 5, 0))
+    sample_order_select = Select(value="Sample name", options=sample_order_columns, sizing_mode="stretch_width", margin=(0, 5, 0, 5))
+    sample_order_row = row(sample_order_label, sample_order_select, sizing_mode="stretch_width", margin=(5, 0, 5, 0))
+
+    same_y_scale_cbg = CheckboxGroup(labels=["Use same y scale for all samples"], active=[], margin=(5, 0, 5, 0))
+    same_y_scale_row = row(same_y_scale_cbg, sizing_mode="stretch_width")
+
     sample_params_content = pn.Column(
-        sample_order_row, same_y_scale_row,
+        max_samples_row, sample_order_row, same_y_scale_row,
         sizing_mode="stretch_width", visible=False
     )
     sample_params_toggle_btn.on_click(make_toggle_callback(sample_params_toggle_btn, sample_params_content))
@@ -2977,11 +3033,15 @@ def create_layout(db_path, enable_timing=False):
     # Gene map is now part of the Genome module's CheckboxButtonGroup
     # Build controls list conditionally based on whether samples exist
     # When no samples: hide views toggle, samples section, and variables section
+    sample_section = pn.Column(
+        separator_samples, sample_title, above_sample_content, widgets['sample_select'],
+        sizing_mode="stretch_width", margin=0,
+    )
     if widgets['has_samples']:
         controls_children = [logo, views, separator_filtering, filtering_header, filtering_content,
                              separator_mags, mag_header, widgets['view_radio'], widgets['mag_select'],
                              separator_contigs, contig_header, widgets['contig_select'], below_contig_content,
-                             separator_samples, sample_title, above_sample_content, widgets['sample_select'],
+                             sample_section,
                              separator_variables,
                              variables_section_one,  # One Sample view (with module checkboxes)
                              variables_section_all,  # All Samples view (title headers only)
@@ -3000,6 +3060,8 @@ def create_layout(db_path, enable_timing=False):
     if enable_timing:
         print(f"[timing]   Plotting params + layout assembly: {time.perf_counter() - t_section:.3f}s", flush=True)
 
+    if enable_timing:
+        controls_children.extend([_timing_ping, _timing_ack])
     controls_column = pn.Column(*controls_children, sizing_mode="fixed", width=400, css_classes=["left-col"])
 
     peruse_button.visible = False  # Initially hidden
@@ -3022,7 +3084,7 @@ def create_layout(db_path, enable_timing=False):
 def add_serve_args(parser):
     parser.add_argument("--db", required=True, help="Path to DuckDB database")
     parser.add_argument("--port", type=int, default=5006, help="Port to serve Panel app")
-    parser.add_argument('--time', action='store_true', default=False, help=argparse.SUPPRESS)
+    parser.add_argument('--time', action='store_true', default=False, help="Print timing and memory diagnostics to the terminal")
 
 def run_serve(args):
     # Print database metadata if available
@@ -3034,7 +3096,8 @@ def run_serve(args):
         db_name = os.path.basename(args.db)
         params = []
         for key in ['Modules', 'Min_aligned_fraction', 'Min_coverage_depth',
-                     'Coverage_percentage']:
+                     'Coverage_percentage', 'Min_occurrences',
+                     'Variation_percentage']:
             if key in meta:
                 params.append(f"{key}={meta[key]}")
         print(f"Database '{db_name}': "

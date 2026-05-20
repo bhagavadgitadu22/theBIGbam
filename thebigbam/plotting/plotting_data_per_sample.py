@@ -1,7 +1,5 @@
-import os
 import colorsys
 import hashlib
-import duckdb
 import numpy as np
 from Bio.Seq import Seq
 from Bio.SeqRecord import SeqRecord
@@ -665,9 +663,6 @@ def make_bokeh_subplot(feature_dict, height, x_range, sample_title=None, show_to
     # Cap y-axis at 1 for relative-to-coverage features (values are ratios between 0 and 1)
     if all(d.get("is_relative_scaled", False) for d in feature_dict):
         p.y_range = Range1d(p.y_range.start, 1)
-    p.yaxis.axis_label = title
-    p.yaxis.axis_label_text_font_size = "10pt"
-    p.yaxis.axis_label_standoff = 0
     p.ygrid.grid_line_alpha = 0.2
     p.yaxis.axis_label = None
 
@@ -1626,6 +1621,8 @@ def get_feature_data(cur, feature, contig_id, sample_id, xstart=None, xend=None,
                             # adds 1 when converting to 1-indexed genomic coordinates).
                             if gc_window > 1:
                                 chunk_dict["x"] = chunk_dict["x"] * gc_window
+                            if contig_feature_name == "gc_skew":
+                                chunk_dict["y"] = chunk_dict["y"] / 100.0
                             blob_dict = _format_chunks_for_bokeh(chunk_dict, xstart, xend, type_picked)
                             if gc_window > 1 and blob_dict is not None:
                                 half = gc_window // 2 - 1
@@ -1649,6 +1646,8 @@ def get_feature_data(cur, feature, contig_id, sample_id, xstart=None, xend=None,
                                     blob_dict[k] = raw[k].tolist() if hasattr(raw[k], "tolist") else raw[k]
                         else:
                             chunk_dict = decode_raw_chunks(chunk_rows, scale_div)
+                            if contig_feature_name == "gc_skew":
+                                chunk_dict["y"] = chunk_dict["y"] / 100.0
                             if gc_window > 1:
                                 # Convert indices to 1-indexed midpoints directly
                                 chunk_dict["x"] = chunk_dict["x"] * gc_window + gc_window // 2
@@ -1814,6 +1813,9 @@ def get_feature_data_batch(cur, feature, contig_id, sample_ids, xstart=None, xen
                             if contig_feature_name == "gc_skew":
                                 chunk_dict["y"] = chunk_dict["y"] / 100.0
                             blob_dict = _format_chunks_for_bokeh(chunk_dict, xstart, xend, type_picked)
+                            if gc_window > 1 and blob_dict is not None:
+                                half = gc_window // 2 - 1
+                                blob_dict["x"] = [v + half for v in blob_dict["x"]]
                     else:
                         blob_dict = None
                 else:
@@ -1833,6 +1835,8 @@ def get_feature_data_batch(cur, feature, contig_id, sample_ids, xstart=None, xen
                                     blob_dict[k] = raw[k].tolist() if hasattr(raw[k], "tolist") else raw[k]
                         else:
                             chunk_dict = decode_raw_chunks(chunk_rows, scale_div)
+                            if contig_feature_name == "gc_skew":
+                                chunk_dict["y"] = chunk_dict["y"] / 100.0
                             if gc_window > 1:
                                 chunk_dict["x"] = chunk_dict["x"] * gc_window
                             blob_dict = {"x": (chunk_dict["x"] + 1).tolist(), "y": chunk_dict["y"].tolist()}
@@ -2426,7 +2430,7 @@ def make_bokeh_genemap_mag(conn, mag_id, mag_name, mag_length, subplot_size,
     return annotation_fig
 
 
-def generate_bokeh_plot_mag_view(conn, list_features, mag_name, sample_name, xstart=None, xend=None, subplot_size=100, genbank_path=None, feature_types=None, plot_isoforms=True, plot_sequence=False, plot_translated_sequence=False, same_y_scale=False, genemap_size=None, sequence_size=None, translated_sequence_size=None, max_base_resolution=None, max_genemap_window=None, max_sequence_window=None, min_relative_value=0.0, feature_label_key=None, custom_colors=None, is_all=False, allowed_samples=None):
+def generate_bokeh_plot_mag_view(conn, list_features, mag_name, sample_name, xstart=None, xend=None, subplot_size=100, genbank_path=None, feature_types=None, plot_isoforms=True, plot_sequence=False, plot_translated_sequence=False, same_y_scale=False, genemap_size=None, sequence_size=None, translated_sequence_size=None, max_base_resolution=None, max_genemap_window=None, max_sequence_window=None, min_relative_value=0.0, feature_label_key=None, custom_colors=None, is_all=False, allowed_samples=None, max_samples=None):
     """Generate a concatenated Bokeh plot for a MAG (all contigs, longest-first).
 
     All contigs are placed consecutively on a shared x-axis (longest first), with
@@ -2536,6 +2540,9 @@ def generate_bokeh_plot_mag_view(conn, list_features, mag_name, sample_name, xst
         if allowed_samples is not None:
             all_rows = [(sid, sname) for sid, sname in all_rows if sname in allowed_samples]
         all_rows.sort(key=lambda r: r[1])
+        if max_samples is not None and len(all_rows) > max_samples:
+            print(f"Plotting {max_samples}/{len(all_rows)} samples (limited by 'Max number of samples plotted')", flush=True)
+            all_rows = all_rows[:max_samples]
         for feature in sample_features:
             for sid, sname in all_rows:
                 try:

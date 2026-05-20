@@ -223,7 +223,7 @@ To further reduce the size of the database, values per feature are filtered rath
 
 - Dense features (coverage, MAPQ, insert sizes, read lengths) can optionally be smoothed using **--variation_percentage** (default 0, disabled). Consecutive positions within this percentage of each other are collapsed to the same value, substantially reducing database size. The minimum and maximum values within each run are tracked, and a new entry is created when the range of values in the run exceeds a threshold relative to the smallest absolute value, defined as:
   
-  $\text{max}(\text{run}) - \text{min}(\text{run}) > r \times \min(|\text{min}(\text{run})|, |\text{max}(\text{run})|)$
+  $\text{max}(\text{run}) - \text{min}(\text{run}) > r \times \text{min}(\text{run})$
   
   Where r is the **--variation_percentage**. This mode produces significantly smaller databases at the cost of per-position precision, making it suitable for visualization and long-term storage when storage space is limited.
 

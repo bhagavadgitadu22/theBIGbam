@@ -192,12 +192,10 @@ pub fn compress_signal_with_reference(
         let new_max = run_max.max(val);
         let range = new_max - new_min;
 
-        // Threshold relative to the smaller absolute value in the run
-        let min_abs = new_min.abs().min(new_max.abs());
-        let threshold = if min_abs < 1e-9 {
-            curve_ratio // absolute threshold for near-zero values
+        let threshold = if new_min < 1e-9 {
+            curve_ratio
         } else {
-            curve_ratio * min_abs
+            curve_ratio * new_min
         };
 
         if range <= threshold {

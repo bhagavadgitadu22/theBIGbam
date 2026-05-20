@@ -25,7 +25,7 @@ ANALYSIS_SCRIPTS = {
 }
 
 SCRIPTS = {
-    'mapping-per-sample': 'Map reads for a single sample (one CSV row)',
+    'mapping-per-sample': 'Map reads for a single sample',
     'calculate': "Run feature calculations over alignment files",
     'serve': "Start interactive Bokeh server",
 

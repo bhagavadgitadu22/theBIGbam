@@ -517,7 +517,7 @@ def build_summary_data(conn, contig_name, sample_names):
     sample_idx = {name: i for i, name in enumerate(sample_names)}
 
     if not sample_names:
-        return  # nothing to query
+        return data
 
     # Check if any sample is paired-read
     placeholders = ','.join(['?'] * len(sample_names))

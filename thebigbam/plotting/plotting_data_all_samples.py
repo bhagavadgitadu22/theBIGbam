@@ -6,7 +6,7 @@ from bokeh.layouts import gridplot
 from .plotting_data_per_sample import get_contig_info, get_feature_data, get_feature_data_batch, get_variable_metadata, make_bokeh_subplot, make_bokeh_genemap, make_bokeh_sequence_subplot, make_bokeh_translated_sequence_subplot, DEFAULT_GENEMAP_WINDOW
 
 ### Function to generate the bokeh plot
-def generate_bokeh_plot_all_samples(conn, variable, contig_name, xstart=None, xend=None, subplot_size=130, genbank_path=None, genome_features=None, allowed_samples=None, feature_types=None, plot_isoforms=True, plot_sequence=False, plot_translated_sequence=False, same_y_scale=False, genemap_size=None, sequence_size=None, translated_sequence_size=None, order_by_column=None, max_base_resolution=None, max_genemap_window=None, min_relative_value=0.0, feature_label_key=None, custom_colors=None):
+def generate_bokeh_plot_all_samples(conn, variable, contig_name, xstart=None, xend=None, subplot_size=130, genbank_path=None, genome_features=None, allowed_samples=None, feature_types=None, plot_isoforms=True, plot_sequence=False, plot_translated_sequence=False, same_y_scale=False, genemap_size=None, sequence_size=None, translated_sequence_size=None, order_by_column=None, max_base_resolution=None, max_genemap_window=None, min_relative_value=0.0, feature_label_key=None, custom_colors=None, max_samples=None):
     """Generate a Bokeh plot showing all samples for a single variable.
 
     Args:
@@ -73,6 +73,11 @@ def generate_bokeh_plot_all_samples(conn, variable, contig_name, xstart=None, xe
             print(f"Samples ordered by {order_by_column}", flush=True)
         except Exception as e:
             print(f"Warning: Could not order samples by '{order_by_column}': {e}", flush=True)
+
+    if max_samples is not None and len(sample_ids) > max_samples:
+        print(f"Plotting {max_samples}/{len(sample_ids)} samples (limited by 'Max number of samples plotted')", flush=True)
+        sample_ids = sample_ids[:max_samples]
+        sample_names = sample_names[:max_samples]
 
     # --- Add subplots for additional Genome features (contig-level, not per-sample) ---
     genome_subplots = []
