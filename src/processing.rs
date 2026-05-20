@@ -133,7 +133,7 @@ pub struct ProcessConfig {
     pub variation_percentage: f64,
     /// Minimum absolute event count for a sparse feature position to be kept.
     /// Applied in addition to bar_ratio filtering: position kept only if
-    /// `value > coverage × bar_ratio AND value > min_occurrences`.
+    /// `value >= coverage × bar_ratio AND value >= min_occurrences`.
     /// Default: 2.
     pub min_occurrences: u32,
     /// When true, record per-sample phase timings and write a timing log
@@ -988,7 +988,7 @@ fn add_features_from_arrays(
         for i in 0..n {
             let val = counts[i];
             let cov = coverage[i];
-            if val > cov * bar_threshold && val > min_occ as f64 {
+            if val >= cov * bar_threshold && val >= min_occ as f64 {
                 positions.push(i as u32);
                 values.push((val / cov * 1000.0).round() as i32);
             }
@@ -1206,7 +1206,7 @@ fn add_features_from_arrays(
             for i in 0..n {
                 let val = counts[i];
                 let cov = coverage[i];
-                if val > cov * bar_threshold && val > min_occ as f64 {
+                if val >= cov * bar_threshold && val >= min_occ as f64 {
                     positions.push(i as u32);
                     vals.push((val / cov * 1000.0).round() as i32);
                 }
@@ -1290,7 +1290,7 @@ fn add_features_from_arrays(
             for i in 0..reads_starts_original.len().min(cov_reduced_f64.len()) {
                 let val = reads_starts_original[i];
                 let cov = cov_reduced_f64[i];
-                if val > cov * bar_threshold && val > min_occ as f64 {
+                if val >= cov * bar_threshold && val >= min_occ as f64 {
                     rs_pos.push(i as u32);
                     rs_vals.push((val / cov * 1000.0).round() as i32);
                 }
@@ -1318,7 +1318,7 @@ fn add_features_from_arrays(
             for i in 0..reads_ends_original.len().min(cov_reduced_f64.len()) {
                 let val = reads_ends_original[i];
                 let cov = cov_reduced_f64[i];
-                if val > cov * bar_threshold && val > min_occ as f64 {
+                if val >= cov * bar_threshold && val >= min_occ as f64 {
                     re_pos.push(i as u32);
                     re_vals.push((val / cov * 1000.0).round() as i32);
                 }

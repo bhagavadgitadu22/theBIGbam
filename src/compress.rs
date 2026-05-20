@@ -50,7 +50,7 @@ fn filter_by_coverage(values: &[f64], coverage: &[f64], threshold: f64) -> Vec<(
         let cov = coverage[i];
         let thresh = cov * threshold;
         
-        if val > thresh {
+        if val >= thresh {
             let value_relative = if cov > 0.0 {
                 ((val / cov) * 1000.0) as f32
             } else {
@@ -74,9 +74,9 @@ fn filter_by_coverage(values: &[f64], coverage: &[f64], threshold: f64) -> Vec<(
 ///
 /// # Algorithm
 /// - **Bars with reference**: Coverage-filtered single-position spikes. Each position where
-///   `value > coverage * bar_ratio` is saved as a separate single-position run.
+///   `value >= coverage * bar_ratio` is saved as a separate single-position run.
 /// - **Curves with reference**: Coverage-filtered then exact-value RLE. Filter positions where
-///   `value > coverage * bar_ratio`, then merge consecutive positions with identical values.
+///   `value >= coverage * bar_ratio`, then merge consecutive positions with identical values.
 /// - **Curves without reference**: Standard adaptive RLE. Range-based grouping with
 ///   `(max - min) <= ratio * min(|min|, |max|)` threshold.
 ///
@@ -87,7 +87,7 @@ fn filter_by_coverage(values: &[f64], coverage: &[f64], threshold: f64) -> Vec<(
 /// bar_ratio = 0.1
 ///
 /// Position 1-3: 5 <= 0.1*1000 → filtered (insignificant)
-/// Position 4-5: 5 > 0.1*50 → saved as runs (significant at low coverage)
+/// Position 4-5: 5 >= 0.1*50 → saved as runs (significant at low coverage)
 /// Position 6-7: 5 <= 0.1*1000 → filtered (insignificant)
 /// ```
 pub fn compress_signal_with_reference(
