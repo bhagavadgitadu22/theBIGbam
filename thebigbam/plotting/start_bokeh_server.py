@@ -80,17 +80,22 @@ def preload_db_data(db_path, enable_timing=False):
 
     if enable_timing:
         _t = time.perf_counter()
+        print("[timing] Preload: coverage presence mapping (querying)...", flush=True)
     sid_to_cids = {}
     cid_to_sids = {}
     if has_sample_table:
         cur.execute("SELECT Contig_id, Sample_id FROM Coverage")
-        for cid, sid in cur.fetchall():
-            if sid not in sid_to_cids:
-                sid_to_cids[sid] = set()
-            sid_to_cids[sid].add(cid)
-            if cid not in cid_to_sids:
-                cid_to_sids[cid] = set()
-            cid_to_sids[cid].add(sid)
+        while True:
+            batch = cur.fetchmany(100_000)
+            if not batch:
+                break
+            for cid, sid in batch:
+                if sid not in sid_to_cids:
+                    sid_to_cids[sid] = set()
+                sid_to_cids[sid].add(cid)
+                if cid not in cid_to_sids:
+                    cid_to_sids[cid] = set()
+                cid_to_sids[cid].add(sid)
     if enable_timing:
         n_pairs = sum(len(v) for v in sid_to_cids.values())
         print(f"[timing] Preload: coverage presence mapping ({n_pairs} pairs): {time.perf_counter() - _t:.3f}s", flush=True)

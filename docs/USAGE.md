@@ -210,10 +210,10 @@ The database obtained is quite massive so we keep it stored remotely on the clus
 sbatch -q serial -N 1 -n 1 -c 8 -t 10:00:00 --wrap="thebigbam serve --db /work/river/NOMIS_VIRUS/05_MAGs/thebigbam_bacteria_mag_view.db"
 ```
 
-We find node where job is running (here jst234) and relay it locally via ssh. For us, `ssh -N -L 5006:jst234:5006 [user@remote.server.com]` fails the cluster firewall blocks direct access to login modes. If you meet a similar problem you can try to jump via the login node with:
+We need to find the node where the job is running (here jst234) and relay it locally via ssh. For us, `ssh -N -L 5006:jst234:5006 user@remote.server.com` fails because the cluster firewall blocks direct access to login nodes. If you meet a similar problem you can try to jump via the login node with:
 
 ```bash
-ssh -J boutroux@jed.epfl.ch -N -L 5006:localhost:5006 boutroux@jst234
+ssh -J user@remote.server.com -N -L 5006:localhost:5006 user@jst234
 ```
 
 We can now open `localhost:5006` in a web browser. For MAG datasets, theBIGbam can visualize complete MAGs instead of individual contigs. Here, the coverage track of a MAG is displayed, with the MAG track above it indicating the boundaries of the constituent contigs:
@@ -242,4 +242,4 @@ thebigbam calculate -t 8 -b new_phage.bam -g pharokka_new_phage/pharokka.gbk -o 
 
 When extending a database, previously processed samples will not contain mapping information for newly added contigs. If this information is required, those samples must be removed and reprocessed using updated BAM files that include the new contigs as references.
 
-This is not useful for the collection presented here, but it may be relevant in **Use Case 2**. For example, if a new glacier-fed stream metagenome is sequenced, additional viral contigs may be assembled that were present but not assembled in previously sequenced metagenomes. Detecting these would require remapping all samples to the updated reference set. However, remapping all samples can be computationally expensive and should only be performed if the final results are expected to substantially differ.
+This is not useful for the collection presented here, but it may be relevant in [Use case 2](#use-case-2-large-dataset-50k-contigs-192-samples). For example, if a new glacier-fed stream metagenome is sequenced, additional viral contigs may be assembled that were present but not assembled in previously sequenced metagenomes. Detecting these would require remapping all samples to the updated reference set. However, remapping all samples can be computationally expensive and should only be performed if the final results are expected to substantially differ.

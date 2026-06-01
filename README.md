@@ -309,7 +309,7 @@ For a database computed with `--view mag`, a **MAGs** section is added to the vi
 
 The MAG and contig filters in the Filtering panel affect the list of MAGs displayed in the **MAGs** section. Only MAGs containing at least one contig passing the contig filters are included in the MAG list. Only contigs belonging to a MAG passing the MAG filters are included in the contig list.
 
-Plots can be generated in the standard contig-based view or in **MAG view**, which displays an entire MAG at once. In **MAG view**, contigs are ordered from longest to shortest, and an additional MAG track is shown above the plots to indicate which contigs are currently being visualized.
+Plots can be generated in the standard contig-based view or in **MAG view**, which displays an entire MAG at once. In **MAG view**, contigs are ordered from longest to shortest, and an additional MAG track is shown above the plots to indicate which contigs are currently being visualized. See [Use case 3](docs/USAGE.md#use-case-3-large-dataset-3000-mags-192-samples) for an example.
 
 #### Plotting
 
