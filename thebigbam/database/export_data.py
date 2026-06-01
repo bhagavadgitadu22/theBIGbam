@@ -139,7 +139,7 @@ def run_export(args):
     try:
         conn = duckdb.connect(args.db, read_only=True)
     except Exception as e:
-        print(f"Error opening database: {e}", file=sys.stderr)
+        print(f"Error opening database: {e}", file=sys.stderr, flush=True)
         return 2
 
     try:
@@ -148,7 +148,7 @@ def run_export(args):
                 print(
                     f"Error: metric '{metric}' is not available at the MAG level.",
                     file=sys.stderr,
-                )
+                flush=True)
                 return 2
 
             from thebigbam.database.database_getters import is_mag_mode
@@ -157,7 +157,7 @@ def run_export(args):
                     "Error: --view mag requires a MAG-mode database. "
                     "This database was built in contig mode.",
                     file=sys.stderr,
-                )
+                flush=True)
                 return 2
 
             view_name = mag_view
@@ -174,7 +174,7 @@ def run_export(args):
             print(
                 f"Error: view '{view_name}' not found in database. "
                 f"Was the corresponding module calculated?",
-                file=sys.stderr,
+                file=sys.stderr, flush=True,
             )
             return 2
 
@@ -184,7 +184,7 @@ def run_export(args):
         ).fetchall()
 
         if not rows:
-            print(f"No data found for metric '{metric}'.", file=sys.stderr)
+            print(f"No data found for metric '{metric}'.", file=sys.stderr, flush=True)
             return 2
 
         entities_seen = {}
@@ -207,11 +207,11 @@ def run_export(args):
                 ]
                 writer.writerow(row)
 
-        print(f"Exported '{metric}' ({len(entities)} {entity_label.lower()}s x {len(samples)} samples) to {args.output}")
+        print(f"Exported '{metric}' ({len(entities)} {entity_label.lower()}s x {len(samples)} samples) to {args.output}", flush=True)
         return 0
 
     except Exception as e:
-        print(f"Error exporting metric: {e}", file=sys.stderr)
+        print(f"Error exporting metric: {e}", file=sys.stderr, flush=True)
         return 2
     finally:
         conn.close()

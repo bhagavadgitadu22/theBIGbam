@@ -45,7 +45,7 @@ def purge_mapping_data(input_db, output_db):
                 deleted[table] = count
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        print(f"Exporting {input_db} ...")
+        print(f"Exporting {input_db} ...", flush=True)
         src.execute(f"EXPORT DATABASE '{tmpdir}'")
         src.close()
 
@@ -77,7 +77,7 @@ def purge_mapping_data(input_db, output_db):
                         continue
                 f.write(line)
 
-        print(f"Building {output_db} ...")
+        print(f"Building {output_db} ...", flush=True)
         dst = duckdb.connect(output_db)
         dst.execute(f"IMPORT DATABASE '{tmpdir}'")
 
@@ -94,12 +94,12 @@ def purge_mapping_data(input_db, output_db):
 
     orig_size = os.path.getsize(input_db) / (1024 * 1024)
     new_size = os.path.getsize(output_db) / (1024 * 1024)
-    print(f"\nPurged mapping data:")
+    print(f"\nPurged mapping data:", flush=True)
     for table, count in deleted.items():
         if count > 0:
-            print(f"  {table}: {count} rows removed")
-    print(f"\nSize: {orig_size:.1f} MB -> {new_size:.1f} MB ({orig_size - new_size:.1f} MB saved)")
-    print(f"\nReady for: thebigbam calculate --extend -b <bams> -o {output_db}")
+            print(f"  {table}: {count} rows removed", flush=True)
+    print(f"\nSize: {orig_size:.1f} MB -> {new_size:.1f} MB ({orig_size - new_size:.1f} MB saved)", flush=True)
+    print(f"\nReady for: thebigbam calculate --extend -b <bams> -o {output_db}", flush=True)
 
 
 def add_purge_args(parser):
@@ -112,5 +112,5 @@ def run_purge(args):
         purge_mapping_data(args.db, args.output)
         return 0
     except Exception as e:
-        print(f"Error: {e}")
+        print(f"Error: {e}", flush=True)
         return 2

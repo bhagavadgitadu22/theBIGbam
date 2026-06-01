@@ -169,14 +169,14 @@ def main(argv=None):
 
     # Warn about unused arguments
     if extras:
-        print(f"Warning: Unknown/unused arguments provided: {' '.join(extras)}", file=sys.stderr)
+        print(f"Warning: Unknown/unused arguments provided: {' '.join(extras)}", file=sys.stderr, flush=True)
 
     # Dispatch to module run functions (shared-args approach)
     if args.cmd == 'mapping-per-sample':
         try:
             return read_mapping.run_mapping_per_sample(args)
         except Exception as e:
-            print(f"Error running mapping-per-sample: {e}")
+            print(f"Error running mapping-per-sample: {e}", flush=True)
             return 2
 
     if args.cmd == 'calculate':
@@ -211,7 +211,7 @@ def main(argv=None):
                 database_getters.remove_sample_metadata(args.db, args.colname)
                 return 0
             except Exception as e:
-                print(f"Error removing sample metadata: {e}")
+                print(f"Error removing sample metadata: {e}", flush=True)
                 return 2
 
     if args.cmd == 'remove-contig-metadata':
@@ -220,7 +220,7 @@ def main(argv=None):
             database_getters.remove_contig_metadata(args.db, args.colname)
             return 0
         except Exception as e:
-            print(f"Error removing contig metadata: {e}")
+            print(f"Error removing contig metadata: {e}", flush=True)
             return 2
 
     if args.cmd == 'remove-mag-metadata':
@@ -229,7 +229,7 @@ def main(argv=None):
             database_getters.remove_mag_metadata(args.db, args.colname)
             return 0
         except Exception as e:
-            print(f"Error removing MAG metadata: {e}")
+            print(f"Error removing MAG metadata: {e}", flush=True)
             return 2
 
     if args.cmd == 'remove-sample':
@@ -238,7 +238,7 @@ def main(argv=None):
             database_getters.remove_sample(args.db, args.name)
             return 0
         except Exception as e:
-            print(f"Error removing sample: {e}")
+            print(f"Error removing sample: {e}", flush=True)
             return 2
 
     if args.cmd == 'remove-contig':
@@ -247,7 +247,7 @@ def main(argv=None):
             database_getters.remove_contig(args.db, args.name)
             return 0
         except Exception as e:
-            print(f"Error removing contig: {e}")
+            print(f"Error removing contig: {e}", flush=True)
             return 2
 
     if args.cmd == 'remove-mag':
@@ -256,7 +256,7 @@ def main(argv=None):
             database_getters.remove_mag(args.db, args.name)
             return 0
         except Exception as e:
-            print(f"Error removing MAG: {e}")
+            print(f"Error removing MAG: {e}", flush=True)
             return 2
         
     if args.cmd == 'remove-variable':
@@ -269,7 +269,7 @@ def main(argv=None):
             database_getters.list_samples(args.db)
             return 0
         except Exception as e:
-            print(f"Error listing samples: {e}")
+            print(f"Error listing samples: {e}", flush=True)
             return 2
 
     if args.cmd == 'list-contigs':
@@ -278,7 +278,7 @@ def main(argv=None):
             database_getters.list_contigs(args.db)
             return 0
         except Exception as e:
-            print(f"Error listing contigs: {e}")
+            print(f"Error listing contigs: {e}", flush=True)
             return 2
 
     if args.cmd == 'list-mags':
@@ -287,7 +287,7 @@ def main(argv=None):
             database_getters.list_mags_cli(args.db)
             return 0
         except Exception as e:
-            print(f"Error listing MAGs: {e}")
+            print(f"Error listing MAGs: {e}", flush=True)
             return 2
 
     if args.cmd == 'list-sample-metadata':
@@ -296,7 +296,7 @@ def main(argv=None):
             database_getters.list_sample_metadata(args.db)
             return 0
         except Exception as e:
-            print(f"Error listing sample metadata: {e}")
+            print(f"Error listing sample metadata: {e}", flush=True)
             return 2
 
     if args.cmd == 'list-contig-metadata':
@@ -305,7 +305,7 @@ def main(argv=None):
             database_getters.list_contig_metadata(args.db)
             return 0
         except Exception as e:
-            print(f"Error listing contig metadata: {e}")
+            print(f"Error listing contig metadata: {e}", flush=True)
             return 2
 
     if args.cmd == 'list-mag-metadata':
@@ -314,7 +314,7 @@ def main(argv=None):
             database_getters.list_mag_metadata(args.db)
             return 0
         except Exception as e:
-            print(f"Error listing MAG metadata: {e}")
+            print(f"Error listing MAG metadata: {e}", flush=True)
             return 2
 
     if args.cmd == 'purge-mapping-data':
@@ -333,11 +333,11 @@ def main(argv=None):
                 database_getters.list_variables(args.db, args.detailed)
                 return 0
             except Exception as e:
-                print(f"Error listing variables: {e}")
+                print(f"Error listing variables: {e}", flush=True)
                 return 2
 
     # fallback
-    print("Unknown command", args.cmd)
+    print("Unknown command", args.cmd, flush=True)
     return 2
 
 if __name__ == '__main__':

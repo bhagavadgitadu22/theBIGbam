@@ -37,7 +37,7 @@ def run_add_mag_metadata(args):
         conn = duckdb.connect(db_path)
 
         if not is_mag_mode(conn):
-            print("Error: database is not in MAG mode (no MAG table found).")
+            print("Error: database is not in MAG mode (no MAG table found).", flush=True)
             conn.close()
             return 1
 
@@ -55,7 +55,7 @@ def run_add_mag_metadata(args):
 
             # Validate 'MAG' column exists (case-sensitive)
             if 'MAG' not in reader.fieldnames:
-                print(f"Error: CSV must have a 'MAG' column (case-sensitive). Found columns: {reader.fieldnames}")
+                print(f"Error: CSV must have a 'MAG' column (case-sensitive). Found columns: {reader.fieldnames}", flush=True)
                 conn.close()
                 return 1
 
@@ -63,7 +63,7 @@ def run_add_mag_metadata(args):
             new_columns = [col for col in reader.fieldnames if col != 'MAG']
 
             if not new_columns:
-                print("Error: CSV has no metadata columns (only 'MAG' column found)")
+                print("Error: CSV has no metadata columns (only 'MAG' column found)", flush=True)
                 conn.close()
                 return 1
 
@@ -71,10 +71,10 @@ def run_add_mag_metadata(args):
             conflicts = [col for col in new_columns if col in existing_columns]
             if conflicts:
                 if args.force:
-                    print(f"Overwriting existing columns (--force): {', '.join(conflicts)}")
+                    print(f"Overwriting existing columns (--force): {', '.join(conflicts)}", flush=True)
                 else:
-                    print(f"Error: The following columns already exist in MAG table: {', '.join(conflicts)}")
-                    print("Use --force to overwrite them, or rename these columns in your CSV file.")
+                    print(f"Error: The following columns already exist in MAG table: {', '.join(conflicts)}", flush=True)
+                    print("Use --force to overwrite them, or rename these columns in your CSV file.", flush=True)
                     conn.close()
                     return 1
 
@@ -82,7 +82,7 @@ def run_add_mag_metadata(args):
             rows = list(reader)
 
         if not rows:
-            print("Warning: CSV file has no data rows")
+            print("Warning: CSV file has no data rows", flush=True)
             conn.close()
             return 0
 
@@ -102,7 +102,7 @@ def run_add_mag_metadata(args):
             col_type = column_types[col]
             # Quote column name to handle special characters
             conn.execute(f'ALTER TABLE MAG ADD COLUMN "{col}" {col_type}')
-            print(f"Added column '{col}' ({col_type})")
+            print(f"Added column '{col}' ({col_type})", flush=True)
 
         # Update rows - match by MAG name
         updated_count = 0
@@ -135,25 +135,25 @@ def run_add_mag_metadata(args):
         conn.close()
 
         # Report results
-        print(f"\nUpdated {updated_count} MAG(s) with {len(new_columns)} new column(s)")
+        print(f"\nUpdated {updated_count} MAG(s) with {len(new_columns)} new column(s)", flush=True)
 
         if skipped_mags:
-            print(f"\nWarning: {len(skipped_mags)} MAG(s) from CSV not found in database:")
+            print(f"\nWarning: {len(skipped_mags)} MAG(s) from CSV not found in database:", flush=True)
             for m in skipped_mags[:10]:  # Show first 10
-                print(f"  - {m}")
+                print(f"  - {m}", flush=True)
             if len(skipped_mags) > 10:
-                print(f"  ... and {len(skipped_mags) - 10} more")
+                print(f"  ... and {len(skipped_mags) - 10} more", flush=True)
 
         return 0
 
     except FileNotFoundError:
-        print(f"Error: CSV file not found: {csv_file}")
+        print(f"Error: CSV file not found: {csv_file}", flush=True)
         return 1
     except duckdb.Error as e:
-        print(f"Database error: {e}")
+        print(f"Database error: {e}", flush=True)
         return 1
     except Exception as e:
-        print(f"Error: {e}")
+        print(f"Error: {e}", flush=True)
         import traceback
         traceback.print_exc()
         return 1

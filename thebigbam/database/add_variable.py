@@ -44,12 +44,12 @@ def run_add_variable(args):
 
     # --- Validate plot type ---
     if vtype not in ("bars", "curve"):
-        print("ERROR: Invalid plot type. Must be 'bars' or 'curve'.")
+        print("ERROR: Invalid plot type. Must be 'bars' or 'curve'.", flush=True)
         return 1
 
     # --- Validate variable name ---
     if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", var_name):
-        print("ERROR: Invalid variable name. Use only letters, digits, and underscores, not starting with a digit.")
+        print("ERROR: Invalid variable name. Use only letters, digits, and underscores, not starting with a digit.", flush=True)
         return 1
 
     cfg = config_feature_subplot(var_name, "Custom", vtype, color, title)
@@ -71,7 +71,7 @@ def run_add_variable(args):
                 existing_id, existing_table = existing
                 cur.execute(f"DROP TABLE IF EXISTS {existing_table}")
                 cur.execute("DELETE FROM Variable WHERE Variable_id=?", (existing_id,))
-                print(f"Removed existing variable '{var_name}' (--force)")
+                print(f"Removed existing variable '{var_name}' (--force)", flush=True)
             else:
                 raise ValueError(f"ERROR: Variable '{var_name}' already exists in the database. Use --force to replace it.")
 
@@ -144,7 +144,7 @@ def run_add_variable(args):
 
                     if not exists:
                         absences_validated.append((contig_id, sample_id))
-                        print(f"WARNING: No presence record for contig '{contig}' and sample '{sample}'. Associated data was not written into the database")
+                        print(f"WARNING: No presence record for contig '{contig}' and sample '{sample}'. Associated data was not written into the database", flush=True)
                     else:
                         presences_validated.append((contig_id, sample_id))
 
@@ -237,7 +237,7 @@ def run_add_variable(args):
 
         update_database_metadata(conn)
         conn.commit()
-        print(f"Variable '{var_name}' added and {len(rows_to_insert)} records inserted into '{feature_table}'")
+        print(f"Variable '{var_name}' added and {len(rows_to_insert)} records inserted into '{feature_table}'", flush=True)
 
     except Exception as e:
         traceback.print_exc()
@@ -269,13 +269,13 @@ def run_remove_variable(args):
         )
         row = cur.fetchone()
         if not row:
-            print(f"Error: variable '{var_name}' does not exist in the database.")
+            print(f"Error: variable '{var_name}' does not exist in the database.", flush=True)
             return 1
 
         variable_id, feature_table_name, module = row
 
         if module != 'Custom':
-            print(f"Error: variable '{var_name}' is a built-in variable and cannot be removed.")
+            print(f"Error: variable '{var_name}' is a built-in variable and cannot be removed.", flush=True)
             return 1
 
         # Drop the associated feature table
@@ -286,7 +286,7 @@ def run_remove_variable(args):
 
         update_database_metadata(conn)
         conn.commit()
-        print(f"Variable '{var_name}' removed from the database.")
+        print(f"Variable '{var_name}' removed from the database.", flush=True)
 
     except Exception as e:
         traceback.print_exc()

@@ -16,18 +16,26 @@ from .plotting_data_all_samples import generate_bokeh_plot_all_samples
 from ..database.database_getters import get_filtering_metadata, resolve_distinct_values, ANNOTATION_EXCLUDED_COLUMNS, is_mag_mode, get_mag_contig_map
 from .searchable_select import SearchableSelect
 
-def build_controls(conn):
+def build_controls(conn, enable_timing=False):
     """Query DB and return widgets and helper mappings."""
     cur = conn.cursor()
 
     # Get annotation feature types from Annotated_types table
+    if enable_timing:
+        _t = time.perf_counter()
     cur.execute("SELECT Type_name FROM Annotated_types ORDER BY Frequency DESC")
     annotation_types = [r[0] for r in cur.fetchall()]
+    if enable_timing:
+        print(f"[timing]   Annotation types: {time.perf_counter() - _t:.3f}s", flush=True)
 
     # Detect MAG mode
+    if enable_timing:
+        _t = time.perf_counter()
     has_mags = is_mag_mode(conn)
     mag_to_contigs, contig_to_mag = get_mag_contig_map(conn)
     mags = sorted(mag_to_contigs.keys())
+    if enable_timing:
+        print(f"[timing]   MAG mode + contig map ({len(mags)} MAGs): {time.perf_counter() - _t:.3f}s", flush=True)
 
     # Widget Selector for MAGs (visible only in MAG-mode databases)
     mag_select = SearchableSelect(
@@ -49,10 +57,14 @@ def build_controls(conn):
     )
 
     # Widget Selector for Contigs (autocomplete with max 20 suggestions)
+    if enable_timing:
+        _t = time.perf_counter()
     cur.execute("SELECT Contig_name, Contig_length FROM Contig ORDER BY Contig_name")
     rows = cur.fetchall()
     contigs = [r[0] for r in rows]
     contig_lengths = {r[0]: r[1] for r in rows}  # Dictionary mapping contig_name -> length
+    if enable_timing:
+        print(f"[timing]   Contigs query ({len(contigs)} contigs): {time.perf_counter() - _t:.3f}s", flush=True)
 
     # Pre-compute MAG-space offsets: {mag_name: {contig_name: cumulative_offset}}
     # Contigs are in longest-first order (matching get_mag_contigs / mag_to_contigs order).
@@ -76,6 +88,8 @@ def build_controls(conn):
 
     # Widget Selector for Samples (autocomplete with max 20 suggestions)
     # Sample table only exists when BAM files were provided
+    if enable_timing:
+        _t = time.perf_counter()
     cur.execute("SELECT 1 FROM information_schema.tables WHERE table_name = 'Sample'")
     has_sample_table = cur.fetchone() is not None
     if has_sample_table:
@@ -84,6 +98,8 @@ def build_controls(conn):
     else:
         samples = []
     has_samples = len(samples) > 0
+    if enable_timing:
+        print(f"[timing]   Samples query ({len(samples)} samples): {time.perf_counter() - _t:.3f}s", flush=True)
 
     # If only one sample in database, pre-fill the field
     sample_select = SearchableSelect(
@@ -95,6 +111,8 @@ def build_controls(conn):
     )
 
     # Build presence mappings: sample -> contigs and contig -> samples
+    if enable_timing:
+        _t = time.perf_counter()
     sample_to_contigs = {}
     contig_to_samples = {}
     if has_sample_table:
@@ -106,14 +124,21 @@ def build_controls(conn):
         for contig_name, sample_name in cur.fetchall():
             sample_to_contigs.setdefault(sample_name, set()).add(contig_name)
             contig_to_samples.setdefault(contig_name, set()).add(sample_name)
+    if enable_timing:
+        n_pairs = sum(len(v) for v in sample_to_contigs.values())
+        print(f"[timing]   Coverage presence mapping ({n_pairs} pairs): {time.perf_counter() - _t:.3f}s", flush=True)
 
     # Pre-compute MAG→samples mapping: a sample belongs to a MAG if any member contig has coverage
+    if enable_timing:
+        _t = time.perf_counter()
     mag_to_samples = {}
     for _mag_name, _mag_contigs in mag_to_contigs.items():
         _s = set()
         for _c in _mag_contigs:
             _s |= contig_to_samples.get(_c, set())
         mag_to_samples[_mag_name] = _s
+    if enable_timing:
+        print(f"[timing]   MAG→samples mapping: {time.perf_counter() - _t:.3f}s", flush=True)
 
     # Get variables that have data (their feature table exists)
     cur.execute("SELECT DISTINCT Feature_table_name FROM Variable")
@@ -464,7 +489,7 @@ def create_layout(db_path, enable_timing=False):
                 cur.execute(query, params)
                 return {(row[0], row[1]) for row in cur.fetchall()}
             except duckdb.Error as e:
-                print(f"[get_filtering_filtered_pairs] Query error: {e}")
+                print(f"[get_filtering_filtered_pairs] Query error: {e}", flush=True)
                 return set()
 
         def evaluate_section(section_data):
@@ -1105,7 +1130,7 @@ def create_layout(db_path, enable_timing=False):
                 # Get selected ordering column (map UI label "Sample name" to DB column "Sample_name")
                 order_by = "Sample_name" if sample_order_select.value == "Sample name" else sample_order_select.value
 
-                print(f"[start_bokeh_server] Generating plot for all samples with variable={selected_var}, contig={contig}, genome_features={genome_features}, filtered_samples={len(filtered_samples)}")
+                print(f"[start_bokeh_server] Generating plot for all samples with variable={selected_var}, contig={contig}, genome_features={genome_features}, filtered_samples={len(filtered_samples)}", flush=True)
                 # Pass plot_genemap to plotting function if supported, else filter genome_features
                 if not plot_genemap and genome_features:
                     # Remove "Gene map" from genome_features if present
@@ -1140,7 +1165,7 @@ def create_layout(db_path, enable_timing=False):
                     for idx in cbg.active:
                         requested_features.append(cbg.labels[idx])
 
-                print(f"[start_bokeh_server] Generating plot for sample={sample}, contig={contig}, features={requested_features}")
+                print(f"[start_bokeh_server] Generating plot for sample={sample}, contig={contig}, features={requested_features}", flush=True)
                 # Remove "Gene map" from requested_features if window too large
                 if not plot_genemap and requested_features:
                     requested_features = [f for f in requested_features if f != "Gene map"]
@@ -1438,9 +1463,9 @@ def create_layout(db_path, enable_timing=False):
     if enable_timing:
         t_init = time.perf_counter()
     conn = duckdb.connect(db_path, read_only=True)
-    widgets = build_controls(conn)
+    widgets = build_controls(conn, enable_timing=enable_timing)
     if enable_timing:
-        print(f"[timing] build_controls (initial DB queries): {time.perf_counter() - t_init:.3f}s", flush=True)
+        print(f"[timing] build_controls total: {time.perf_counter() - t_init:.3f}s", flush=True)
 
     # Build subplot → variable_name(s) mapping for inspect command generation
     _subplot_to_varnames = {}
@@ -3077,7 +3102,7 @@ def create_layout(db_path, enable_timing=False):
 
     if enable_timing:
         print(f"[timing] UI construction (widgets + layout): {time.perf_counter() - t_ui:.3f}s", flush=True)
-        print(f"[timing] Total initial load: {time.perf_counter() - t_init:.3f}s", flush=True)
+        print(f"[timing] Session ready (total: {time.perf_counter() - t_init:.3f}s)", flush=True)
 
     return layout
 
@@ -3104,10 +3129,10 @@ def run_serve(args):
               f"\n Created on {meta.get('Date_of_creation', '?')} "
               f"(v{meta.get('Tool_version_used_for_creation', '?')}) "
               f"\n Last modified on {meta.get('Date_of_last_modification', '?')} "
-              f"(v{meta.get('Tool_version_used_for_last_modification', '?')})")
+              f"(v{meta.get('Tool_version_used_for_last_modification', '?')})", flush=True)
         if params:
             params_str = '\n '.join(params)
-            print(f"Calculate parameters used:\n {params_str}")
+            print(f"Calculate parameters used:\n {params_str}", flush=True)
     finally:
         _conn.close()
 

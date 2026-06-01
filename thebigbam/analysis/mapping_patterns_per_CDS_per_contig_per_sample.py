@@ -454,7 +454,7 @@ def run(args):
     """Entry point called by CLI dispatcher."""
 
     if not 0 <= args.min_aligned_fraction <= 100:
-        print("Error: --min_aligned_fraction must be between 0 and 100.", file=sys.stderr)
+        print("Error: --min_aligned_fraction must be between 0 and 100.", file=sys.stderr, flush=True)
         sys.exit(1)
 
     conn = duckdb.connect(args.db, read_only=True)
@@ -485,18 +485,18 @@ def run(args):
             }
 
     if not _table_exists(conn, "Contig_annotation"):
-        print("Error: No Contig_annotation table. Run annotation first.", file=sys.stderr)
+        print("Error: No Contig_annotation table. Run annotation first.", file=sys.stderr, flush=True)
         sys.exit(1)
 
     if not _table_exists(conn, "Sample"):
-        print("Error: No Sample table. Database has no BAM data.", file=sys.stderr)
+        print("Error: No Sample table. Database has no BAM data.", file=sys.stderr, flush=True)
         sys.exit(1)
 
     samples = conn.execute(
         "SELECT Sample_id, Sample_name FROM Sample ORDER BY Sample_id"
     ).fetchall()
     if not samples:
-        print("Error: No samples found in database.", file=sys.stderr)
+        print("Error: No samples found in database.", file=sys.stderr, flush=True)
         sys.exit(1)
 
     contigs = conn.execute(
@@ -551,12 +551,12 @@ def run(args):
         f"Processing {len(samples)} sample(s), "
         f"{len(name_to_id)} feature(s), "
         f"{len(all_genes)} CDS...",
-        file=sys.stderr,
+        file=sys.stderr, flush=True,
     )
     print(
         f"Filters: aligned_fraction >= {args.min_aligned_fraction}%, "
         f"coverage_depth >= {args.min_coverage_depth}",
-        file=sys.stderr,
+        file=sys.stderr, flush=True,
     )
 
     af_threshold = args.min_aligned_fraction * 10
@@ -600,10 +600,10 @@ def run(args):
                 sample_rows += 1
 
             total_rows += sample_rows
-            print(f"  Done: {sample_name} ({sample_rows} CDS)", file=sys.stderr)
+            print(f"  Done: {sample_name} ({sample_rows} CDS)", file=sys.stderr, flush=True)
 
     conn.close()
-    print(f"Wrote {total_rows} rows to {args.output}", file=sys.stderr)
+    print(f"Wrote {total_rows} rows to {args.output}", file=sys.stderr, flush=True)
 
 
 def main():

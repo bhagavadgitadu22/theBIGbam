@@ -159,12 +159,12 @@ def run(args):
     ).fetchall()
 
     if not contigs_with_cds:
-        print("No CDS features found in database.", file=sys.stderr)
+        print("No CDS features found in database.", file=sys.stderr, flush=True)
         conn.close()
         sys.exit(0)
 
     total_contigs = len(contigs_with_cds)
-    print(f"Processing {total_contigs} contigs ({len(qualifier_keys)} qualifier columns)...", file=sys.stderr)
+    print(f"Processing {total_contigs} contigs ({len(qualifier_keys)} qualifier columns)...", file=sys.stderr, flush=True)
 
     columns = (["mag_name"] + FIXED_COLUMNS + qualifier_keys
                if mag_mode else FIXED_COLUMNS + qualifier_keys)
@@ -244,11 +244,11 @@ def run(args):
                 total_cds += len(contig_cds)
 
             processed = min(batch_start + CONTIG_BATCH_SIZE, total_contigs)
-            print(f"  Processed {processed}/{total_contigs} contigs ({total_cds} CDS)...", file=sys.stderr)
+            print(f"  Processed {processed}/{total_contigs} contigs ({total_cds} CDS)...", file=sys.stderr, flush=True)
 
     conn.close()
 
-    print(f"Wrote {total_cds} CDS to {args.output} ({len(qualifier_keys)} qualifier columns)", file=sys.stderr)
+    print(f"Wrote {total_cds} CDS to {args.output} ({len(qualifier_keys)} qualifier columns)", file=sys.stderr, flush=True)
 
 
 def main():

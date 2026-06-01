@@ -121,7 +121,7 @@ def perform_autoblast(threads: int, assembly_path: Path, output_path: Path, eval
                 results = future.result()
                 all_results.extend(results)
             except Exception as e:
-                print(f"Warning: BLAST failed for {contig_id}: {e}")
+                print(f"Warning: BLAST failed for {contig_id}: {e}", flush=True)
 
     # Write all results to output file
     with open(output_path, 'w') as out_handle:
@@ -154,4 +154,4 @@ if __name__ == "__main__":
         Path(args.output),
         evalue=args.evalue
     )
-    print(f"Autoblast results written to: {result}")
+    print(f"Autoblast results written to: {result}", flush=True)

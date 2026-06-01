@@ -471,19 +471,19 @@ def list_variables(db_path, detailed=False):
     rows = cur.fetchall()
 
     if not rows:
-        print("No variables found in the database.")
+        print("No variables found in the database.", flush=True)
         conn.close()
         return
 
     # Print header
     for row in rows:
         # Pair field name and value and print nicely
-        print(row[0])  # Variable_name as header
+        print(row[0], flush=True)  # Variable_name as header
         if detailed:
             # Print other fields minus variable name
             for fname, val in zip(display_fields[1:], row[1:]):
-                print(f"- {fname}: {val}")
-            print("")
+                print(f"- {fname}: {val}", flush=True)
+            print("", flush=True)
 
     conn.close()
 
@@ -493,16 +493,16 @@ def list_samples(db_path):
     cur = conn.cursor()
     cur.execute("SELECT 1 FROM information_schema.tables WHERE table_name = 'Sample'")
     if cur.fetchone() is None:
-        print("No samples in the database (genbank-only mode).")
+        print("No samples in the database (genbank-only mode).", flush=True)
         conn.close()
         return
     cur.execute("SELECT Sample_name FROM Sample ORDER BY Sample_name")
     rows = [r[0] for r in cur.fetchall()]
     if not rows:
-        print("No samples found in the database.")
+        print("No samples found in the database.", flush=True)
     else:
         for s in rows:
-            print(f"{s}")
+            print(f"{s}", flush=True)
     conn.close()
 
 def list_contigs(db_path):
@@ -512,25 +512,25 @@ def list_contigs(db_path):
     cur.execute("SELECT Contig_name FROM Contig ORDER BY Contig_name")
     rows = [r[0] for r in cur.fetchall()]
     if not rows:
-        print("No contigs found in the database.")
+        print("No contigs found in the database.", flush=True)
     else:
         for c in rows:
-            print(f"{c}")
+            print(f"{c}", flush=True)
     conn.close()
 
 def list_mags_cli(db_path):
     """Print MAG_name values from MAG table."""
     conn = duckdb.connect(db_path, read_only=True)
     if conn.execute("SELECT 1 FROM information_schema.tables WHERE table_name = 'MAG'").fetchone() is None:
-        print("No MAG table in database (not in MAG mode).")
+        print("No MAG table in database (not in MAG mode).", flush=True)
         conn.close()
         return
     rows = [r[0] for r in conn.execute("SELECT MAG_name FROM MAG ORDER BY MAG_name").fetchall()]
     if not rows:
-        print("No MAGs found in the database.")
+        print("No MAGs found in the database.", flush=True)
     else:
         for m in rows:
-            print(f"{m}")
+            print(f"{m}", flush=True)
     conn.close()
 
 SAMPLE_INTERNAL_COLUMNS = {
@@ -556,16 +556,16 @@ def list_sample_metadata(db_path):
     conn = duckdb.connect(db_path, read_only=True)
     if conn.execute("SELECT 1 FROM information_schema.tables WHERE table_name = 'Sample'").fetchone() is None:
         conn.close()
-        print("No Sample table in database (genbank-only mode).")
+        print("No Sample table in database (genbank-only mode).", flush=True)
         return
     cols = [r[0] for r in conn.execute("DESCRIBE Sample").fetchall()]
     conn.close()
     user_cols = [c for c in cols if c not in SAMPLE_INTERNAL_COLUMNS]
     if not user_cols:
-        print("No user-added metadata columns on Sample table.")
+        print("No user-added metadata columns on Sample table.", flush=True)
     else:
         for c in user_cols:
-            print(c)
+            print(c, flush=True)
 
 
 def list_contig_metadata(db_path):
@@ -575,48 +575,48 @@ def list_contig_metadata(db_path):
     conn.close()
     user_cols = [c for c in cols if c not in CONTIG_INTERNAL_COLUMNS]
     if not user_cols:
-        print("No user-added metadata columns on Contig table.")
+        print("No user-added metadata columns on Contig table.", flush=True)
     else:
         for c in user_cols:
-            print(c)
+            print(c, flush=True)
 
 
 def remove_sample_metadata(db_path, colname):
     """Remove a user-added column from the Sample table."""
     if colname in SAMPLE_INTERNAL_COLUMNS:
-        print(f"Error: '{colname}' is a built-in column and cannot be removed.")
+        print(f"Error: '{colname}' is a built-in column and cannot be removed.", flush=True)
         return
     conn = duckdb.connect(db_path)
     if conn.execute("SELECT 1 FROM information_schema.tables WHERE table_name = 'Sample'").fetchone() is None:
         conn.close()
-        print("No Sample table in database (genbank-only mode).")
+        print("No Sample table in database (genbank-only mode).", flush=True)
         return
     cols = [r[0] for r in conn.execute("DESCRIBE Sample").fetchall()]
     if colname not in cols:
         conn.close()
-        print(f"Error: column '{colname}' does not exist on Sample table.")
+        print(f"Error: column '{colname}' does not exist on Sample table.", flush=True)
         return
     conn.execute(f'ALTER TABLE Sample DROP COLUMN "{colname}"')
     update_database_metadata(conn)
     conn.close()
-    print(f"Removed column '{colname}' from Sample table.")
+    print(f"Removed column '{colname}' from Sample table.", flush=True)
 
 
 def remove_contig_metadata(db_path, colname):
     """Remove a user-added column from the Contig table."""
     if colname in CONTIG_INTERNAL_COLUMNS:
-        print(f"Error: '{colname}' is a built-in column and cannot be removed.")
+        print(f"Error: '{colname}' is a built-in column and cannot be removed.", flush=True)
         return
     conn = duckdb.connect(db_path)
     cols = [r[0] for r in conn.execute("DESCRIBE Contig").fetchall()]
     if colname not in cols:
         conn.close()
-        print(f"Error: column '{colname}' does not exist on Contig table.")
+        print(f"Error: column '{colname}' does not exist on Contig table.", flush=True)
         return
     conn.execute(f'ALTER TABLE Contig DROP COLUMN "{colname}"')
     update_database_metadata(conn)
     conn.close()
-    print(f"Removed column '{colname}' from Contig table.")
+    print(f"Removed column '{colname}' from Contig table.", flush=True)
 
 
 def list_mag_metadata(db_path):
@@ -624,37 +624,37 @@ def list_mag_metadata(db_path):
     conn = duckdb.connect(db_path, read_only=True)
     if conn.execute("SELECT 1 FROM information_schema.tables WHERE table_name = 'MAG'").fetchone() is None:
         conn.close()
-        print("No MAG table in database (not in MAG mode).")
+        print("No MAG table in database (not in MAG mode).", flush=True)
         return
     cols = [r[0] for r in conn.execute("DESCRIBE MAG").fetchall()]
     conn.close()
     user_cols = [c for c in cols if c not in MAG_INTERNAL_COLUMNS]
     if not user_cols:
-        print("No user-added metadata columns on MAG table.")
+        print("No user-added metadata columns on MAG table.", flush=True)
     else:
         for c in user_cols:
-            print(c)
+            print(c, flush=True)
 
 
 def remove_mag_metadata(db_path, colname):
     """Remove a user-added column from the MAG table."""
     if colname in MAG_INTERNAL_COLUMNS:
-        print(f"Error: '{colname}' is a built-in column and cannot be removed.")
+        print(f"Error: '{colname}' is a built-in column and cannot be removed.", flush=True)
         return
     conn = duckdb.connect(db_path)
     if conn.execute("SELECT 1 FROM information_schema.tables WHERE table_name = 'MAG'").fetchone() is None:
         conn.close()
-        print("No MAG table in database (not in MAG mode).")
+        print("No MAG table in database (not in MAG mode).", flush=True)
         return
     cols = [r[0] for r in conn.execute("DESCRIBE MAG").fetchall()]
     if colname not in cols:
         conn.close()
-        print(f"Error: column '{colname}' not found in MAG table.")
+        print(f"Error: column '{colname}' not found in MAG table.", flush=True)
         return
     conn.execute(f'ALTER TABLE MAG DROP COLUMN "{colname}"')
     update_database_metadata(conn)
     conn.close()
-    print(f"Removed column '{colname}' from MAG table.")
+    print(f"Removed column '{colname}' from MAG table.", flush=True)
 
 
 def _table_exists(conn, table_name):
@@ -699,7 +699,7 @@ def remove_sample(db_path, sample_name):
 
     if not _table_exists(conn, 'Sample'):
         conn.close()
-        print("No Sample table in database (genbank-only mode).")
+        print("No Sample table in database (genbank-only mode).", flush=True)
         return
 
     row = conn.execute(
@@ -707,7 +707,7 @@ def remove_sample(db_path, sample_name):
     ).fetchone()
     if row is None:
         conn.close()
-        print(f"Error: sample '{sample_name}' not found in database.")
+        print(f"Error: sample '{sample_name}' not found in database.", flush=True)
         return
     sample_id = row[0]
 
@@ -735,7 +735,7 @@ def remove_sample(db_path, sample_name):
     conn.execute("DELETE FROM Sample WHERE Sample_id = ?", [sample_id])
     update_database_metadata(conn)
     conn.close()
-    print(f"Removed sample '{sample_name}' and all associated data.")
+    print(f"Removed sample '{sample_name}' and all associated data.", flush=True)
 
 
 def remove_contig(db_path, contig_name):
@@ -747,7 +747,7 @@ def remove_contig(db_path, contig_name):
     ).fetchone()
     if row is None:
         conn.close()
-        print(f"Error: contig '{contig_name}' not found in database.")
+        print(f"Error: contig '{contig_name}' not found in database.", flush=True)
         return
     contig_id = row[0]
 
@@ -780,7 +780,7 @@ def remove_contig(db_path, contig_name):
     conn.execute("DELETE FROM Contig WHERE Contig_id = ?", [contig_id])
     update_database_metadata(conn)
     conn.close()
-    print(f"Removed contig '{contig_name}' and all associated data.")
+    print(f"Removed contig '{contig_name}' and all associated data.", flush=True)
 
 
 
@@ -791,7 +791,7 @@ def remove_mag(db_path, mag_name):
 
     if not _table_exists(conn, 'MAG'):
         conn.close()
-        print("No MAG table in database (not in MAG mode).")
+        print("No MAG table in database (not in MAG mode).", flush=True)
         return
 
     row = conn.execute(
@@ -799,7 +799,7 @@ def remove_mag(db_path, mag_name):
     ).fetchone()
     if row is None:
         conn.close()
-        print(f"Error: MAG '{mag_name}' not found in database.")
+        print(f"Error: MAG '{mag_name}' not found in database.", flush=True)
         return
     mag_id = row[0]
 
@@ -853,7 +853,7 @@ def remove_mag(db_path, mag_name):
     conn.execute("DELETE FROM MAG WHERE MAG_id = ?", [mag_id])
     update_database_metadata(conn)
     conn.close()
-    print(f"Removed MAG '{mag_name}' and all associated data ({len(contig_ids)} contigs).")
+    print(f"Removed MAG '{mag_name}' and all associated data ({len(contig_ids)} contigs).", flush=True)
 
 def main(argv=None):
     import argparse

@@ -67,7 +67,7 @@ def run_inspect(args):
                 [mag_name],
             ).fetchall()
             if not rows:
-                print(f"# ERROR: MAG '{mag_name}' not found or has no member contigs, skipping.", file=sys.stderr)
+                print(f"# ERROR: MAG '{mag_name}' not found or has no member contigs, skipping.", file=sys.stderr, flush=True)
                 continue
             for cn, offset in rows:
                 contigs.append(cn)
@@ -91,7 +91,7 @@ def run_inspect(args):
         for mag_name in mags:
             mag_id = get_mag_id(conn, mag_name)
             if mag_id is None:
-                print(f"# ERROR: MAG '{mag_name}' not found, skipping.", file=sys.stderr)
+                print(f"# ERROR: MAG '{mag_name}' not found, skipping.", file=sys.stderr, flush=True)
                 continue
             for feature_name in features:
                 if is_contig_blob_feature(feature_name):
@@ -102,14 +102,14 @@ def run_inspect(args):
                                      region_start, region_end, mag_name=mag_name)
                 else:
                     if not samples:
-                        print(f"# ERROR: '{feature_name}' is sample-level — --sample required, skipping.", file=sys.stderr)
+                        print(f"# ERROR: '{feature_name}' is sample-level — --sample required, skipping.", file=sys.stderr, flush=True)
                         continue
                     for sample_name in samples:
                         s_row = conn.execute(
                             "SELECT Sample_id FROM Sample WHERE Sample_name = ?", [sample_name]
                         ).fetchone()
                         if s_row is None:
-                            print(f"# ERROR: Sample '{sample_name}' not found, skipping.", file=sys.stderr)
+                            print(f"# ERROR: Sample '{sample_name}' not found, skipping.", file=sys.stderr, flush=True)
                             continue
                         zoom_blob = get_mag_feature_zoom(conn, mag_id, s_row[0], feature_name)
                         if zoom_blob is None:
@@ -124,7 +124,7 @@ def run_inspect(args):
             "SELECT Contig_id, Contig_length FROM Contig WHERE Contig_name = ?", [contig_name]
         ).fetchone()
         if row is None:
-            print(f"# ERROR: Contig '{contig_name}' not found, skipping.", file=sys.stderr)
+            print(f"# ERROR: Contig '{contig_name}' not found, skipping.", file=sys.stderr, flush=True)
             continue
         contig_id, contig_length = int(row[0]), int(row[1])
         contig_mag = mag_of_contig.get(contig_name, "")
@@ -148,7 +148,7 @@ def run_inspect(args):
 
             if is_contig_blob_feature(feature_name):
                 if fid is None:
-                    print(f"# ERROR: Unknown feature '{feature_name}', skipping.", file=sys.stderr)
+                    print(f"# ERROR: Unknown feature '{feature_name}', skipping.", file=sys.stderr, flush=True)
                     continue
                 _inspect_contig_feature(
                     conn, contig_id, contig_name, feature_name, fid,
@@ -157,12 +157,12 @@ def run_inspect(args):
                 )
             elif fid is not None:
                 if not samples:
-                    print(f"# ERROR: '{feature_name}' is sample-level — --sample required, skipping.", file=sys.stderr)
+                    print(f"# ERROR: '{feature_name}' is sample-level — --sample required, skipping.", file=sys.stderr, flush=True)
                     continue
                 for sample_name in samples:
                     row = conn.execute("SELECT Sample_id FROM Sample WHERE Sample_name = ?", [sample_name]).fetchone()
                     if row is None:
-                        print(f"# ERROR: Sample '{sample_name}' not found, skipping.", file=sys.stderr)
+                        print(f"# ERROR: Sample '{sample_name}' not found, skipping.", file=sys.stderr, flush=True)
                         continue
                     sample_id = row[0]
                     _inspect_sample_feature(
@@ -172,7 +172,7 @@ def run_inspect(args):
                         mag_name=contig_mag, mag_offset=mag_offset,
                     )
             else:
-                print(f"# ERROR: Unknown feature '{feature_name}', skipping.", file=sys.stderr)
+                print(f"# ERROR: Unknown feature '{feature_name}', skipping.", file=sys.stderr, flush=True)
 
     conn.close()
     return 0
