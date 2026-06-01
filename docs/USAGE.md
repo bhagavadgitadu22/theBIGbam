@@ -1,4 +1,4 @@
-# How to run theBIGbam on big projects?
+# Applying theBIGbam to real projects?
 
 ## Use case 1: medium dataset, 1 contig, 252 samples
 
@@ -210,13 +210,15 @@ The database obtained is quite massive so we keep it stored remotely on the clus
 sbatch -q serial -N 1 -n 1 -c 8 -t 10:00:00 --wrap="thebigbam serve --db /work/river/NOMIS_VIRUS/05_MAGs/thebigbam_bacteria_mag_view.db"
 ```
 
-We find node where job is running (here jst234) and relay it locally via ssh:
+We find node where job is running (here jst234) and relay it locally via ssh. For us, `ssh -N -L 5006:jst234:5006 [user@remote.server.com]` fails the cluster firewall blocks direct access to login modes. If you meet a similar problem you can try to jump via the login node with:
 
 ```bash
-ssh -N -L 5006:jst184:5006 user@remote.server.com
+ssh -J boutroux@jed.epfl.ch -N -L 5006:localhost:5006 boutroux@jst234
 ```
 
-We can now access the served webpage via our favorite web-browser (Firefox right?) at the address [http://localhost:5006](http://localhost:5006):
+We can now open `localhost:5006` in a web browser. For MAG datasets, theBIGbam can visualize complete MAGs instead of individual contigs. Here, the coverage track of a MAG is displayed, with the MAG track above it indicating the boundaries of the constituent contigs:
+
+![image](https://raw.githubusercontent.com/bhagavadgitadu22/theBIGbam/master/docs/images/VISUALIZATION_MAG.png)
 
 ---
 

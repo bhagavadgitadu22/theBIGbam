@@ -16,58 +16,41 @@ from .plotting_data_all_samples import generate_bokeh_plot_all_samples
 from ..database.database_getters import get_filtering_metadata, resolve_distinct_values, ANNOTATION_EXCLUDED_COLUMNS, is_mag_mode, get_mag_contig_map
 from .searchable_select import SearchableSelect
 
-def build_controls(conn, enable_timing=False):
-    """Query DB and return widgets and helper mappings."""
+def preload_db_data(db_path, enable_timing=False):
+    """Run all expensive DB queries once at startup. Returns a dict of pure data."""
+    import duckdb as _duckdb
+    if enable_timing:
+        _t_total = time.perf_counter()
+
+    conn = _duckdb.connect(db_path, read_only=True)
     cur = conn.cursor()
 
-    # Get annotation feature types from Annotated_types table
     if enable_timing:
         _t = time.perf_counter()
     cur.execute("SELECT Type_name FROM Annotated_types ORDER BY Frequency DESC")
     annotation_types = [r[0] for r in cur.fetchall()]
     if enable_timing:
-        print(f"[timing]   Annotation types: {time.perf_counter() - _t:.3f}s", flush=True)
+        print(f"[timing] Preload: annotation types: {time.perf_counter() - _t:.3f}s", flush=True)
 
-    # Detect MAG mode
     if enable_timing:
         _t = time.perf_counter()
     has_mags = is_mag_mode(conn)
     mag_to_contigs, contig_to_mag = get_mag_contig_map(conn)
     mags = sorted(mag_to_contigs.keys())
     if enable_timing:
-        print(f"[timing]   MAG mode + contig map ({len(mags)} MAGs): {time.perf_counter() - _t:.3f}s", flush=True)
+        print(f"[timing] Preload: MAG mode + contig map ({len(mags)} MAGs): {time.perf_counter() - _t:.3f}s", flush=True)
 
-    # Widget Selector for MAGs (visible only in MAG-mode databases)
-    mag_select = SearchableSelect(
-        value=mags[0] if len(mags) == 1 else "",
-        options=mags,
-        placeholder="Type to search MAGs...",
-        sizing_mode="stretch_width",
-        margin=(0, 5, 0, 5),
-        visible=has_mags,
-    )
-
-    # View toggle (MAG / Contig). Only relevant in MAG-mode databases.
-    view_radio = RadioButtonGroup(
-        labels=["MAG view", "Contig view"],
-        active=1,
-        visible=has_mags,
-        sizing_mode="stretch_width",
-        margin=(0, 5, 10, 5),
-    )
-
-    # Widget Selector for Contigs (autocomplete with max 20 suggestions)
     if enable_timing:
         _t = time.perf_counter()
-    cur.execute("SELECT Contig_name, Contig_length FROM Contig ORDER BY Contig_name")
+    cur.execute("SELECT Contig_id, Contig_name, Contig_length FROM Contig ORDER BY Contig_name")
     rows = cur.fetchall()
-    contigs = [r[0] for r in rows]
-    contig_lengths = {r[0]: r[1] for r in rows}  # Dictionary mapping contig_name -> length
+    contigs = [r[1] for r in rows]
+    contig_lengths = {r[1]: r[2] for r in rows}
+    contig_name_to_id = {r[1]: r[0] for r in rows}
+    contig_id_to_name = {r[0]: r[1] for r in rows}
     if enable_timing:
-        print(f"[timing]   Contigs query ({len(contigs)} contigs): {time.perf_counter() - _t:.3f}s", flush=True)
+        print(f"[timing] Preload: contigs query ({len(contigs)} contigs): {time.perf_counter() - _t:.3f}s", flush=True)
 
-    # Pre-compute MAG-space offsets: {mag_name: {contig_name: cumulative_offset}}
-    # Contigs are in longest-first order (matching get_mag_contigs / mag_to_contigs order).
     mag_to_contig_offsets = {}
     for _mag_name, _contigs in mag_to_contigs.items():
         off = 0
@@ -77,98 +60,73 @@ def build_controls(conn, enable_timing=False):
             off += contig_lengths.get(c, 0)
         mag_to_contig_offsets[_mag_name] = d
 
-    # If only one contig in database, pre-fill the field
-    contig_select = SearchableSelect(
-        value=contigs[0] if len(contigs) == 1 else "",
-        options=contigs,
-        placeholder="Type to search contigs...",
-        sizing_mode="stretch_width",
-        margin=(0, 5, 0, 5)
-    )
-
-    # Widget Selector for Samples (autocomplete with max 20 suggestions)
-    # Sample table only exists when BAM files were provided
     if enable_timing:
         _t = time.perf_counter()
     cur.execute("SELECT 1 FROM information_schema.tables WHERE table_name = 'Sample'")
     has_sample_table = cur.fetchone() is not None
+    sample_name_to_id = {}
+    sample_id_to_name = {}
     if has_sample_table:
-        cur.execute("SELECT Sample_name FROM Sample ORDER BY Sample_name")
-        samples = [r[0] for r in cur.fetchall()]
+        cur.execute("SELECT Sample_id, Sample_name FROM Sample ORDER BY Sample_name")
+        sample_rows = cur.fetchall()
+        samples = [r[1] for r in sample_rows]
+        sample_name_to_id = {r[1]: r[0] for r in sample_rows}
+        sample_id_to_name = {r[0]: r[1] for r in sample_rows}
     else:
         samples = []
     has_samples = len(samples) > 0
     if enable_timing:
-        print(f"[timing]   Samples query ({len(samples)} samples): {time.perf_counter() - _t:.3f}s", flush=True)
+        print(f"[timing] Preload: samples query ({len(samples)} samples): {time.perf_counter() - _t:.3f}s", flush=True)
 
-    # If only one sample in database, pre-fill the field
-    sample_select = SearchableSelect(
-        value=samples[0] if len(samples) == 1 else "",
-        options=samples,
-        placeholder="Type to search samples...",
-        sizing_mode="stretch_width",
-        margin=(0, 5, 0, 5)
-    )
-
-    # Build presence mappings: sample -> contigs and contig -> samples
     if enable_timing:
         _t = time.perf_counter()
-    sample_to_contigs = {}
-    contig_to_samples = {}
+    sid_to_cids = {}
+    cid_to_sids = {}
     if has_sample_table:
-        cur.execute("""
-        SELECT Contig.Contig_name, Sample.Sample_name FROM Coverage
-          JOIN Contig ON Coverage.Contig_id = Contig.Contig_id
-          JOIN Sample ON Coverage.Sample_id = Sample.Sample_id
-        """)
-        for contig_name, sample_name in cur.fetchall():
-            sample_to_contigs.setdefault(sample_name, set()).add(contig_name)
-            contig_to_samples.setdefault(contig_name, set()).add(sample_name)
+        cur.execute("SELECT Contig_id, Sample_id FROM Coverage")
+        for cid, sid in cur.fetchall():
+            if sid not in sid_to_cids:
+                sid_to_cids[sid] = set()
+            sid_to_cids[sid].add(cid)
+            if cid not in cid_to_sids:
+                cid_to_sids[cid] = set()
+            cid_to_sids[cid].add(sid)
     if enable_timing:
-        n_pairs = sum(len(v) for v in sample_to_contigs.values())
-        print(f"[timing]   Coverage presence mapping ({n_pairs} pairs): {time.perf_counter() - _t:.3f}s", flush=True)
+        n_pairs = sum(len(v) for v in sid_to_cids.values())
+        print(f"[timing] Preload: coverage presence mapping ({n_pairs} pairs): {time.perf_counter() - _t:.3f}s", flush=True)
 
-    # Pre-compute MAG→samples mapping: a sample belongs to a MAG if any member contig has coverage
     if enable_timing:
         _t = time.perf_counter()
-    mag_to_samples = {}
+    mag_to_sample_ids = {}
     for _mag_name, _mag_contigs in mag_to_contigs.items():
         _s = set()
         for _c in _mag_contigs:
-            _s |= contig_to_samples.get(_c, set())
-        mag_to_samples[_mag_name] = _s
+            _cid = contig_name_to_id.get(_c)
+            if _cid is not None:
+                _s |= cid_to_sids.get(_cid, set())
+        mag_to_sample_ids[_mag_name] = _s
     if enable_timing:
-        print(f"[timing]   MAG→samples mapping: {time.perf_counter() - _t:.3f}s", flush=True)
+        print(f"[timing] Preload: MAG→samples mapping: {time.perf_counter() - _t:.3f}s", flush=True)
 
-    # Get variables that have data (their feature table exists)
+    if enable_timing:
+        _t = time.perf_counter()
     cur.execute("SELECT DISTINCT Feature_table_name FROM Variable")
     tables_with_data = [r[0] for r in cur.fetchall()]
 
-    # Get modules that have at least one variable with data
-    # Define the display order for modules
     MODULE_ORDER = ["Genome", "Coverage", "Misalignment", "RNA", "Long-reads", "Paired-reads", "Phage termini"]
-
     cur.execute("SELECT DISTINCT Module FROM Variable WHERE Feature_table_name IN ({})".format(
         ','.join('?' * len(tables_with_data))
-    ), tuple(tables_with_data))  # Pass only variable names to match with Feature_table_name
+    ), tuple(tables_with_data))
     modules_from_db = [r[0] for r in cur.fetchall()]
-
-    # Sort modules according to MODULE_ORDER, keeping any unknown modules at the end
     modules = sorted(modules_from_db, key=lambda m: MODULE_ORDER.index(m) if m in MODULE_ORDER else len(MODULE_ORDER))
 
-    # Identify custom contig-level subplots (Contig_* tables in Custom module)
     cur.execute("SELECT Subplot FROM Variable WHERE Module='Custom' AND Feature_table_name LIKE 'Contig_%'")
     custom_contig_subplots = [r[0] for r in cur.fetchall()]
 
-    # For each module get variables (only those with data)
-    # Create TWO sets of widgets: one for "One Sample" view, one for "All Samples" view
     module_names = []
-    module_widgets_one = []  # Module checkboxes for One Sample view
-    variables_widgets_one = []  # Variable button groups for One Sample view
-    variables_widgets_all = []  # Variable button groups for All Samples view
-    helps_widgets = []
+    module_variables = []
+    module_helps = []
     for module in modules:
-        # Get distinct subplots (deduplicate by subplot name only)
         cur.execute(
             "SELECT DISTINCT Subplot FROM Variable WHERE Module=? AND Feature_table_name IN ({}) ORDER BY Module_order".format(
                 ','.join('?' * len(tables_with_data))
@@ -177,32 +135,15 @@ def build_controls(conn, enable_timing=False):
         )
         variables_checkbox = [r[0] for r in cur.fetchall()]
 
-        # For Genome module, "Gene map" is handled separately (not in the checkbox group)
-        # So we don't add it here - it will get its own dedicated button
-
-        # For Custom module, exclude contig-level subplots (they go in genome section)
         if module == "Custom" and custom_contig_subplots:
             variables_checkbox = [v for v in variables_checkbox if v not in custom_contig_subplots]
 
-        # Skip this module if no variables with data
         if not variables_checkbox:
             continue
 
         module_names.append(module)
+        module_variables.append(variables_checkbox)
 
-        # Module checkbox (for One Sample view only)
-        module_checkbox = CheckboxGroup(labels=[module], active=[])
-        module_widgets_one.append(module_checkbox)
-
-        # CheckboxButtonGroup for One Sample view
-        cbg_one = CheckboxButtonGroup(labels=variables_checkbox, active=[], sizing_mode="stretch_width", orientation="vertical")
-        variables_widgets_one.append(cbg_one)
-
-        # CheckboxButtonGroup for All Samples view (separate instance)
-        cbg_all = CheckboxButtonGroup(labels=variables_checkbox, active=[], sizing_mode="stretch_width", orientation="vertical")
-        variables_widgets_all.append(cbg_all)
-
-        # Consolidate help texts for the module into a single HelpButton attached to module title
         combined_help = ""
         cur.execute(
             "SELECT DISTINCT Subplot, Title, Help FROM Variable WHERE Module=? AND Feature_table_name IN ({}) ORDER BY Subplot".format(
@@ -210,12 +151,117 @@ def build_controls(conn, enable_timing=False):
             ),
             (module,) + tuple(tables_with_data)
         )
-        records = cur.fetchall()
-        for subplot, title, help_text in records:
-            if help_text is None or not help_text.strip():
-                continue  # Skip empty or None help texts
-            combined_help += f"{title} ({subplot} subplot): {help_text}\n"
+        for subplot, title, help_text in cur.fetchall():
+            if help_text and help_text.strip():
+                combined_help += f"{title} ({subplot} subplot): {help_text}\n"
+        module_helps.append(combined_help)
+    if enable_timing:
+        print(f"[timing] Preload: variable/module queries: {time.perf_counter() - _t:.3f}s", flush=True)
 
+    if enable_timing:
+        _t = time.perf_counter()
+    filtering_metadata = get_filtering_metadata(db_path)
+    if enable_timing:
+        print(f"[timing] Preload: filtering metadata: {time.perf_counter() - _t:.3f}s", flush=True)
+
+    if enable_timing:
+        _t = time.perf_counter()
+    subplot_to_varnames = {}
+    cur.execute("SELECT Variable_name, Subplot FROM Variable WHERE Variable_name IS NOT NULL AND Subplot IS NOT NULL")
+    for _vname, _subplot in cur.fetchall():
+        subplot_to_varnames.setdefault(_subplot, []).append(_vname)
+    if enable_timing:
+        print(f"[timing] Preload: subplot→varnames: {time.perf_counter() - _t:.3f}s", flush=True)
+
+    conn.close()
+
+    if enable_timing:
+        print(f"[timing] Preload total: {time.perf_counter() - _t_total:.3f}s", flush=True)
+
+    return {
+        'annotation_types': annotation_types,
+        'has_mags': has_mags,
+        'mag_to_contigs': mag_to_contigs,
+        'contig_to_mag': contig_to_mag,
+        'mags': mags,
+        'contigs': contigs,
+        'contig_lengths': contig_lengths,
+        'contig_name_to_id': contig_name_to_id,
+        'contig_id_to_name': contig_id_to_name,
+        'sample_name_to_id': sample_name_to_id,
+        'sample_id_to_name': sample_id_to_name,
+        'mag_to_contig_offsets': mag_to_contig_offsets,
+        'samples': samples,
+        'has_samples': has_samples,
+        'sid_to_cids': sid_to_cids,
+        'cid_to_sids': cid_to_sids,
+        'mag_to_sample_ids': mag_to_sample_ids,
+        'module_names': module_names,
+        'module_variables': module_variables,
+        'module_helps': module_helps,
+        'custom_contig_subplots': custom_contig_subplots,
+        'filtering_metadata': filtering_metadata,
+        'subplot_to_varnames': subplot_to_varnames,
+    }
+
+
+def build_controls(preloaded):
+    """Create Bokeh widgets from preloaded data. Fast — no DB queries."""
+    mags = preloaded['mags']
+    has_mags = preloaded['has_mags']
+    contigs = preloaded['contigs']
+    samples = preloaded['samples']
+
+    mag_select = SearchableSelect(
+        value=mags[0] if len(mags) == 1 else "",
+        options=mags,
+        placeholder="Type to search MAGs...",
+        sizing_mode="stretch_width",
+        margin=(0, 5, 0, 5),
+        visible=has_mags,
+    )
+
+    view_radio = RadioButtonGroup(
+        labels=["MAG view", "Contig view"],
+        active=1,
+        visible=has_mags,
+        sizing_mode="stretch_width",
+        margin=(0, 5, 10, 5),
+    )
+
+    contig_select = SearchableSelect(
+        value=contigs[0] if len(contigs) == 1 else "",
+        options=contigs,
+        placeholder="Type to search contigs...",
+        sizing_mode="stretch_width",
+        margin=(0, 5, 0, 5)
+    )
+
+    sample_select = SearchableSelect(
+        value=samples[0] if len(samples) == 1 else "",
+        options=samples,
+        placeholder="Type to search samples...",
+        sizing_mode="stretch_width",
+        margin=(0, 5, 0, 5)
+    )
+
+    module_widgets_one = []
+    variables_widgets_one = []
+    variables_widgets_all = []
+    helps_widgets = []
+    for i, module in enumerate(preloaded['module_names']):
+        variables_checkbox = preloaded['module_variables'][i]
+
+        module_checkbox = CheckboxGroup(labels=[module], active=[])
+        module_widgets_one.append(module_checkbox)
+
+        cbg_one = CheckboxButtonGroup(labels=variables_checkbox, active=[], sizing_mode="stretch_width", orientation="vertical")
+        variables_widgets_one.append(cbg_one)
+
+        cbg_all = CheckboxButtonGroup(labels=variables_checkbox, active=[], sizing_mode="stretch_width", orientation="vertical")
+        variables_widgets_all.append(cbg_all)
+
+        combined_help = preloaded['module_helps'][i]
         if combined_help:
             tooltip = Tooltip(content=combined_help, position="right")
         else:
@@ -227,29 +273,33 @@ def build_controls(conn, enable_timing=False):
         'contig_select': contig_select,
         'mag_select': mag_select,
         'view_radio': view_radio,
-        'sample_to_contigs': sample_to_contigs,
-        'contig_to_samples': contig_to_samples,
-        'mag_to_contigs': mag_to_contigs,
-        'contig_to_mag': contig_to_mag,
-        'mag_to_samples': mag_to_samples,
-        'mag_to_contig_offsets': mag_to_contig_offsets,
+        'sid_to_cids': preloaded['sid_to_cids'],
+        'cid_to_sids': preloaded['cid_to_sids'],
+        'contig_name_to_id': preloaded['contig_name_to_id'],
+        'contig_id_to_name': preloaded['contig_id_to_name'],
+        'sample_name_to_id': preloaded['sample_name_to_id'],
+        'sample_id_to_name': preloaded['sample_id_to_name'],
+        'mag_to_contigs': preloaded['mag_to_contigs'],
+        'contig_to_mag': preloaded['contig_to_mag'],
+        'mag_to_sample_ids': preloaded['mag_to_sample_ids'],
+        'mag_to_contig_offsets': preloaded['mag_to_contig_offsets'],
         'mags': mags,
         'has_mags': has_mags,
-        'module_names': module_names,
+        'module_names': preloaded['module_names'],
         'module_widgets_one': module_widgets_one,
         'helps_widgets': helps_widgets,
         'variables_widgets_one': variables_widgets_one,
         'variables_widgets_all': variables_widgets_all,
         'contigs': contigs,
-        'contig_lengths': contig_lengths,
+        'contig_lengths': preloaded['contig_lengths'],
         'samples': samples,
-        'custom_contig_subplots': custom_contig_subplots,
-        'annotation_types': annotation_types,
-        'has_samples': has_samples  # True if database has any samples
+        'custom_contig_subplots': preloaded['custom_contig_subplots'],
+        'annotation_types': preloaded['annotation_types'],
+        'has_samples': preloaded['has_samples'],
     }
     return widgets
 
-def create_layout(db_path, enable_timing=False):
+def create_layout(db_path, preloaded, enable_timing=False):
     """Create and return the application layout for Panel serve."""
 
     ### Event functions
@@ -578,8 +628,10 @@ def create_layout(db_path, enable_timing=False):
             # Contig mode: filter contigs by selected sample (ONE SAMPLE view).
             if views.active == 0 and widgets['sample_select'].value:
                 sel_sample = widgets['sample_select'].value
-                allowed = widgets['sample_to_contigs'].get(sel_sample, set())
-                completions = [c for c in orig_contigs if c in allowed]
+                sel_sid = widgets['sample_name_to_id'].get(sel_sample)
+                allowed_cids = widgets['sid_to_cids'].get(sel_sid, set()) if sel_sid is not None else set()
+                _c2id = widgets['contig_name_to_id']
+                completions = [c for c in orig_contigs if _c2id.get(c) in allowed_cids]
             else:
                 completions = list(orig_contigs)
 
@@ -600,9 +652,10 @@ def create_layout(db_path, enable_timing=False):
         if widgets['has_mags']:
             # MAG mode: filter samples by selected MAG.
             sel_mag = widgets['mag_select'].value
-            if views.active == 0 and sel_mag and sel_mag in widgets['mag_to_samples']:
-                allowed = widgets['mag_to_samples'][sel_mag]
-                completions = [s for s in orig_samples if s in allowed]
+            if views.active == 0 and sel_mag and sel_mag in widgets['mag_to_sample_ids']:
+                allowed_sids = widgets['mag_to_sample_ids'][sel_mag]
+                _s2id = widgets['sample_name_to_id']
+                completions = [s for s in orig_samples if _s2id.get(s) in allowed_sids]
             else:
                 completions = list(orig_samples)
 
@@ -619,8 +672,10 @@ def create_layout(db_path, enable_timing=False):
             # Contig mode: filter samples by selected contig (ONE SAMPLE view).
             if views.active == 0 and widgets['contig_select'].value:
                 sel_contig = widgets['contig_select'].value
-                allowed = widgets['contig_to_samples'].get(sel_contig, set())
-                completions = [s for s in orig_samples if s in allowed]
+                sel_cid = widgets['contig_name_to_id'].get(sel_contig)
+                allowed_sids = widgets['cid_to_sids'].get(sel_cid, set()) if sel_cid is not None else set()
+                _s2id = widgets['sample_name_to_id']
+                completions = [s for s in orig_samples if _s2id.get(s) in allowed_sids]
             else:
                 completions = list(orig_samples)
 
@@ -645,10 +700,12 @@ def create_layout(db_path, enable_timing=False):
         mag_to_contigs = widgets['mag_to_contigs']
         sel_sample = widgets['sample_select'].value
         if views.active == 0 and sel_sample:
-            valid_contigs = widgets['sample_to_contigs'].get(sel_sample, set())
+            sel_sid = widgets['sample_name_to_id'].get(sel_sample)
+            valid_cids = widgets['sid_to_cids'].get(sel_sid, set()) if sel_sid is not None else set()
+            _c2id = widgets['contig_name_to_id']
             completions = [
                 m for m in sorted(mag_to_contigs.keys())
-                if any(c in valid_contigs for c in mag_to_contigs[m])
+                if any(_c2id.get(c) in valid_cids for c in mag_to_contigs[m])
             ]
         else:
             completions = sorted(mag_to_contigs.keys())
@@ -683,10 +740,13 @@ def create_layout(db_path, enable_timing=False):
             filtered_samples = {selected_sample}
 
         # Count presences (valid contig/sample pairs within filtered sets)
+        _c2id = widgets['contig_name_to_id']
+        _s_id2n = widgets['sample_id_to_name']
+        _filtered_sids = {widgets['sample_name_to_id'][s] for s in filtered_samples if s in widgets['sample_name_to_id']}
         presences_count = sum(
             1 for contig in filtered_contigs
-            for sample in widgets['contig_to_samples'].get(contig, set())
-            if sample in filtered_samples
+            for sid in widgets['cid_to_sids'].get(_c2id.get(contig), set())
+            if sid in _filtered_sids
         )
 
         contigs_count = len(filtered_contigs)
@@ -932,8 +992,11 @@ def create_layout(db_path, enable_timing=False):
                         raise ValueError("In 'All samples' view you must select at least one variable.")
                     # Compute filtered samples for this MAG (union across all its contigs)
                     mag_contigs = widgets['mag_to_contigs'].get(active_mag, [])
+                    _c2id = widgets['contig_name_to_id']
+                    _mag_cids = {_c2id[c] for c in mag_contigs if c in _c2id}
+                    _s2id = widgets['sample_name_to_id']
                     filtered_samples = [s for s in orig_samples
-                                        if any(s in widgets['contig_to_samples'].get(c, set()) for c in mag_contigs)]
+                                        if any(_s2id.get(s) in widgets['cid_to_sids'].get(cid, set()) for cid in _mag_cids)]
                     filtering_pairs = get_filtering_filtered_pairs()
                     if filtering_pairs is not None:
                         allowed_s = {pair[1] for pair in filtering_pairs}
@@ -1120,7 +1183,7 @@ def create_layout(db_path, enable_timing=False):
 
                 # Compute filtered samples (same logic as refresh_sample_options)
                 # Start with samples that have the selected contig
-                filtered_samples = [s for s in orig_samples if s in widgets['contig_to_samples'].get(contig, set())]
+                filtered_samples = [s for s in orig_samples if widgets['sample_name_to_id'].get(s) in widgets['cid_to_sids'].get(widgets['contig_name_to_id'].get(contig), set())]
                 # Apply Filtering2 query builder conditions
                 filtering_pairs = get_filtering_filtered_pairs()
                 if filtering_pairs is not None:
@@ -1303,7 +1366,7 @@ def create_layout(db_path, enable_timing=False):
 
             if is_all:
                 # All Samples view: get filtered samples
-                filtered_samples = [s for s in orig_samples if s in widgets['contig_to_samples'].get(contig, set())]
+                filtered_samples = [s for s in orig_samples if widgets['sample_name_to_id'].get(s) in widgets['cid_to_sids'].get(widgets['contig_name_to_id'].get(contig), set())]
                 # Apply Filtering2 query builder conditions
                 filtering_pairs = get_filtering_filtered_pairs()
                 if filtering_pairs is not None:
@@ -1392,7 +1455,7 @@ def create_layout(db_path, enable_timing=False):
         is_all = (views.active == 1)
 
         if is_all:
-            filtered_samples = [s for s in orig_samples if s in widgets['contig_to_samples'].get(contig, set())]
+            filtered_samples = [s for s in orig_samples if widgets['sample_name_to_id'].get(s) in widgets['cid_to_sids'].get(widgets['contig_name_to_id'].get(contig), set())]
             filtering_pairs = get_filtering_filtered_pairs()
             if filtering_pairs is not None:
                 allowed_samples = {pair[1] for pair in filtering_pairs}
@@ -1463,17 +1526,11 @@ def create_layout(db_path, enable_timing=False):
     if enable_timing:
         t_init = time.perf_counter()
     conn = duckdb.connect(db_path, read_only=True)
-    widgets = build_controls(conn, enable_timing=enable_timing)
+    widgets = build_controls(preloaded)
     if enable_timing:
-        print(f"[timing] build_controls total: {time.perf_counter() - t_init:.3f}s", flush=True)
+        print(f"[timing] Session: widget creation: {time.perf_counter() - t_init:.3f}s", flush=True)
 
-    # Build subplot → variable_name(s) mapping for inspect command generation
-    _subplot_to_varnames = {}
-    _cur = conn.cursor()
-    _cur.execute("SELECT Variable_name, Subplot FROM Variable WHERE Variable_name IS NOT NULL AND Subplot IS NOT NULL")
-    for _vname, _subplot in _cur.fetchall():
-        _subplot_to_varnames.setdefault(_subplot, []).append(_vname)
-    _cur.close()
+    _subplot_to_varnames = preloaded['subplot_to_varnames']
 
     if enable_timing:
         t_ui = time.perf_counter()
@@ -1535,12 +1592,7 @@ def create_layout(db_path, enable_timing=False):
     )
     filtering_header = row(filtering_toggle_btn, filtering_title, _filter_help_btn, sizing_mode="stretch_width", align="center")
 
-    # Cache filtering metadata once when document loads
-    if enable_timing:
-        t_fmeta = time.perf_counter()
-    filtering_metadata = get_filtering_metadata(db_path)
-    if enable_timing:
-        print(f"[timing]   get_filtering_metadata: {time.perf_counter() - t_fmeta:.3f}s", flush=True)
+    filtering_metadata = preloaded['filtering_metadata']
 
     # Get Sample table columns for ordering dropdown (exclude ID and name columns)
     sample_order_columns = ["Sample name"]  # Default option
@@ -2992,7 +3044,7 @@ def create_layout(db_path, enable_timing=False):
             sample_arg = ""
             if has_samples:
                 if is_all:
-                    filtered_samples = [s for s in orig_samples if s in widgets['contig_to_samples'].get(contig, set())]
+                    filtered_samples = [s for s in orig_samples if widgets['sample_name_to_id'].get(s) in widgets['cid_to_sids'].get(widgets['contig_name_to_id'].get(contig), set())]
                     filtering_pairs = get_filtering_filtered_pairs()
                     if filtering_pairs is not None:
                         allowed = {pair[1] for pair in filtering_pairs}
@@ -3101,7 +3153,7 @@ def create_layout(db_path, enable_timing=False):
     layout.stylesheets = [stylesheet]
 
     if enable_timing:
-        print(f"[timing] UI construction (widgets + layout): {time.perf_counter() - t_ui:.3f}s", flush=True)
+        print(f"[timing] Session: UI construction: {time.perf_counter() - t_ui:.3f}s", flush=True)
         print(f"[timing] Session ready (total: {time.perf_counter() - t_init:.3f}s)", flush=True)
 
     return layout
@@ -3136,10 +3188,14 @@ def run_serve(args):
     finally:
         _conn.close()
 
-    # Create a factory function that Panel will call for each session
     enable_timing = getattr(args, 'time', False)
+
+    print("Preloading database data...", flush=True)
+    preloaded = preload_db_data(args.db, enable_timing=enable_timing)
+    print(f"Server ready. Open localhost:{args.port} in your browser.", flush=True)
+
     def create_app():
-        return create_layout(args.db, enable_timing=enable_timing)
+        return create_layout(args.db, preloaded, enable_timing=enable_timing)
 
     static_path = os.path.join(os.path.dirname(__file__), "..", "static")
     pn.serve(

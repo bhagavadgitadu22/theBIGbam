@@ -123,7 +123,7 @@ thebigbam calculate \
 thebigbam serve --db tests/HK97/HK97.db --port 5006
 ```
 
-For more complex examples see [the usage page](docs/USAGE.md).
+For more complex examples see [the usage page](docs/USAGE.md). It covers large-scale datasets, MAG collections and live databases that are regularly updated.
 
 ## Database computation
 
@@ -280,6 +280,7 @@ When accessing the web server (http://localhost:5006), you will be presented wit
 
 <div align="center">
   <img src="https://raw.githubusercontent.com/bhagavadgitadu22/theBIGbam/master/docs/images/VISUALIZATION.png" alt="image" width="800" />
+
 </div>
 
 #### One Sample mode
@@ -483,7 +484,7 @@ Run `thebigbam analysis -h` to display the list of available analysis scripts. R
 
 # Additional in-depth documentation pages
 
-- [How to run theBIGbam on my project?](docs/USAGE.md) TO-DO add MAG
+- [Applying theBIGbam to real projects](docs/USAGE.md)
 - [On mapping with circular genome support](docs/CIRCULAR_MAPPING.md)
 - [Features](docs/FEATURES.md) TO-DO
 - [Compression](docs/COMPRESSION.md) TO-DO
