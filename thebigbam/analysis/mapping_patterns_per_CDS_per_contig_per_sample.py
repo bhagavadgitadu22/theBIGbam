@@ -145,8 +145,11 @@ def _table_exists(conn, table_name):
 
 
 # ============================================================================
-# Blob decoding — batched per (contig, sample)
+# Blob decoding — batched per sample, grouped by contig
 # ============================================================================
+
+CONTIG_BATCH_SIZE = 10_000
+
 
 def _resolve_feature_ids(conn):
     id_to_name = {}
@@ -159,36 +162,49 @@ def _resolve_feature_ids(conn):
     return id_to_name, name_to_id
 
 
-def _load_all_features(conn, contig_id, sample_id, contig_length, id_to_name, name_to_id):
-    """Decode all sample-level features for one (contig, sample) in 2 SQL queries."""
-    zoom_map = {}
-    for row in conn.execute(
-        "SELECT Feature_id, Zoom_data FROM Feature_blob "
-        "WHERE Contig_id=? AND Sample_id=?", [contig_id, sample_id]
-    ).fetchall():
-        fid = row[0]
-        if fid in id_to_name:
-            zoom_map[fid] = bytes(row[1])
+def _prefetch_batch_features(conn, sample_id, contig_id_batch, id_to_name):
+    """Prefetch all feature blob data for a batch of contigs in 2 SQL queries."""
+    placeholders = ",".join("?" * len(contig_id_batch))
+    params = [sample_id] + list(contig_id_batch)
 
-    chunks_by_fid = defaultdict(list)
+    zoom_by_contig = defaultdict(dict)
     for row in conn.execute(
-        "SELECT Feature_id, Chunk_idx, Data FROM Feature_blob_chunk "
-        "WHERE Contig_id=? AND Sample_id=? ORDER BY Feature_id, Chunk_idx",
-        [contig_id, sample_id]
+        f"SELECT Contig_id, Feature_id, Zoom_data FROM Feature_blob "
+        f"WHERE Sample_id=? AND Contig_id IN ({placeholders})",
+        params,
     ).fetchall():
-        fid = row[0]
+        contig_id, fid, zoom = row
         if fid in id_to_name:
-            chunks_by_fid[fid].append((row[1], row[2]))
+            zoom_by_contig[contig_id][fid] = bytes(zoom)
+
+    chunks_by_contig = defaultdict(lambda: defaultdict(list))
+    for row in conn.execute(
+        f"SELECT Contig_id, Feature_id, Chunk_idx, Data FROM Feature_blob_chunk "
+        f"WHERE Sample_id=? AND Contig_id IN ({placeholders}) "
+        f"ORDER BY Contig_id, Feature_id, Chunk_idx",
+        params,
+    ).fetchall():
+        contig_id, fid, chunk_idx, data = row
+        if fid in id_to_name:
+            chunks_by_contig[contig_id][fid].append((chunk_idx, data))
+
+    return zoom_by_contig, chunks_by_contig
+
+
+def _decode_contig_features(contig_id, contig_length, zoom_by_contig, chunks_by_contig, id_to_name, name_to_id):
+    """Decode all features for one contig from prefetched data."""
+    zoom_map = zoom_by_contig.get(contig_id, {})
+    chunks_map = chunks_by_contig.get(contig_id, {})
 
     result = {}
 
     for name in _DENSE_FEATURES:
         fid = name_to_id.get(name)
-        if fid is None or fid not in zoom_map or fid not in chunks_by_fid:
+        if fid is None or fid not in zoom_map or fid not in chunks_map:
             result[name] = np.zeros(contig_length, dtype=np.float64)
             continue
         scale_div = get_scale_from_zoom_blob(zoom_map[fid])
-        data = decode_raw_chunks(chunks_by_fid[fid], scale_div)
+        data = decode_raw_chunks(chunks_map[fid], scale_div)
         arr = np.zeros(contig_length, dtype=np.float64)
         x, y = data["x"], data["y"]
         valid = x < contig_length
@@ -198,11 +214,11 @@ def _load_all_features(conn, contig_id, sample_id, contig_length, id_to_name, na
     _empty_sparse = {"x": np.array([], dtype=np.uint32), "y": np.array([], dtype=np.float64)}
     for name in _SPARSE_FEATURES:
         fid = name_to_id.get(name)
-        if fid is None or fid not in zoom_map or fid not in chunks_by_fid:
+        if fid is None or fid not in zoom_map or fid not in chunks_map:
             result[name] = _empty_sparse
             continue
         scale_div = get_scale_from_zoom_blob(zoom_map[fid])
-        result[name] = decode_raw_sparse_chunks(chunks_by_fid[fid], scale_div)
+        result[name] = decode_raw_sparse_chunks(chunks_map[fid], scale_div)
 
     return result
 
@@ -274,106 +290,110 @@ def process_sample(conn, sample_id, sample_name, contig_info, cov_map, af_map,
                    mag_mode=False, contig_to_mag=None, mag_cov_map=None,
                    mag_id_to_name=None):
     """Process all CDS for one sample. Yields row tuples."""
-    contig_ids = list(cov_map.keys())
+    contig_ids = [cid for cid in cov_map if cid in genes_by_contig]
     if not contig_ids:
         return
 
-    for contig_id in contig_ids:
-        contig_genes = genes_by_contig.get(contig_id)
-        if not contig_genes:
-            continue
-
-        contig_name, contig_length, _ = contig_info[contig_id]
-        contig_cov_tmean = cov_map[contig_id]
-        contig_af = af_map[contig_id]
-
-        mag_name = ""
-        mag_af = None
-        mag_cov_tmean = None
-        if mag_mode and contig_to_mag:
-            mag_id = contig_to_mag.get(contig_id)
-            if mag_id is not None:
-                mag_name = (mag_id_to_name or {}).get(mag_id, "")
-                if mag_cov_map:
-                    mag_af, mag_cov_tmean = mag_cov_map.get((mag_id, sample_id), (None, None))
-
-        features = _load_all_features(
-            conn, contig_id, sample_id, contig_length, id_to_name, name_to_id
+    for batch_start in range(0, len(contig_ids), CONTIG_BATCH_SIZE):
+        batch = contig_ids[batch_start:batch_start + CONTIG_BATCH_SIZE]
+        zoom_by_contig, chunks_by_contig = _prefetch_batch_features(
+            conn, sample_id, batch, id_to_name
         )
 
-        gene_names = gene_names_by_contig.get(contig_id, [])
+        for contig_id in batch:
+            contig_name, contig_length, _ = contig_info[contig_id]
+            contig_cov_tmean = cov_map[contig_id]
+            contig_af = af_map[contig_id]
 
-        for idx, g in enumerate(contig_genes):
-            gene_start, gene_end = g[1], g[2]
-            s_sites, n_sites = g[4], g[5]
-            gene_name = gene_names[idx] if idx < len(gene_names) else ""
+            mag_name = ""
+            mag_af = None
+            mag_cov_tmean = None
+            if mag_mode and contig_to_mag:
+                mag_id = contig_to_mag.get(contig_id)
+                if mag_id is not None:
+                    mag_name = (mag_id_to_name or {}).get(mag_id, "")
+                    if mag_cov_map:
+                        mag_af, mag_cov_tmean = mag_cov_map.get((mag_id, sample_id), (None, None))
 
-            s0 = gene_start - 1
-            e0 = gene_end
+            features = _decode_contig_features(
+                contig_id, contig_length, zoom_by_contig, chunks_by_contig,
+                id_to_name, name_to_id
+            )
 
-            gene_slice = features["primary_reads"][s0:e0]
-            gene_cov_med = float(np.median(gene_slice))
-            gene_af = round(float(np.count_nonzero(gene_slice) / len(gene_slice) * 100), 2) if len(gene_slice) > 0 else 0
-            gene_sec_med = float(np.median(features["secondary_reads"][s0:e0]))
+            gene_names = gene_names_by_contig.get(contig_id, [])
+            contig_genes = genes_by_contig[contig_id]
 
-            coverage_ratio = 0
-            if contig_cov_tmean is not None and contig_cov_tmean > 0:
-                coverage_ratio = round(gene_cov_med / contig_cov_tmean, 4)
+            for idx, g in enumerate(contig_genes):
+                gene_start, gene_end = g[1], g[2]
+                s_sites, n_sites = g[4], g[5]
+                gene_name = gene_names[idx] if idx < len(gene_names) else ""
 
-            mm = _mismatch_stats(features["mismatches"], s0, e0)
-            total_pos, total_prev = mm[0], mm[1]
-            syn_pos, syn_prev = mm[2], mm[3]
-            nonsyn_pos, nonsyn_prev = mm[4], mm[5]
+                s0 = gene_start - 1
+                e0 = gene_end
 
-            dnds = 0
-            if (syn_prev and nonsyn_prev
-                    and syn_prev > 0 and n_sites and s_sites):
-                dnds = round((nonsyn_prev * s_sites) / (syn_prev * n_sites), 4)
+                gene_slice = features["primary_reads"][s0:e0]
+                gene_cov_med = float(np.median(gene_slice))
+                gene_af = round(float(np.count_nonzero(gene_slice) / len(gene_slice) * 100), 2) if len(gene_slice) > 0 else 0
+                gene_sec_med = float(np.median(features["secondary_reads"][s0:e0]))
 
-            ins_pos, ins_prev = _sparse_stats(features["insertions"], s0, e0)
-            del_pos, del_prev = _sparse_stats(features["deletions"], s0, e0)
-            lc_pos, lc_prev = _sparse_stats(features["left_clippings"], s0, e0)
-            rc_pos, rc_prev = _sparse_stats(features["right_clippings"], s0, e0)
+                coverage_ratio = 0
+                if contig_cov_tmean is not None and contig_cov_tmean > 0:
+                    coverage_ratio = round(gene_cov_med / contig_cov_tmean, 4)
 
-            row = [
-                sample_name,
-            ]
-            if mag_mode:
-                row.append(mag_name)
-            row.extend([
-                contig_name,
-                gene_name,
-            ])
-            if mag_mode:
-                row.append(mag_af)
-            row.append(contig_af)
-            row.append(gene_af)
-            if mag_mode:
-                row.append(mag_cov_tmean)
-            row.extend([
-                contig_cov_tmean,
-                gene_cov_med,
-                coverage_ratio,
-                gene_sec_med,
-                total_pos,
-                total_prev,
-                syn_pos,
-                syn_prev,
-                nonsyn_pos,
-                nonsyn_prev,
-                s_sites,
-                n_sites,
-                dnds,
-                ins_pos,
-                ins_prev,
-                del_pos,
-                del_prev,
-                lc_pos,
-                lc_prev,
-                rc_pos,
-                rc_prev,
-            ])
-            yield tuple(row)
+                mm = _mismatch_stats(features["mismatches"], s0, e0)
+                total_pos, total_prev = mm[0], mm[1]
+                syn_pos, syn_prev = mm[2], mm[3]
+                nonsyn_pos, nonsyn_prev = mm[4], mm[5]
+
+                dnds = 0
+                if (syn_prev and nonsyn_prev
+                        and syn_prev > 0 and n_sites and s_sites):
+                    dnds = round((nonsyn_prev * s_sites) / (syn_prev * n_sites), 4)
+
+                ins_pos, ins_prev = _sparse_stats(features["insertions"], s0, e0)
+                del_pos, del_prev = _sparse_stats(features["deletions"], s0, e0)
+                lc_pos, lc_prev = _sparse_stats(features["left_clippings"], s0, e0)
+                rc_pos, rc_prev = _sparse_stats(features["right_clippings"], s0, e0)
+
+                row = [
+                    sample_name,
+                ]
+                if mag_mode:
+                    row.append(mag_name)
+                row.extend([
+                    contig_name,
+                    gene_name,
+                ])
+                if mag_mode:
+                    row.append(mag_af)
+                row.append(contig_af)
+                row.append(gene_af)
+                if mag_mode:
+                    row.append(mag_cov_tmean)
+                row.extend([
+                    contig_cov_tmean,
+                    gene_cov_med,
+                    coverage_ratio,
+                    gene_sec_med,
+                    total_pos,
+                    total_prev,
+                    syn_pos,
+                    syn_prev,
+                    nonsyn_pos,
+                    nonsyn_prev,
+                    s_sites,
+                    n_sites,
+                    dnds,
+                    ins_pos,
+                    ins_prev,
+                    del_pos,
+                    del_prev,
+                    lc_pos,
+                    lc_prev,
+                    rc_pos,
+                    rc_prev,
+                ])
+                yield tuple(row)
 
 
 DESCRIPTION = """\

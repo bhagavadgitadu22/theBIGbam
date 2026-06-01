@@ -39,28 +39,45 @@ FIXED_COLUMNS = [
     "gene_gc_content",
 ]
 
+CONTIG_BATCH_SIZE = 10_000
 
-def _load_contig_gc(conn, contig_id, contig_length):
-    """Decode GC content from Contig_blob for one contig. Returns full-length array."""
-    fid = feature_name_to_id("gc_content", conn)
-    zoom_row = conn.execute(
-        "SELECT Zoom_data FROM Contig_blob WHERE Contig_id=? AND Feature_id=?",
-        [contig_id, fid]
-    ).fetchone()
-    if zoom_row is None:
+
+def _prefetch_batch_gc(conn, contig_id_batch, gc_feature_id):
+    """Prefetch GC blob data for a batch of contigs in 2 SQL queries."""
+    if gc_feature_id is None:
+        return {}, {}
+
+    placeholders = ",".join("?" * len(contig_id_batch))
+    params = list(contig_id_batch) + [gc_feature_id]
+
+    zoom_by_contig = {}
+    for row in conn.execute(
+        f"SELECT Contig_id, Zoom_data FROM Contig_blob "
+        f"WHERE Contig_id IN ({placeholders}) AND Feature_id=?",
+        params,
+    ).fetchall():
+        zoom_by_contig[row[0]] = bytes(row[1])
+
+    chunks_by_contig = defaultdict(list)
+    for row in conn.execute(
+        f"SELECT Contig_id, Chunk_idx, Data FROM Contig_blob_chunk "
+        f"WHERE Contig_id IN ({placeholders}) AND Feature_id=? "
+        f"ORDER BY Contig_id, Chunk_idx",
+        params,
+    ).fetchall():
+        chunks_by_contig[row[0]].append((row[1], row[2]))
+
+    return zoom_by_contig, chunks_by_contig
+
+
+def _decode_gc_array(contig_id, contig_length, zoom_by_contig, chunks_by_contig):
+    """Decode GC content array for one contig from prefetched data."""
+    zoom_blob = zoom_by_contig.get(contig_id)
+    chunk_rows = chunks_by_contig.get(contig_id)
+    if zoom_blob is None or not chunk_rows:
         return None
 
-    chunk_rows = conn.execute(
-        "SELECT Chunk_idx, Data FROM Contig_blob_chunk "
-        "WHERE Contig_id=? AND Feature_id=? ORDER BY Chunk_idx",
-        [contig_id, fid]
-    ).fetchall()
-    if not chunk_rows:
-        return None
-
-    zoom_blob = bytes(zoom_row[0])
     scale_div = get_scale_from_zoom_blob(zoom_blob)
-    chunk_rows = [(r[0], r[1]) for r in chunk_rows]
     data = decode_raw_chunks(chunk_rows, scale_div)
 
     window_size = GC_CONTENT_WINDOW_SIZE
@@ -130,98 +147,108 @@ def run(args):
         ).fetchall()
     ]
 
-    # Get all CDS with core fields + contig info
-    cds_rows = conn.execute(
+    # Get all contigs that have CDS features
+    contigs_with_cds = conn.execute(
         """
-        SELECT ca.Annotation_id, c.Contig_name, ca.Contig_id,
-               ca."Start", ca."End", ca.Strand, ca.Main_isoform,
-               c.Contig_length, c.GC_mean
+        SELECT DISTINCT c.Contig_id, c.Contig_name, c.Contig_length, c.GC_mean
         FROM Contig_annotation_core ca
         JOIN Contig c ON ca.Contig_id = c.Contig_id
         WHERE ca."Type" = 'CDS'
-        ORDER BY ca.Contig_id, ca."Start"
+        ORDER BY c.Contig_id
         """
     ).fetchall()
 
-    if not cds_rows:
+    if not contigs_with_cds:
         print("No CDS features found in database.", file=sys.stderr)
         conn.close()
         sys.exit(0)
 
-    # Get all qualifiers for CDS annotations in one query
-    quals = defaultdict(dict)
-    for ann_id, key, value in conn.execute(
-        """
-        SELECT aq.Annotation_id, aq."Key", aq."Value"
-        FROM Annotation_qualifier aq
-        JOIN Contig_annotation_core ca ON aq.Annotation_id = ca.Annotation_id
-        WHERE ca."Type" = 'CDS'
-        """
-    ).fetchall():
-        quals[ann_id][key] = value
+    total_contigs = len(contigs_with_cds)
+    print(f"Processing {total_contigs} contigs ({len(qualifier_keys)} qualifier columns)...", file=sys.stderr)
 
-    # Precompute GC arrays per contig
-    contig_lengths = {}
-    for row in cds_rows:
-        contig_lengths[row[2]] = row[7]  # contig_id → contig_length
-
-    gc_arrays = {}
-    for contig_id, contig_length in contig_lengths.items():
-        gc_arr = _load_contig_gc(conn, contig_id, contig_length)
-        if gc_arr is not None:
-            gc_arrays[contig_id] = gc_arr
-
-    conn.close()
-
-    # Build gene names: <contig_name>_tbb_<N> per contig
-    counter = defaultdict(int)
-    gene_names = []
-    for row in cds_rows:
-        contig_id = row[2]
-        contig_name = row[1]
-        counter[contig_id] += 1
-        gene_names.append(f"{contig_name}_tbb_{counter[contig_id]}")
-
-    # Write TSV
     columns = (["mag_name"] + FIXED_COLUMNS + qualifier_keys
                if mag_mode else FIXED_COLUMNS + qualifier_keys)
+
+    total_cds = 0
+    gc_feature_id = feature_name_to_id("gc_content", conn)
 
     with open(args.output, "w", newline="") as f:
         writer = csv.writer(f, delimiter="\t")
         writer.writerow(columns)
 
-        for i, row in enumerate(cds_rows):
-            ann_id = row[0]
-            contig_name = row[1]
-            contig_id = row[2]
-            start = row[3]
-            end = row[4]
-            strand = row[5]
-            main_isoform = row[6]
-            contig_gc = row[8]  # GC_mean from Contig table
+        for batch_start in range(0, total_contigs, CONTIG_BATCH_SIZE):
+            batch = contigs_with_cds[batch_start:batch_start + CONTIG_BATCH_SIZE]
+            batch_ids = [r[0] for r in batch]
+            placeholders = ",".join("?" * len(batch_ids))
 
-            gene_length = end - start + 1
+            batch_cds = conn.execute(
+                f"""
+                SELECT ca.Contig_id, ca.Annotation_id, ca."Start", ca."End",
+                       ca.Strand, ca.Main_isoform
+                FROM Contig_annotation_core ca
+                WHERE ca.Contig_id IN ({placeholders}) AND ca."Type" = 'CDS'
+                ORDER BY ca.Contig_id, ca."Start"
+                """,
+                batch_ids,
+            ).fetchall()
 
-            # Gene GC from blob
-            gene_gc = None
-            gc_arr = gc_arrays.get(contig_id)
-            if gc_arr is not None:
-                s0 = start - 1
-                e0 = end
-                gene_slice = gc_arr[s0:e0]
-                valid = ~np.isnan(gene_slice)
-                if np.any(valid):
-                    gene_gc = round(float(np.mean(gene_slice[valid])), 1)
+            ann_ids = [r[1] for r in batch_cds]
+            quals = defaultdict(dict)
+            if ann_ids:
+                ann_ph = ",".join("?" * len(ann_ids))
+                for ann_id, key, value in conn.execute(
+                    f"""
+                    SELECT aq.Annotation_id, aq."Key", aq."Value"
+                    FROM Annotation_qualifier aq
+                    WHERE aq.Annotation_id IN ({ann_ph})
+                    """,
+                    ann_ids,
+                ).fetchall():
+                    quals[ann_id][key] = value
 
-            fixed = [contig_name, gene_names[i], start, end, gene_length,
-                     strand, main_isoform, contig_gc, gene_gc]
-            if mag_mode:
-                fixed = [contig_to_mag.get(contig_name, "")] + fixed
-            dynamic = [quals[ann_id].get(key, "") for key in qualifier_keys]
+            gc_zoom, gc_chunks = _prefetch_batch_gc(conn, batch_ids, gc_feature_id)
 
-            writer.writerow(fixed + dynamic)
+            cds_by_contig = defaultdict(list)
+            for row in batch_cds:
+                cds_by_contig[row[0]].append(row[1:])
 
-    print(f"Wrote {len(cds_rows)} CDS to {args.output} ({len(qualifier_keys)} qualifier columns)", file=sys.stderr)
+            for contig_id, contig_name, contig_length, contig_gc in batch:
+                contig_cds = cds_by_contig.get(contig_id)
+                if not contig_cds:
+                    continue
+
+                gc_arr = _decode_gc_array(contig_id, contig_length, gc_zoom, gc_chunks)
+                mag_name = contig_to_mag.get(contig_name, "") if mag_mode else None
+
+                for gene_idx, (ann_id, start, end, strand, main_isoform) in enumerate(contig_cds, start=1):
+                    gene_length = end - start + 1
+                    gene_name = f"{contig_name}_tbb_{gene_idx}"
+
+                    gene_gc = None
+                    if gc_arr is not None:
+                        s0 = start - 1
+                        e0 = end
+                        gene_slice = gc_arr[s0:e0]
+                        valid = ~np.isnan(gene_slice)
+                        if np.any(valid):
+                            gene_gc = round(float(np.mean(gene_slice[valid])), 1)
+
+                    fixed = [contig_name, gene_name, start, end, gene_length,
+                             strand, main_isoform, contig_gc, gene_gc]
+                    if mag_mode:
+                        fixed = [mag_name] + fixed
+                    dynamic = [quals[ann_id].get(key, "") for key in qualifier_keys]
+
+                    writer.writerow(fixed + dynamic)
+
+                total_cds += len(contig_cds)
+
+            processed = min(batch_start + CONTIG_BATCH_SIZE, total_contigs)
+            print(f"  Processed {processed}/{total_contigs} contigs ({total_cds} CDS)...", file=sys.stderr)
+
+    conn.close()
+
+    print(f"Wrote {total_cds} CDS to {args.output} ({len(qualifier_keys)} qualifier columns)", file=sys.stderr)
 
 
 def main():

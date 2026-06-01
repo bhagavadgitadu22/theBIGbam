@@ -3120,6 +3120,8 @@ def run_serve(args):
     pn.serve(
         create_app,
         port=args.port,
+        address="0.0.0.0",
+        allow_websocket_origin=["*"],
         show=True,
         title="theBIGbam",
         static_dirs={'assets': static_path}

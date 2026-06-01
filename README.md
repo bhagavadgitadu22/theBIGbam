@@ -140,7 +140,7 @@ thebigbam calculate
 -t 4
 ```
 
-TO-DO add MAG example?
+Example command for a 
 
 For more complex examples see [the usage page](docs/USAGE.md).
 
@@ -483,7 +483,7 @@ Run `thebigbam analysis -h` to display the list of available analysis scripts. R
 
 # Additional in-depth documentation pages
 
-- [How to run theBIGbam on big projects?](docs/USAGE.md) TO-DO add MAG
+- [How to run theBIGbam on my project?](docs/USAGE.md) TO-DO add MAG
 - [On mapping with circular genome support](docs/CIRCULAR_MAPPING.md)
 - [Features](docs/FEATURES.md) TO-DO
 - [Compression](docs/COMPRESSION.md) TO-DO
