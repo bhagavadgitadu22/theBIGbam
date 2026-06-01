@@ -3149,7 +3149,8 @@ def run_serve(args):
         allow_websocket_origin=["*"],
         show=True,
         title="theBIGbam",
-        static_dirs={'assets': static_path}
+        static_dirs={'assets': static_path},
+        session_token_expiration=3600,
     )
     return 0
 
