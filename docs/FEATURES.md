@@ -2,7 +2,7 @@
 
 This document describes all features computed from the input files by theBIGbam and stored in the DuckDB database. Features are organized by **module** as they appear in the visualization interface. Within a module, each subplot displays 1 or 2 features that are plotted together.
 
-5 modules comprise mapping-derived features. Most of them are defined by the SAM/BAM standard and documented in the [SAM specification](https://samtools.github.io/hts-specs/SAMv1.pdf). You can consult it for additional information.
+6 modules comprise mapping-derived features. Most of them are defined by the SAM/BAM standard and documented in the [SAM specification](https://samtools.github.io/hts-specs/SAMv1.pdf). You can consult it for additional information.
 
 1 additional module comprises genomic features computed from the annotation or assembly file provided.
 
@@ -12,17 +12,17 @@ This document describes all features computed from the input files by theBIGbam 
 
 Features describing read alignment depth and quality across the genome.
 
-![image](images/COVERAGE_MODULE.png)
+<img title="" src="images/COVERAGE_MODULE.png" alt="image" data-align="center">
 
-| Subplot              | Feature               | Description                                                                                                                                                                                                                                                                         | Use case                                                                                                          |
-| -------------------- | --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| Primary alignments   | Primary reads         | The number of reads covering each position, counting only primary alignments                                                                                                                                                                                                        |                                                                                                                   |
-| Alignments by strand | Strand + and strand - | Separation of primary alignments by strand (+ and -)                                                                                                                                                                                                                                | Strand bias can indicate certain library preparation artifacts or biological features like transcription          |
-| Other alignments     | Secondary             | Reads flagged as secondary (SAM flag 0x100) - alternative alignments when a read maps to multiple locations                                                                                                                                                                         | High secondary alignment counts indicate repetitive or ambiguous regions where reads could map to multiple places |
-| Other alignments     | Supplementary         | Reads flagged as supplementary (SAM flag 0x800) - chimeric alignments where different parts of the read map to different locations                                                                                                                                                  | High supplementary counts may indicate structural variants, chimeric sequences, or assembly errors                |
-| MAPQ                 | MAPQ                  | Average confidence of read alignments at each position. **Warning:** MAPQ scoring varies between aligners (BWA, Bowtie2, minimap2, etc.), See this [blog](https://sequencing.qcfail.com/articles/mapq-values-are-really-useful-but-their-implementation-is-a-mess/) for more detail | Evaluate alignment confidence variability                                                                         |
+| Subplot              | Feature        | Description                                                                                                                        | Associated to / Used for                                             |
+|:-------------------- | -------------- | ---------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------- |
+| Primary alignments   | Primary reads  | The number of reads covering each position, counting only primary alignments                                                       | Abundance per position                                               |
+| Alignments by strand | Strand + and - | Separation of primary alignments by strand (+ and -)                                                                               | Library preparation, amplification, sequencing, or mapping artifacts |
+| Other alignments     | Secondary      | Reads flagged as secondary (SAM flag 0x100) - alternative alignments when a read maps to multiple locations                        | Repetitive or ambiguous regions                                      |
+| Other alignments     | Supplementary  | Reads flagged as supplementary (SAM flag 0x800) - chimeric alignments where different parts of the read map to different locations | Structural variants, chimeric sequences                              |
+| MAPQ                 | MAPQ           | Average confidence of read alignments at each position. See the waning below though                                                | Filtering reads                                                      |
 
-**Warning:** Secondary reads and MAPQ are not realiable when using thebigbam mapping with `--circular`  option. Because this option doubles the contig length during mapping, reads that do not span the contig junction can map equally well to two positions. This results in an artificially high number of secondary alignments and reduced MAPQ values.
+**Warning:** MAPQ scoring varies between aligners (BWA, Bowtie2, minimap2, etc.), See this [blog](https://sequencing.qcfail.com/articles/mapq-values-are-really-useful-but-their-implementation-is-a-mess/) for more detail. Also MAPQ are not reliable when using thebigbam mapping with `--circular`  option. See [On mapping with circular genome support](docs/CIRCULAR_MAPPING.md) for details.
 
 ---
 
@@ -71,6 +71,8 @@ Features specific to paired-end/mate-pair sequencing data (Illumina).
 Features designed for detecting phage DNA packaging sites and terminus types. These are particularly useful for analyzing bacteriophage genomes.
 
 (see the [PhageTerm publication](https://www.nature.com/articles/s41598-017-07910-5))
+
+![image](images/TERMINI_MODULE.png)
 
 Subplot: Coverage Reduced
 

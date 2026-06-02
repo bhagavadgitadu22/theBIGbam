@@ -276,10 +276,7 @@ ssh -L 5006:node042:5006 user@cluster.address
 
 ### Web interface overview
 
-When accessing the web server (http://localhost:5006), you will be presented with a web interface:
-
-<div align="center">
-  <img src="https://raw.githubusercontent.com/bhagavadgitadu22/theBIGbam/master/docs/images/VISUALIZATION.png" alt="image" width="800" />
+When accessing the web server (http://localhost:5006), you will be presented with a web interface:  <img src="https://raw.githubusercontent.com/bhagavadgitadu22/theBIGbam/master/docs/images/VISUALIZATION.png" alt="image" width="800" />
 
 </div>
 
@@ -485,7 +482,6 @@ Run `thebigbam analysis -h` to display the list of available analysis scripts. R
 # Additional in-depth documentation pages
 
 - [Applying theBIGbam to real projects](docs/USAGE.md)
-- [On mapping with circular genome support](docs/CIRCULAR_MAPPING.md)
 - [Features](docs/FEATURES.md) TO-DO
 - [Compression](docs/COMPRESSION.md) TO-DO
 - [Filters](docs/FILTERS.md) TO-DO
@@ -495,6 +491,7 @@ Run `thebigbam analysis -h` to display the list of available analysis scripts. R
 - [Database](docs/DATABASE.md) TO-DO
 - [Visualization](docs/VISUALIZATION.md) TO-DO
 - [Plot interpretation](docs/PLOT_INTERPRETATION.md) TO-DO, discard?
+- [On mapping with circular genome support](docs/CIRCULAR_MAPPING.md)
 - [Developers note](docs/DEVELOPERS_NOTE.md) TO-DO, to merge with contributing?
 - [Contributing](CONTRIBUTING.md) TO-DO
 - Installation guide to remove?

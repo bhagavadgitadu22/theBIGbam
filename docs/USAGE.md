@@ -210,6 +210,8 @@ The database obtained is quite massive so we keep it stored remotely on the clus
 sbatch -q serial -N 1 -n 1 -c 8 -t 10:00:00 --wrap="thebigbam serve --db /work/river/NOMIS_VIRUS/05_MAGs/thebigbam_bacteria_mag_view.db"
 ```
 
+Such a massive database needs about 5 minutes for preloading before the webpage is ready, after which the log should print: "Server ready".
+
 We need to find the node where the job is running (here jst234) and relay it locally via ssh. For us, `ssh -N -L 5006:jst234:5006 user@remote.server.com` fails because the cluster firewall blocks direct access to login nodes. If you meet a similar problem you can try to jump via the login node with:
 
 ```bash

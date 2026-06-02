@@ -28,13 +28,13 @@ This means reads that cross the origin of a circular genome will have their alig
 
 ## MAPQ limitation
 
-in circular mode the mapper sees the doubled reference as two distinct loci, so every read produces at least one ghost alignment that competes with the real one. The mapper therefore assigns lower MAPQ scores than the same read would receive against a single-copy reference, because MAPQ quantifies the confidence that the *reported* alignment is the only good one — and in a doubled reference there are always at least two.
+In circular mode the mapper sees the doubled reference as two distinct loci, so every read produces at least one ghost alignment that competes with the real one. The mapper therefore assigns lower MAPQ scores than the same read would receive against a single-copy reference, because MAPQ quantifies the confidence that the reported alignment is the only good one, and in a doubled reference there are always at least two.
 
-The circular-BAM conversion step removes these ghost secondary and supplementary alignments, restoring the correct read count. For reads whose *only* competing alignments were ghosts (i.e. after removal they have no remaining secondary or supplementary records), the conversion sets MAPQ to 60, which is the conventional value for a uniquely mapping read. Reads that retain legitimate secondary or supplementary alignments after ghost removal keep their original MAPQ unchanged.
+These ghost secondary and supplementary alignments are removed post-mapping, restoring the correct read count. For reads whose only competing alignments were ghosts (i.e. after removal they have no remaining secondary or supplementary records), the conversion sets MAPQ to 60, which is the conventional value for a uniquely mapping read. 
 
-Full MAPQ recalculation is not possible because both minimap2 and bwa-mem2 derive MAPQ from internal values that are never written to BAM output:
+Reads that retain legitimate secondary or supplementary alignments after ghost removal keep their original MAPQ values unchanged. In principle, their MAPQ values should be recomputed because removing ghost alignments increase mapping confidence. However, accurate MAPQ recalculation is not possible from the BAM file alone because both minimap2 and bwa-mem2 derive MAPQ from internal alignment statistics that are not recorded in the BAM output:
 
-- **minimap2** uses chaining scores (*f*₁, *f*₂) and anchor counts to compute MAPQ; these are discarded after alignment.
-- **bwa-mem2** uses chaining scores, seed coverage, and the repetitive fraction (*frac_rep*); these are likewise internal only.
+- **minimap2** uses chaining scores (*f*₁, *f*₂) and anchor counts to compute MAPQ
+- **bwa-mem2** uses chaining scores, seed coverage, and the repetitive fraction (frac_rep)
 
 The common practice of using MAPQ values to filter alignments makes this limitation frustrating. However, the impact is mitigated by the fact that MAPQ scores are inherently software-dependent and should always be interpreted with caution.
