@@ -97,3 +97,10 @@ thebigbam calculate --extend -b third_batch/ -g new_contigs.gbk -o my_database.d
   
   - If the database was created with annotation files (`-g`/`-a`), new contigs are only added if you also provide `-g`/`-a` during extend.
   - If the database was created in BAM-only mode (no annotation files), new contigs found in BAM headers are automatically added.
+
+## Database Storage Notes
+
+- All feature values are stored as **INTEGER** in DuckDB for efficient compression
+- **Tau** and **MAPQ** values are stored multiplied by 100 (e.g., τ=0.75 stored as 75)
+- Features with length statistics (clippings, insertions) include additional **Mean**, **Median**, and **Std** columns
+- The **Variable** table contains metadata for each feature including display properties (color, plot type, module assignment)

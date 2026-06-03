@@ -138,6 +138,7 @@ done
 We copy the 3,287 Bakta files in a new directory annotations_on_mags:
 
 ```bash
+mkdir annotations_on_mags
 find bakta -name "*.gff3" -exec cp {} annotation_on_mags \;
 ```
 

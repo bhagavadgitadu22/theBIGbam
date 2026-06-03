@@ -880,3 +880,121 @@ def main(argv=None):
 
 if __name__ == '__main__':
     main()
+
+def resolve_histogram_bins(db_path: str, filtering_metadata: dict,
+                           category: str, col_name: str,
+                           n_bins: int = 50, log_mode: bool = False,
+                           scale: float | None = None) -> tuple | None:
+    """Compute histogram bins in SQL and cache. Returns (edges, counts) numpy arrays."""
+    import numpy as np
+    cat_meta = filtering_metadata.get(category, {})
+    col_info = cat_meta.get('columns', {}).get(col_name, {})
+    if not col_info or col_info.get('type') != 'numeric' or col_info.get('is_bool'):
+        return None
+
+    cache_key = ('histogram_bins_log' if log_mode else 'histogram_bins_lin')
+    if cache_key in col_info:
+        return col_info[cache_key]
+
+    source = col_info.get('source') or cat_meta.get('source', '')
+    if not source:
+        col_info[cache_key] = None
+        return None
+
+    if scale:
+        val_expr = f'("{col_name}" / {scale})'
+    else:
+        val_expr = f'"{col_name}"'
+
+    null_filter = f'"{col_name}" IS NOT NULL'
+    if log_mode:
+        if scale:
+            val_expr = f'LOG10("{col_name}" / {scale})'
+        else:
+            val_expr = f'LOG10("{col_name}")'
+        null_filter += f' AND "{col_name}" > 0'
+
+    conn = duckdb.connect(db_path, read_only=True)
+    try:
+        row = conn.execute(
+            f'SELECT MIN({val_expr}), MAX({val_expr}), COUNT(*) '
+            f'FROM {source} WHERE {null_filter}'
+        ).fetchone()
+        if not row or row[2] == 0 or row[0] is None or row[1] is None:
+            col_info[cache_key] = None
+            return None
+        mn, mx, total = float(row[0]), float(row[1]), int(row[2])
+
+        if mn == mx:
+            edges = np.array([mn - 0.5, mx + 0.5])
+            counts = np.array([total])
+            result = (edges, counts)
+            col_info[cache_key] = result
+            return result
+
+        actual_bins = min(n_bins, total)
+        bin_width = (mx - mn) / actual_bins
+        bucket_expr = f'LEAST(CAST(FLOOR(({val_expr} - {mn}) / {bin_width}) AS INTEGER), {actual_bins - 1})'
+        bucket_rows = conn.execute(
+            f'SELECT {bucket_expr} AS bucket, COUNT(*) AS cnt '
+            f'FROM {source} WHERE {null_filter} '
+            f'GROUP BY bucket ORDER BY bucket'
+        ).fetchall()
+
+        edges = np.linspace(mn, mx, actual_bins + 1)
+        counts = np.zeros(actual_bins, dtype=int)
+        for bucket_num, cnt in bucket_rows:
+            idx = int(bucket_num)
+            if 0 <= idx < actual_bins:
+                counts[idx] = cnt
+
+        result = (edges, counts)
+    except duckdb.Error as e:
+        print(f"[resolve_histogram_bins] {e}", flush=True)
+        result = None
+    finally:
+        conn.close()
+
+    col_info[cache_key] = result
+    return result
+
+
+def resolve_value_counts(db_path: str, filtering_metadata: dict,
+                          category: str, col_name: str) -> list | None:
+    """Fetch and cache (value, count) pairs for a text column (for treemap display)."""
+    cat_meta = filtering_metadata.get(category, {})
+    col_info = cat_meta.get('columns', {}).get(col_name, {})
+    if not col_info or col_info.get('type') != 'text':
+        return None
+    if 'value_counts' in col_info:
+        return col_info['value_counts']
+
+    source_override = col_info.get('source')
+    qualifier_key = col_info.get('qualifier_key')
+    conn = duckdb.connect(db_path, read_only=True)
+    try:
+        if qualifier_key and source_override in ('Contig_qualifier', 'Annotation_qualifier'):
+            rows = conn.execute(
+                f'SELECT "Value", COUNT(*) FROM {source_override} '
+                'WHERE "Key" = ? AND "Value" IS NOT NULL '
+                'GROUP BY "Value" ORDER BY COUNT(*) DESC',
+                [qualifier_key]
+            ).fetchall()
+        else:
+            source = source_override or cat_meta.get('source', '')
+            if not source:
+                col_info['value_counts'] = None
+                return None
+            rows = conn.execute(
+                f'SELECT "{col_name}", COUNT(*) FROM {source} '
+                f'WHERE "{col_name}" IS NOT NULL '
+                f'GROUP BY "{col_name}" ORDER BY COUNT(*) DESC'
+            ).fetchall()
+        counts = [(r[0], r[1]) for r in rows]
+    except duckdb.Error:
+        counts = None
+    finally:
+        conn.close()
+
+    col_info['value_counts'] = counts
+    return counts

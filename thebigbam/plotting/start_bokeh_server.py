@@ -13,8 +13,9 @@ from bokeh.models.widgets import CheckboxGroup, HelpButton, Button, RadioButtonG
 # Import the plotting function from the repo
 from .plotting_data_per_sample import generate_bokeh_plot_per_sample, generate_bokeh_plot_mag_view, DEFAULT_GENEMAP_WINDOW, DEFAULT_SEQUENCE_WINDOW, _DEFAULT_MAX_BASE_RESOLUTION
 from .plotting_data_all_samples import generate_bokeh_plot_all_samples
-from ..database.database_getters import get_filtering_metadata, resolve_distinct_values, ANNOTATION_EXCLUDED_COLUMNS, is_mag_mode, get_mag_contig_map
+from ..database.database_getters import get_filtering_metadata, resolve_distinct_values, resolve_histogram_bins, resolve_value_counts, ANNOTATION_EXCLUDED_COLUMNS, is_mag_mode, get_mag_contig_map
 from .searchable_select import SearchableSelect
+from .perusing_data import _FILTER_ENCODE
 
 def preload_db_data(db_path, enable_timing=False):
     """Run all expensive DB queries once at startup. Returns a dict of pure data."""
@@ -536,6 +537,11 @@ def create_layout(db_path, preloaded, enable_timing=False):
                     value = float(value)
                 except (ValueError, TypeError):
                     return set()
+
+            # Re-encode human-readable value to DB integer scale
+            _enc = _FILTER_ENCODE.get(column_name)
+            if _enc and not is_bool and col_type == "numeric":
+                value = round(value * _enc)
 
             # value is always the last param; refresh it after coercion
             params[-1] = value
@@ -1633,6 +1639,247 @@ def create_layout(db_path, preloaded, enable_timing=False):
             global_toggle_lock['locked'] = False
             doc.unhold()
 
+
+    def build_numeric_histogram(row_data, category, col_name, spinner, log_mode=False, log_y=False):
+        """Build a histogram with draggable threshold bar for a numeric column."""
+        import numpy as np
+        from bokeh.plotting import figure as bk_figure
+        from bokeh.models import Span, ColumnDataSource, Range1d
+        from bokeh.models.callbacks import CustomJS
+
+        col_info = filtering_metadata.get(category, {}).get("columns", {}).get(col_name, {})
+        if col_info.get("type") != "numeric" or col_info.get("is_bool"):
+            row_data["histogram_pane"] = None
+            row_data["histogram_fig"] = None
+            row_data["threshold_span"] = None
+            return None
+
+        scale = _FILTER_ENCODE.get(col_name)
+        bin_result = resolve_histogram_bins(db_path, filtering_metadata, category, col_name,
+                                            n_bins=50, log_mode=log_mode, scale=scale)
+        if bin_result is None:
+            row_data["histogram_pane"] = None
+            row_data["histogram_fig"] = None
+            row_data["threshold_span"] = None
+            return None
+
+        edges, counts = bin_result
+        row_data["log_mode"] = log_mode
+        row_data["log_y"] = log_y
+
+        total_count = int(sum(counts))
+        mids = ((edges[:-1] + edges[1:]) / 2).tolist()
+        pcts = [(c / total_count * 100 if total_count else 0) for c in counts.tolist()]
+        if log_y:
+            counts = np.array([np.log10(c) if c > 0 else 0 for c in counts])
+        max_count = float(max(counts)) if len(counts) else 1
+        if log_mode:
+            display_min = [f"{10**v:.4g}" for v in edges[:-1].tolist()]
+            display_max = [f"{10**v:.4g}" for v in edges[1:].tolist()]
+        else:
+            display_min = [f"{v:.4g}" for v in edges[:-1].tolist()]
+            display_max = [f"{v:.4g}" for v in edges[1:].tolist()]
+        hist_source = ColumnDataSource(data=dict(
+            left=edges[:-1].tolist(), right=edges[1:].tolist(),
+            top=counts.tolist(), bottom=[0] * len(counts),
+            mid=mids,
+            min_val=display_min,
+            max_val=display_max,
+            pct=[f"{p:.1f}%" for p in pcts],
+        ))
+
+        fig = bk_figure(
+            height=60, sizing_mode="stretch_width",
+            toolbar_location=None, tools="",
+            outline_line_color=None,
+            min_border_left=5, min_border_right=5,
+            min_border_top=2, min_border_bottom=15,
+            y_range=Range1d(0, max_count * 1.15),
+        )
+        fig.quad(left="left", right="right", top="top", bottom="bottom",
+                 source=hist_source, fill_color="#00b17c", fill_alpha=0.6,
+                 line_color="white", line_width=0.5,
+                 nonselection_fill_color="#00b17c", nonselection_fill_alpha=0.6,
+                 nonselection_line_color="white", nonselection_line_width=0.5,
+                 selection_fill_color="#00b17c", selection_fill_alpha=0.6,
+                 selection_line_color="white", selection_line_width=0.5)
+        fig.xaxis.minor_tick_line_color = None
+        fig.xaxis.major_label_text_font_size = "7pt"
+        if log_mode:
+            from bokeh.models import CustomJSTickFormatter
+            fig.xaxis.formatter = CustomJSTickFormatter(code="return (Math.pow(10, tick)).toPrecision(3);")
+        fig.yaxis.visible = False
+        fig.xgrid.grid_line_color = None
+        fig.ygrid.grid_line_color = None
+
+        from bokeh.models import HoverTool
+        fig.add_tools(HoverTool(tooltips=[("Min", "@min_val"), ("Max", "@max_val"), ("%", "@pct")]))
+
+        if log_mode and spinner.value and spinner.value > 0:
+            init_loc = np.log10(spinner.value)
+        elif spinner.value:
+            init_loc = spinner.value
+        else:
+            init_loc = float("-inf")
+        threshold_span = Span(location=init_loc, dimension="height",
+                              line_color="black", line_width=2)
+        fig.add_layout(threshold_span)
+
+        is_log = [1] if log_mode else [0]
+        from bokeh.events import Tap
+        from bokeh.models import TapTool as _TapTool
+        fig.add_tools(_TapTool())
+        click_js = CustomJS(args=dict(span=threshold_span, spinner=spinner, source=hist_source, is_log=is_log), code="""
+            const x = cb_obj.x;
+            if (x === undefined || isNaN(x)) return;
+            const step = spinner.step || 1;
+            const decimals = step < 1 ? Math.ceil(-Math.log10(step)) : 0;
+            const lefts = source.data.left;
+            const rights = source.data.right;
+            const mids = source.data.mid;
+            let val = x;
+            for (let i = 0; i < lefts.length; i++) {
+                if (x >= lefts[i] && x <= rights[i]) {
+                    val = mids[i];
+                    break;
+                }
+            }
+            span.location = val;
+            let real_val = is_log[0] ? Math.pow(10, val) : val;
+            const rounded = parseFloat((Math.round(real_val / step) * step).toFixed(decimals));
+            spinner.value = rounded;
+        """)
+        fig.js_on_event(Tap, click_js)
+
+        hist_pane = pn.pane.Bokeh(fig, sizing_mode="stretch_width", margin=(0, 0, 0, 0))
+
+        def _rebuild_histogram(new_log_x, new_log_y):
+            hist_container = row_data["hist_container"]
+            hist_container.loading = True
+            row_data["histogram_pane"] = None
+            row_data["histogram_fig"] = None
+            row_data["threshold_span"] = None
+            result = build_numeric_histogram(row_data, category, col_name, spinner, log_mode=new_log_x, log_y=new_log_y)
+            if result:
+                hist_container.objects = [result]
+            hist_container.loading = False
+
+        log_x_btn = pn.widgets.Toggle(
+            name="log x", value=log_mode,
+            width=45, height=30, margin=(0, 2, 3, 0),
+            button_type="default"
+        )
+        log_y_btn = pn.widgets.Toggle(
+            name="log y", value=log_y,
+            width=45, height=30, margin=(0, 0, 3, 0),
+            button_type="default"
+        )
+        def _on_log_x(event):
+            _rebuild_histogram(event.new, row_data.get("log_y", False))
+        def _on_log_y(event):
+            _rebuild_histogram(row_data.get("log_mode", False), event.new)
+        log_x_btn.param.watch(_on_log_x, "value")
+        log_y_btn.param.watch(_on_log_y, "value")
+
+        pane = pn.Column(
+            pn.Row(log_x_btn, log_y_btn, margin=0),
+            hist_pane,
+            sizing_mode="stretch_width", margin=0,
+            styles={'background': 'white', 'border-radius': '5px', 'padding': '5px'},
+        )
+        row_data["histogram_pane"] = pane
+        row_data["histogram_fig"] = fig
+        row_data["threshold_span"] = threshold_span
+        return pane
+
+    def build_text_treemap(row_data, category, col_name, input_ref, hist_container):
+        """Build a 1D treemap showing value distribution for a text column."""
+        from bokeh.plotting import figure as bk_figure
+        from bokeh.models import ColumnDataSource, Range1d, HoverTool
+        from bokeh.models.callbacks import CustomJS
+        from bokeh.palettes import Category20_20
+
+        value_counts = resolve_value_counts(db_path, filtering_metadata, category, col_name)
+        if not value_counts:
+            row_data["treemap_pane"] = None
+            return None
+
+        total = sum(c for _, c in value_counts)
+        if total == 0:
+            row_data["treemap_pane"] = None
+            return None
+
+        filtered = [(v, c) for v, c in value_counts if (c / total * 100) >= 1.0]
+        if not filtered:
+            row_data["treemap_pane"] = None
+            return None
+
+        filtered_total = sum(c for _, c in filtered)
+        lefts, rights, values, pcts, colors = [], [], [], [], []
+        cursor = 0.0
+        for i, (val, cnt) in enumerate(filtered):
+            pct = cnt / filtered_total * 100
+            lefts.append(cursor)
+            rights.append(cursor + pct)
+            values.append(str(val))
+            pcts.append(f"{pct:.1f}%")
+            colors.append(Category20_20[i % 20])
+            cursor += pct
+
+        source = ColumnDataSource(data=dict(
+            left=lefts, right=rights, top=[1] * len(lefts), bottom=[0] * len(lefts),
+            value=values, pct=pcts, color=colors,
+        ))
+
+        fig = bk_figure(
+            height=40, sizing_mode="stretch_width",
+            toolbar_location=None, tools="",
+            outline_line_color=None,
+            x_range=Range1d(0, 100), y_range=Range1d(0, 1),
+            min_border_left=0, min_border_right=0,
+            min_border_top=0, min_border_bottom=0,
+        )
+        fig.quad(left="left", right="right", top="top", bottom="bottom",
+                 source=source, fill_color="color", line_color="white", line_width=1)
+        fig.xaxis.visible = False
+        fig.yaxis.visible = False
+        fig.xgrid.grid_line_color = None
+        fig.ygrid.grid_line_color = None
+
+        from bokeh.models import TapTool as _TapTool
+        fig.add_tools(HoverTool(tooltips=[("Value", "@value"), ("%", "@pct")]), _TapTool())
+
+        bridge = TextInput(value="", visible=False)
+        bridge_pane = pn.pane.Bokeh(bridge, height=0, sizing_mode="fixed", margin=0)
+
+        tap_cb = CustomJS(args=dict(source=source, bridge=bridge), code="""
+            const x = cb_obj.x;
+            if (x === undefined || isNaN(x)) return;
+            const data = source.data;
+            for (let i = 0; i < data.left.length; i++) {
+                if (x >= data.left[i] && x <= data.right[i]) {
+                    bridge.value = data.value[i];
+                    break;
+                }
+            }
+        """)
+        from bokeh.events import Tap
+        fig.js_on_event(Tap, tap_cb)
+
+        def on_bridge_change(attr, old, new):
+            if new:
+                widget = input_ref["widget"]
+                if hasattr(widget, "value"):
+                    widget.value = new
+                bridge.value = ""
+                refresh_on_filter_change()
+        bridge.on_change("value", on_bridge_change)
+
+        pane = pn.pane.Bokeh(fig, sizing_mode="stretch_width", margin=(0, 0, 0, 0))
+        row_data["treemap_pane"] = pane
+        row_data["bridge_input"] = bridge
+        return [pane, bridge_pane]
+
     def create_query_row(section_data):
         """Create a single query row with cascading selects, comparison, dynamic input and remove button."""
         # Get categories from metadata
@@ -1689,14 +1936,21 @@ def create_layout(db_path, preloaded, enable_timing=False):
             initial_input.param.watch(lambda event: refresh_on_filter_change(), 'value')
             initial_is_panel = True
         else:
-            initial_input = Spinner(value=0, placeholder="Value...", width=90, margin=(0, 2, 0, 0))
+            _enc_scale = _FILTER_ENCODE.get(initial_column)
+            _step = 1.0 / _enc_scale if _enc_scale else 1
+            initial_input = Spinner(value=0, step=_step, placeholder="Value...", width=90, margin=(0, 2, 0, 0))
             input_container.objects = [initial_input]
-            # Add callback for Bokeh Spinner
-            initial_input.on_change('value', lambda attr, old, new: refresh_on_filter_change())
+            # Add callback for Bokeh Spinner (also syncs histogram threshold)
+            def _on_initial_spinner(attr, old, new):
+                if row_data.get('threshold_span') is not None and new is not None:
+                    import math as _m
+                    if row_data.get('log_mode') and new > 0:
+                        row_data['threshold_span'].location = _m.log10(new)
+                    else:
+                        row_data['threshold_span'].location = new
+                refresh_on_filter_change()
+            initial_input.on_change('value', _on_initial_spinner)
             initial_is_panel = False
-
-        # Remove button (Panel button for proper dynamic event handling)
-        minus_btn = pn.widgets.Button(name="−", width=30, height=30, margin=(0, 10, 0, 0), stylesheets=[stylesheet])
 
         # Store reference to current input widget (for later retrieval)
         current_input_ref = {'widget': initial_input, 'is_panel': initial_is_panel}
@@ -1737,12 +1991,38 @@ def create_layout(db_path, preloaded, enable_timing=False):
                     current_input_ref['is_panel'] = True
                     new_input.param.watch(lambda event: refresh_on_filter_change(), 'value')
             else:
-                new_input = Spinner(value=0, placeholder="Value...", width=90, margin=(0, 2, 0, 0))
+                _enc_scale = _FILTER_ENCODE.get(col_name)
+                _step = 1.0 / _enc_scale if _enc_scale else 1
+                new_input = Spinner(value=0, step=_step, placeholder="Value...", width=90, margin=(0, 2, 0, 0))
                 input_container.objects = [new_input]
                 current_input_ref['widget'] = new_input
                 current_input_ref['is_panel'] = False
-                # Add callback for Bokeh Spinner
-                new_input.on_change('value', lambda attr, old, new: refresh_on_filter_change())
+                def _on_spinner_change(attr, old, new):
+                    if row_data.get('threshold_span') is not None and new is not None:
+                        import math as _m
+                        if row_data.get('log_mode') and new > 0:
+                            row_data['threshold_span'].location = _m.log10(new)
+                        else:
+                            row_data['threshold_span'].location = new
+                    refresh_on_filter_change()
+                new_input.on_change('value', _on_spinner_change)
+
+            # Rebuild distribution visualization if currently visible
+            if hist_container.objects:
+                hist_container.objects = []
+                row_data['histogram_pane'] = None
+                row_data['histogram_fig'] = None
+                row_data['threshold_span'] = None
+                row_data['treemap_pane'] = None
+                row_data['bridge_input'] = None
+                if is_text:
+                    result = build_text_treemap(row_data, category, col_name, current_input_ref, hist_container)
+                    if result:
+                        hist_container.objects = result
+                elif not col_info.get('is_bool'):
+                    result = build_numeric_histogram(row_data, category, col_name, current_input_ref['widget'])
+                    if result:
+                        hist_container.objects = [result]
 
             # Immediately apply the new default value to contig/sample filtering
             refresh_on_filter_change()
@@ -1792,17 +2072,35 @@ def create_layout(db_path, preloaded, enable_timing=False):
         subcategory_select.on_change('value', update_input_on_column_change)
         comparison_select.on_change('value', update_input_on_operator_change)
 
-        query_row = pn.Row(category_select, subcategory_select, comparison_select, input_container, minus_btn,
-                       sizing_mode="stretch_width", margin=(2, 0, 2, 0))
+        dist_toggle = pn.widgets.Button(name="\U0001f50d", width=40, height=30, margin=(0, 10, 0, 0), description="See distribution of values", stylesheets=[stylesheet])
+
+        # Remove button (Panel button for proper dynamic event handling)
+        minus_btn = pn.widgets.Button(name="−", width=30, height=30, margin=(2, 5, 0, 0), stylesheets=[stylesheet])
+
+        query_row = pn.Row(category_select, subcategory_select, comparison_select, input_container, dist_toggle, sizing_mode="stretch_width", margin=(3, 0, 3, 0))
+
+        hist_container = pn.Column(sizing_mode="stretch_width", margin=(0, 5, 0, 0))
+        row_wrapper = pn.Column(query_row, hist_container, sizing_mode="stretch_width", margin=(0, 0, 2, 0))
 
         # Store reference to this row
         row_data = {
             'query_row': query_row,
+            'row_wrapper': row_wrapper,
+            'hist_container': hist_container,
+            'dist_toggle': dist_toggle,
             'category_select': category_select,
             'subcategory_select': subcategory_select,
             'comparison_select': comparison_select,
             'input_ref': current_input_ref,
-            'and_div': None  # Will be set when AND is added above this row
+            'minus_btn': minus_btn,
+            'and_div': None,
+            'histogram_pane': None,
+            'histogram_fig': None,
+            'threshold_span': None,
+            'treemap_pane': None,
+            'bridge_input': None,
+            'log_mode': False,
+            'log_y': False,
         }
 
         def remove_row_callback(event):
@@ -1829,34 +2127,65 @@ def create_layout(db_path, preloaded, enable_timing=False):
                     break
 
         minus_btn.on_click(remove_row_callback)
+
+        def toggle_distribution(event):
+            if hist_container.objects:
+                hist_container.objects = []
+                row_data['histogram_pane'] = None
+                row_data['histogram_fig'] = None
+                row_data['threshold_span'] = None
+                row_data['treemap_pane'] = None
+                row_data['bridge_input'] = None
+            else:
+                category = category_select.value
+                col_name = subcategory_select.value
+                col_info = filtering_metadata.get(category, {}).get('columns', {}).get(col_name, {})
+                if col_info.get('type') == 'numeric' and not col_info.get('is_bool'):
+                    result = build_numeric_histogram(row_data, category, col_name, current_input_ref['widget'])
+                    if result:
+                        hist_container.objects = [result]
+                elif col_info.get('type') == 'text':
+                    result = build_text_treemap(row_data, category, col_name, current_input_ref, hist_container)
+                    if result:
+                        hist_container.objects = result
+
+        dist_toggle.on_click(toggle_distribution)
+
         return row_data
 
     def rebuild_section(section_data):
         """Rebuild a section's content with all its query rows and the Add AND button."""
         section_children = []
+        rows = section_data['rows']
 
-        for i, row_data in enumerate(section_data['rows']):
-            # Add AND/OR div before each row except the first
-            if i > 0:
-                # Reuse existing widget to preserve user's AND/OR selection
-                if row_data['and_div'] is not None:
-                    select_widget = row_data['and_div']
+        for i, row_data in enumerate(rows):
+            row_data['and_div'] = row_data.get('and_div')
+
+            section_children.append(row_data['row_wrapper'])
+
+            # Build connector line after each row: [minus] + [AND/OR or +Add]
+            connector_items = [row_data['minus_btn']]
+
+            if i < len(rows) - 1:
+                next_row = rows[i + 1]
+                if next_row['and_div'] is not None:
+                    select_widget = next_row['and_div']
                 else:
                     select_widget = Select(
                         options=["AND", "OR"],
                         value="AND",
+                        height=30,
                         margin=(2, 0, 2, 0)
                     )
                     select_widget.on_change('value', lambda attr, old, new: refresh_on_filter_change())
-                    row_data['and_div'] = select_widget
-                section_children.append(select_widget)
-            else:
-                row_data['and_div'] = None
+                    next_row['and_div'] = select_widget
+                connector_items.append(select_widget)
 
-            section_children.append(row_data['query_row'])
+            if i == len(rows) - 1:
+                connector_items.append(section_data['add_and_btn'])
 
-        # Add the "+ Add AND" button
-        section_children.append(section_data['add_and_btn'])
+            manipulate_row = pn.Row(*connector_items, sizing_mode="stretch_width", height=30, margin=(3, 0, 6, 0))
+            section_children.append(manipulate_row)
 
         # Update the section column's objects
         section_data['column'].objects = section_children
@@ -1871,6 +2200,7 @@ def create_layout(db_path, preloaded, enable_timing=False):
         # Use Panel button instead of Bokeh button for proper dynamic event handling
         add_and_btn = pn.widgets.Button(
             name="+ Add AND/OR",
+            height=30,
             margin=(2, 0, 2, 0),
             button_type="success",
             stylesheets=[stylesheet]
@@ -3177,7 +3507,7 @@ def run_serve(args):
         meta = dict(rows)
         db_name = os.path.basename(args.db)
         params = []
-        for key in ['Modules', 'Min_aligned_fraction', 'Min_coverage_depth',
+        for key in ['Modules', 'View_mode', 'Min_aligned_fraction', 'Min_coverage_depth',
                      'Coverage_percentage', 'Min_occurrences',
                      'Variation_percentage']:
             if key in meta:

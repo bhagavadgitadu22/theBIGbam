@@ -4,13 +4,13 @@ The Filtering section lets you build complex queries to narrow down which contig
 
 Each filter row consists of:
 
-- A **category**: Contig, Sample, Coverage, Misassembly, Microdiversity, Side misassembly, Topology, or Termini
+- A **category** of metric: Contig, Annotations, Sample, Coverage, Misassembly, Microdiversity, Side misassembly, Topology, or Termini. For a MAG database, additional categories MAG, "MAG coverage", "MAG Misassembly" and "MAG Microdiversity" exists
 
 - A **metric** within that category: examples "Contig length" for Contig, "Coverage mean" for Coverage, "Sequencing type" for Sample
 
-- A **comparison operator**: "=", "!=", ">" and "<" for numeric columns, "=" and "!=" for text columns
+- A **comparison operator**: "=", "!=", ">" and "<" for numeric columns, "=", "!=", "has", "has not" for text columns
 
-- An **input value**: a numeric value for numeric columns, or a text value for other columns. For text inputs, a list of existing column values is provided as autocomplete suggestions
+- An **input value**: a numeric value for numeric columns, or a text value for other columns. For text inputs, a list of values used in the database is provided as suggestions
 
 - A **"-" button** to remove the filter row
 
@@ -26,7 +26,9 @@ This two-level grouping allows expressive compound queries. For example, the exa
 
 *(Contig_length > 50kbp AND Sequencing_type = "long") OR (Aligned_fraction > 70% OR Circularising_reads > 10)*
 
-Once your filters are set, the available contigs and samples update accordingly, and only matching pairs will appear in the generated plots. This is particularly useful for focusing your analysis on subsets of interest, such as high-coverage contigs, specific packaging mechanisms, or contigs meeting completeness thresholds.
+Once your filters are set, the list of contigs and samples proposed in their respective sections is updated. In addition, only matching pairs will appear in the generated plots. This is particularly useful for focusing your analysis on subsets of interest, such as high-coverage contigs, specific packaging mechanisms, or contigs meeting completeness thresholds.
+
+For MAG databases, the MAG and contig filters in the Filtering panel affect the list of MAGs displayed in the **MAGs** section. Only MAGs containing at least one contig passing the contig filters are included in the MAG list. Only contigs belonging to a MAG passing the MAG filters are included in the contig list.
 
 # Available filters per category
 
@@ -34,17 +36,26 @@ Once your filters are set, the available contigs and samples update accordingly,
 
 Those metrics are available only if a Genbank file was provided (or at least an assembly file for some of them).
 
-| Metric                              | Definition                                                                                                                                |
-| ----------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
-| Contig_length                       | Length of the contig sequence, in base pairs (bp)                                                                                         |
-| Duplication_percentage              | Proportion of the contig covered by repeats (stored as integer x10; e.g. 125 = 12.5%), calculated from BLAST self-alignment               |
-| GC_mean                             | Mean GC content (%) calculated across the contig using non-overlapping 500 bp sliding windows                                             |
-| GC_sd                               | Standard deviation of GC content (stored as integer x100; e.g. 350 = 3.50)                                                                |
-| GC_skew_amplitude                   | Amplitude of GC skew, i.e. *max(GC skew) - min(GC skew)* (stored as integer x100), calculated across non-overlapping 1kbp sliding windows |
-| Positive_GC_skew_windows_percentage | Percentage of the 1kbp windows with positive skew (stored as integer x10; e.g. 523 = 52.3%)                                               |
-| Annotation columns                  | Columns extracted from the Genbank file: for pharokka for instance, Type, Product, Function and Phrog can be queried                      |
+| Metric                       | Definition                                                                                                                                |
+| ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| Contig length                | Length of the contig sequence, in base pairs (bp)                                                                                         |
+| Duplication (%)              | Proportion of the contig covered by repeats (calculated from BLAST self-alignment)                                                        |
+| GC mean                      | Mean GC content (%) calculated across the contig using non-overlapping 500 bp sliding windows                                             |
+| GC sd                        | Standard deviation of GC content (stored as integer x100; e.g. 350 = 3.50)                                                                |
+| GC skew amplitude            | Amplitude of GC skew, i.e. *max(GC skew) - min(GC skew)* (stored as integer x100), calculated across non-overlapping 1kbp sliding windows |
+| Positive GC skew windows (%) | Percentage of the 1 kbp windows with positive GC skew (stored as integer x10; e.g. 523 = 52.3%)                                           |
 
 Additional columns might be available depending on the information you added per contig using **thebigbam add-contig-metadata** command.
+
+## Annotation
+
+| Metric             | Definition                                                                                                           |
+| ------------------ | -------------------------------------------------------------------------------------------------------------------- |
+| Annotation columns | Columns extracted from the Genbank file: for pharokka for instance, Type, Product, Function and Phrog can be queried |
+|                    |                                                                                                                      |
+|                    |                                                                                                                      |
+|                    |                                                                                                                      |
+|                    |                                                                                                                      |
 
 ## Sample
 

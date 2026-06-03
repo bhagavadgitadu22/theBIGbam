@@ -482,7 +482,7 @@ Run `thebigbam analysis -h` to display the list of available analysis scripts. R
 # Additional in-depth documentation pages
 
 - [Applying theBIGbam to real projects](docs/USAGE.md)
-- [Features](docs/FEATURES.md) TO-DO
+- [Features](docs/FEATURES.md)
 - [Compression](docs/COMPRESSION.md) TO-DO
 - [Filters](docs/FILTERS.md) TO-DO
 - [Misalignment](docs/MISALIGNMENT.md) TO-DO

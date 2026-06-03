@@ -9,6 +9,15 @@ _SUMMARY_DECODE = {
 _CONTIG_DECODE = _SUMMARY_DECODE
 _MAG_DECODE = _SUMMARY_DECODE
 
+## Inverse of _SUMMARY_DECODE: maps column name → DB scale factor.
+## user_value * scale = db_value.  Spinner step = 1/scale.
+_FILTER_ENCODE = {
+    "Duplication_percentage": 10.0,
+    "GC_sd": 100.0,
+    "GC_skew_amplitude": 100.0,
+    "Positive_GC_skew_windows_percentage": 10.0,
+}
+
 
 ## Helper to build an HTML table from query rows with optional column filtering and decoding
 def _build_row_table_html(rows, col_names, skip_cols=(), decode_map=None):

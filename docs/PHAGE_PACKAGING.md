@@ -223,3 +223,22 @@ Both DuckDB views can be explored with a database viewer allowing DuckDB databas
 - duckdb "SELECT * FROM Explicit_phage_termini"
 
 The `Explicit_phage_mechanisms` results are also integrated in the visualization local webpage.
+
+#### Read Starts
+
+- **Description:** Count of read 5' ends at each position
+- **How it's computed:** Count how many reads have their first aligned base at each position. For paired-end data, uses strand-aware logic to identify true 5' ends
+- **Interpretation:** Peaks indicate positions where DNA molecules frequently begin, which may represent:
+  - Phage packaging initiation sites
+  - DNA cutting/fragmentation sites
+  - For random fragmentation (most libraries), should be relatively uniform
+
+Moreover, only read boundaries that align with an exact match to the 
+reference sequence are considered (clippings <5 bp are tolerated). 
+Additionally, not all read boundaries are equally informative depending 
+on the sequencing technology. For long-read sequencing data, both 
+boundaries may represent fragment termini and can therefore be used for 
+detection. In contrast, only start positions of short reads are 
+informative for terminus detection, as sequencing terminates once the 
+expected read length is reached (e.g., ~150 bp), even if the DNA 
+fragment has not been fully sequenced.

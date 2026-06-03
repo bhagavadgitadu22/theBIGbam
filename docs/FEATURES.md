@@ -14,13 +14,13 @@ Features describing read alignment depth and quality across the genome.
 
 <img title="" src="images/COVERAGE_MODULE.png" alt="image" data-align="center">
 
-| Subplot              | Feature        | Description                                                                                                                        | Associated to / Used for                                             |
+| Subplot              | Feature        | Description                                                                                                                        | Use case                                                             |
 |:-------------------- | -------------- | ---------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------- |
 | Primary alignments   | Primary reads  | The number of reads covering each position, counting only primary alignments                                                       | Abundance per position                                               |
 | Alignments by strand | Strand + and - | Separation of primary alignments by strand (+ and -)                                                                               | Library preparation, amplification, sequencing, or mapping artifacts |
 | Other alignments     | Secondary      | Reads flagged as secondary (SAM flag 0x100) - alternative alignments when a read maps to multiple locations                        | Repetitive or ambiguous regions                                      |
 | Other alignments     | Supplementary  | Reads flagged as supplementary (SAM flag 0x800) - chimeric alignments where different parts of the read map to different locations | Structural variants, chimeric sequences                              |
-| MAPQ                 | MAPQ           | Average confidence of read alignments at each position. See the waning below though                                                | Filtering reads                                                      |
+| MAPQ                 | MAPQ           | Average confidence of read alignments at each position. See the **warning** below though                                           | Filtering reads                                                      |
 
 **Warning:** MAPQ scoring varies between aligners (BWA, Bowtie2, minimap2, etc.), See this [blog](https://sequencing.qcfail.com/articles/mapq-values-are-really-useful-but-their-implementation-is-a-mess/) for more detail. Also MAPQ are not reliable when using thebigbam mapping with `--circular`  option. See [On mapping with circular genome support](docs/CIRCULAR_MAPPING.md) for details.
 
@@ -32,22 +32,22 @@ Features describing alignment anomalies that may indicate assembly issues or mic
 
 ![image](images/MISALIGNMENT_MODULE.png) 
 
-| Subplot    | Feature                  | Description                                                                                                                                                                                                                                                                                                                                                 | Use case                                                                                                                                                                                                                                                                      |
-| ---------- | ------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Clippings  | Left and right clippings | Soft/hard clipping occurs when part of a read does not align to the reference. The clipped portion represents sequence in the read that has no corresponding match in the reference. At each position, reads with soft/hard clipping at their left (5') and right (3') end are counted, along with mean, median, and standard deviation of clipping lengths | Indicates sequence present in reads but missing from the left or right side of the reference at this position. Common at contig ends if the assembly is incomplete. **Warning:** can also be caused by adapter contamination be certain your reads were properly preprocessed |
-| Indels     | Insertions               | Sequence present in the reference but absent from reads. Determined from 'I' operations in CIGAR strings. Mean, median, and standard deviation of insertion lengths are also determined                                                                                                                                                                     | Could indicate true insertions in the sequenced sample, missing sequence in the reference assembly, sequencing errors (especially in homopolymer regions)                                                                                                                     |
-| Indels     | Deletions                | Sequence present in the reference but absent from reads. Determined from 'D' operations in CIGAR strings.                                                                                                                                                                                                                                                   | Could indicate true deletions in the sequenced sample, extra sequence incorrectly included in the reference, alignment artifacts                                                                                                                                              |
-| Mismatches | Mismatches               | Count of base substitutions at each position. Computed from from the MD tag in BAM files, count positions where the read base differs from the reference base                                                                                                                                                                                               | SNPs (true variation between sample and reference), sequencing errors, alignment errors in repetitive regions                                                                                                                                                                 |
+| Subplot    | Feature                  | Description                                                                                                                                                                                                                                                                                                                                                                                                           | Use case                                                                                                                                                                                                                                                                    |
+| ---------- | ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Clippings  | Left and right clippings | Soft/hard clipping occurs when part of a read does not align to the reference. The clipped portion represents sequence in the read that has no corresponding match in the reference. At each position, reads with soft/hard clipping at their left (5') and right (3') end are counted, along with mean, median, and standard deviation of clipping lengths. The dominant clipping sequence is recorded (first 20 bp) | Indicates sequence present in reads but missing from the left or right side of the reference at this position. Common at contig ends if the assembly is incomplete. **Warning:** can also be caused by adapter contamination so check your reads were properly preprocessed |
+| Indels     | Insertions               | Sequence present in the reference but absent from reads. Determined from 'I' operations in CIGAR strings. Mean, median, and standard deviation of insertion lengths are also determined. The dominant insertion is recorded                                                                                                                                                                                           | Could indicate true insertions in the sequenced sample, missing sequence in the reference assembly, sequencing errors (especially in homopolymer regions)                                                                                                                   |
+| Indels     | Deletions                | Sequence present in the reference but absent from reads. Determined from 'D' operations in CIGAR strings                                                                                                                                                                                                                                                                                                              | Could indicate true deletions in the sequenced sample, extra sequence incorrectly included in the reference, alignment artifacts                                                                                                                                            |
+| Mismatches | Mismatches               | Count of base substitutions at each position. Computed from from the MD tag in BAM files, count positions where the read base differs from the reference base. The dominant mismatch is recorded along with the change category (synonymous, non-synonymous, intergenic) and the resulting amino acid                                                                                                                 | SNPs (true variation between sample and reference), sequencing errors, alignment errors in repetitive regions                                                                                                                                                               |
 
 ---
 
-## Long-reads module
+## RNA module
 
-Features specific to long-read sequencing data (PacBio, Nanopore).
+Features specific to RNA sequencing data. It only applies to RNA-aware alignment data produced by tools like STAR or HISAT2.
 
-| Subplot      | Feature      | Description                                    | Use case                                                                                                                                |
-| ------------ | ------------ | ---------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
-| Read lengths | Read lengths | Average length of reads covering each position | Identify regions covered by shorter or longer reads. Unusually short reads in a region might indicate fragmentation or alignment issues |
+| Subplot   | Feature   | Description                                                                           | Use case                                       |
+| --------- | --------- | ------------------------------------------------------------------------------------- | ---------------------------------------------- |
+| Splicings | Splicings | Sequence absent from RNA transcripts. Determined from 'N' operations in CIGAR strings | Differentiate introns from exons, and isoforms |
 
 ---
 
@@ -66,71 +66,39 @@ Features specific to paired-end/mate-pair sequencing data (Illumina).
 
 ---
 
-## Termini Module
+## Long-reads module
 
-Features designed for detecting phage DNA packaging sites and terminus types. These are particularly useful for analyzing bacteriophage genomes.
+Features specific to long-read sequencing data (PacBio, Nanopore).
 
-(see the [PhageTerm publication](https://www.nature.com/articles/s41598-017-07910-5))
+| Subplot      | Feature      | Description                                    | Use case                                                                                                                                |
+| ------------ | ------------ | ---------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| Read lengths | Read lengths | Average length of reads covering each position | Identify regions covered by shorter or longer reads. Unusually short reads in a region might indicate fragmentation or alignment issues |
+
+---
+
+## Termini module
+
+Features dedicated to the start and end positions of read alignments. Those positions are useful for analyzing bacteriophage pachaging mechanisms (see the [PhageTerm publication](https://www.nature.com/articles/s41598-017-07910-5) for the methods).
 
 ![image](images/TERMINI_MODULE.png)
 
-Subplot: Coverage Reduced
-
-#### Coverage Reduced
-
-- **Description:** Coverage counting only "clean" reads without clipping or mismatches at their ends
-- **How it's computed:** Count reads that:
-  - Start with an exact match (no 5' clipping or mismatch)
-  - For long reads: also end with an exact match
-- **Use case:** Provides cleaner signal for terminus detection by excluding reads with noisy ends that could obscure true packaging sites
-- **Display:** Shown as a continuous curve
-
-Moreover, only read boundaries that align with an exact match to the reference sequence are considered (clippings <5 bp are tolerated). Additionally, not all read boundaries are equally informative depending on the sequencing technology. For long-read sequencing data, both boundaries may represent fragment termini and can therefore be used for detection. In contrast, only start positions of short reads are informative for terminus detection, as sequencing terminates once the expected read length is reached (e.g., ~150 bp), even if the DNA fragment has not been fully sequenced.
-
-### Subplot: Reads Termini
-
-| Subplot       | Feature                    | Description                                                                                                                             | Use case                                                                                                                                                    |
-| ------------- | -------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Reads termini | Read starts and reads ends | These features count where reads start and end, which can reveal DNA packaging cut sites. Count of read 5' and 3' ends at each position | Consistent insert sizes indicate normal library structure. Deviations from the expected insert size may indicate structural variants (insertions/deletions) |
-
-These features count where reads start and end, which can reveal DNA packaging cut sites.
-
-#### Read Starts
-
-- **Description:** Count of read 5' ends at each position
-- **How it's computed:** Count how many reads have their first aligned base at each position. For paired-end data, uses strand-aware logic to identify true 5' ends
-- **Interpretation:** Peaks indicate positions where DNA molecules frequently begin, which may represent:
-  - Phage packaging initiation sites
-  - DNA cutting/fragmentation sites
-  - For random fragmentation (most libraries), should be relatively uniform
-
-#### Read Ends
-
-- **Description:** Count of read 3' ends at each position
-- **How it's computed:** Count how many reads have their last aligned base at each position
-- **Interpretation:** Peaks indicate positions where DNA molecules frequently end. Combined with Read Starts, helps identify terminus types
+| Subplot          | Feature                    | Description                                                                                                                         | Use case                                                                                                                                        |
+| ---------------- | -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| Coverage Reduced | Coverage Reduced           | Coverage counting only primary reads starting with a match (clippings smaller than 5 bp are tolerated)                              | Provides cleaner signal for terminus detection by excluding reads with noisy ends that could obscure true packaging sites                       |
+| Reads termini    | Read starts and reads ends | Count how many read alignments start/end per position among reads kept by "Coverage reduced" (ie read 5' and 3' ends, respectively) | Positions where many reads start/end may correspond to a real termini of the genome (or a misassembly). Also suggests a linear genomic topology |
 
 ---
 
 ## Genome module
 
-Features describing intrinsic genomic properties, independent of sequencing data. These are computed when an annotation file (`-g`) or assembly file (`-a`) is provided.
+Features describing intrinsic genomic properties, independent of read alignments. These are computed when an annotation file (`-g`) or assembly file (`-a`) is provided.
 
-| Subplot | Feature          | Description                                                                                                                                                                    | Use case                                                                                                                                                          |
-| ------- | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Repeats | Direct repeats   | Regions of the genome that are repeated in the same orientation. Detected by BLAST self-alignment, identifying segments that appear multiple times in the same 5'→3' direction | Terminal direct repeats (DTR) are characteristic of certain phage packaging mechanisms. Internal direct repeats may indicate mobile elements or gene duplications |
-| Repeats | Inverted repeats | Regions of the genome that are repeated in opposite orientations. Detected by BLAST self-alignment, identifying segments where one copy is the reverse complement of another   | Inverted terminal repeats (ITR) are found in certain phages and transposons. Internal inverted repeats can form secondary structures (hairpins)                   |
+| Subplot    | Feature             | Description                                                                                                                                                                    | Use case                                                                                                                                                          |
+| ---------- | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| GC content | GC content          | Proportion of nucleotides that are Guanine or Cytosine. Calculated over 500 bp windows                                                                                         | Detection of Horizontal Gene Transfer (HGT) with regions with different GC content. Assessment of sequencing and assembly quality                                 |
+| GC skew    | GC skew             | Imbalance between G and C: *(G-C)/(G+C)*.  Calculated over 1 kbp windows                                                                                                       | A sudden switch may indicate replicating origin or assembly issues                                                                                                |
+| Repeats    | Direct repeats*     | Regions of the contig that are repeated in the same orientation. Detected by BLAST self-alignment, identifying segments that appear multiple times in the same 5'→3' direction | Internal direct repeats may indicate mobile elements or gene duplications. Terminal direct repeats (DTR) are characteristic of certain phage packaging mechanisms |
+| Repeats    | Inverted repeats*   | Regions of the contig that are repeated in opposite orientations (one copy is the reverse complement of another).                                                              | Inverted terminal repeats (ITR) are found in certain phages and transposons. Internal inverted repeats can form secondary structures (hairpins)                   |
+| Repeats    | Repeats within MAG* | Regions of the contig repeated in another contig from the same MAG (valid only in MAG view)                                                                                    | For mobile elements or gene duplications                                                                                                                          |
 
-## Database Storage Notes
-
-- All feature values are stored as **INTEGER** in DuckDB for efficient compression
-- **Tau** and **MAPQ** values are stored multiplied by 100 (e.g., τ=0.75 stored as 75)
-- Features with length statistics (clippings, insertions) include additional **Mean**, **Median**, and **Std** columns
-- The **Variable** table contains metadata for each feature including display properties (color, plot type, module assignment)
-
----
-
-## See Also
-
-- [Assembly Check Metrics](ASSEMBLY_CHECK.md) - Filtering metrics based on these features
-- [Phage Packaging](PHAGE_PACKAGING.md) - How packaging mechanisms are detected from terminus patterns
+*For each position, the number of repeats and the hit with maximal identity (%) comprising this position are recorded
