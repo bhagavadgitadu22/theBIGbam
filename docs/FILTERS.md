@@ -12,23 +12,21 @@ Each filter row consists of:
 
 - An **input value**: a numeric value for numeric columns, or a text value for other columns. For text inputs, a list of values used in the database is provided as suggestions
 
-- A **"-" button** to remove the filter row
+- A **magnifying glass** button to see the distribution of values for this metric in the database
 
-Multiple conditions can be added within a section (visually grouped by a green bar on the left) using the green "+ Add AND/OR" button.
-
-Multiple sections can be added using the pink "+ Add AND/OR" button.
-
-Clicking "+ Add AND/OR" adds a new **connector** and a new **filter row**. You can choose whether the logical operator is **AND** or **OR**.
-
-<img title="" src="images/FILTERING.png" alt="image" data-align="center" width="323">
-
-This two-level grouping allows expressive compound queries. For example, the example above is equivalent to the condition:
-
-*(Contig_length > 50kbp AND Sequencing_type = "long") OR (Aligned_fraction > 70% OR Circularising_reads > 10)*
+The row value contains a **"-" button** to remove the previous filter row and a "+ Add AND/OR" green button to add a new **connector** and a new **filter row**. You can choose whether the logical operator is **AND** or **OR**. Multiple conditions within a section are visually grouped by a green bar on the left. Multiple sections can be added using the pink "+ Add AND/OR" button.
 
 Once your filters are set, the list of contigs and samples proposed in their respective sections is updated. In addition, only matching pairs will appear in the generated plots. This is particularly useful for focusing your analysis on subsets of interest, such as high-coverage contigs, specific packaging mechanisms, or contigs meeting completeness thresholds.
 
 For MAG databases, the MAG and contig filters in the Filtering panel affect the list of MAGs displayed in the **MAGs** section. Only MAGs containing at least one contig passing the contig filters are included in the MAG list. Only contigs belonging to a MAG passing the MAG filters are included in the contig list.
+
+<img title="" src="images/FILTERING.png" alt="image" width="354">
+
+For example, the example above is equivalent to the condition:
+
+*(Contig_length > 50kbp AND ARG_mechanism = "ABC transporter") OR (Aligned_fraction > 50%)*
+
+In the Contigs section, the tool proposes contigs that are long enough and harbor at least one ABC transporter. Contigs with an aligned fraction exceeding 50% are also included. The MAGs containing these contigs are reported, together with the samples in which these MAGs are present.
 
 # Available filters per category
 
@@ -36,34 +34,30 @@ For MAG databases, the MAG and contig filters in the Filtering panel affect the 
 
 Those metrics are available only if a Genbank file was provided (or at least an assembly file for some of them).
 
-| Metric                       | Definition                                                                                                                                |
-| ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
-| Contig length                | Length of the contig sequence, in base pairs (bp)                                                                                         |
-| Duplication (%)              | Proportion of the contig covered by repeats (calculated from BLAST self-alignment)                                                        |
-| GC mean                      | Mean GC content (%) calculated across the contig using non-overlapping 500 bp sliding windows                                             |
-| GC sd                        | Standard deviation of GC content (stored as integer x100; e.g. 350 = 3.50)                                                                |
-| GC skew amplitude            | Amplitude of GC skew, i.e. *max(GC skew) - min(GC skew)* (stored as integer x100), calculated across non-overlapping 1kbp sliding windows |
-| Positive GC skew windows (%) | Percentage of the 1 kbp windows with positive GC skew (stored as integer x10; e.g. 523 = 52.3%)                                           |
+| Metric                       | Definition                                                                                                              |
+| ---------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| Contig length                | Length of the contig sequence, in base pairs (bp)                                                                       |
+| Duplication (%)              | Proportion of the contig covered by repeats (calculated from BLAST self-alignment)                                      |
+| GC mean                      | Mean GC content (%) calculated across the contig using non-overlapping 500 bp sliding windows                           |
+| GC sd                        | Standard deviation of GC content                                                                                        |
+| GC skew amplitude            | Amplitude of GC skew, i.e. *max(GC skew) - min(GC skew)*, calculated across non-overlapping 1 kbp sliding windows       |
+| Positive GC skew windows (%) | % of the 1 kbp windows with positive GC skew                                                                            |
+| Number of samples            | Number of samples where this contig is present. In a MAG database, this field is associated to the MAG section instead. |
 
 Additional columns might be available depending on the information you added per contig using **thebigbam add-contig-metadata** command.
 
-## Annotation
+## Annotations
 
-| Metric             | Definition                                                                                                           |
-| ------------------ | -------------------------------------------------------------------------------------------------------------------- |
-| Annotation columns | Columns extracted from the Genbank file: for pharokka for instance, Type, Product, Function and Phrog can be queried |
-|                    |                                                                                                                      |
-|                    |                                                                                                                      |
-|                    |                                                                                                                      |
-|                    |                                                                                                                      |
+All qualifiers extracted from the annotation files during the calculate operation can be used to identify subsets with contigs of interest. In the example above, we mapped a collection of MAGs from multiple river metagenomes and generated a database from the resulting alignments. We were specifically interested in antimicrobial resistance genes (ARGs) present in these metagenomes. These genes were identified using hmmscan and the Resfams HMM models. The resulting annotations were then merged into the Bakta-generated GenBank files as described in [Use case 3](docs/USAGE.md#use-case-3-large-dataset-3000-mags-192-samples). Once incorporated into the database, these annotations can be used in the Filtering section to select only contigs harboring ARGs associated with specific resistance mechanisms, as illustrated in the example above.
 
 ## Sample
 
-| Metric                 | Definition                                                                           |
-| ---------------------- | ------------------------------------------------------------------------------------ |
-| Sequencing_type        | Type of sequencing technology used for the sample (long, paired-short, single-short) |
-| Number_of_reads        | Total number of sequencing reads generated for the sample                            |
-| Number_of_mapped_reads | Number of sequencing reads that successfully map to the contigs                      |
+| Metric                 | Definition                                                                               |
+| ---------------------- | ---------------------------------------------------------------------------------------- |
+| Sequencing_type        | Type of sequencing technology used for the sample (long, paired-short, single-short)     |
+| Number_of_reads        | Total number of sequencing reads generated for the sample                                |
+| Number_of_mapped_reads | Number of sequencing reads that successfully map to the contigs                          |
+| Circular mapping       | Whether the mapping of this samples was done using the circular done of theBIGbam or not |
 
 Additional columns might be available depending on the information you added per sample using **thebigbam add-sample-metadata** command.
 
@@ -167,3 +161,17 @@ Phage packaging mechanism detection based on terminus analysis.
 | Repeat_length        | Length of the detected terminal repeat in base pairs                                         |
 | Terminase_distance   | Minimal distance (bp) from any kept terminus center to the nearest terminase gene annotation |
 | Terminase_percentage | Terminase_distance expressed as a percentage of contig length                                |
+
+## MAG
+
+
+
+## MAG coverage
+
+
+
+## MAG misassembly
+
+
+
+## MAG microdiversity

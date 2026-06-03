@@ -286,7 +286,7 @@ You are initially in the **One Sample** mode, which allows exploration of all co
 
 - **Filtering**: Only pairs of contig/samples matching the selected filters are available in the **Contigs** and **Samples** sections. For instance, if the contig length filter is set to >10 kbp, only contigs longer than this threshold will appear in the **Contigs** section, and only samples containing at least one such contig will appear in the **Samples** section. To consult the list of filters available have a look at [the filtering page](docs/FILTERS.md)
 
-- **Contigs**: Select the contig you want to explore. If annotations were provided when creating the database, a gene map can be plotted: users can choose which features to include on the map and customize their colors and labels. In addition, if sequence data was provided when creating the database, genomic features can be selected for plotting: repeats within contigs (and within MAGs in MAG view), GC content, GC skew
+- **Contigs**: Select the contig you want to explore. If annotations were provided when creating the database, a gene map can be plotted: users can choose which features to include on the map and customize their colors and labels using information stored in the database (the gene category for instance). In addition, if sequence data was provided when creating the database, genomic features can be selected for plotting: repeats within contigs (and within MAGs in MAG view), GC content, GC skew
 
 - **Samples**: Select the sample you want to explore
 

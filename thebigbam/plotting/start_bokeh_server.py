@@ -1567,6 +1567,11 @@ def create_layout(db_path, preloaded, enable_timing=False):
         toggle_css_text = f.read()
     toggle_stylesheet = InlineStyleSheet(css=toggle_css_text)
 
+    grey_buttons_css_path = os.path.join(static_path, "grey_buttons.css")
+    with open(grey_buttons_css_path) as f:
+        grey_buttons_css_text = f.read()
+    grey_buttons_stylesheet = InlineStyleSheet(css=grey_buttons_css_text)
+
     # Create main elements
     ## Views section
     logo_url = "https://raw.githubusercontent.com/bhagavadgitadu22/theBIGbam/master/thebigbam/static/LOGO.png"
@@ -1713,7 +1718,7 @@ def create_layout(db_path, preloaded, enable_timing=False):
         fig.ygrid.grid_line_color = None
 
         from bokeh.models import HoverTool
-        fig.add_tools(HoverTool(tooltips=[("Min", "@min_val"), ("Max", "@max_val"), ("%", "@pct")]))
+        fig.add_tools(HoverTool(tooltips=[("Min", "@min_val"), ("Max", "@max_val"), ("%", "@pct")], mode="vline"))
 
         if log_mode and spinner.value and spinner.value > 0:
             init_loc = np.log10(spinner.value)
@@ -1764,22 +1769,27 @@ def create_layout(db_path, preloaded, enable_timing=False):
                 hist_container.objects = [result]
             hist_container.loading = False
 
-        log_x_btn = pn.widgets.Toggle(
-            name="log x", value=log_mode,
-            width=45, height=30, margin=(0, 2, 3, 0),
-            button_type="default"
+        log_x_btn = pn.widgets.Button(
+            name="log x",
+            height=30, margin=(0, 2, 3, 0),
+            button_type="primary" if log_mode else "default",
+            description="Only positive values will be considered for the plot",
+            stylesheets=[grey_buttons_stylesheet]
         )
-        log_y_btn = pn.widgets.Toggle(
-            name="log y", value=log_y,
-            width=45, height=30, margin=(0, 0, 3, 0),
-            button_type="default"
+        log_y_btn = pn.widgets.Button(
+            name="log y",
+            height=30, margin=(0, 0, 3, 2),
+            button_type="primary" if log_y else "default",
+            stylesheets=[grey_buttons_stylesheet]
         )
         def _on_log_x(event):
-            _rebuild_histogram(event.new, row_data.get("log_y", False))
+            new_log = not row_data.get("log_mode", False)
+            _rebuild_histogram(new_log, row_data.get("log_y", False))
         def _on_log_y(event):
-            _rebuild_histogram(row_data.get("log_mode", False), event.new)
-        log_x_btn.param.watch(_on_log_x, "value")
-        log_y_btn.param.watch(_on_log_y, "value")
+            new_log_y = not row_data.get("log_y", False)
+            _rebuild_histogram(row_data.get("log_mode", False), new_log_y)
+        log_x_btn.on_click(_on_log_x)
+        log_y_btn.on_click(_on_log_y)
 
         pane = pn.Column(
             pn.Row(log_x_btn, log_y_btn, margin=0),

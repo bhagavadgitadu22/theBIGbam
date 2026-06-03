@@ -1,0 +1,11 @@
+.bk-btn.bk-btn-default {
+    background: #d0d0d0 !important;
+    border-color: #b0b0b0 !important;
+    color: #333 !important;
+}
+
+.bk-btn.bk-btn-primary {
+    background: #666 !important;
+    border-color: #555 !important;
+    color: white !important;
+}
