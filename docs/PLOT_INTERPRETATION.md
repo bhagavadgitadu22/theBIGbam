@@ -51,3 +51,9 @@ Use the **"Plot relative to local coverage"** checkbox to normalize these counts
 - [FEATURES.md](FEATURES.md) — Complete reference for all computed features
 - [FILTERS.md](FILTERS.md) — Available filtering metrics for narrowing down contigs/samples
 - [ASSEMBLY_CHECK.md](ASSEMBLY_CHECK.md) — Detailed explanation of assembly quality metrics
+
+Complementary information from other modules can further confirm misassemblies or biologically meaningful subpopulations (microdiversity):
+
+- For the **Coverage module**: local peaks and troughs in primary reads depth ; presence of secondary or supplementary alignments suggests repeated regions within a contig or similarity to another contig
+
+- For the **Paired-Reads module**: increase in read insert size indicates that genomic segments may be missing from the reference, whereas a sharp decrease suggests additional sequence in some reads. Non-inward read pairs may indicate inversions, while missing mates point to incomplete assembly. Reads whose mates map to a different contig suggest a relationship between contigs, either due to shared genomic regions or because one represents the continuation of the other in the organism’s genome.

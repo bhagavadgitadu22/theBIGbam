@@ -10,7 +10,7 @@ import duckdb
 METRIC_TO_VIEW = {
     # Explicit_coverage / Explicit_coverage_per_MAG
     "Aligned_fraction_percentage": ("Explicit_coverage", "Aligned_fraction_percentage", "Explicit_coverage_per_MAG"),
-    "Above_expected_aligned_fraction": ("Explicit_coverage", "Above_expected_aligned_fraction", "Explicit_coverage_per_MAG"),
+    "Expected_aligned_fraction": ("Explicit_coverage", "Expected_aligned_fraction", "Explicit_coverage_per_MAG"),
     "Read_count": ("Explicit_coverage", "Read_count", "Explicit_coverage_per_MAG"),
     "Coverage_mean": ("Explicit_coverage", "Coverage_mean", "Explicit_coverage_per_MAG"),
     "Coverage_median": ("Explicit_coverage", "Coverage_median", "Explicit_coverage_per_MAG"),
@@ -67,7 +67,7 @@ _METRIC_EPILOG = """\
 Available metrics:
 
   coverage (MAG-mode only):
-    Aligned_fraction_percentage, Above_expected_aligned_fraction,
+    Aligned_fraction_percentage, Expected_aligned_fraction,
     Read_count, Coverage_mean, Coverage_median, Coverage_trimmed_mean,
     RPKM, TPM, Coverage_coefficient_of_variation, Relative_coverage_roughness
 

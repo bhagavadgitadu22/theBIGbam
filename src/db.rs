@@ -390,14 +390,14 @@ impl DbWriter {
 
         for p in presences {
             let cov_pct = (p.coverage_pct * 10.0).round() as i32;
-            let above_expected = p.above_expected_aligned_fraction;
+            let expected_af = (p.expected_aligned_fraction * 10.0).round() as i32;
             let read_count = p.read_count as i64;
             let cov_mean = (p.coverage_mean * 10.0).round() as i32;
             let cov_median = (p.coverage_median * 10.0).round() as i32;
             let cov_trimmed_mean = (p.coverage_trimmed_mean * 10.0).round() as i32;
             let cov_sd = p.coverage_coefficient_of_variation.round() as i32;
             let cov_var = p.coverage_relative_coverage_roughness.round() as i32;
-            appender.append_row(params![p.contig_id, sample_id, cov_pct, above_expected, read_count, cov_mean, cov_median, cov_trimmed_mean, cov_sd, cov_var])?;
+            appender.append_row(params![p.contig_id, sample_id, cov_pct, expected_af, read_count, cov_mean, cov_median, cov_trimmed_mean, cov_sd, cov_var])?;
         }
 
         appender.flush().context("Failed to flush Coverage appender")?;
@@ -699,7 +699,7 @@ impl DbWriter {
             sample_id,
             s.mag_length as i64,
             s.aligned_fraction_pct_x10,
-            s.above_expected,
+            s.expected_aligned_fraction_pct_x10,
             s.read_count as i64,
             s.coverage_mean_x10,
             s.coverage_median_x10,
@@ -1936,7 +1936,7 @@ fn create_core_tables(conn: &Connection, has_bam: bool, is_mag_mode: bool) -> Re
             Contig_id INTEGER REFERENCES Contig(Contig_id),
             Sample_id INTEGER REFERENCES Sample(Sample_id),
             Aligned_fraction_percentage INTEGER,
-            Above_expected_aligned_fraction BOOLEAN,
+            Expected_aligned_fraction INTEGER,
             Read_count INTEGER,
             Coverage_mean INTEGER,
             Coverage_median INTEGER,
@@ -2047,7 +2047,7 @@ fn create_core_tables(conn: &Connection, has_bam: bool, is_mag_mode: bool) -> Re
                 Sample_id                            INTEGER NOT NULL REFERENCES Sample(Sample_id),
                 MAG_length                           INTEGER NOT NULL,
                 Aligned_fraction_percentage          INTEGER NOT NULL,
-                Above_expected_aligned_fraction      BOOLEAN NOT NULL,
+                Expected_aligned_fraction             INTEGER NOT NULL,
                 Read_count                           INTEGER NOT NULL,
                 Coverage_mean                        INTEGER NOT NULL,
                 Coverage_median                      INTEGER NOT NULL,
@@ -2111,6 +2111,7 @@ fn create_core_tables(conn: &Connection, has_bam: bool, is_mag_mode: bool) -> Re
         ("Coverage", "Coverage_coefficient_of_variation", 1_000_000),
         ("Coverage", "Coverage_relative_coverage_roughness", 1_000_000),
         ("Coverage", "Aligned_fraction_percentage", 100),
+        ("Coverage", "Expected_aligned_fraction", 100),
         // MapQ (×100 for decimal precision)
         ("mapq", "Value", 100),
         // Coverage-relative features (×1000 for per-mille)
@@ -3098,7 +3099,7 @@ fn create_views(conn: &Connection, has_bam: bool, is_mag_mode: bool) -> Result<(
              c.Contig_name,
              s.Sample_name,
              p.Aligned_fraction_percentage / 10.0 AS Aligned_fraction_percentage,
-             p.Above_expected_aligned_fraction,
+             p.Expected_aligned_fraction / 10.0 AS Expected_aligned_fraction,
              p.Read_count,
              p.Coverage_mean / 10.0 AS Coverage_mean,
              p.Coverage_median / 10.0 AS Coverage_median,
@@ -3314,7 +3315,7 @@ fn create_views(conn: &Connection, has_bam: bool, is_mag_mode: bool) -> Result<(
                  mg.MAG_name,
                  s.Sample_name,
                  mc.Aligned_fraction_percentage / 10.0                                                   AS Aligned_fraction_percentage,
-                 mc.Above_expected_aligned_fraction                                                      AS Above_expected_aligned_fraction,
+                 mc.Expected_aligned_fraction / 10.0                                                      AS Expected_aligned_fraction,
                  mc.Read_count                                                                           AS Read_count,
                  mc.Coverage_mean / 10.0                                                                 AS Coverage_mean,
                  mc.Coverage_median / 10.0                                                               AS Coverage_median,

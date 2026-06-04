@@ -65,7 +65,7 @@ thebigbam serve --db ecoli_megaplate.db
 
 On the figure below, we selected the evolutionary path leading to node 111 in the **Filtering** section of the **All Samples** mode. We picked the Mismatches variable as the plotted variable to see the mismatches appearing and disappearing along this path. To make it easily readable, we order samples by Root_distance in the **Plotting parameters**: 
 
-![image](https://raw.githubusercontent.com/bhagavadgitadu22/theBIGbam/master/docs/images/VISUALIZATION.png)
+<img src="images/VISUALIZATION.png" title="" alt="image" data-align="center">
 
 On the figure, we zoomed in around position 1,237,440 to see the prevalence of a mismatch across generations. **When zooming, we need to re-click APPLY to refresh the plots**. If zooming close enough, as here, we see the sequence and codons appearing below the gene map on the top tracks.
 
@@ -221,7 +221,7 @@ ssh -J user@remote.server.com -N -L 5006:localhost:5006 user@jst234
 
 We can now open `localhost:5006` in a web browser. For MAG datasets, theBIGbam can visualize complete MAGs instead of individual contigs. Here, the coverage track of a MAG is displayed, with the MAG track above it indicating the boundaries of the constituent contigs:
 
-![image](https://raw.githubusercontent.com/bhagavadgitadu22/theBIGbam/master/docs/images/VISUALIZATION_MAG.png)
+![image](images/VISUALIZATION_MAG.png)
 
 ---
 

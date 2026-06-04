@@ -66,7 +66,7 @@ def build_mag_summary_data(conn, mag_name, sample_names):
     """
     coverage_cols = {
         "Aligned_fraction_percentage": "Aligned fraction (%)",
-        "Above_expected_aligned_fraction": "Above expected AF",
+        "Expected_aligned_fraction": "Expected aligned fraction (%)",
         "Read_count": "Read count",
         "Coverage_mean": "Coverage mean",
         "Coverage_median": "Coverage median",
@@ -437,7 +437,7 @@ def build_summary_data(conn, contig_name, sample_names):
     # Define column groups for each subsection
     coverage_cols = {
         "Aligned_fraction_percentage": "Aligned fraction (%)",
-        "Above_expected_aligned_fraction": "Above expected AF",
+        "Expected_aligned_fraction": "Expected aligned fraction (%)",
         "Read_count": "Read count",
         "Coverage_mean": "Coverage mean",
         "Coverage_median": "Coverage median",

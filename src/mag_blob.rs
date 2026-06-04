@@ -436,7 +436,7 @@ fn load_contig_chunks(
 pub struct MagCoverageStats {
     pub mag_length: u32,
     pub aligned_fraction_pct_x10: i32,
-    pub above_expected: bool,
+    pub expected_aligned_fraction_pct_x10: i32,
     pub read_count: u64,
     pub coverage_mean_x10: i32,
     pub coverage_median_x10: i32,
@@ -457,7 +457,7 @@ pub fn compute_mag_coverage_stats_from_raw(
 ) -> MagCoverageStats {
     if mag_values.is_empty() {
         return MagCoverageStats {
-            mag_length, aligned_fraction_pct_x10: 0, above_expected: false,
+            mag_length, aligned_fraction_pct_x10: 0, expected_aligned_fraction_pct_x10: 0,
             read_count: total_read_count, coverage_mean_x10: 0, coverage_median_x10: 0,
             coverage_trimmed_mean_x10: 0, coverage_cv_x1e6: 0, coverage_roughness_x1e6: 0,
         };
@@ -495,8 +495,9 @@ pub fn compute_mag_coverage_stats_from_raw(
     let n_f = n_positions as f64;
     let mean_raw = sum_x as f64 / n_f;
     let af_raw = (n_covered as f64 / n_f) * 100.0;
-    let above_expected = mean_raw > 0.0
-        && af_raw >= (1.0 - (-0.883 * mean_raw).exp()) * 100.0;
+    let expected_af_raw = if mean_raw > 0.0 {
+        (1.0 - (-0.883 * mean_raw).exp()) * 100.0
+    } else { 0.0 };
 
     let mut sorted = mag_values.to_vec();
     sorted.sort_unstable();
@@ -518,7 +519,7 @@ pub fn compute_mag_coverage_stats_from_raw(
     MagCoverageStats {
         mag_length,
         aligned_fraction_pct_x10: (af_raw * 10.0).round() as i32,
-        above_expected,
+        expected_aligned_fraction_pct_x10: (expected_af_raw * 10.0).round() as i32,
         read_count: total_read_count,
         coverage_mean_x10: (mean_raw * 10.0).round() as i32,
         coverage_median_x10: (median_raw * 10.0).round() as i32,

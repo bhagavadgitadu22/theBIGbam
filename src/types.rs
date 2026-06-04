@@ -526,12 +526,12 @@ pub struct PresenceData {
     pub contig_name: String,
     /// Percentage of bases with at least 1x coverage (0-100)
     pub coverage_pct: f32,
-    /// Whether aligned fraction is above expected: exact_af >= (1 - e^(-0.883 × coverage_mean)) × 100
-    pub above_expected_aligned_fraction: bool,
+    /// Expected aligned fraction (%): (1 - e^(-0.883 × coverage_mean)) × 100
+    pub expected_aligned_fraction: f32,
     /// Number of primary reads mapped to this contig
     pub read_count: u64,
-    /// Coverage relative coverage roughness (Fano factor style): 1/(n-1) * Σ(cov(i+1) - cov(i))² / mean_cov
-    /// Measures coverage smoothness normalized by mean (low = uniform, high = variable)
+    /// Relative coverage roughness: sqrt( Σ(cov[i+1] - cov[i])² / (n-1) ) / mean_cov
+    /// RMS of consecutive-position differences, normalized by mean (low = smooth, high = jagged)
     pub coverage_relative_coverage_roughness: f32,
     /// Coverage coefficient of variation: Coefficient of Variation (CV) = std_dev / mean
     /// Measures overall spread from the mean, normalized to remove correlation with coverage depth

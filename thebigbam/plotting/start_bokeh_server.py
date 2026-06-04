@@ -1672,6 +1672,16 @@ def create_layout(db_path, preloaded, enable_timing=False):
         row_data["log_mode"] = log_mode
         row_data["log_y"] = log_y
 
+        if not scale:
+            import math as _m
+            bin_width = float(edges[-1] - edges[0]) / max(len(edges) - 1, 1)
+            if bin_width > 0 and bin_width < 1:
+                spinner.step = 10 ** _m.floor(_m.log10(bin_width))
+            elif bin_width >= 1:
+                spinner.step = 1
+            else:
+                spinner.step = 0.001
+
         total_count = int(sum(counts))
         mids = ((edges[:-1] + edges[1:]) / 2).tolist()
         pcts = [(c / total_count * 100 if total_count else 0) for c in counts.tolist()]

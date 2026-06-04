@@ -48,7 +48,7 @@ def download_contig_metrics_csv(db_path, contig_name, sample_names):
 
             if 'Explicit_coverage' in existing_views:
                 select_parts.extend([
-                    'cov.Aligned_fraction_percentage', 'cov.Above_expected_aligned_fraction',
+                    'cov.Aligned_fraction_percentage', 'cov.Expected_aligned_fraction',
                     'cov.Read_count', 'cov.Coverage_mean', 'cov.Coverage_median', 'cov.Coverage_trimmed_mean',
                     'cov.RPKM', 'cov.TPM', 'cov.Coverage_coefficient_of_variation', 'cov.Relative_coverage_roughness',
                 ])
@@ -177,7 +177,7 @@ def download_mag_metrics_csv(db_path, mag_name, sample_names):
 
             if 'Explicit_coverage_per_MAG' in existing_views:
                 select_parts.extend([
-                    'cov.Aligned_fraction_percentage', 'cov.Above_expected_aligned_fraction',
+                    'cov.Aligned_fraction_percentage', 'cov.Expected_aligned_fraction',
                     'cov.Read_count', 'cov.Coverage_mean', 'cov.Coverage_median', 'cov.Coverage_trimmed_mean',
                     'cov.RPKM', 'cov.TPM', 'cov.Coverage_coefficient_of_variation', 'cov.Relative_coverage_roughness',
                 ])

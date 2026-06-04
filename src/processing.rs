@@ -1597,7 +1597,7 @@ fn process_mag_group(
         let coverage_mean = arrays.coverage_mean() as f32;
         let coverage_median = arrays.coverage_median() as f32;
         let coverage_trimmed_mean = arrays.coverage_trimmed_mean(0.05) as f32;
-        let above_expected = coverage_pct >= (1.0 - (-0.883 * coverage_mean as f64).exp()) * 100.0;
+        let expected_af = (1.0 - (-0.883 * coverage_mean as f64).exp()) * 100.0;
         let coverage_relative_coverage_roughness = if arrays.primary_reads.len() > 1 && coverage_mean > 0.0 {
             let nn = arrays.primary_reads.len();
             let mean_cov = coverage_mean as f64;
@@ -1618,7 +1618,7 @@ fn process_mag_group(
             contig_id: member.contig_id,
             contig_name: member.ref_name.clone(),
             coverage_pct: coverage_pct as f32,
-            above_expected_aligned_fraction: above_expected,
+            expected_aligned_fraction: expected_af as f32,
             read_count: primary_count,
             coverage_relative_coverage_roughness,
             coverage_coefficient_of_variation,
@@ -2029,7 +2029,7 @@ pub fn process_sample(
                     let coverage_median = arrays.coverage_median() as f32;
                     let coverage_trimmed_mean = arrays.coverage_trimmed_mean(0.05) as f32;
 
-                    let above_expected = coverage_pct >= (1.0 - (-0.883 * coverage_mean as f64).exp()) * 100.0;
+                    let expected_af = (1.0 - (-0.883 * coverage_mean as f64).exp()) * 100.0;
 
                     let coverage_relative_coverage_roughness = if arrays.primary_reads.len() > 1 && coverage_mean > 0.0 {
                         let n = arrays.primary_reads.len();
@@ -2067,7 +2067,7 @@ pub fn process_sample(
                         contig_id,
                         contig_name: ref_name.clone(),
                         coverage_pct: coverage_pct as f32,
-                        above_expected_aligned_fraction: above_expected,
+                        expected_aligned_fraction: expected_af as f32,
                         read_count: primary_count,
                         coverage_relative_coverage_roughness,
                         coverage_coefficient_of_variation,

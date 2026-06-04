@@ -101,4 +101,4 @@ Features describing intrinsic genomic properties, independent of read alignments
 | Repeats    | Inverted repeats*   | Regions of the contig that are repeated in opposite orientations (one copy is the reverse complement of another).                                                              | Inverted terminal repeats (ITR) are found in certain phages and transposons. Internal inverted repeats can form secondary structures (hairpins)                   |
 | Repeats    | Repeats within MAG* | Regions of the contig repeated in another contig from the same MAG (valid only in MAG view)                                                                                    | For mobile elements or gene duplications                                                                                                                          |
 
-*For each position, the number of repeats and the hit with maximal identity (%) comprising this position are recorded
+\* For each position, the number of repeats and the hit with maximal identity (%) comprising this position are recorded
