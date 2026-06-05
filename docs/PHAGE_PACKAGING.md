@@ -1,142 +1,149 @@
-# Phage Packaging Classification Algorithm
+# Phage packaging classification
 
-The `processing_phage_packaging.rs` module classifies phage packaging mechanisms through a multi-step filtering and classification pipeline.
+The classification is made through a multi-step filtering and classification pipeline. Steps 1-8 identify positions on the contig where significantly more reads than expected start or end their alignments. Those steps are applied independently to read start positions and read end positions. For simplicity, the descriptions below focus on read start positions, but the same procedure is applied identically to read end positions. In the final step (Step 9), information from both sets of positions is combined to assign the contig to a packaging mechanism category.
 
-## 1. Computing Read Starts and Ends
+**Beware:** this works only for libraries prepared without fragmentation or with random fragmentation (i.e. restriction enzyme digestions would not produce enrichment).
 
-The phage termini detection relies on **reads_starts** and **reads_ends** arrays that count where reads begin and end along the contig.
+## 1. Only keep reliable reads
 
-### Filtering: Only Matching Termini
+To identify positions enriched in read starts and ends, we first filter primary alignments. We retain only reads that begin with a match within the first *min_clipping_length* base pairs (default: 5 bp). This condition is validated using both the CIGAR string and the MD tag. Reads starting with soft clipping or insertions longer than 5 bp are excluded, as they are more likely to reflect sequencing or alignment artifacts rather than true biological termini.
 
-A read's terminus is only counted if it starts with a **match** within the first min_clipping_length basepairs (default 5). This is verified using both the CIGAR string and MD tag. Reads starting with clippings or insertions longer than 5bp are excluded because they likely represent sequencing artifacts or misalignments rather than true biological termini. Reads where the terminus is counted are called "clean reads".
+For **long reads**, we consider both ends of the alignment. Each read is therefore split into two segments, and the end of the second segment is treated as an additional start position. This allows both alignment boundaries to contribute to terminus detection.
 
-### Short vs Long Reads
+The resulting set of filtered primary reads is used to compute a new coverage profile, referred to as *coverage_reduced*. Only those reads are considered to locate the contig termini.
 
-**Short reads**: For paired-end sequencing, the 5' end of read1 (+ strand) represents the fragment start; the 5' end of read2 (- strand) represents the fragment end. Thus:
+## 2. Computing read starts and ends
 
-- reads_starts = start positions of + strand reads
-- reads_ends = start positions of - strand reads (which are fragment 3' ends)
+The phage termini detection relies on *read_starts* and *read_ends* arrays that count where reads begin and end along the contig.
 
-For single-end sequencing, only one fragment terminus is observed. The read is classified as `reads_starts` if it maps to the + strand and as `reads_ends` if it maps to the − strand.
+### Counting read termini depending on sequencing type
 
-**Long reads**: Each read is **split in half** and each terminus is evaluated independently. This prevents losing ~80% of reads that have clipping at one end but a clean match at the other. Both strands contribute to both arrays:
+During **paired-end sequencing**, a DNA fragment is sequenced in 2 parts: one associated to the + strand (read 1) and its mate associated to the - strand (read 2). The 5' end of read 1 represents the fragment start (contribute to *read_starts* array) ; the 5' end of read 2 represents the fragment end (contribute to *read_ends* array).
 
-- reads_starts = 5' ends from both strands (start_plus + start_minus)
-- reads_ends = 3' ends from both strands (end_plus + end_minus)
+For **single-end sequencing** only one fragment terminus is observed, the other terminus of a fragment is never sequenced. The 5' end of the read is counted in `reads_starts` if it maps to the + strand. Alternatively, the 3' end of the reads is counted in `reads_ends` if it maps to the − strand.
 
-## 2. Contig Selection
+For **long reads**, we consider both ends of each read. For reads mapping on the + strand, the 5' end contribute to *reads_starts* and the 3' end to *reads_ends*. For reads mapping on the - strand, this is the opposite (3' end contribute to *reads_starts* and the 5' end to *reads_ends*).
 
-Only contigs where ≥ **min_aligned_fraction** (default 90%) of positions have at least one aligned read are processed.
+## 3. Contig selection
 
-## 3. Terminal repeats (DTR/ITR) are identified:
+Only contigs where ≥ *min_aligned_fraction* (default 90%) of positions have at least one aligned read are processed further.
+
+## 4. Terminal repeats (DTR/ITR) are identified:
 
 Repeat detection results (BLAST self-alignment) are filtered to keep real terminal repeats:
 
-- Identity ≥ **min_identity_dtr** (default 90%)
-- One region within **max_distance_duplication** (default 100bp) of contig start
-- Other region within **max_distance_duplication** of contig end
+- Identity ≥ *min_identity_dtr* (default 90%)
+- One of the repeats within *max_distance_duplication* (default 100 bp) of contig start
+- The other repeat within *max_distance_duplication* of contig end
 
-These regions enable:
+Identification of DTR regions enable the filtering of clippings and termini peaks later in the pipeline.
 
-- **Both-copies confirmation** for clipping validation (DTR only)
-- Deduplication of peaks at equivalent positions in both DTR copies (at classification time)
+## 5. Position filtering
 
-## 3. Position Filtering
+A position must pass two criteria to be considered as a potential start termini:
 
-A position must pass two criteria to be considered as potential termini:
+- *read_starts* ≥ *min_frequency* × coverage_reduced (default 10%)
+- *read_starts* ≥ *min_events* (default 10)
 
-- read_starts ≥ **min_frequency** × coverage_reduced (default 10%)
-- read_starts ≥ **min_events** (default 10)
+## 6. Peak merging
 
-Where the raw count used is read_starts (for start positions) or read_ends (for end positions).
+Contig termini are not always confined to a single base position. They may be associated with several nearby positions due to biological variability in the DNA packaging and cleavage process. To account for this phenomenon, *read_starts* positions passing the filter are merged into peak areas:
 
-## 4. Peak Merging
+- Nearby positions within *max_distance_peaks* (default 20 bp) are merged together. For genomes with circular mapping, position 1 and the last position on the contig are considered at a distance of 1 bp
 
-Positions passing the filter are merged into peak areas:
+Each peak area stores:
 
-- Nearby positions within **max_distance_peaks** (default 20bp) merge together
-- For circular genomes, wrap-around merging occurs
-- Each area stores: start_pos, end_pos, peak_size, center_pos (position with highest signal), total_spc (spc stands for Starting Position Coverage)
+- beginning position
 
-## 5. Peak Testing
+- finishing position
 
-2 tests are performed to identify real termini. The Poisson test validates that the peak itself is significant (more starts than expected under uniform fragmentation). The subsequent clipping test checks whether a significant peak is an artifact (excess clippings indicating misalignment). These are complementary: the Poisson test filters noise, the clipping test filters artifacts. An area must pass **both** tests (`passed_poisson_test && passed_clipping_test`) to be kept.
+- center position (position where the peak with the highest signal is located)
 
-First, each peak area is tested for statistical significance using a **true Poisson exact test**. Under uniform random fragmentation, read starts at each position follow a Poisson distribution with rate proportional to local coverage.
+- total SPC (Starting Position Coverage) with the total number of reads starting aligning in the peak area
 
-**Background rate computation:**
+## 7. Peak testing
 
-- `pstart = sum(reads_starts) / sum(coverage_reduced)` (computed separately for starts and ends)
+2 tests are performed to identify real termini.
 
-**Per-window expected count:**
+- **Poisson test:** validates that the peak area itself is significant. The peak should harbor more starts than expected under uniform fragmentation.
 
-- The window spans from `start_pos` to `end_pos` of the merged area
-- `λ_W = sum(coverage_reduced[i] × pstart)` for all positions i in the window
+- **Clipping test**:** checks whether a significant peak is likely to be an artifact. High clipping rates near a peak indicate potential misalignment rather than a true terminus. This test requires mappings generated with `thebigbam mapping-per-sample --circular`, as standard linear mappings produce artificial clipping at contig ends, making genuine termini indistinguishable from alignment artifacts.
+
+These are complementary: the Poisson test filters noise, the clipping test filters artifacts. An area must pass both tests to be kept.
+
+### 7a. Details of the Poisson test
+
+First, each peak area is tested for statistical significance using a **true Poisson exact test**. Under uniform random fragmentation, read starting at each position follow a Poisson distribution with rate proportional to local coverage.
+
+**Per-area expected count:**
+
+- Average expected number of starts per position: `pstart = sum(reads_starts) / sum(coverage_reduced)`
+- `λ_W = sum(coverage_reduced[i] × pstart)` for all positions i in the peak
 - This accounts for variable coverage across the window
 
 **Observed count:**
 
-- `X_W = area.total_spc` (total read starts/ends in the window)
+- `X_W = area.total_spc` (total read starts in the window)
 
 **Significance test:**
 
 - Model: `X_W ~ Poisson(λ_W)`
-- p-value: `P(X >= X_W | Poisson(λ_W))` (upper-tail, via `statrs` crate)
-- Bonferroni correction: `adjusted_pvalue = pvalue × K` where K = number of windows tested (separate K for starts and ends)
-- Areas with `adjusted_pvalue > 0.05` pass the test
+- p-value: `P(X >= X_W | Poisson(λ_W))`
+- Bonferroni correction: `adjusted_pvalue = pvalue × K` where K = number of windows tested
+- Areas with `adjusted_pvalue <= 0.05` pass the test
 
-## 6. Clipping Testing
+### 7b. Details of the clipping test
 
-### 6a. Clipping Pre-filter
+#### Clipping pre-filter
 
 Individual clipping positions are pre-filtered before aggregation. A clipping position is significant if:
 
-- clippings ≥ **min_frequency** × primary_reads (default 10%)
-- clippings ≥ **min_events** (default 10)
+- clippings ≥ *min_frequency* × primary_reads (default 10%)
+- clippings ≥ *min_events* (default 10)
 
-For start areas: evaluate left_clippings at each position
-For end areas: evaluate right_clippings at each position
+Left clippings are considered for start peak areas. Right clippings are considered for end peak areas.
 
-### 6b. DTR Both-Copies Confirmation
+#### DTR both-copies confirmation
 
-For **DTR only** (not ITR): real biological clippings appear at both DTR copies at equivalent positions. Boundary artifacts (reads can't extend past contig edge) appear at only one copy.
+Phages with direct terminal repeats (DTRs) are circular during part of their infection cycle and therefore exist in forms containing only a single copy of the repeat. As a result, sequencing reads (particularly long reads) may span the repeat region and contain sequence extending on both sides of the repeat.
 
-Any clipping that lacks a counterpart at the equivalent position in the other DTR copy is zeroed out. This prevents false positives from contig boundary effects.
+If the assembled contig contains both copies of the DTR, these reads cannot align continuously across the junction between the two repeat copies. Even when using `thebigbam mapping-per-sample --circular`, they will therefore generate split alignments and an excess of clipped reads at the DTR boundaries.
 
-### 6c. Area Clipping Aggregation
+These clipping events differ from clipping caused by misalignments. Misalignment-induced clipping typically occurs at both DTR copies, whereas clipping caused by reads spanning a single-repeat genome form occurs only at the artificial junction between the two DTR copies in the assembly.
+
+To account for this effect, clipping signals are compared between the two DTR copies. Any clipping event that does not have a corresponding signal at the equivalent position in the other repeat copy is set to zero. This correction removes clipping artifacts caused by the assembly structure and prevents false positives during terminus detection.
+
+#### Area clipping aggregation
 
 For each peak area, sum all pre-filtered clippings:
 
-- Within the area bounds (start_pos to end_pos)
-- OR within **max_distance_peaks** of area edges
+- Located within the area bounds (start_pos to end_pos)
+- OR within *max_distance_peaks* of area edges
 
-### 6d. Statistical Test
+#### Statistical test
 
 Test whether a peak area has **significantly more clippings** than expected globally using a **z-test with a normal approximation to a binomial model**.
 
 **Expected clippings calculation:**
 
-- `clipped_ratio = (primary_reads_mean - coverage_reduced_mean) / coverage_reduced_mean`
-- `expected_clippings = clipped_ratio × total_spc`
+- We calculate per-read probability of being clipped: `clipped_ratio = (primary_reads_mean - coverage_reduced_mean) / coverage_reduced_mean`
+- For long reads, each read contributes to both termini so primary_reads is doubled: ``clipped_ratio = (2*primary_reads_mean - coverage_reduced_mean) / coverage_reduced_mean`
+- If clippings were uniformly distributed, how many clippings do we expect in this area given the number of reads starting there: `expected_clippings = clipped_ratio × total_spc`
 
 **Decision logic:**
 
-- If `sum_clippings > expected_clippings` significantly → **DISCARD** (`passed_clipping_test = false`)
-- Otherwise → **KEEP**
+Only peaks that do not have too many clippings within their area are kept:
 
-Statistical significance is determined using **clipping_significance** (default 0.05 → z_critical = 1.645). Only peaks that do not have too many clippings within their area are kept.
+- Areas where `sum_clippings` is significantly higher than `expected_clippings` are discarded
+- Statistical significance is determined using **clipping_significance** (default 0.05 → z_critical = 1.645)
 
-## 7. DTR Deduplication
+## 8. DTR deduplication
 
-Before classification, remaining peak areas are deduplicated:
+Before classification, remaining peak regions are deduplicated. When the same peak is detected in both copies of a direct terminal repeat (DTR), they are merged into the occurence from the first repeat copy.
 
-- Each area's `center_pos` is translated to the first DTR region (canonical position)
-- Duplicate areas at the same canonical position (within 20bp tolerance) are removed
-- Result: unique peak count for classification
+This deduplication serves two purposes. First, it ensures that each biological terminus is counted only once, allowing the correct number of termini to be inferred. Second, it enables accurate distance calculations between termini during classification. For example, in the case of the T7 phage, the termini are located near positions 1 and 160, corresponding to a DTR length of 159 bp. Without deduplication, one of the termini could be assigned to the second DTR copy near the end of the contig, yielding an incorrect distance of approximately 39 kbp instead of the true DTR length.
 
-**Important:** Canonical positions ensure correct distance calculation for classification (e.g., T7 phage: start at pos 1, end at pos 160 → DTR distance = 159bp, not ~39000bp if using second copy position).
-
-## 8. Classification
+## 9. Classification
 
 Based on unique peak count after deduplication:
 
@@ -146,99 +153,82 @@ Based on unique peak count after deduplication:
 | 1           | 0         | PAC                            |
 | 0           | 1         | PAC                            |
 | 1           | 1         | See distance-based rules below |
-| >1 or >1    |           | Unknown_packaging              |
-
-For contigs harboring DTR, 2 peaks that are located at equivalent positions on both DTR count as only 1 peak.
+| > 1         | OR > 1    | Unknown_packaging              |
 
 ### Distance-based Classification (1 start, 1 end)
 
-For ITR configuration (both peaks in ITR regions, distance ≤20bp):
+For ITR configuration (both peaks in ITR regions, distance ≤ *max_distance_peaks*):
 
-- ITR length ≤1000bp → **ITR_short_5'/3'**
-- ITR length ≤10% genome → **ITR_long_5'/3'**
-- ITR length >10% genome → **ITR_outlier_5'/3'**
+- ITR length ≤ 1000 bp → **ITR_short_5'/3'**
+- ITR length ≤ 10% genome → **ITR_long_5'/3'**
+- ITR length > 10% genome → **ITR_outlier_5'/3'**
 
-Otherwise, based on distance between canonical positions:
+Otherwise, based on distance between peaks:
 
-- <2bp → **COS** (blunt cohesive ends)
-- ≤20bp → **COS_5'/3'** (cohesive with overhang)
-- ≤1000bp → **DTR_short_5'/3'**
-- ≤10% genome → **DTR_long_5'/3'**
-- \>10% genome → **DTR_outlier_5'/3'**
+- < 2 bp → **COS** (blunt cohesive ends)
+- ≤ 20 bp → **COS_5'/3'** (cohesive with overhang)
+- ≤ 1000 bp → **DTR_short_5'/3'**
+- ≤ 10% genome → **DTR_long_5'/3'**
+- \> 10% genome → **DTR_outlier_5'/3'**
 
 The suffix (_5' or _3') indicates overhang orientation based on whether end comes before or after start in genomic coordinates.
 
-## 9. Output
+## 10. Output
 
-Results are stored as two DuckDB views in the database: `Explicit_phage_mechanisms` (one row per contig×sample) and `Explicit_phage_termini` (one row per terminus area).
+If you want to use the phage packaging results outside thebigbam visualization tool, the data structure is described below.
 
-### Explicit_phage_mechanisms
+Results are exposed as 2 DuckDB views:
 
-| Column                         | Description                                                                                                                                      |
-| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Contig_name                    | Contig identifier                                                                                                                                |
-| Sample_name                    | Sample identifier                                                                                                                                |
-| Packaging_mechanism            | Classification string (e.g., "DTR_short_5'")                                                                                                     |
-| Left_termini                   | Comma-separated center positions of kept start areas                                                                                             |
-| Median_left_termini_clippings  | Comma-separated median clipping lengths of clean starts per left terminus (one value per terminus, same order as Left_termini)                   |
-| Right_termini                  | Comma-separated center positions of kept end areas                                                                                               |
-| Median_right_termini_clippings | Comma-separated median clipping lengths of clean starts per right terminus (one value per terminus, same order as Right_termini)                 |
-| Duplication                    | "DTR" if all peaks in DTR, "ITR" if all in ITR, NULL otherwise                                                                                   |
-| Total_peaks                    | Count of areas that passed both Poisson and clipping tests                                                                                       |
-| Repeat_length                  | Distance between start and end peak centers (if 1 of each)                                                                                       |
-| Terminase_distance             | Distance between the two peak centers (if applicable, from terminase large subunit annotation — comes from external metadata, not this pipeline) |
-| Terminase_percentage           | `Terminase_distance / Contig_length × 100`                                                                                                       |
+- `Explicit_phage_termini` contains one row per terminus area per contig per sample (results of step 8)
+
+- `Explicit_phage_mechanisms` contains the final classification made per contig sample (results of step 9)
 
 ### Explicit_phage_termini
 
-Contains all columns from `Explicit_phage_mechanisms` (Contig_name through Terminase_percentage) plus the following per-area columns:
+| Column              | Description                                                                                                                                                                                                                                                                                                        |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Start               | First position of the merged area                                                                                                                                                                                                                                                                                  |
+| End                 | Last position of the merged area                                                                                                                                                                                                                                                                                   |
+| Size                | Distance between Start and End + 1                                                                                                                                                                                                                                                                                 |
+| Center              | Position with highest SPC in the area                                                                                                                                                                                                                                                                              |
+| Status              | "start" (left terminus) or "end" (right terminus)                                                                                                                                                                                                                                                                  |
+| SPC                 | Total starting position coverage in the area                                                                                                                                                                                                                                                                       |
+| Median_clippings    | Median clipping length across all clean reads starting in the area. Clean reads are those with clipping < *min_clipping_length* (default 5): exact-match reads contribute 0, near-match reads contribute their actual clip length (1–4).                                                                           |
+| Coverage            | Coverage at center position                                                                                                                                                                                                                                                                                        |
+| Tau                 | SPC / Coverage × 100 (stored as integer)                                                                                                                                                                                                                                                                           |
+| NumberPeaks         | Number of positions merged into this area                                                                                                                                                                                                                                                                          |
+| Passed_PoissonTest  | "yes" or "no"                                                                                                                                                                                                                                                                                                      |
+| Expected_SPC        | Expected SPC from Poisson model (λ_W, rounded)                                                                                                                                                                                                                                                                     |
+| Pvalue              | Raw Poisson p-value (compact format)                                                                                                                                                                                                                                                                               |
+| Adjusted_pvalue     | Bonferroni-adjusted p-value (compact format)                                                                                                                                                                                                                                                                       |
+| Passed_ClippingTest | "yes" or "no"                                                                                                                                                                                                                                                                                                      |
+| Clippings           | Sum of pre-filtered clippings in/near area                                                                                                                                                                                                                                                                         |
+| Clipping_excess     | % of clipped reads relative to clean reads (those starting with a match). Formula: `100 × (primary_reads − clean_reads) / clean_reads`. For long reads, each read contributes to both termini so primary_reads is doubled: `100 × (2 × primary_reads − clean_reads) / clean_reads`. Stored as an integer (rounded) |
+| Expected_clippings  | Expected number of clippings under the null hypothesis, computed from the local SPC and the clipping_excess value for this contig/sample                                                                                                                                                                           |
 
-| Column              | Description                                                                                                                                                                                                                                                                                                                                                                                                               |
-| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Start               | First position of the merged area                                                                                                                                                                                                                                                                                                                                                                                         |
-| End                 | Last position of the merged area                                                                                                                                                                                                                                                                                                                                                                                          |
-| Size                | Distance between Start and End + 1                                                                                                                                                                                                                                                                                                                                                                                        |
-| Center              | Position with highest SPC in the area                                                                                                                                                                                                                                                                                                                                                                                     |
-| Status              | "start" (left terminus) or "end" (right terminus)                                                                                                                                                                                                                                                                                                                                                                         |
-| SPC                 | Total starting position coverage in the area                                                                                                                                                                                                                                                                                                                                                                              |
-| Median_clippings    | Median clipping length across all clean reads in the area. Clean reads are those with clipping < min_clipping_length (default 5): exact-match reads contribute 0, near-match reads contribute their actual clip length (1–4). Values range from 0 to min_clipping_length − 1                                                                                                                                              |
-| Coverage            | Coverage at center position                                                                                                                                                                                                                                                                                                                                                                                               |
-| Tau                 | SPC / Coverage × 100 (stored as integer)                                                                                                                                                                                                                                                                                                                                                                                  |
-| NumberPeaks         | Number of positions merged into this area                                                                                                                                                                                                                                                                                                                                                                                 |
-| Passed_PoissonTest  | "yes" or "no"                                                                                                                                                                                                                                                                                                                                                                                                             |
-| Expected_SPC        | Expected SPC from Poisson model (λ_W, rounded)                                                                                                                                                                                                                                                                                                                                                                            |
-| Pvalue              | Raw Poisson p-value (compact format)                                                                                                                                                                                                                                                                                                                                                                                      |
-| Adjusted_pvalue     | Bonferroni-adjusted p-value (compact format)                                                                                                                                                                                                                                                                                                                                                                              |
-| Passed_ClippingTest | "yes" or "no"                                                                                                                                                                                                                                                                                                                                                                                                             |
-| Clippings           | Sum of pre-filtered clippings in/near area                                                                                                                                                                                                                                                                                                                                                                                |
-| Clipping_excess     | Relative amount of clipped reads to the number of reads starting with a match: `100*(#reads-# reads_starting_with_a_match)/# reads_starting_with_a_match`. `#reads-# reads_starting_with_a_match` corresponds to the number of clipped reads. For long reads, each read is split in two to account for both termini so the formula becomes:  `100*(2*#reads-# reads_starting_with_a_match)/# reads_starting_with_a_match` |
-| Expected_clippings  | `ROUND(expected_clippings)` — expected number of clippings under the null hypothesis, computed from the local SPC and the clipping_excess value for this contig/sample                                                                                                                                                                                                                                                    |
+### Explicit_phage_mechanisms
+
+| Column                         | Description                                                                                                                                                                                    |
+| ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Contig_name                    | Contig identifier                                                                                                                                                                              |
+| Sample_name                    | Sample identifier                                                                                                                                                                              |
+| Packaging_mechanism            | Classification string (e.g., "DTR_short_5'")                                                                                                                                                   |
+| Left_termini                   | Comma-separated center positions of kept start areas                                                                                                                                           |
+| Median_left_termini_clippings  | Comma-separated median clipping lengths of clean starts per left terminus (one value per terminus, same order as Left_termini)                                                                 |
+| Right_termini                  | Comma-separated center positions of kept end areas                                                                                                                                             |
+| Median_right_termini_clippings | Comma-separated median clipping lengths of clean starts per right terminus (one value per terminus, same order as Right_termini)                                                               |
+| Duplication                    | "DTR" if all kept peaks are in DTR regions, "ITR" if all in ITR regions. NULL when status is mixed or no peaks were kept                                                                       |
+| Total_peaks                    | Total number of terminus areas (both starts and ends) that passed both the Poisson test and the clipping test                                                                                  |
+| Repeat_length                  | Genomic distance between the unique start and end peak centers. Only set when there is exactly 1 kept start area and 1 kept end area (after DTR deduplication), NULL otherwise                 |
+| Terminase_distance             | Distance between the kept peak center(s) and the nearest terminase annotation (from GFF/GBK `product` qualifier matching "terminase"). NULL when no terminase annotation exists for the contig |
+| Terminase_percentage           | `Terminase_distance / Contig_length × 100`                                                                                                                                                     |
 
 ### Accessing the results
 
 Both DuckDB views can be explored with a database viewer allowing DuckDB databases like DBeaver or directly in the terminal via:
 
-- duckdb <DATABASE_NAME> "SELECT * FROM Explicit_phage_mechanisms"
+- duckdb <DB_NAME> "SELECT * FROM Explicit_phage_mechanisms"
 
-- duckdb "SELECT * FROM Explicit_phage_termini"
+- duckdb <DB_NAME> "SELECT * FROM Explicit_phage_termini"
 
-The `Explicit_phage_mechanisms` results are also integrated in the visualization local webpage.
-
-#### Read Starts
-
-- **Description:** Count of read 5' ends at each position
-- **How it's computed:** Count how many reads have their first aligned base at each position. For paired-end data, uses strand-aware logic to identify true 5' ends
-- **Interpretation:** Peaks indicate positions where DNA molecules frequently begin, which may represent:
-  - Phage packaging initiation sites
-  - DNA cutting/fragmentation sites
-  - For random fragmentation (most libraries), should be relatively uniform
-
-Moreover, only read boundaries that align with an exact match to the 
-reference sequence are considered (clippings <5 bp are tolerated). 
-Additionally, not all read boundaries are equally informative depending 
-on the sequencing technology. For long-read sequencing data, both 
-boundaries may represent fragment termini and can therefore be used for 
-detection. In contrast, only start positions of short reads are 
-informative for terminus detection, as sequencing terminates once the 
-expected read length is reached (e.g., ~150 bp), even if the DNA 
-fragment has not been fully sequenced.
+The `Explicit_phage_mechanisms` results are also integrated in the visualization webpage.

@@ -154,15 +154,17 @@ An approximate estimate of the first 3 metrics could be calculated without the `
 
 ## Termini
 
-Phage packaging mechanism detection based on terminus analysis.
+Phage packaging mechanism detection based on terminus analysis. In sequencing libraries prepared by random fragmentation of DNA, read starts accumulate at natural genome termini because these positions are overrepresented compared to randomly generated fragment ends. This enrichment allows the precise identification of contig termini. In the particular case of bacteriophages, the number, orientation, and relative positions of detected termini can be used to infer the phage DNA packaging mechanism. The [classification protocol](docs/PHAGE_PACKAGING.md) mostly follows the rules implemented by the [PhageTerm software](https://www.nature.com/articles/s41598-017-07910-5).
 
-| Metric              | Definition                                                                                   |
-| ------------------- | -------------------------------------------------------------------------------------------- |
-| Packaging mechanism | Detected packaging mechanism type (e.g. headful, cos, DTR, etc.)                             |
-| Left termini        | Comma-separated center positions of kept left (start) terminus peaks                         |
-| Right termini       | Comma-separated center positions of kept right (end) terminus peaks                          |
-| Duplication         | Type of terminal repeat: DTR (direct) or ITR (inverted), or NULL if no repeat detected       |
-| Total peaks         | Total number of kept terminus peaks (both left and right)                                    |
-| Repeat length       | Length of the detected terminal repeat in base pairs                                         |
-| Terminase distance  | Minimal distance (bp) from any kept terminus center to the nearest terminase gene annotation |
-| Terminase (%)       | Terminase_distance expressed as a percentage of contig length                                |
+| Metric                         | Definition                                                                                                                                                                                                                                                 |
+| ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Packaging mechanism            | Detected packaging mechanism type (e.g. headful, COS, DTR, etc.)                                                                                                                                                                                           |
+| Total peaks                    | Total number of termini (start and end)                                                                                                                                                                                                                    |
+| Left termini                   | Comma-separated positions of start terminus peaks (where a lot of read alignments start)                                                                                                                                                                   |
+| Median left termini clippings  | Tells you how long is the typical soft-clip/insertion at read starts for each terminus. The maximum is 5 bp as only reads starting with a clipping shorter than 5bp are considered during terminus search. 0 means no basepair are missing from the contig |
+| Right termini                  | Comma-separated positions of end terminus peaks (where a lot of read alignments end)                                                                                                                                                                       |
+| Median right termini clippings | Tells you how long is the typical soft-clip/insertion at read ends for each terminus. Maximum 5 bp. 0 means no basepair are missing from the contig                                                                                                        |
+| Duplication                    | Type of terminal repeat: DTR (direct), ITR (inverted), or none                                                                                                                                                                                             |
+| Repeat length                  | Length of the detected terminal repeat in base pairs                                                                                                                                                                                                       |
+| Terminase distance             | Minimal distance (bp) from any kept terminus peak to the nearest terminase gene annotation                                                                                                                                                                 |
+| Terminase (%)                  | Terminase distance expressed as a % of contig length                                                                                                                                                                                                       |

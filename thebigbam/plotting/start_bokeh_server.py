@@ -1574,8 +1574,9 @@ def create_layout(db_path, preloaded, enable_timing=False):
 
     # Create main elements
     ## Views section
-    logo_url = "https://raw.githubusercontent.com/bhagavadgitadu22/theBIGbam/master/thebigbam/static/LOGO.png"
-    logo = Div(text=f"""<img src="{logo_url}" style="width:100%; max-width:800px; padding: 0 25%;">""")
+    logo_url_local = "/assets/LOGO.png"
+    logo_url_remote = "https://raw.githubusercontent.com/bhagavadgitadu22/theBIGbam/master/thebigbam/static/LOGO.png"
+    logo = Div(text=f"""<img src="{logo_url_local}" onerror="this.onerror=function(){{this.style.display='none'}}; this.src='{logo_url_remote}'" style="width:100%; max-width:800px; padding: 0 25%;">""")
     views = RadioButtonGroup(labels=["ONE SAMPLE", "ALL SAMPLES"], active=0, sizing_mode="stretch_width", stylesheets=[stylesheet])
 
     # Global lock for toggles when enforcing "All samples" view (single-variable mode)
@@ -1769,15 +1770,18 @@ def create_layout(db_path, preloaded, enable_timing=False):
         hist_pane = pn.pane.Bokeh(fig, sizing_mode="stretch_width", margin=(0, 0, 0, 0))
 
         def _rebuild_histogram(new_log_x, new_log_y):
+            from bokeh.io import curdoc
             hist_container = row_data["hist_container"]
             hist_container.loading = True
-            row_data["histogram_pane"] = None
-            row_data["histogram_fig"] = None
-            row_data["threshold_span"] = None
-            result = build_numeric_histogram(row_data, category, col_name, spinner, log_mode=new_log_x, log_y=new_log_y)
-            if result:
-                hist_container.objects = [result]
-            hist_container.loading = False
+            def _do_rebuild():
+                row_data["histogram_pane"] = None
+                row_data["histogram_fig"] = None
+                row_data["threshold_span"] = None
+                result = build_numeric_histogram(row_data, category, col_name, spinner, log_mode=new_log_x, log_y=new_log_y)
+                if result:
+                    hist_container.objects = [result]
+                hist_container.loading = False
+            curdoc().add_next_tick_callback(_do_rebuild)
 
         log_x_btn = pn.widgets.Button(
             name="log x",
@@ -1834,21 +1838,31 @@ def create_layout(db_path, preloaded, enable_timing=False):
             row_data["treemap_pane"] = None
             return None
 
-        filtered_total = sum(c for _, c in filtered)
-        lefts, rights, values, pcts, colors = [], [], [], [], []
+        lefts, rights, labels, values, pcts, colors = [], [], [], [], [], []
         cursor = 0.0
         for i, (val, cnt) in enumerate(filtered):
-            pct = cnt / filtered_total * 100
+            pct = cnt / total * 100
             lefts.append(cursor)
             rights.append(cursor + pct)
+            labels.append(str(val))
             values.append(str(val))
             pcts.append(f"{pct:.1f}%")
             colors.append(Category20_20[i % 20])
             cursor += pct
 
+        other_count = total - sum(c for _, c in filtered)
+        if other_count > 0:
+            other_pct = other_count / total * 100
+            lefts.append(cursor)
+            rights.append(cursor + other_pct)
+            labels.append("Other")
+            values.append("")
+            pcts.append(f"{other_pct:.1f}%")
+            colors.append("#cccccc")
+
         source = ColumnDataSource(data=dict(
             left=lefts, right=rights, top=[1] * len(lefts), bottom=[0] * len(lefts),
-            value=values, pct=pcts, color=colors,
+            label=labels, value=values, pct=pcts, color=colors,
         ))
 
         fig = bk_figure(
@@ -1867,7 +1881,7 @@ def create_layout(db_path, preloaded, enable_timing=False):
         fig.ygrid.grid_line_color = None
 
         from bokeh.models import TapTool as _TapTool
-        fig.add_tools(HoverTool(tooltips=[("Value", "@value"), ("%", "@pct")]), _TapTool())
+        fig.add_tools(HoverTool(tooltips=[("Value", "@label"), ("%", "@pct")]), _TapTool())
 
         bridge = TextInput(value="", visible=False)
         bridge_pane = pn.pane.Bokeh(bridge, height=0, sizing_mode="fixed", margin=0)
@@ -1878,7 +1892,9 @@ def create_layout(db_path, preloaded, enable_timing=False):
             const data = source.data;
             for (let i = 0; i < data.left.length; i++) {
                 if (x >= data.left[i] && x <= data.right[i]) {
-                    bridge.value = data.value[i];
+                    if (data.value[i]) {
+                        bridge.value = data.value[i];
+                    }
                     break;
                 }
             }
@@ -2149,25 +2165,28 @@ def create_layout(db_path, preloaded, enable_timing=False):
         minus_btn.on_click(remove_row_callback)
 
         def toggle_distribution(event):
-            if hist_container.objects:
-                hist_container.objects = []
-                row_data['histogram_pane'] = None
-                row_data['histogram_fig'] = None
-                row_data['threshold_span'] = None
-                row_data['treemap_pane'] = None
-                row_data['bridge_input'] = None
-            else:
-                category = category_select.value
-                col_name = subcategory_select.value
-                col_info = filtering_metadata.get(category, {}).get('columns', {}).get(col_name, {})
-                if col_info.get('type') == 'numeric' and not col_info.get('is_bool'):
-                    result = build_numeric_histogram(row_data, category, col_name, current_input_ref['widget'])
-                    if result:
-                        hist_container.objects = [result]
-                elif col_info.get('type') == 'text':
-                    result = build_text_treemap(row_data, category, col_name, current_input_ref, hist_container)
-                    if result:
-                        hist_container.objects = result
+            from bokeh.io import curdoc
+            def _do_toggle():
+                if hist_container.objects:
+                    hist_container.objects = []
+                    row_data['histogram_pane'] = None
+                    row_data['histogram_fig'] = None
+                    row_data['threshold_span'] = None
+                    row_data['treemap_pane'] = None
+                    row_data['bridge_input'] = None
+                else:
+                    category = category_select.value
+                    col_name = subcategory_select.value
+                    col_info = filtering_metadata.get(category, {}).get('columns', {}).get(col_name, {})
+                    if col_info.get('type') == 'numeric' and not col_info.get('is_bool'):
+                        result = build_numeric_histogram(row_data, category, col_name, current_input_ref['widget'])
+                        if result:
+                            hist_container.objects = [result]
+                    elif col_info.get('type') == 'text':
+                        result = build_text_treemap(row_data, category, col_name, current_input_ref, hist_container)
+                        if result:
+                            hist_container.objects = result
+            curdoc().add_next_tick_callback(_do_toggle)
 
         dist_toggle.on_click(toggle_distribution)
 
