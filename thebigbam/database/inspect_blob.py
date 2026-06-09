@@ -17,9 +17,10 @@ import duckdb
 from thebigbam.database.blob_decoder import (
     decode_zoom_standalone,
     decode_raw_chunks, decode_raw_sparse_chunks,
-    get_scale_from_zoom_blob, is_sparse_zoom_blob,
-    feature_name_to_id, is_contig_blob_feature, gc_window_size,
-    CHUNK_SIZE,
+    get_blob_scale, get_chunk_size, get_zoom_bin_sizes,
+    get_gc_window_size, is_sparse_zoom_blob,
+    feature_name_to_id, is_contig_blob_feature,
+    init_scales,
 )
 
 
@@ -37,6 +38,7 @@ def add_inspect_args(parser):
 
 def run_inspect(args):
     conn = duckdb.connect(args.db, read_only=True)
+    init_scales(conn)
 
     features = [f.strip() for f in args.feature.split(',')]
     samples = [s.strip() for s in args.sample.split(',')] if args.sample else []
@@ -98,7 +100,7 @@ def run_inspect(args):
                     zoom_blob = get_mag_contig_zoom(conn, mag_id, feature_name)
                     if zoom_blob is None:
                         continue
-                    _print_zoom_rows(zoom_blob, zoom_bin_size, "-", "", feature_name,
+                    _print_zoom_rows(conn, zoom_blob, zoom_bin_size, "-", "", feature_name,
                                      region_start, region_end, mag_name=mag_name)
                 else:
                     if not samples:
@@ -114,7 +116,7 @@ def run_inspect(args):
                         zoom_blob = get_mag_feature_zoom(conn, mag_id, s_row[0], feature_name)
                         if zoom_blob is None:
                             continue
-                        _print_zoom_rows(zoom_blob, zoom_bin_size, "-", sample_name, feature_name,
+                        _print_zoom_rows(conn, zoom_blob, zoom_bin_size, "-", sample_name, feature_name,
                                          region_start, region_end, mag_name=mag_name)
         conn.close()
         return 0
@@ -191,20 +193,21 @@ def _inspect_contig_feature(conn, contig_id, contig_name, feature_name, fid,
     zoom_blob = bytes(row[0])
 
     if zoom_bin_size is not None:
-        _print_zoom_rows(zoom_blob, zoom_bin_size, contig_name, "", feature_name, region_start, region_end,
+        _print_zoom_rows(conn, zoom_blob, zoom_bin_size, contig_name, "", feature_name, region_start, region_end,
                          mag_name=mag_name, mag_offset=mag_offset)
         return
 
-    scale_div = get_scale_from_zoom_blob(zoom_blob)
-    chunk_rows = _fetch_contig_chunks(conn, contig_id, fid, region_start, region_end, feature_name)
+    scale_div = get_blob_scale(conn, feature_name)
+    chunk_sz = get_chunk_size(conn)
+    gc_win = get_gc_window_size(conn, feature_name)
+    chunk_rows = _fetch_contig_chunks(conn, contig_id, fid, region_start, region_end, chunk_sz, gc_win)
     if not chunk_rows:
         return
 
-    data = decode_raw_chunks(chunk_rows, scale_div)
+    data = decode_raw_chunks(chunk_rows, scale_div, chunk_sz)
     x_arr = data["x"]
     y_arr = data["y"]
 
-    gc_win = gc_window_size(feature_name)
     if gc_win > 1:
         x_arr = x_arr * gc_win
 
@@ -226,31 +229,31 @@ def _inspect_sample_feature(conn, contig_id, contig_name, sample_name, sample_id
     zoom_blob = bytes(row[0])
 
     if zoom_bin_size is not None:
-        _print_zoom_rows(zoom_blob, zoom_bin_size, contig_name, sample_name, feature_name, region_start, region_end,
+        _print_zoom_rows(conn, zoom_blob, zoom_bin_size, contig_name, sample_name, feature_name, region_start, region_end,
                          mag_name=mag_name, mag_offset=mag_offset)
         return
 
-    scale_div = get_scale_from_zoom_blob(zoom_blob)
+    scale_div = get_blob_scale(conn, feature_name)
+    chunk_sz = get_chunk_size(conn)
     sparse = is_sparse_zoom_blob(zoom_blob)
-    chunk_rows = _fetch_feature_chunks(conn, contig_id, sample_id, fid, region_start, region_end)
+    chunk_rows = _fetch_feature_chunks(conn, contig_id, sample_id, fid, region_start, region_end, chunk_sz)
     if not chunk_rows:
         return
 
     if sparse:
-        data = decode_raw_sparse_chunks(chunk_rows, scale_div)
+        data = decode_raw_sparse_chunks(chunk_rows, scale_div, chunk_sz)
     else:
-        data = decode_raw_chunks(chunk_rows, scale_div)
+        data = decode_raw_chunks(chunk_rows, scale_div, chunk_sz)
 
     _print_rows(contig_name, sample_name, feature_name, data["x"], data["y"], region_start, region_end,
                 mag_name=mag_name, mag_offset=mag_offset)
 
 
-def _fetch_contig_chunks(conn, contig_id, fid, region_start, region_end, feature_name):
+def _fetch_contig_chunks(conn, contig_id, fid, region_start, region_end, chunk_sz, gc_win):
     """Fetch Contig_blob_chunk rows, optionally limited to region."""
-    gc_win = gc_window_size(feature_name)
     if region_start is not None:
-        first_idx = max(0, (region_start - 1) // gc_win // CHUNK_SIZE)
-        last_idx = (region_end - 1) // gc_win // CHUNK_SIZE
+        first_idx = max(0, (region_start - 1) // gc_win // chunk_sz)
+        last_idx = (region_end - 1) // gc_win // chunk_sz
         rows = conn.execute(
             "SELECT Chunk_idx, Data FROM Contig_blob_chunk "
             "WHERE Contig_id=? AND Feature_id=? AND Chunk_idx BETWEEN ? AND ? ORDER BY Chunk_idx",
@@ -265,11 +268,11 @@ def _fetch_contig_chunks(conn, contig_id, fid, region_start, region_end, feature
     return [(r[0], r[1]) for r in rows] if rows else []
 
 
-def _fetch_feature_chunks(conn, contig_id, sample_id, fid, region_start, region_end):
+def _fetch_feature_chunks(conn, contig_id, sample_id, fid, region_start, region_end, chunk_sz):
     """Fetch Feature_blob_chunk rows, optionally limited to region."""
     if region_start is not None:
-        first_idx = max(0, (region_start - 1) // CHUNK_SIZE)
-        last_idx = (region_end - 1) // CHUNK_SIZE
+        first_idx = max(0, (region_start - 1) // chunk_sz)
+        last_idx = (region_end - 1) // chunk_sz
         rows = conn.execute(
             "SELECT Chunk_idx, Data FROM Feature_blob_chunk "
             "WHERE Contig_id=? AND Sample_id=? AND Feature_id=? AND Chunk_idx BETWEEN ? AND ? ORDER BY Chunk_idx",
@@ -284,10 +287,10 @@ def _fetch_feature_chunks(conn, contig_id, sample_id, fid, region_start, region_
     return [(r[0], r[1]) for r in rows] if rows else []
 
 
-def _print_zoom_rows(zoom_blob, bin_size, contig_name, sample_name, feature_name,
+def _print_zoom_rows(conn, zoom_blob, bin_size, contig_name, sample_name, feature_name,
                      region_start, region_end, mag_name="", mag_offset=0):
     """Print zoom summary bins as RLE TSV rows."""
-    data = decode_zoom_standalone(zoom_blob, bin_size)
+    data = decode_zoom_standalone(zoom_blob, bin_size, get_blob_scale(conn, feature_name), get_zoom_bin_sizes(conn))
     if data is None:
         return
 

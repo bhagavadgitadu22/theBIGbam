@@ -26,7 +26,7 @@ import duckdb
 from thebigbam.database.blob_decoder import (
     feature_name_to_id,
     decode_raw_chunks, decode_raw_sparse_chunks,
-    get_scale_from_zoom_blob,
+    get_blob_scale, get_chunk_size,
 )
 
 
@@ -74,33 +74,15 @@ def _build_columns(mag_mode):
         cols.append(c)
     return cols
 
-# Features to decode per (contig, sample)
-_DENSE_FEATURES = ["primary_reads", "secondary_reads"]
-_SPARSE_FEATURES = ["mismatches", "insertions", "deletions", "left_clippings", "right_clippings"]
-
-_CODON_TABLE = {
-    "TTT": "F", "TTC": "F", "TTA": "L", "TTG": "L",
-    "CTT": "L", "CTC": "L", "CTA": "L", "CTG": "L",
-    "ATT": "I", "ATC": "I", "ATA": "I", "ATG": "M",
-    "GTT": "V", "GTC": "V", "GTA": "V", "GTG": "V",
-    "TCT": "S", "TCC": "S", "TCA": "S", "TCG": "S",
-    "CCT": "P", "CCC": "P", "CCA": "P", "CCG": "P",
-    "ACT": "T", "ACC": "T", "ACA": "T", "ACG": "T",
-    "GCT": "A", "GCC": "A", "GCA": "A", "GCG": "A",
-    "TAT": "Y", "TAC": "Y", "TAA": "*", "TAG": "*",
-    "CAT": "H", "CAC": "H", "CAA": "Q", "CAG": "Q",
-    "AAT": "N", "AAC": "N", "AAA": "K", "AAG": "K",
-    "GAT": "D", "GAC": "D", "GAA": "E", "GAG": "E",
-    "TGT": "C", "TGC": "C", "TGA": "*", "TGG": "W",
-    "CGT": "R", "CGC": "R", "CGA": "R", "CGG": "R",
-    "AGT": "S", "AGC": "S", "AGA": "R", "AGG": "R",
-    "GGT": "G", "GGC": "G", "GGA": "G", "GGG": "G",
-}
+# Feature names to decode per (contig, sample).
+# The actual encoding (Dense/Sparse) is verified at runtime from the Variable table.
+_DENSE_FEATURE_NAMES = ["primary_reads", "secondary_reads"]
+_SPARSE_FEATURE_NAMES = ["mismatches", "insertions", "deletions", "left_clippings", "right_clippings"]
 
 _BASES = "ACGT"
 
 
-def _compute_sn_sites(nuc_seq):
+def _compute_sn_sites(nuc_seq, codon_to_aa):
     """Compute (S_sites, N_sites) from a nucleotide sequence."""
     seq = nuc_seq.upper()
     syn = 0
@@ -109,7 +91,7 @@ def _compute_sn_sites(nuc_seq):
         codon = seq[i:i + 3]
         if len(codon) != 3 or not all(b in _BASES for b in codon):
             continue
-        orig_aa = _CODON_TABLE.get(codon)
+        orig_aa = codon_to_aa.get(codon)
         if orig_aa is None or orig_aa == "*":
             continue
         for pos in range(3):
@@ -117,7 +99,7 @@ def _compute_sn_sites(nuc_seq):
                 if alt == codon[pos]:
                     continue
                 mutant = codon[:pos] + alt + codon[pos + 1:]
-                mut_aa = _CODON_TABLE.get(mutant)
+                mut_aa = codon_to_aa.get(mutant)
                 if mut_aa is not None:
                     if mut_aa == orig_aa:
                         syn += 1
@@ -154,7 +136,7 @@ CONTIG_BATCH_SIZE = 10_000
 def _resolve_feature_ids(conn):
     id_to_name = {}
     name_to_id = {}
-    for name in _DENSE_FEATURES + _SPARSE_FEATURES:
+    for name in _DENSE_FEATURE_NAMES + _SPARSE_FEATURE_NAMES:
         fid = feature_name_to_id(name, conn)
         if fid is not None:
             id_to_name[fid] = name
@@ -191,20 +173,21 @@ def _prefetch_batch_features(conn, sample_id, contig_id_batch, id_to_name):
     return zoom_by_contig, chunks_by_contig
 
 
-def _decode_contig_features(contig_id, contig_length, zoom_by_contig, chunks_by_contig, id_to_name, name_to_id):
+def _decode_contig_features(conn, contig_id, contig_length, zoom_by_contig, chunks_by_contig, id_to_name, name_to_id):
     """Decode all features for one contig from prefetched data."""
     zoom_map = zoom_by_contig.get(contig_id, {})
     chunks_map = chunks_by_contig.get(contig_id, {})
+    chunk_sz = get_chunk_size(conn)
 
     result = {}
 
-    for name in _DENSE_FEATURES:
+    for name in _DENSE_FEATURE_NAMES:
         fid = name_to_id.get(name)
         if fid is None or fid not in zoom_map or fid not in chunks_map:
             result[name] = np.zeros(contig_length, dtype=np.float64)
             continue
-        scale_div = get_scale_from_zoom_blob(zoom_map[fid])
-        data = decode_raw_chunks(chunks_map[fid], scale_div)
+        scale_div = get_blob_scale(conn, name)
+        data = decode_raw_chunks(chunks_map[fid], scale_div, chunk_sz)
         arr = np.zeros(contig_length, dtype=np.float64)
         x, y = data["x"], data["y"]
         valid = x < contig_length
@@ -212,13 +195,13 @@ def _decode_contig_features(contig_id, contig_length, zoom_by_contig, chunks_by_
         result[name] = arr
 
     _empty_sparse = {"x": np.array([], dtype=np.uint32), "y": np.array([], dtype=np.float64)}
-    for name in _SPARSE_FEATURES:
+    for name in _SPARSE_FEATURE_NAMES:
         fid = name_to_id.get(name)
         if fid is None or fid not in zoom_map or fid not in chunks_map:
             result[name] = _empty_sparse
             continue
-        scale_div = get_scale_from_zoom_blob(zoom_map[fid])
-        result[name] = decode_raw_sparse_chunks(chunks_map[fid], scale_div)
+        scale_div = get_blob_scale(conn, name)
+        result[name] = decode_raw_sparse_chunks(chunks_map[fid], scale_div, chunk_sz)
 
     return result
 
@@ -316,7 +299,7 @@ def process_sample(conn, sample_id, sample_name, contig_info, cov_map, af_map,
                         mag_af, mag_cov_tmean = mag_cov_map.get((mag_id, sample_id), (None, None))
 
             features = _decode_contig_features(
-                contig_id, contig_length, zoom_by_contig, chunks_by_contig,
+                conn, contig_id, contig_length, zoom_by_contig, chunks_by_contig,
                 id_to_name, name_to_id
             )
 
@@ -511,6 +494,9 @@ def run(args):
     contig_info = {r[0]: (r[1], r[2], r[3]) for r in contigs}
 
     id_to_name, name_to_id = _resolve_feature_ids(conn)
+    codon_to_aa = {r[0]: r[1] for r in conn.execute(
+        "SELECT Codon, AminoAcid FROM Codon_table"
+    ).fetchall()}
     has_sn_sites = _column_exists(conn, "Contig_annotation", "S_sites")
     has_coverage = _table_exists(conn, "Coverage")
 
@@ -540,7 +526,7 @@ def run(args):
         for r in raw:
             nuc_seq = r[4]
             if nuc_seq:
-                s, n = _compute_sn_sites(nuc_seq)
+                s, n = _compute_sn_sites(nuc_seq, codon_to_aa)
             else:
                 s, n = None, None
             all_genes.append((r[0], r[1], r[2], r[3], s, n))

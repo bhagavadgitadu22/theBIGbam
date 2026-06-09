@@ -64,14 +64,14 @@ Tables are grouped by what they describe. Not all tables are present in every da
 
 ### Visualization metadata
 
-| Table                      | Key                           | Description                                                                                                       |
-| -------------------------- | ----------------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| **Variable**               | `Variable_id`                 | Feature display properties: subplot assignment, module, color, alpha, size, encoding type, help text              |
-| **Column_scales**          | `(Feature_name, Column_name)` | Documents the integer scaling factor for each stored column so Python can decode back to real values              |
-| **Constants_for_plotting** | `Constant`                    | Boolean metadata flags about database content (e.g., whether modules are present)                                 |
-| **Color_templates**        | `Template_id`                 | Named color schemes (e.g., pharokka, generic)                                                                     |
-| **Color_rules**            | `Rule_id`                     | Individual coloring rules belonging to a template, matching qualifier values to colors                            |
-| **Database_metadata**      | `Key`                         | Key-value store for how the database was created/modified (theBIGbam version, creation date, modules, parameters) |
+| Table                      | Key                           | Description                                                                                                                                                                     |
+| -------------------------- | ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Variable**               | `Variable_id`                 | Feature display properties: subplot assignment, module, color, alpha, size, encoding type, help text                                                                            |
+| **Column_scales**          | `(Feature_name, Column_name)` | Documents the integer scaling factor for each stored column so Python can decode back to real values                                                                            |
+| **Constants_for_plotting** | `Constant`                    | Boolean metadata flags about database content (e.g., whether modules are present)                                                                                               |
+| **Color_templates**        | `Template_id`                 | Named color schemes (e.g., pharokka, generic)                                                                                                                                   |
+| **Color_rules**            | `Rule_id`                     | Individual coloring rules belonging to a template, matching qualifier values to colors                                                                                          |
+| **Database_metadata**      | `Key`                         | Key-value store for structural encoding constants (chunk size, zoom bin sizes, GC window sizes) and processing metadata (theBIGbam version, creation date, modules, parameters) |
 
 ### Views
 
@@ -140,9 +140,9 @@ Every scale factor is defined once in the Rust constant arrays in `src/types.rs`
 
 - **`COLUMN_SCALES`**: scale factors for SQL INTEGER columns of metric tables.
 - **`VARIABLES` / `ValueScale`**: scale factors for BLOB feature values. The `ValueScale` enum (`Raw`, `Times10`, `Times100`, `Times1000`) is encoded in each BLOB header byte.
-- **`METADATA_STATS_SCALE`** and **`METADATA_PREVALENCE_SCALE`**: scale factors for sparse event metadata fields associated to some features (stored inside the binary metadata section of feature sparse BLOBs).
+- **`METADATA_STATS_SCALE`** and **`METADATA_PREVALENCE_SCALE`**: scale factors for sparse event metadata fields (stored in `Column_scales` as `Sparse_metadata`/`Metadata_statistics` and `Sparse_metadata`/`Sequence_prevalence` respectively).
 
-At database creation, all scale factors are written to the `Column_scales` table. The `Explicit_*` SQL views read their divisors from this Rust array. The Python plotting and analysis code reads scales from the `Column_scales` table at runtime.
+At database creation, all scale factors are written to the `Column_scales` table. The `Explicit_*` SQL views read their divisors from the Rust arrays. The Python plotting and analysis code reads scales from `Column_scales`.
 
 ### SQL INTEGER columns
 
@@ -157,16 +157,18 @@ These are metric and summary columns in non-BLOB tables. The scale factor must b
 
 ### BLOB feature values
 
-| Scale    | Features                                                                                                                             | Why                              |
-| -------- | ------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------- |
-| x1 (Raw) | primary_reads, strand counts, secondary/supplementary, coverage_reduced, splicings, gc_content (0-100 per window), repeat/hit counts | Already integers (counts)        |
-| x10      | insert_sizes, read_lengths                                                                                                           | Averages per position (float)    |
-| x100     | mapq, gc_skew, repeat/hit identity                                                                                                   | Averages or ratios (float)       |
-| x1000    | mismatches, deletions, insertions, clippings, non_inward_pairs, mate_not_mapped, mate_on_another_contig, reads_starts, reads_ends    | Coverage-relative ratios (float) |
+| Scale    | Features                                                                                                                             |
+| -------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| x1 (Raw) | primary_reads, strand counts, secondary/supplementary, coverage_reduced, splicings, gc_content (0-100 per window), repeat/hit counts |
+| x10      | insert_sizes, read_lengths                                                                                                           |
+| x100     | mapq, gc_skew, repeat/hit identity                                                                                                   |
+| x1000    | mismatches, deletions, insertions, clippings, non_inward_pairs, mate_not_mapped, mate_on_another_contig, reads_starts, reads_ends    |
 
 ### BLOB sparse event metadata
 
-| Scale | Field               | What it represents                              |
-| ----- | ------------------- | ----------------------------------------------- |
-| x100  | mean, median, std   | Length statistics of the dominant variant       |
-| x1000 | sequence_prevalence | Fraction of reads carrying the dominant variant |
+Stored in `Column_scales` under the `Sparse_metadata` feature name:
+
+| Scale | Column_scales key     | Fields              | What it represents                              |
+| ----- | --------------------- | ------------------- | ----------------------------------------------- |
+| x100  | `Metadata_statistics` | mean, median, std   | Length statistics of the dominant variant       |
+| x1000 | `Sequence_prevalence` | sequence_prevalence | Fraction of reads carrying the dominant variant |

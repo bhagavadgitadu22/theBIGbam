@@ -18,56 +18,107 @@ except ImportError:
     import zlib  # fallback won't work, but gives clear error
 
 # ============================================================================
-# Constants
+# Binary format magic bytes (fixed protocol constants)
 # ============================================================================
 
 MAGIC = b"TBB\x01"
 ZOOM_MAGIC = b"TBZ\x01"
-CHUNK_SIZE = 65536
-# Zoom level bin sizes (100bp, 1000bp, 10000bp)
-ZOOM_BIN_SIZES = [100, 1000, 10000]
 
-# GC window sizes (must match src/gc_content.rs DEFAULT_GC_*_WINDOW_SIZE)
-GC_CONTENT_WINDOW_SIZE = 500
-GC_SKEW_WINDOW_SIZE = 1000
+# ============================================================================
+# Module-level caches — loaded lazily from the database on first access.
+# Column_scales: per-feature BLOB scales and sparse metadata scales.
+# Codon_table: codon/amino-acid lookup arrays for BLOB decoding.
+# Variable: which features live in Contig_blob vs Feature_blob.
+# Structural constants (chunk size, zoom bins, GC windows) live in Database_metadata.
+# ============================================================================
 
-def gc_window_size(feature_name):
-    """Return the window size for a windowed contig feature (GC content/skew), or 1 for base-resolution."""
+_scales_cache = None
+_codon_cache = None
+_contig_features_cache = None
+
+def init_scales(conn):
+    """Load all caches from the database. Call once per DB session."""
+    global _scales_cache, _codon_cache, _contig_features_cache
+    if _scales_cache is not None:
+        return
+    rows = conn.execute("SELECT Feature_name, Column_name, Scale FROM Column_scales").fetchall()
+    _scales_cache = {(r[0], r[1]): int(r[2]) for r in rows}
+
+    rows = conn.execute(
+        "SELECT Codon, AminoAcid, AminoAcid_name FROM Codon_table ORDER BY Codon"
+    ).fetchall()
+    if rows:
+        codon_list = [r[0] for r in rows]
+        aa_set = {}
+        for _, letter, name in rows:
+            if letter not in aa_set:
+                aa_set[letter] = f"{letter} ({name})"
+        aa_list = [aa_set[k] for k in sorted(aa_set)]
+        _codon_cache = {"codons": codon_list, "amino_acids": aa_list}
+
+    rows = conn.execute(
+        "SELECT Variable_name FROM Variable WHERE Feature_table_name = 'Contig_blob'"
+    ).fetchall()
+    _contig_features_cache = frozenset(r[0] for r in rows)
+
+def _ensure_scales(conn):
+    if _scales_cache is None:
+        init_scales(conn)
+    return _scales_cache
+
+def get_blob_scale(conn, feature_name):
+    """Get BLOB value scale divisor for a feature from Column_scales."""
+    return _ensure_scales(conn).get((feature_name, "Value"), 1)
+
+def _get_metadata_value(conn, key, default):
+    """Read a single value from Database_metadata by key."""
+    row = conn.execute(
+        "SELECT Value FROM Database_metadata WHERE Key = ?", (key,)
+    ).fetchone()
+    return int(row[0]) if row else default
+
+def get_chunk_size(conn):
+    """Get base-resolution chunk size from Database_metadata."""
+    return _get_metadata_value(conn, "Chunk_size", 65536)
+
+def get_zoom_bin_sizes(conn):
+    """Get zoom level bin sizes from Database_metadata."""
+    row = conn.execute(
+        "SELECT Value FROM Database_metadata WHERE Key = ?", ("Zoom_bin_sizes",)
+    ).fetchone()
+    if row:
+        return [int(x) for x in row[0].split(",")]
+    return [100, 1000, 10000]
+
+def get_gc_window_size(conn, feature_name):
+    """Get GC window size for a windowed contig feature, or 1 for base-resolution."""
     if feature_name == "gc_content":
-        return GC_CONTENT_WINDOW_SIZE
+        return _get_metadata_value(conn, "GC_content_window_size", 500)
     elif feature_name == "gc_skew":
-        return GC_SKEW_WINDOW_SIZE
+        return _get_metadata_value(conn, "GC_skew_window_size", 1000)
     return 1
 
-# Scale factor mapping (must match src/types.rs ValueScale)
-SCALE_DIVISORS = {0: 1, 1: 100, 2: 1000, 3: 10}
+def _metadata_stats_scale():
+    """Sparse metadata stats scale (mean/median/std)."""
+    return float(_scales_cache.get(("Sparse_metadata", "Metadata_statistics"), 100))
 
-# Sparse event metadata scales (must match src/types.rs METADATA_*_SCALE)
-METADATA_STATS_SCALE = 100.0
-METADATA_PREVALENCE_SCALE = 1000.0
-
-# Codon/AA tables (must match src/blob.rs)
-CODON_TABLE = [
-    "AAA", "AAC", "AAG", "AAT", "ACA", "ACC", "ACG", "ACT",
-    "AGA", "AGC", "AGG", "AGT", "ATA", "ATC", "ATG", "ATT",
-    "CAA", "CAC", "CAG", "CAT", "CCA", "CCC", "CCG", "CCT",
-    "CGA", "CGC", "CGG", "CGT", "CTA", "CTC", "CTG", "CTT",
-    "GAA", "GAC", "GAG", "GAT", "GCA", "GCC", "GCG", "GCT",
-    "GGA", "GGC", "GGG", "GGT", "GTA", "GTC", "GTG", "GTT",
-    "TAA", "TAC", "TAG", "TAT", "TCA", "TCC", "TCG", "TCT",
-    "TGA", "TGC", "TGG", "TGT", "TTA", "TTC", "TTG", "TTT",
-]
-
-AMINO_ACID_TABLE = [
-    "A (Alanine)", "C (Cysteine)", "D (Aspartic acid)", "E (Glutamic acid)",
-    "F (Phenylalanine)", "G (Glycine)", "H (Histidine)", "I (Isoleucine)",
-    "K (Lysine)", "L (Leucine)", "M (Methionine)", "N (Asparagine)",
-    "P (Proline)", "Q (Glutamine)", "R (Arginine)", "S (Serine)",
-    "T (Threonine)", "V (Valine)", "W (Tryptophan)", "Y (Tyrosine)",
-    "* (Stop)",
-]
+def _metadata_prevalence_scale():
+    """Sparse metadata prevalence scale."""
+    return float(_scales_cache.get(("Sparse_metadata", "Sequence_prevalence"), 1000))
 
 CODON_CATEGORIES = {0: "Synonymous", 1: "Non-synonymous", 2: "Intergenic"}
+
+def _get_codon_table():
+    """Codon list (alphabetical, matching Rust CODON_TABLE index order). Loaded from Codon_table DB."""
+    if _codon_cache is not None:
+        return _codon_cache["codons"]
+    return None
+
+def _get_amino_acid_table():
+    """Amino acid display strings (alphabetical, matching Rust AMINO_ACID_TABLE index order). Loaded from Codon_table DB."""
+    if _codon_cache is not None:
+        return _codon_cache["amino_acids"]
+    return None
 
 
 # ============================================================================
@@ -135,7 +186,6 @@ def _parse_header(blob):
         "has_codons": bool(flags_byte & 0x08),
         "has_partner": bool(flags_byte & 0x10),
         "scale_code": scale_code,
-        "scale_divisor": SCALE_DIVISORS.get(scale_code, 1),
         "num_zoom_levels": num_zoom_levels,
         "contig_length": contig_length,
         "base_block_offset": base_block_offset,
@@ -211,13 +261,13 @@ def _decode_sparse_base(blob, header):
     return positions[:event_count].astype(np.uint32), values[:event_count].astype(np.int32)
 
 
-def decode_raw_chunks(chunk_rows, scale_divisor, chunk_size=CHUNK_SIZE):
+def decode_raw_chunks(chunk_rows, scale_divisor, chunk_size):
     """Decode raw chunk blobs fetched from Feature_blob_chunk / Contig_blob_chunk.
 
     Args:
         chunk_rows: list of (chunk_idx, raw_bytes) sorted by chunk_idx
-        scale_divisor: value scale divisor (1, 100, 1000, or 10)
-        chunk_size: positions per chunk (default 65536)
+        scale_divisor: value scale divisor (from get_blob_scale())
+        chunk_size: positions per chunk (from get_chunk_size())
 
     Returns dict: {"x": ndarray, "y": ndarray, "sparse": False}
     """
@@ -239,18 +289,6 @@ def decode_raw_chunks(chunk_rows, scale_divisor, chunk_size=CHUNK_SIZE):
     return {"x": x, "y": values, "sparse": False}
 
 
-def get_scale_from_zoom_blob(zoom_blob_bytes):
-    """Extract scale divisor from a standalone zoom BLOB (TBZ format).
-
-    Returns scale divisor (1, 100, 1000, or 10), or 1 if parsing fails.
-    """
-    if isinstance(zoom_blob_bytes, memoryview):
-        zoom_blob_bytes = bytes(zoom_blob_bytes)
-    if len(zoom_blob_bytes) < 16 or zoom_blob_bytes[:4] != ZOOM_MAGIC:
-        return 1
-    scale_code = zoom_blob_bytes[4]
-    return SCALE_DIVISORS.get(scale_code, 1)
-
 
 def is_sparse_zoom_blob(zoom_blob_bytes):
     """Check if a standalone zoom BLOB represents sparse data."""
@@ -269,11 +307,12 @@ def _decode_chunk_metadata(meta_data, event_count, has_stats, has_sequence, has_
     n = event_count
 
     if has_stats:
-        result["mean"] = np.frombuffer(meta_data[pos:pos + n * 4], dtype="<i4") / METADATA_STATS_SCALE
+        stats_scale = _metadata_stats_scale()
+        result["mean"] = np.frombuffer(meta_data[pos:pos + n * 4], dtype="<i4") / stats_scale
         pos += n * 4
-        result["median"] = np.frombuffer(meta_data[pos:pos + n * 4], dtype="<i4") / METADATA_STATS_SCALE
+        result["median"] = np.frombuffer(meta_data[pos:pos + n * 4], dtype="<i4") / stats_scale
         pos += n * 4
-        result["std"] = np.frombuffer(meta_data[pos:pos + n * 4], dtype="<i4") / METADATA_STATS_SCALE
+        result["std"] = np.frombuffer(meta_data[pos:pos + n * 4], dtype="<i4") / stats_scale
         pos += n * 4
 
     if has_sequence:
@@ -287,7 +326,7 @@ def _decode_chunk_metadata(meta_data, event_count, has_stats, has_sequence, has_
             else:
                 sequences.append(None)
         result["sequence"] = sequences
-        result["sequence_prevalence"] = np.frombuffer(meta_data[pos:pos + n * 2], dtype="<i2").astype(np.float64) / (METADATA_PREVALENCE_SCALE / 100.0)
+        result["sequence_prevalence"] = np.frombuffer(meta_data[pos:pos + n * 2], dtype="<i2").astype(np.float64) / (_metadata_prevalence_scale() / 100.0)
         pos += n * 2
 
     if has_codons:
@@ -297,9 +336,11 @@ def _decode_chunk_metadata(meta_data, event_count, has_stats, has_sequence, has_
         pos += n
         aa_id_bytes = meta_data[pos:pos + n]
         pos += n
+        codons = _get_codon_table()
+        amino_acids = _get_amino_acid_table()
         result["codon_category"] = [CODON_CATEGORIES.get(cat_bytes[i]) for i in range(n)]
-        result["codon_change"] = [CODON_TABLE[codon_id_bytes[i]] if codon_id_bytes[i] < 64 else None for i in range(n)]
-        result["aa_change"] = [AMINO_ACID_TABLE[aa_id_bytes[i]] if aa_id_bytes[i] < 21 else None for i in range(n)]
+        result["codon_change"] = [codons[codon_id_bytes[i]] if codons and codon_id_bytes[i] < len(codons) else None for i in range(n)]
+        result["aa_change"] = [amino_acids[aa_id_bytes[i]] if amino_acids and aa_id_bytes[i] < len(amino_acids) else None for i in range(n)]
 
     if has_partner:
         result["partner_contig_id"] = np.frombuffer(meta_data[pos:pos + n * 4], dtype="<i4").copy()
@@ -308,7 +349,7 @@ def _decode_chunk_metadata(meta_data, event_count, has_stats, has_sequence, has_
     return result
 
 
-def decode_raw_sparse_chunks(chunk_rows, scale_divisor, chunk_size=CHUNK_SIZE):
+def decode_raw_sparse_chunks(chunk_rows, scale_divisor, chunk_size):
     """Decode raw sparse chunk blobs from Feature_blob_chunk / Contig_blob_chunk.
 
     Each chunk blob format:
@@ -411,16 +452,17 @@ def _decode_sparse_metadata(blob, header, event_count):
 
     # Stats: mean[], median[], std[] as i32 arrays
     if header["has_stats"]:
+        stats_scale = _metadata_stats_scale()
         mean_bytes = meta_data[pos:pos + n * 4]
-        result["mean"] = np.frombuffer(mean_bytes, dtype="<i4") / METADATA_STATS_SCALE
+        result["mean"] = np.frombuffer(mean_bytes, dtype="<i4") / stats_scale
         pos += n * 4
 
         median_bytes = meta_data[pos:pos + n * 4]
-        result["median"] = np.frombuffer(median_bytes, dtype="<i4") / METADATA_STATS_SCALE
+        result["median"] = np.frombuffer(median_bytes, dtype="<i4") / stats_scale
         pos += n * 4
 
         std_bytes = meta_data[pos:pos + n * 4]
-        result["std"] = np.frombuffer(std_bytes, dtype="<i4") / METADATA_STATS_SCALE
+        result["std"] = np.frombuffer(std_bytes, dtype="<i4") / stats_scale
         pos += n * 4
 
     # Sequences: [len: u8, bytes[len]] per event, then prevalence[n] as i16
@@ -438,7 +480,7 @@ def _decode_sparse_metadata(blob, header, event_count):
         result["sequence"] = sequences
 
         prev_bytes = meta_data[pos:pos + n * 2]
-        result["sequence_prevalence"] = np.frombuffer(prev_bytes, dtype="<i2").astype(np.float64) / (METADATA_PREVALENCE_SCALE / 100.0)
+        result["sequence_prevalence"] = np.frombuffer(prev_bytes, dtype="<i2").astype(np.float64) / (_metadata_prevalence_scale() / 100.0)
         pos += n * 2
 
     # Codons: category[], codon_id[], aa_id[] each as u8 arrays
@@ -450,6 +492,8 @@ def _decode_sparse_metadata(blob, header, event_count):
         aa_id_bytes = meta_data[pos:pos + n]
         pos += n
 
+        codon_tbl = _get_codon_table()
+        aa_tbl = _get_amino_acid_table()
         categories = []
         codons = []
         amino_acids = []
@@ -457,9 +501,9 @@ def _decode_sparse_metadata(blob, header, event_count):
             cat = cat_bytes[i]
             categories.append(CODON_CATEGORIES.get(cat))
             cid = codon_id_bytes[i]
-            codons.append(CODON_TABLE[cid] if cid < 64 else None)
+            codons.append(codon_tbl[cid] if codon_tbl and cid < len(codon_tbl) else None)
             aid = aa_id_bytes[i]
-            amino_acids.append(AMINO_ACID_TABLE[aid] if aid < 21 else None)
+            amino_acids.append(aa_tbl[aid] if aa_tbl and aid < len(aa_tbl) else None)
 
         result["codon_category"] = categories
         result["codon_change"] = codons
@@ -477,7 +521,7 @@ def _decode_sparse_metadata(blob, header, event_count):
 # Zoom Level Decoding
 # ============================================================================
 
-def _decode_zoom_levels(blob, header):
+def _decode_zoom_levels(blob, header, zoom_bin_sizes):
     """Decode all zoom levels from BLOB.
 
     Format: sparse features store only max_value(i32), dense features store only mean(i32).
@@ -486,17 +530,14 @@ def _decode_zoom_levels(blob, header):
     is_sparse = header["sparse"]
     levels = []
 
+    effective_bins = [10000] if header["num_zoom_levels"] == 1 else zoom_bin_sizes
     for level_idx in range(header["num_zoom_levels"]):
         compressed_size = struct.unpack_from("<I", blob, offset)[0]
         offset += 4
         level_data = _zstd_decompress(blob[offset:offset + compressed_size])
         offset += compressed_size
 
-        if header["num_zoom_levels"] == 1:
-            zoom_bin_sizes = [10000]
-        else:
-            zoom_bin_sizes = ZOOM_BIN_SIZES
-        bin_size = zoom_bin_sizes[level_idx] if level_idx < len(zoom_bin_sizes) else 10000
+        bin_size = effective_bins[level_idx] if level_idx < len(effective_bins) else 10000
         contig_length = header["contig_length"]
         num_bins = (contig_length + bin_size - 1) // bin_size
 
@@ -545,22 +586,25 @@ def _decode_zoom_levels(blob, header):
 # Public API
 # ============================================================================
 
-def decode_blob(blob_bytes):
+def decode_blob(blob_bytes, scale_divisor):
     """
     Decode a Feature_blob BLOB to arrays.
+
+    Args:
+        blob_bytes: Raw BLOB bytes
+        scale_divisor: value scale divisor (from get_blob_scale())
 
     Returns dict:
     - For dense: {"x": ndarray, "y": ndarray}
     - For sparse: {"x": ndarray, "y": ndarray, ...metadata fields}
 
-    Values are automatically descaled (e.g., ÷100 for Times100, ÷1000 for Times1000).
-    Positions in x are 0-indexed.
+    Values are automatically descaled. Positions in x are 0-indexed.
     """
     if isinstance(blob_bytes, memoryview):
         blob_bytes = bytes(blob_bytes)
 
     header = _parse_header(blob_bytes)
-    scale = header["scale_divisor"]
+    scale = scale_divisor
 
     if header["sparse"]:
         positions, values = _decode_sparse_base(blob_bytes, header)
@@ -590,37 +634,6 @@ def decode_blob(blob_bytes):
             "y": values.astype(np.float64) / scale if scale != 1 else values.astype(np.float64),
             "sparse": False,
         }
-
-
-def decode_zoom_level(blob_bytes, level):
-    """
-    Decode pre-computed zoom summaries for a specific level index.
-
-    Note: Prefer decode_zoom_by_bin_size() for more flexible access.
-
-    Args:
-        blob_bytes: Raw BLOB bytes
-        level: Zoom level index (0=100bp, 1=1000bp, 2=10000bp)
-
-    Returns dict:
-        {"bin_start": ndarray, "bin_end": ndarray, "mean": ndarray, ...}
-        For sparse features: includes "max", only nonzero bins
-        For dense features: includes "mean", all bins
-    """
-    if isinstance(blob_bytes, memoryview):
-        blob_bytes = bytes(blob_bytes)
-
-    header = _parse_header(blob_bytes)
-    scale = header["scale_divisor"]
-    levels = _decode_zoom_levels(blob_bytes, header)
-
-    if level >= len(levels):
-        raise ValueError(f"Zoom level {level} not available (have {len(levels)} levels)")
-
-    zoom = levels[level]
-    return _zoom_bins_to_dict(
-        zoom["bins"], zoom["bin_size"], header["contig_length"], scale, header["sparse"]
-    )
 
 
 def _zoom_bins_to_dict(bins, bin_size, contig_length, scale, is_sparse):
@@ -653,18 +666,17 @@ def _zoom_bins_to_dict(bins, bin_size, contig_length, scale, is_sparse):
         }
 
 
-def decode_zoom_by_bin_size(blob_bytes, target_bin_size):
+def decode_zoom_by_bin_size(blob_bytes, target_bin_size, scale_divisor, zoom_bin_sizes):
     """
     Decode pre-computed zoom summaries by target bin size with fallback.
 
-    Available bin sizes: 100bp, 1000bp, 10000bp
-
     If target_bin_size is not available, tries to use the next larger available bin size.
-    For Contig_blob (1 zoom level), uses base resolution if 10kbp is not available.
 
     Args:
         blob_bytes: Raw BLOB bytes
         target_bin_size: Desired bin size (100, 1000, 10000, etc.)
+        scale_divisor: value scale divisor (from get_blob_scale())
+        zoom_bin_sizes: list of zoom bin sizes (from get_zoom_bin_sizes())
 
     Returns dict or None if no suitable bin size is available.
     """
@@ -672,15 +684,13 @@ def decode_zoom_by_bin_size(blob_bytes, target_bin_size):
         blob_bytes = bytes(blob_bytes)
 
     header = _parse_header(blob_bytes)
-    scale = header["scale_divisor"]
+    scale = scale_divisor
     is_sparse = header["sparse"]
     contig_length = header["contig_length"]
-    levels = _decode_zoom_levels(blob_bytes, header)
+    levels = _decode_zoom_levels(blob_bytes, header, zoom_bin_sizes)
 
-    # Try exact match first, then next larger bin size
-    available_bins = [100, 1000, 10000]
     bin_sizes_to_try = [target_bin_size]
-    fallback = [b for b in available_bins if b > target_bin_size]
+    fallback = [b for b in zoom_bin_sizes if b > target_bin_size]
     if fallback:
         bin_sizes_to_try.append(min(fallback))
 
@@ -693,15 +703,18 @@ def decode_zoom_by_bin_size(blob_bytes, target_bin_size):
     return None
 
 
-def decode_zoom_standalone(zoom_blob_bytes, target_bin_size):
+def decode_zoom_standalone(zoom_blob_bytes, target_bin_size, scale_divisor, zoom_bin_sizes):
     """
     Decode zoom levels from a standalone Zoom_data BLOB (TBZ format).
 
     This is the lightweight alternative to decode_zoom_by_bin_size() that works
     on the separate Zoom_data column, avoiding the need to fetch the full Data BLOB.
 
-    Format: ZOOM_MAGIC (4) + scale_code (1) + flags (1) + num_zoom_levels (1)
-          + reserved (1) + contig_length (4) + reserved (4) = 16-byte header + zoom data
+    Args:
+        zoom_blob_bytes: Raw zoom BLOB bytes (TBZ format)
+        target_bin_size: Desired bin size (100, 1000, 10000, etc.)
+        scale_divisor: value scale divisor (from get_blob_scale())
+        zoom_bin_sizes: list of zoom bin sizes (from get_zoom_bin_sizes())
 
     Returns dict or None if no suitable bin size is available.
     """
@@ -711,18 +724,14 @@ def decode_zoom_standalone(zoom_blob_bytes, target_bin_size):
     if len(zoom_blob_bytes) < 16 or zoom_blob_bytes[:4] != ZOOM_MAGIC:
         return None
 
-    scale_code = zoom_blob_bytes[4]
     flags_byte = zoom_blob_bytes[5]
     num_zoom_levels = zoom_blob_bytes[6]
     contig_length = struct.unpack_from("<I", zoom_blob_bytes, 8)[0]
 
-    scale = SCALE_DIVISORS.get(scale_code, 1)
+    scale = scale_divisor
     is_sparse = (flags_byte & 0x01) != 0
 
-    if num_zoom_levels == 1:
-        zoom_bin_sizes = [10000]
-    else:
-        zoom_bin_sizes = ZOOM_BIN_SIZES
+    effective_bins = [10000] if num_zoom_levels == 1 else zoom_bin_sizes
 
     # Decode zoom levels from offset 16
     offset = 16
@@ -737,7 +746,7 @@ def decode_zoom_standalone(zoom_blob_bytes, target_bin_size):
         level_data = _zstd_decompress(zoom_blob_bytes[offset:offset + compressed_size])
         offset += compressed_size
 
-        bin_size = zoom_bin_sizes[level_idx] if level_idx < len(zoom_bin_sizes) else 10000
+        bin_size = effective_bins[level_idx] if level_idx < len(effective_bins) else 10000
         num_bins = (contig_length + bin_size - 1) // bin_size
 
         if is_sparse:
@@ -773,10 +782,8 @@ def decode_zoom_standalone(zoom_blob_bytes, target_bin_size):
 
         levels.append({"bin_size": bin_size, "bins": bins})
 
-    # Try exact match first, then next larger bin size
-    available_bins = [100, 1000, 10000]
     bin_sizes_to_try = [target_bin_size]
-    fallback = [b for b in available_bins if b > target_bin_size]
+    fallback = [b for b in zoom_bin_sizes if b > target_bin_size]
     if fallback:
         bin_sizes_to_try.append(min(fallback))
 
@@ -788,32 +795,9 @@ def decode_zoom_standalone(zoom_blob_bytes, target_bin_size):
     return None
 
 
-def get_blob_header(blob_bytes):
-    """Parse and return the BLOB header as a dict (for inspection/debugging)."""
-    if isinstance(blob_bytes, memoryview):
-        blob_bytes = bytes(blob_bytes)
-    return _parse_header(blob_bytes)
-
-
 # ============================================================================
 # Feature ID Mapping (read from DB Variable table)
 # ============================================================================
-
-# Feature names whose blobs live in Contig_blob (per-contig scope) rather than
-# Feature_blob (per-sample scope). Names are stable — they match VARIABLES.name
-# in src/types.rs — so this set is safe to hardcode. The numeric Feature_id is
-# resolved at runtime via feature_name_to_id(name, conn) from the Variable table.
-_CONTIG_BLOB_FEATURES = frozenset({
-    "direct_repeat_count",
-    "inverted_repeat_count",
-    "direct_repeat_identity",
-    "inverted_repeat_identity",
-    "hit_count_within_mag",
-    "hit_identity_within_mag",
-    "gc_content",
-    "gc_skew",
-})
-
 
 def feature_name_to_id(name, conn):
     """Look up Feature_id from the Variable table (1-based).
@@ -828,7 +812,12 @@ def feature_name_to_id(name, conn):
 
 
 def is_contig_blob_feature(name):
-    """True if `name` is stored in Contig_blob (per-contig) rather than Feature_blob (per-sample)."""
-    return name in _CONTIG_BLOB_FEATURES
+    """True if `name` is stored in Contig_blob (per-contig) rather than Feature_blob (per-sample).
+
+    Loaded from Variable.Feature_table_name at init_scales() time.
+    """
+    if _contig_features_cache is not None:
+        return name in _contig_features_cache
+    return False
 
 

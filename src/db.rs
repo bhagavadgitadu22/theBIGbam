@@ -1304,9 +1304,9 @@ impl DbWriter {
         )?;
 
         for data in gc_data {
-            let s_sd = crate::types::get_column_scale("Contig", "GC_sd");
-            let s_amp = crate::types::get_column_scale("Contig", "GC_skew_amplitude");
-            let s_pos = crate::types::get_column_scale("Contig", "Positive_GC_skew_windows_percentage");
+            let s_sd = crate::types::get_column_scale("Contig", "GC_sd") as f32;
+            let s_amp = crate::types::get_column_scale("Contig", "GC_skew_amplitude") as f32;
+            let s_pos = crate::types::get_column_scale("Contig", "Positive_GC_skew_windows_percentage") as f32;
             stmt.execute(params![
                 data.stats.average.round() as i32,
                 (data.stats.sd * s_sd).round() as i32,
@@ -1497,7 +1497,7 @@ impl DbWriter {
         }
 
         if hits_by_contig.is_empty() {
-            return Ok(());
+            return Ok(vec![]);
         }
 
         let total_contigs = hits_by_contig.len();
@@ -1639,6 +1639,11 @@ impl DbWriter {
 
         let modules_str = modules.join(",");
 
+        let zoom_bins: String = crate::blob::ZOOM_BIN_SIZES.iter()
+            .map(|b| b.to_string()).collect::<Vec<_>>().join(",");
+        let contig_zoom_bins: String = crate::blob::CONTIG_ZOOM_BIN_SIZES.iter()
+            .map(|b| b.to_string()).collect::<Vec<_>>().join(",");
+
         let rows: Vec<(&str, String)> = vec![
             ("Date_of_creation", now.clone()),
             ("Date_of_last_modification", now),
@@ -1652,6 +1657,11 @@ impl DbWriter {
             ("Min_occurrences", min_occurrences.to_string()),
             ("View_mode", view_mode.to_string()),
             ("Blast_enabled", blast.to_string()),
+            ("Chunk_size", crate::blob::CHUNK_SIZE.to_string()),
+            ("Zoom_bin_sizes", zoom_bins),
+            ("Contig_zoom_bin_sizes", contig_zoom_bins),
+            ("GC_content_window_size", crate::gc_content::DEFAULT_GC_CONTENT_WINDOW_SIZE.to_string()),
+            ("GC_skew_window_size", crate::gc_content::DEFAULT_GC_SKEW_WINDOW_SIZE.to_string()),
         ];
 
         for (key, value) in &rows {
@@ -2163,15 +2173,13 @@ fn create_core_tables(conn: &Connection, has_bam: bool, is_mag_mode: bool) -> Re
                 .context("Failed to append Column_scales row")?;
         }
         // BLOB feature values — from VARIABLES in types.rs
-        for v in &crate::types::VARIABLES {
+        for v in crate::types::VARIABLES {
             appender.append_row(params![v.name, "Value", v.value_scale.multiplier() as i32])
                 .context("Failed to append Column_scales row")?;
         }
-        // BLOB sparse metadata — from constants in types.rs
-        appender.append_row(params!["sparse_metadata", "mean", crate::types::METADATA_STATS_SCALE as i32])?;
-        appender.append_row(params!["sparse_metadata", "median", crate::types::METADATA_STATS_SCALE as i32])?;
-        appender.append_row(params!["sparse_metadata", "std", crate::types::METADATA_STATS_SCALE as i32])?;
-        appender.append_row(params!["sparse_metadata", "sequence_prevalence", crate::types::METADATA_PREVALENCE_SCALE as i32])?;
+        // BLOB sparse metadata scales
+        appender.append_row(params!["Sparse_metadata", "Metadata_statistics", crate::types::METADATA_STATS_SCALE as i32])?;
+        appender.append_row(params!["Sparse_metadata", "Sequence_prevalence", crate::types::METADATA_PREVALENCE_SCALE as i32])?;
         appender.flush().context("Failed to flush Column_scales appender")?;
     }
 
@@ -3105,7 +3113,6 @@ fn create_views(conn: &Connection, has_bam: bool, is_mag_mode: bool) -> Result<(
     // All per-sample features (including primary_reads) are now stored in Feature_blob.
     // Repeat features are converted to Contig_blob via DbWriter::convert_repeat_blobs,
     // called in pre-sample setup so MAG-scale aggregation can read them.
-    if has_bam {
     use crate::types::get_column_scale;
     let s_af  = get_column_scale("Coverage", "Aligned_fraction_percentage");
     let s_eaf = get_column_scale("Coverage", "Expected_aligned_fraction");
@@ -3117,6 +3124,7 @@ fn create_views(conn: &Connection, has_bam: bool, is_mag_mode: bool) -> Result<(
     let s_sc  = get_column_scale("Side_misassembly", "Contig_start_collapse_percentage");
     let s_ec  = get_column_scale("Side_misassembly", "Contig_end_collapse_percentage");
 
+    if has_bam {
     // Explicit_coverage VIEW with RPKM and TPM
     conn.execute(
         &format!("CREATE VIEW Explicit_coverage AS

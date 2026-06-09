@@ -11,16 +11,16 @@
 // ============================================================================
 
 /// Positions per chunk for large genomes
-const CHUNK_SIZE: u32 = 65536;
+pub const CHUNK_SIZE: u32 = 65536;
 
 /// Zoom level bin sizes (100bp, 1000bp, 10000bp)
-const ZOOM_BIN_SIZES: &[u32] = &[100, 1000, 10000];
+pub const ZOOM_BIN_SIZES: &[u32] = &[100, 1000, 10000];
 
 /// Zoom level bin sizes for windowed contig features (GC content, GC skew only).
 /// Only 10kbp zoom — these features are already windowed (500bp / 1000bp),
 /// so finer bins would not add resolution.
 /// Repeat and BLAST features use ZOOM_BIN_SIZES via encode_sparse_blob().
-const CONTIG_ZOOM_BIN_SIZES: &[u32] = &[10000];
+pub const CONTIG_ZOOM_BIN_SIZES: &[u32] = &[10000];
 
 /// Zstd compression level (3 = good balance of speed and compression)
 const ZSTD_LEVEL: i32 = 3;

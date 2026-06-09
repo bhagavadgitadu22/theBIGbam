@@ -26,12 +26,11 @@ def blob_to_int_array(conn, contig_id, sample_id, feature_name, length):
     """
     from thebigbam.database.blob_decoder import (
         feature_name_to_id, decode_raw_chunks, decode_raw_sparse_chunks,
-        get_scale_from_zoom_blob, is_sparse_zoom_blob,
+        get_blob_scale, get_chunk_size, is_sparse_zoom_blob,
     )
 
     fid = feature_name_to_id(feature_name, conn)
 
-    # Get scale/sparse info from zoom blob
     row = conn.execute(
         "SELECT Zoom_data FROM Feature_blob WHERE Contig_id=? AND Sample_id=? AND Feature_id=?",
         (contig_id, sample_id, fid)
@@ -39,10 +38,10 @@ def blob_to_int_array(conn, contig_id, sample_id, feature_name, length):
     if row is None:
         return [0] * length
     zoom_blob = bytes(row[0])
-    scale_div = get_scale_from_zoom_blob(zoom_blob)
+    scale_div = get_blob_scale(conn, feature_name)
+    chunk_sz = get_chunk_size(conn)
     sparse = is_sparse_zoom_blob(zoom_blob)
 
-    # Decode from chunks
     chunk_rows = conn.execute(
         "SELECT Chunk_idx, Data FROM Feature_blob_chunk "
         "WHERE Contig_id=? AND Sample_id=? AND Feature_id=? ORDER BY Chunk_idx",
@@ -52,7 +51,7 @@ def blob_to_int_array(conn, contig_id, sample_id, feature_name, length):
         return [0] * length
     chunk_rows = [(r[0], r[1]) for r in chunk_rows]
 
-    data = decode_raw_sparse_chunks(chunk_rows, scale_div) if sparse else decode_raw_chunks(chunk_rows, scale_div)
+    data = decode_raw_sparse_chunks(chunk_rows, scale_div, chunk_sz) if sparse else decode_raw_chunks(chunk_rows, scale_div, chunk_sz)
     x = data["x"]
     y = data["y"]
 

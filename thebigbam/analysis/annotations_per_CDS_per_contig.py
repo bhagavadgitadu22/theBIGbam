@@ -22,8 +22,7 @@ import duckdb
 from thebigbam.database.blob_decoder import (
     feature_name_to_id,
     decode_raw_chunks,
-    get_scale_from_zoom_blob,
-    GC_CONTENT_WINDOW_SIZE,
+    get_blob_scale, get_chunk_size, get_gc_window_size,
 )
 
 
@@ -70,17 +69,16 @@ def _prefetch_batch_gc(conn, contig_id_batch, gc_feature_id):
     return zoom_by_contig, chunks_by_contig
 
 
-def _decode_gc_array(contig_id, contig_length, zoom_by_contig, chunks_by_contig):
+def _decode_gc_array(contig_id, contig_length, zoom_by_contig, chunks_by_contig,
+                     scale_div, chunk_sz, window_size):
     """Decode GC content array for one contig from prefetched data."""
     zoom_blob = zoom_by_contig.get(contig_id)
     chunk_rows = chunks_by_contig.get(contig_id)
     if zoom_blob is None or not chunk_rows:
         return None
 
-    scale_div = get_scale_from_zoom_blob(zoom_blob)
-    data = decode_raw_chunks(chunk_rows, scale_div)
+    data = decode_raw_chunks(chunk_rows, scale_div, chunk_sz)
 
-    window_size = GC_CONTENT_WINDOW_SIZE
     arr = np.full(contig_length, np.nan, dtype=np.float64)
     for i in range(len(data["x"])):
         start = int(data["x"][i]) * window_size
@@ -171,6 +169,9 @@ def run(args):
 
     total_cds = 0
     gc_feature_id = feature_name_to_id("gc_content", conn)
+    gc_scale_div = get_blob_scale(conn, "gc_content")
+    gc_chunk_sz = get_chunk_size(conn)
+    gc_window_sz = get_gc_window_size(conn, "gc_content")
 
     with open(args.output, "w", newline="") as f:
         writer = csv.writer(f, delimiter="\t")
@@ -217,7 +218,8 @@ def run(args):
                 if not contig_cds:
                     continue
 
-                gc_arr = _decode_gc_array(contig_id, contig_length, gc_zoom, gc_chunks)
+                gc_arr = _decode_gc_array(contig_id, contig_length, gc_zoom, gc_chunks,
+                                         gc_scale_div, gc_chunk_sz, gc_window_sz)
                 mag_name = contig_to_mag.get(contig_name, "") if mag_mode else None
 
                 for gene_idx, (ann_id, start, end, strand, main_isoform) in enumerate(contig_cds, start=1):

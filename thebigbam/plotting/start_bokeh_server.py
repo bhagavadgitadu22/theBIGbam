@@ -26,6 +26,9 @@ def preload_db_data(db_path, enable_timing=False):
     conn = _duckdb.connect(db_path, read_only=True)
     cur = conn.cursor()
 
+    from thebigbam.database.blob_decoder import init_scales
+    init_scales(conn)
+
     _FILTER_ENCODE.update(_make_filter_encode(conn))
 
     if enable_timing:

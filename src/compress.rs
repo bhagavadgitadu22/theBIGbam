@@ -21,45 +21,30 @@ pub struct Run {
     pub end_pos: i32,
     /// The value for this run
     pub value: f32,
-    /// Optional relative value (value / coverage * 1000) for coverage-dependent features
-    pub value_relative: Option<f32>,
 }
 
 // ============================================================================
 // MAIN COMPRESSION FUNCTION
 // ============================================================================
 
-/// Filter positions by coverage threshold and compute relative values.
+/// Filter positions by coverage threshold.
 ///
-/// Returns Vec of (position, value, value_relative) tuples for positions where
-/// value > coverage * threshold.
-///
-/// # Arguments
-/// * `values` - The signal values (e.g., mismatches, non_inward_pairs)
-/// * `coverage` - The coverage reference signal
-/// * `threshold` - Fraction threshold (e.g., 0.1 for 10%)
-///
-/// # Returns
-/// Vector of (0-indexed position, absolute value, relative value * 1000)
-fn filter_by_coverage(values: &[f64], coverage: &[f64], threshold: f64) -> Vec<(usize, f32, f32)> {
+/// Returns Vec of (position, value) tuples for positions where
+/// value >= coverage * threshold.
+fn filter_by_coverage(values: &[f64], coverage: &[f64], threshold: f64) -> Vec<(usize, f32)> {
     let n = values.len().min(coverage.len());
     let mut filtered = Vec::new();
-    
+
     for i in 0..n {
         let val = values[i];
         let cov = coverage[i];
         let thresh = cov * threshold;
-        
+
         if val >= thresh {
-            let value_relative = if cov > 0.0 {
-                ((val / cov) * 1000.0) as f32
-            } else {
-                0.0
-            };
-            filtered.push((i, val as f32, value_relative));
+            filtered.push((i, val as f32));
         }
     }
-    
+
     filtered
 }
 
@@ -110,13 +95,12 @@ pub fn compress_signal_with_reference(
     if matches!(plot_type, PlotType::Bars) && reference.is_some() {
         let coverage = reference.unwrap();
         let filtered = filter_by_coverage(values, coverage, bar_ratio);
-        
-        for (pos, val, val_rel) in filtered {
+
+        for (pos, val) in filtered {
             runs.push(Run {
                 start_pos: (pos + 1) as i32,
                 end_pos: (pos + 1) as i32,
                 value: val,
-                value_relative: Some(val_rel),
             });
         }
         return runs;
@@ -126,53 +110,40 @@ pub fn compress_signal_with_reference(
     if matches!(plot_type, PlotType::Curve) && reference.is_some() {
         let coverage = reference.unwrap();
         let filtered = filter_by_coverage(values, coverage, bar_ratio);
-        
+
         if filtered.is_empty() {
             return runs;
         }
 
-        // Start first run
         let mut run_start_idx = 0;
         let mut current_value = filtered[0].1;
-        let mut rel_sum = filtered[0].2 as f64;
-        let mut rel_count = 1;
 
         for i in 1..filtered.len() {
-            let (pos, val, val_rel) = filtered[i];
+            let (pos, val) = filtered[i];
             let prev_pos = filtered[i - 1].0;
 
-            // Check if consecutive positions with same value
             if pos == prev_pos + 1 && (val - current_value).abs() < 1e-6 {
                 // Extend run
-                rel_sum += val_rel as f64;
-                rel_count += 1;
             } else {
-                // Close current run
                 let run_start_pos = filtered[run_start_idx].0;
                 let run_end_pos = filtered[i - 1].0;
                 runs.push(Run {
                     start_pos: (run_start_pos + 1) as i32,
                     end_pos: (run_end_pos + 1) as i32,
                     value: current_value,
-                    value_relative: Some((rel_sum / rel_count as f64) as f32),
                 });
 
-                // Start new run
                 run_start_idx = i;
                 current_value = val;
-                rel_sum = val_rel as f64;
-                rel_count = 1;
             }
         }
 
-        // Save last run
         let run_start_pos = filtered[run_start_idx].0;
         let run_end_pos = filtered[filtered.len() - 1].0;
         runs.push(Run {
             start_pos: (run_start_pos + 1) as i32,
             end_pos: (run_end_pos + 1) as i32,
             value: current_value,
-            value_relative: Some((rel_sum / rel_count as f64) as f32),
         });
 
         return runs;
@@ -205,12 +176,10 @@ pub fn compress_signal_with_reference(
             run_min = new_min;
             run_max = new_max;
         } else {
-            // Close current run (store average as value)
             runs.push(Run {
                 start_pos: (run_start + 1) as i32,
                 end_pos: (run_start + run_count) as i32,
                 value: (run_sum / run_count as f64) as f32,
-                value_relative: None,
             });
 
             // Start new run
@@ -222,12 +191,10 @@ pub fn compress_signal_with_reference(
         }
     }
 
-    // Save the last run
     runs.push(Run {
         start_pos: (run_start + 1) as i32,
         end_pos: (run_start + run_count) as i32,
         value: (run_sum / run_count as f64) as f32,
-        value_relative: None,
     });
 
     runs

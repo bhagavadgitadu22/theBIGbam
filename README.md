@@ -420,7 +420,7 @@ In this example, the new file annotations_enriched.gbk will contain new annotati
 
 ## Database maintenance
 
-Consult [DATABASE.md](docs/DATABASE.md) for instructions on reading and modifying the database after it has been created. You can add, remove, or list samples, contigs, and variables. You can also design more complex queries using SQL.
+Consult [DATABASE_STRUCTURE.md](docs/DATABASE_STRUCTURE.md) to understand how theBIGbam databases are organised, and [DATABASE.md](docs/DATABASE.md) for instructions on reading and modifying the database after it has been created. You can add, remove, or list samples, contigs, and variables. You can also design more complex queries using SQL.
 
 ## Exporting data
 

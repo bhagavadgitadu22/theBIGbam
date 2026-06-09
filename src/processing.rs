@@ -856,7 +856,7 @@ fn add_features_from_arrays(
     repeats: &[RepeatsData],
     cds_index: Option<&CdsIndex>,
     blob_output: &mut Vec<(String, i64, crate::blob::EncodedBlob)>,
-    sparse_output: Option<&mut Vec<SparseFeatureData>>,
+    mut sparse_output: Option<&mut Vec<SparseFeatureData>>,
 ) -> (Option<PackagingData>, Option<(MisassemblyData, MicrodiversityData, SideMisassemblyData, TopologyData)>) {
     use crate::blob::{encode_dense_blob, smooth_dense_values, encode_sparse_blob, EventMeta, MetadataFlags,
                        codon_category_to_id, codon_to_id, aa_to_id};
