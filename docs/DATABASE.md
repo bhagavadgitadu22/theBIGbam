@@ -4,7 +4,7 @@
 
 To create a lightweight database, we chose DuckDB for database management due to its columnar structure, which enables efficient storage and fast SQL-like queries, and because it is an embedded engine that avoids the need for a separate server process (Raasveldt and Mühleisen 2019). While DuckDB may face limitations when scaling to extremely large databases (~ 1 TB or more), theBIGbam is expected to remain well below this mark in typical use cases.
 
-explain database structure
+For a full description of all tables, views, BLOB encoding, and integer scaling conventions, see [Database Structure](DATABASE_STRUCTURE.md). For details on how data is compressed and where precision is lost, see [Information Loss and Compression](COMPRESSION.md).
 
 ### Updating the database
 
@@ -15,11 +15,7 @@ thebigbam add-variable examples/outputs/HK97/HK97.db test bars "#f60820" "Test B
 thebigbam add-variable examples/outputs/HK97/HK97.db test2 curve "#aef1c2" "Test Curve" examples/inputs/HK97/variable_test2.csv
 ```
 
-Database compression
-
-For each sample, Rust computations are performed for all contigs detected as present in the BAM file (i.e., those exceeding the --min_aligned_fraction and --min_coverage_depth thresholds). After computation, the final database is further reduced through a compression step. Coverage metrics are compressed using run-length encoding (RLE): consecutive positions with similar values (within the --compress_ratio threshold) are stored as a single entry, preserving the overall signal while drastically reducing storage size. For phagetermini and assemblycheck metrics, values are compared to the local coverage and discarded if they fall below the --compress_ratio threshold, ensuring that only meaningful peaks are retained. When consecutive positions remain after filtering, RLE is applied to group them.
-
-The output is a DuckDB database containing all computed values. This database is typically ~100× smaller than the original BAM files while retaining the essential characteristics of the mapping data.
+The output is a DuckDB database containing all computed values. This database is typically ~100x smaller than the original BAM files while retaining the essential characteristics of the mapping data. See [Information Loss and Compression](COMPRESSION.md) for details on the RLE and sparse filtering applied during this step.
 
 ### Listing database contents
 

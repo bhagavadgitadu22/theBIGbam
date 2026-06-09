@@ -1,5 +1,6 @@
 <div align="center">
   <img src="https://raw.githubusercontent.com/bhagavadgitadu22/theBIGbam/master/thebigbam/static/LOGO.png" alt="image" width="400" />
+
 </div>
 
 TheBIGbam is a **genome browser** and **alignment viewer** designed for massive metagenomic and metatranscriptomic datasets. 
@@ -229,7 +230,7 @@ To further reduce the size of the database, values per feature are filtered rath
 
 The output is a DuckDB database that is typically **10-100 times smaller** than the original BAM files while retaining the essential characteristics of the mapping data. When using **theBIGbam** only for annotation files, the main objective is visualization, as the output database is typically similar in size to the original file.
 
-For more information see [the compression section](docs/COMPRESSION.md).
+To understand better what is lost during `thebigbam calculate`, see [the compression section](docs/COMPRESSION.md). To understand how the resulting databases are organised, see [the database structure section](docs/DATABASE_STRUCTURE.md).
 
 ### Metrics computed per contig/MAG and per sample
 
@@ -483,7 +484,8 @@ Run `thebigbam analysis -h` to display the list of available analysis scripts. R
 
 - [Applying theBIGbam to real projects](docs/USAGE.md)
 - [Features](docs/FEATURES.md)
-- [Compression](docs/COMPRESSION.md) TO-DO
+- [Compression](docs/COMPRESSION.md)
+- [Database structure](docs/DATABASE_STRUCTURE.md) TO-DO
 - [Filters](docs/FILTERS.md)
 - [Misalignment](docs/MISALIGNMENT.md) TO-DO
 - [Phage packaging](docs/PHAGE_PACKAGING.md)

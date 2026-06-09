@@ -1,41 +1,19 @@
-# Compression & Memory Optimizations
+# Compression and information loss
 
-## Dominant Sequence Tracking
+A few additional information losses occur during `thebigbam calculate`, beyond those described on the [main page](READMD.md#database-compression).
 
-For each assembly-check feature (insertions, left/right clips, start/end clips), theBIGbam tracks the **dominant sequence** — the most frequent sequence variant at each genomic position. This is used to populate the `sequence` column in the database.
+## GC content and GC skew windowing
 
-### Memory bounds
+GC content is computed in 500 bp non-overlapping windows and GC skew in 1 kbp non-overlapping windows. Each stored value represents the window average, not a per-base value. Sub-window variation is not recoverable from the database. For most use cases — broad GC composition, horizontal gene transfer detection — this resolution is sufficient.
 
-Two caps keep memory usage bounded during the BAM pass:
+## Dominant variant sequences are truncated
 
-1. **Max 10 unique sequence variants per position** (`MAX_SEQS_PER_POS = 10`).
-   At any position, only the first 10 distinct sequences are stored. Once 10 variants are tracked, new unique sequences are dropped. However, **counts for already-tracked sequences continue to increment without limit**. This means the dominant sequence count remains accurate as long as the dominant variant appears within the first 10 unique sequences seen — which is virtually guaranteed for biological data, where the true dominant sequence appears early and frequently.
+For clippings, insertions, and mismatches, theBIGbam tracks which sequence variant occurs most frequently at each position. At most 10 unique sequence variants are tracked per position (`MAX_SEQS_PER_POS = 10`). Once 10 variants have been seen, new unique sequences are dropped, but counts for already-tracked variants continue to accumulate. The dominant sequence is determined at the end of the BAM pass as the variant with the highest count. In practice, the true biological dominant variant appears early and frequently, so the 10-variant cap rarely affects which variant is identified as dominant.
 
-2. **Insertion sequences capped to 43 bytes** (first 20bp + `...` + last 20bp).
-   Long-read insertions can be thousands of base pairs. Sequences longer than 40bp are truncated to the first 20bp and last 20bp, separated by `...` to indicate truncation. The full insertion *length* is still recorded separately in `insertion_lengths` and is unaffected by this cap.
+For clippings (left and right), sequences are truncated to the first 20 bp before tracking (`MAX_CLIP_SEQ_LEN = 20`). For insertions, sequences up to 40 bp are stored in full; longer insertions are truncated to the first 20 bp and the last 20 bp. Clipping and insertion lengths are recorded separately and are not truncated.
 
-### Prevalence calculation
+## Codon change approximation
 
-The prevalence (stored as `percentage_x10` in the database) is computed as:
+For mismatch annotation, theBIGbam classifies variants as synonymous, non-synonymous, or intergenic using per-position mismatch summaries rather than individual read sequences. Each genomic position is evaluated independently: the dominant mismatch base observed at that position is substituted into the reference codon, and the resulting codon change is classified.
 
-```
-prevalence = dominant_count / total_primary_reads_at_position
-```
-
-The denominator is the total number of primary reads covering that position (from the coverage array), **not** the sum of tracked variant counts. This means the 10-variant cap does not inflate prevalence — if the dominant sequence appeared in 800 out of 1000 reads, prevalence is 0.80 regardless of how many other variants were tracked or dropped.
-
-### Allocation avoidance
-
-The `track_sequence` helper accepts a byte slice (`&[u8]`) rather than an owned `Vec<u8>`. A heap allocation (`to_vec()`) only occurs when a genuinely new variant needs to be inserted into the map. In the common case — the sequence is already tracked (just increment) or the map is full (just drop) — no allocation happens. This avoids millions of unnecessary per-read allocations during the BAM pass.
-
-The algorithm tracks the minimum and maximum values within each run, and a new entry is created when the range of values in the run exceeds a threshold relative to the smallest absolute value, defined as:
-
-\text{max}(\text{run}) - \text{min}(\text{run}) > r \times \min(|\text{min}(\text{run})|, |\text{max}(\text{run})|)
-
-where r is the allowed variation ratio. This range-based criterion is symmetric (independent of position order) and prevents drift on gradual monotonic changes. The stored value for each run is the average of all values in the run.
-
-Contig features use a separate parameter with a lower default value because only one value needs to be computed per contig and per position (O(n²)), whereas mapping features require computing one value per contig, per position, and per sample in which the contig is present (O(n³)).
-
-compression variation_percentage -> not symmetric, greedy run boundaries still depend on scan direction (inherent to any single-pass approach), but the invariant itself is now symmetric over the run's values rather than anchored to whichever value came first
-
-explain zoom blobs etc.
+This approach does not preserve the linkage between mutations occurring on the same read. Consequently, if two or more mismatches occur within the same codon and are carried by the same read, they are not combined into a single mutant codon. As a result, the inferred amino acid change may occasionally differ from the true amino acid change present in the sequenced molecule.

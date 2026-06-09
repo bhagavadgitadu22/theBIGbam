@@ -16,8 +16,10 @@ const CHUNK_SIZE: u32 = 65536;
 /// Zoom level bin sizes (100bp, 1000bp, 10000bp)
 const ZOOM_BIN_SIZES: &[u32] = &[100, 1000, 10000];
 
-/// Zoom level bin sizes for contig features (GC content, GC skew, repeats)
-/// Only 10kbp zoom - used for contigs > 1 Mbp; base resolution used otherwise
+/// Zoom level bin sizes for windowed contig features (GC content, GC skew only).
+/// Only 10kbp zoom — these features are already windowed (500bp / 1000bp),
+/// so finer bins would not add resolution.
+/// Repeat and BLAST features use ZOOM_BIN_SIZES via encode_sparse_blob().
 const CONTIG_ZOOM_BIN_SIZES: &[u32] = &[10000];
 
 /// Zstd compression level (3 = good balance of speed and compression)
@@ -549,11 +551,12 @@ fn encode_sparse_metadata(metadata: &[EventMeta], flags: &MetadataFlags) -> Vec<
 }
 
 // ============================================================================
-// Contig_blob-Specific Encoding (only 10kbp zoom)
+// Contig_blob-Specific Encoding for Windowed Features (GC content/skew — 10kbp zoom only)
 // ============================================================================
 
-/// Encode a dense contig feature (GC content, GC skew) as a compressed BLOB.
-/// Uses only 10kbp zoom level for contigs > 1 Mbp.
+/// Encode a windowed contig feature (GC content, GC skew) as a compressed BLOB.
+/// Uses only 10kbp zoom since these features are already windowed.
+/// Repeat and BLAST contig features use encode_sparse_blob() directly (3 zoom levels).
 ///
 /// `window_size` is the genomic window each value represents (e.g. 500 for GC content).
 /// Zoom bins are computed in window-index space so indices align with the values array.
@@ -582,24 +585,6 @@ pub fn encode_contig_dense_blob(values: &[i32], scale: ValueScale, contig_length
     let zoom_blob = build_zoom_blob(scale, false, CONTIG_ZOOM_BIN_SIZES.len() as u8, contig_length, &zoom_bytes);
 
     EncodedBlob { zoom: zoom_blob, chunks }
-}
-
-/// Encode a sparse contig feature (repeat features) as a compressed BLOB.
-/// Uses 100bp, 1000bp, 10000bp zoom levels (same as sample-level blobs).
-pub fn encode_contig_sparse_blob(
-    positions: &[u32],
-    values: &[i32],
-    scale: ValueScale,
-    contig_length: u32,
-) -> EncodedBlob {
-    assert_eq!(positions.len(), values.len());
-
-    // === Zoom Levels (100bp, 1000bp, 10000bp — same as sample-level blobs) ===
-    let zoom_levels = compute_zoom_levels_sparse(positions, values, contig_length, ZOOM_BIN_SIZES);
-    let zoom_bytes = encode_zoom_levels_sparse(&zoom_levels);
-    let zoom_blob = build_zoom_blob(scale, true, ZOOM_BIN_SIZES.len() as u8, contig_length, &zoom_bytes);
-
-    EncodedBlob { zoom: zoom_blob, chunks: Vec::new() }
 }
 
 /// Chunk size in base pairs (must match CHUNK_SIZE constant used in encoding).
