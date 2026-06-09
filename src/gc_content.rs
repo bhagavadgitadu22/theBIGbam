@@ -140,6 +140,7 @@ pub fn compute_gc_skew(sequence: &[u8], window_size: usize) -> (Vec<i16>, GCSkew
     }
 
     let mut skew_values: Vec<i16> = Vec::new();
+    let skew_scale = crate::types::get_value_scale("gc_skew").multiplier();
 
     // Compute GC skew for each non-overlapping window
     let mut pos = 0;
@@ -155,8 +156,7 @@ pub fn compute_gc_skew(sequence: &[u8], window_size: usize) -> (Vec<i16>, GCSkew
             0.0 // Default to 0 if window contains no G or C
         };
 
-        // Store as i16 × 100 (range: -100 to +100)
-        skew_values.push((skew * 100.0).round() as i16);
+        skew_values.push((skew * skew_scale).round() as i16);
         pos = window_end;
     }
 
@@ -165,8 +165,8 @@ pub fn compute_gc_skew(sequence: &[u8], window_size: usize) -> (Vec<i16>, GCSkew
         return (Vec::new(), GCSkewStats { amplitude: 0.0, percent_positive: 0.0 });
     }
 
-    let min_skew = skew_values.iter().cloned().min().unwrap_or(0) as f64 / 100.0;
-    let max_skew = skew_values.iter().cloned().max().unwrap_or(0) as f64 / 100.0;
+    let min_skew = skew_values.iter().cloned().min().unwrap_or(0) as f64 / skew_scale;
+    let max_skew = skew_values.iter().cloned().max().unwrap_or(0) as f64 / skew_scale;
     let amplitude = (max_skew - min_skew) as f32;
 
     let positive_count = skew_values.iter().filter(|&&s| s > 0).count();

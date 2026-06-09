@@ -1621,8 +1621,6 @@ def get_feature_data(cur, feature, contig_id, sample_id, xstart=None, xend=None,
                             # adds 1 when converting to 1-indexed genomic coordinates).
                             if gc_window > 1:
                                 chunk_dict["x"] = chunk_dict["x"] * gc_window
-                            if contig_feature_name == "gc_skew":
-                                chunk_dict["y"] = chunk_dict["y"] / 100.0
                             blob_dict = _format_chunks_for_bokeh(chunk_dict, xstart, xend, type_picked)
                             if gc_window > 1 and blob_dict is not None:
                                 half = gc_window // 2 - 1
@@ -1646,8 +1644,6 @@ def get_feature_data(cur, feature, contig_id, sample_id, xstart=None, xend=None,
                                     blob_dict[k] = raw[k].tolist() if hasattr(raw[k], "tolist") else raw[k]
                         else:
                             chunk_dict = decode_raw_chunks(chunk_rows, scale_div)
-                            if contig_feature_name == "gc_skew":
-                                chunk_dict["y"] = chunk_dict["y"] / 100.0
                             if gc_window > 1:
                                 # Convert indices to 1-indexed midpoints directly
                                 chunk_dict["x"] = chunk_dict["x"] * gc_window + gc_window // 2
@@ -1810,8 +1806,6 @@ def get_feature_data_batch(cur, feature, contig_id, sample_ids, xstart=None, xen
                             chunk_dict = decode_raw_chunks(chunk_rows, scale_div)
                             if gc_window > 1:
                                 chunk_dict["x"] = chunk_dict["x"] * gc_window
-                            if contig_feature_name == "gc_skew":
-                                chunk_dict["y"] = chunk_dict["y"] / 100.0
                             blob_dict = _format_chunks_for_bokeh(chunk_dict, xstart, xend, type_picked)
                             if gc_window > 1 and blob_dict is not None:
                                 half = gc_window // 2 - 1
@@ -1835,8 +1829,6 @@ def get_feature_data_batch(cur, feature, contig_id, sample_ids, xstart=None, xen
                                     blob_dict[k] = raw[k].tolist() if hasattr(raw[k], "tolist") else raw[k]
                         else:
                             chunk_dict = decode_raw_chunks(chunk_rows, scale_div)
-                            if contig_feature_name == "gc_skew":
-                                chunk_dict["y"] = chunk_dict["y"] / 100.0
                             if gc_window > 1:
                                 chunk_dict["x"] = chunk_dict["x"] * gc_window
                             blob_dict = {"x": (chunk_dict["x"] + 1).tolist(), "y": chunk_dict["y"].tolist()}

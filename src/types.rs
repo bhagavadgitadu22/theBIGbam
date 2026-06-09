@@ -156,6 +156,16 @@ impl ValueScale {
     }
 
     #[inline]
+    pub fn multiplier(&self) -> f64 {
+        match self {
+            Self::Raw => 1.0,
+            Self::Times100 => 100.0,
+            Self::Times1000 => 1000.0,
+            Self::Times10 => 10.0,
+        }
+    }
+
+    #[inline]
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Raw => "raw",
@@ -164,6 +174,42 @@ impl ValueScale {
             Self::Times10 => "times10",
         }
     }
+}
+
+// Sparse event metadata scales (fixed binary format constants).
+pub const METADATA_STATS_SCALE: f64 = 100.0;
+pub const METADATA_PREVALENCE_SCALE: f64 = 1000.0;
+
+// SQL INTEGER column scales.
+// real_value * scale = stored_integer.
+// stored_integer / scale = real_value.
+pub const COLUMN_SCALES: &[(&str, &str, i32)] = &[
+    ("Coverage", "Coverage_mean", 10),
+    ("Coverage", "Coverage_median", 10),
+    ("Coverage", "Coverage_trimmed_mean", 10),
+    ("Coverage", "Coverage_coefficient_of_variation", 1_000_000),
+    ("Coverage", "Coverage_relative_coverage_roughness", 1_000_000),
+    ("Coverage", "Aligned_fraction_percentage", 10),
+    ("Coverage", "Expected_aligned_fraction", 10),
+    ("Contig", "GC_mean", 1),
+    ("Contig", "GC_sd", 100),
+    ("Contig", "GC_skew_amplitude", 100),
+    ("Contig", "Duplication_percentage", 10),
+    ("Contig", "Positive_GC_skew_windows_percentage", 10),
+    ("Contig_directRepeats", "Pident", 100),
+    ("Contig_invertedRepeats", "Pident", 100),
+    ("Phage_termini", "Tau", 100),
+    ("Phage_termini", "Clipped_ratio", 100),
+    ("Side_misassembly", "Contig_start_collapse_percentage", 10),
+    ("Side_misassembly", "Contig_end_collapse_percentage", 10),
+];
+
+pub fn get_column_scale(table: &str, column: &str) -> f64 {
+    COLUMN_SCALES
+        .iter()
+        .find(|(t, c, _)| *t == table && *c == column)
+        .map(|(_, _, s)| *s as f64)
+        .unwrap_or_else(|| panic!("Missing COLUMN_SCALES entry: {}.{}", table, column))
 }
 
 // ============================================================================

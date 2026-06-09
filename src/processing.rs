@@ -738,9 +738,10 @@ fn run_mag_interblast(
 
         if let Ok(conn) = db_writer.lock_conn() {
             use duckdb::params;
+            let pident_scale = crate::types::get_column_scale("Contig_directRepeats", "Pident");
             for dup in &repeats {
                 if let Some(contig_id) = db_writer.get_contig_id(&dup.contig_name) {
-                    let pident_int = (dup.pident * 100.0).round() as i32;
+                    let pident_int = (dup.pident * pident_scale).round() as i32;
                     let table = if dup.is_direct { "Contig_directRepeats" } else { "Contig_invertedRepeats" };
                     let _ = conn.execute(
                         &format!("INSERT INTO {} (Contig_id, Position1, Position2, Position1prime, Position2prime, Pident) VALUES (?, ?, ?, ?, ?, ?)", table),
@@ -765,7 +766,7 @@ fn run_mag_interblast(
                             std::mem::swap(&mut p2, &mut p2p);
                             (cid_s, cid_q)
                         };
-                        let pident_i = (pident * 100.0).round() as i32;
+                        let pident_i = (pident * pident_scale).round() as i32;
                         let _ = stmt.execute(params![cid1, cid2, p1, p2, p1p, p2p, pident_i]);
                     }
                 }
@@ -824,10 +825,25 @@ fn compute_area_median_clippings(
     }
 }
 
+/// Intermediate sparse feature data produced by [`add_features_from_arrays`].
+/// When `sparse_output` is `Some`, these are collected alongside the per-contig
+/// blobs so the caller can accumulate them into MAG-wide arrays without
+/// decode→re-encode.
+pub(crate) struct SparseFeatureData {
+    pub feature_name: &'static str,
+    pub positions: Vec<u32>,
+    pub values: Vec<i32>,
+    pub metadata: Option<Vec<crate::blob::EventMeta>>,
+    pub flags: crate::blob::MetadataFlags,
+}
+
 /// Encode features from FeatureArrays into BLOB format and compute metrics.
 /// Returns a tuple of:
 /// - Optional packaging data for phagetermini module (includes all termini with filtering metadata)
 /// - Optional metric structs (misassembly, microdiversity, side_misassembly, topology)
+///
+/// When `sparse_output` is `Some`, intermediate filtered sparse data is also
+/// pushed there (positions are contig-local; the caller shifts by MAG offset).
 fn add_features_from_arrays(
     arrays: &mut FeatureArrays,
     contig_name: &str,
@@ -840,10 +856,11 @@ fn add_features_from_arrays(
     repeats: &[RepeatsData],
     cds_index: Option<&CdsIndex>,
     blob_output: &mut Vec<(String, i64, crate::blob::EncodedBlob)>,
+    sparse_output: Option<&mut Vec<SparseFeatureData>>,
 ) -> (Option<PackagingData>, Option<(MisassemblyData, MicrodiversityData, SideMisassemblyData, TopologyData)>) {
     use crate::blob::{encode_dense_blob, smooth_dense_values, encode_sparse_blob, EventMeta, MetadataFlags,
                        codon_category_to_id, codon_to_id, aa_to_id};
-    use crate::types::{get_encoding, get_value_scale, Encoding};
+    use crate::types::{get_encoding, get_value_scale, Encoding, METADATA_STATS_SCALE};
     let pt_config = config.phagetermini_config;
     let contig_length = arrays.ref_length();
 
@@ -928,8 +945,8 @@ fn add_features_from_arrays(
         debug_assert_eq!(get_encoding("supplementary_reads"), Encoding::Dense);
         blob_output.push(("supplementary_reads".into(), cid, encode_dense_blob(&sup_i32, get_value_scale("supplementary_reads"), clen)));
 
-        // MAPQ: stored as ×100 integer
-        let mut mapq_i32: Vec<i32> = mapq_f64.iter().map(|&x| (x * 100.0).round() as i32).collect();
+        let mapq_scale = get_value_scale("mapq").multiplier();
+        let mut mapq_i32: Vec<i32> = mapq_f64.iter().map(|&x| (x * mapq_scale).round() as i32).collect();
         smooth_dense_values(&mut mapq_i32, config.variation_percentage);
         debug_assert_eq!(get_encoding("mapq"), Encoding::Dense);
         blob_output.push(("mapq".into(), cid, encode_dense_blob(&mapq_i32, get_value_scale("mapq"), clen)));
@@ -979,8 +996,8 @@ fn add_features_from_arrays(
     let clen = contig_length as u32;
     let bar_threshold = config.bar_ratio * 0.01;
     let min_occ = config.min_occurrences;
+    let sparse_scale = get_value_scale("mismatches").multiplier();
 
-    // Helper: filter positions by coverage threshold AND min_occurrences, produce (positions, values)
     let filter_sparse = |counts: &[f64], coverage: &[f64]| -> (Vec<u32>, Vec<i32>) {
         let mut positions = Vec::new();
         let mut values = Vec::new();
@@ -990,7 +1007,7 @@ fn add_features_from_arrays(
             let cov = coverage[i];
             if val >= cov * bar_threshold && val >= min_occ as f64 {
                 positions.push(i as u32);
-                values.push((val / cov * 1000.0).round() as i32);
+                values.push((val / cov * sparse_scale).round() as i32);
             }
         }
         (positions, values)
@@ -1051,6 +1068,9 @@ fn add_features_from_arrays(
             debug_assert_eq!(get_encoding("mismatches"), Encoding::Sparse);
             blob_output.push(("mismatches".into(), cid,
                 encode_sparse_blob(&pos, &vals, Some(&meta), flags, get_value_scale("mismatches"), clen)));
+            if let Some(ref mut so) = sparse_output {
+                so.push(SparseFeatureData { feature_name: "mismatches", positions: pos, values: vals, metadata: Some(meta), flags });
+            }
         }
 
         // deletions (value only)
@@ -1060,6 +1080,9 @@ fn add_features_from_arrays(
             debug_assert_eq!(get_encoding("deletions"), Encoding::Sparse);
             blob_output.push(("deletions".into(), cid,
                 encode_sparse_blob(&pos, &vals, None, flags, get_value_scale("deletions"), clen)));
+            if let Some(ref mut so) = sparse_output {
+                so.push(SparseFeatureData { feature_name: "deletions", positions: pos, values: vals, metadata: None, flags });
+            }
         }
 
         // insertions (with stats + sequence)
@@ -1068,9 +1091,9 @@ fn add_features_from_arrays(
             let meta: Vec<EventMeta> = pos.iter().map(|&p| {
                 let idx = p as usize;
                 let mut em = EventMeta {
-                    mean: Some((insertion_means.get(idx).copied().unwrap_or(0.0) * 100.0).round() as i32),
-                    median: Some((insertion_medians.get(idx).copied().unwrap_or(0.0) * 100.0).round() as i32),
-                    std: Some((insertion_stds.get(idx).copied().unwrap_or(0.0) * 100.0).round() as i32),
+                    mean: Some((insertion_means.get(idx).copied().unwrap_or(0.0) * METADATA_STATS_SCALE).round() as i32),
+                    median: Some((insertion_medians.get(idx).copied().unwrap_or(0.0) * METADATA_STATS_SCALE).round() as i32),
+                    std: Some((insertion_stds.get(idx).copied().unwrap_or(0.0) * METADATA_STATS_SCALE).round() as i32),
                     ..Default::default()
                 };
                 if let Some((seq_str, pct)) = dominant_insertions.get(&idx) {
@@ -1083,6 +1106,9 @@ fn add_features_from_arrays(
             debug_assert_eq!(get_encoding("insertions"), Encoding::Sparse);
             blob_output.push(("insertions".into(), cid,
                 encode_sparse_blob(&pos, &vals, Some(&meta), flags, get_value_scale("insertions"), clen)));
+            if let Some(ref mut so) = sparse_output {
+                so.push(SparseFeatureData { feature_name: "insertions", positions: pos, values: vals, metadata: Some(meta), flags });
+            }
         }
 
         // left_clippings (with stats + sequence)
@@ -1105,9 +1131,9 @@ fn add_features_from_arrays(
             let meta: Vec<EventMeta> = pos.iter().map(|&p| {
                 let idx = p as usize;
                 let mut em = EventMeta {
-                    mean: Some((lc_means.get(idx).copied().unwrap_or(0.0) * 100.0).round() as i32),
-                    median: Some((lc_medians.get(idx).copied().unwrap_or(0.0) * 100.0).round() as i32),
-                    std: Some((lc_stds.get(idx).copied().unwrap_or(0.0) * 100.0).round() as i32),
+                    mean: Some((lc_means.get(idx).copied().unwrap_or(0.0) * METADATA_STATS_SCALE).round() as i32),
+                    median: Some((lc_medians.get(idx).copied().unwrap_or(0.0) * METADATA_STATS_SCALE).round() as i32),
+                    std: Some((lc_stds.get(idx).copied().unwrap_or(0.0) * METADATA_STATS_SCALE).round() as i32),
                     ..Default::default()
                 };
                 if let Some((seq_str, pct)) = dominant_left_clips.get(&idx) {
@@ -1120,6 +1146,9 @@ fn add_features_from_arrays(
             debug_assert_eq!(get_encoding("left_clippings"), Encoding::Sparse);
             blob_output.push(("left_clippings".into(), cid,
                 encode_sparse_blob(&pos, &vals, Some(&meta), flags, get_value_scale("left_clippings"), clen)));
+            if let Some(ref mut so) = sparse_output {
+                so.push(SparseFeatureData { feature_name: "left_clippings", positions: pos, values: vals, metadata: Some(meta), flags });
+            }
         }
 
         // right_clippings (with stats + sequence)
@@ -1142,9 +1171,9 @@ fn add_features_from_arrays(
             let meta: Vec<EventMeta> = pos.iter().map(|&p| {
                 let idx = p as usize;
                 let mut em = EventMeta {
-                    mean: Some((rc_means.get(idx).copied().unwrap_or(0.0) * 100.0).round() as i32),
-                    median: Some((rc_medians.get(idx).copied().unwrap_or(0.0) * 100.0).round() as i32),
-                    std: Some((rc_stds.get(idx).copied().unwrap_or(0.0) * 100.0).round() as i32),
+                    mean: Some((rc_means.get(idx).copied().unwrap_or(0.0) * METADATA_STATS_SCALE).round() as i32),
+                    median: Some((rc_medians.get(idx).copied().unwrap_or(0.0) * METADATA_STATS_SCALE).round() as i32),
+                    std: Some((rc_stds.get(idx).copied().unwrap_or(0.0) * METADATA_STATS_SCALE).round() as i32),
                     ..Default::default()
                 };
                 if let Some((seq_str, pct)) = dominant_right_clips.get(&idx) {
@@ -1157,6 +1186,9 @@ fn add_features_from_arrays(
             debug_assert_eq!(get_encoding("right_clippings"), Encoding::Sparse);
             blob_output.push(("right_clippings".into(), cid,
                 encode_sparse_blob(&pos, &vals, Some(&meta), flags, get_value_scale("right_clippings"), clen)));
+            if let Some(ref mut so) = sparse_output {
+                so.push(SparseFeatureData { feature_name: "right_clippings", positions: pos, values: vals, metadata: Some(meta), flags });
+            }
         }
     }
 
@@ -1177,6 +1209,9 @@ fn add_features_from_arrays(
         debug_assert_eq!(get_encoding("splicings"), Encoding::Sparse);
         blob_output.push(("splicings".into(), cid,
             encode_sparse_blob(&spl_pos, &spl_vals, None, flags, get_value_scale("splicings"), clen)));
+        if let Some(ref mut so) = sparse_output {
+            so.push(SparseFeatureData { feature_name: "splicings", positions: spl_pos, values: spl_vals, metadata: None, flags });
+        }
     }
 
     // Paired-reads module
@@ -1198,7 +1233,7 @@ fn add_features_from_arrays(
         let bar_threshold = config.bar_ratio * 0.01;
         let min_occ = config.min_occurrences;
 
-        // non_inward_pairs, mate_not_mapped, mate_on_another_contig: sparse, value only
+        let sparse_scale_pr = get_value_scale("non_inward_pairs").multiplier();
         let filter_sparse_pr = |counts: &[f64], coverage: &[f64]| -> (Vec<u32>, Vec<i32>) {
             let mut positions = Vec::new();
             let mut vals = Vec::new();
@@ -1208,7 +1243,7 @@ fn add_features_from_arrays(
                 let cov = coverage[i];
                 if val >= cov * bar_threshold && val >= min_occ as f64 {
                     positions.push(i as u32);
-                    vals.push((val / cov * 1000.0).round() as i32);
+                    vals.push((val / cov * sparse_scale_pr).round() as i32);
                 }
             }
             (positions, vals)
@@ -1219,19 +1254,29 @@ fn add_features_from_arrays(
         debug_assert_eq!(get_encoding("non_inward_pairs"), Encoding::Sparse);
         blob_output.push(("non_inward_pairs".into(), cid,
             encode_sparse_blob(&pos, &vals, None, sp_flags, get_value_scale("non_inward_pairs"), clen)));
+        if let Some(ref mut so) = sparse_output {
+            so.push(SparseFeatureData { feature_name: "non_inward_pairs", positions: pos, values: vals, metadata: None, flags: sp_flags });
+        }
 
         let (pos, vals) = filter_sparse_pr(&mate_unmapped_f64, &primary_reads_f64);
         debug_assert_eq!(get_encoding("mate_not_mapped"), Encoding::Sparse);
         blob_output.push(("mate_not_mapped".into(), cid,
             encode_sparse_blob(&pos, &vals, None, sp_flags, get_value_scale("mate_not_mapped"), clen)));
+        if let Some(ref mut so) = sparse_output {
+            so.push(SparseFeatureData { feature_name: "mate_not_mapped", positions: pos, values: vals, metadata: None, flags: sp_flags });
+        }
 
         let (pos, vals) = filter_sparse_pr(&mate_other_contig_f64, &primary_reads_f64);
         debug_assert_eq!(get_encoding("mate_on_another_contig"), Encoding::Sparse);
         blob_output.push(("mate_on_another_contig".into(), cid,
             encode_sparse_blob(&pos, &vals, None, sp_flags, get_value_scale("mate_on_another_contig"), clen)));
+        if let Some(ref mut so) = sparse_output {
+            so.push(SparseFeatureData { feature_name: "mate_on_another_contig", positions: pos, values: vals, metadata: None, flags: sp_flags });
+        }
 
         // insert_sizes: dense curve
-        let mut is_i32: Vec<i32> = values.iter().map(|&x| (x * 10.0).round() as i32).collect();
+        let is_scale = get_value_scale("insert_sizes").multiplier();
+        let mut is_i32: Vec<i32> = values.iter().map(|&x| (x * is_scale).round() as i32).collect();
         smooth_dense_values(&mut is_i32, config.variation_percentage);
         debug_assert_eq!(get_encoding("insert_sizes"), Encoding::Dense);
         blob_output.push(("insert_sizes".into(), cid, encode_dense_blob(&is_i32, get_value_scale("insert_sizes"), clen)));
@@ -1248,7 +1293,8 @@ fn add_features_from_arrays(
 
         // === BLOB encoding for long-reads features ===
         let clen = contig_length as u32;
-        let mut rl_i32: Vec<i32> = values.iter().map(|&x| (x * 10.0).round() as i32).collect();
+        let rl_scale = get_value_scale("read_lengths").multiplier();
+        let mut rl_i32: Vec<i32> = values.iter().map(|&x| (x * rl_scale).round() as i32).collect();
         smooth_dense_values(&mut rl_i32, config.variation_percentage);
         debug_assert_eq!(get_encoding("read_lengths"), Encoding::Dense);
         blob_output.push(("read_lengths".into(), cid, encode_dense_blob(&rl_i32, get_value_scale("read_lengths"), clen)));
@@ -1285,6 +1331,7 @@ fn add_features_from_arrays(
 
             // reads_starts: sparse with median + sequence
             let cov_reduced_f64: Vec<f64> = arrays.coverage_reduced.iter().map(|&x| x as f64).collect();
+            let rs_scale = get_value_scale("reads_starts").multiplier();
             let mut rs_pos = Vec::new();
             let mut rs_vals = Vec::new();
             for i in 0..reads_starts_original.len().min(cov_reduced_f64.len()) {
@@ -1292,13 +1339,13 @@ fn add_features_from_arrays(
                 let cov = cov_reduced_f64[i];
                 if val >= cov * bar_threshold && val >= min_occ as f64 {
                     rs_pos.push(i as u32);
-                    rs_vals.push((val / cov * 1000.0).round() as i32);
+                    rs_vals.push((val / cov * rs_scale).round() as i32);
                 }
             }
             let rs_meta: Vec<EventMeta> = rs_pos.iter().map(|&p| {
                 let idx = p as usize;
                 let mut em = EventMeta {
-                    median: Some((start_evt_medians.get(idx).copied().unwrap_or(0.0) * 100.0).round() as i32),
+                    median: Some((start_evt_medians.get(idx).copied().unwrap_or(0.0) * METADATA_STATS_SCALE).round() as i32),
                     ..Default::default()
                 };
                 if let Some((seq_str, pct)) = dominant_start_clips.get(&idx) {
@@ -1311,8 +1358,12 @@ fn add_features_from_arrays(
             debug_assert_eq!(get_encoding("reads_starts"), Encoding::Sparse);
             blob_output.push(("reads_starts".into(), cid,
                 encode_sparse_blob(&rs_pos, &rs_vals, Some(&rs_meta), pt_flags, get_value_scale("reads_starts"), clen)));
+            if let Some(ref mut so) = sparse_output {
+                so.push(SparseFeatureData { feature_name: "reads_starts", positions: rs_pos, values: rs_vals, metadata: Some(rs_meta), flags: pt_flags });
+            }
 
             // reads_ends: sparse with median + sequence
+            let re_scale = get_value_scale("reads_ends").multiplier();
             let mut re_pos = Vec::new();
             let mut re_vals = Vec::new();
             for i in 0..reads_ends_original.len().min(cov_reduced_f64.len()) {
@@ -1320,13 +1371,13 @@ fn add_features_from_arrays(
                 let cov = cov_reduced_f64[i];
                 if val >= cov * bar_threshold && val >= min_occ as f64 {
                     re_pos.push(i as u32);
-                    re_vals.push((val / cov * 1000.0).round() as i32);
+                    re_vals.push((val / cov * re_scale).round() as i32);
                 }
             }
             let re_meta: Vec<EventMeta> = re_pos.iter().map(|&p| {
                 let idx = p as usize;
                 let mut em = EventMeta {
-                    median: Some((end_evt_medians.get(idx).copied().unwrap_or(0.0) * 100.0).round() as i32),
+                    median: Some((end_evt_medians.get(idx).copied().unwrap_or(0.0) * METADATA_STATS_SCALE).round() as i32),
                     ..Default::default()
                 };
                 if let Some((seq_str, pct)) = dominant_end_clips.get(&idx) {
@@ -1338,6 +1389,9 @@ fn add_features_from_arrays(
             debug_assert_eq!(get_encoding("reads_ends"), Encoding::Sparse);
             blob_output.push(("reads_ends".into(), cid,
                 encode_sparse_blob(&re_pos, &re_vals, Some(&re_meta), pt_flags, get_value_scale("reads_ends"), clen)));
+            if let Some(ref mut so) = sparse_output {
+                so.push(SparseFeatureData { feature_name: "reads_ends", positions: re_pos, values: re_vals, metadata: Some(re_meta), flags: pt_flags });
+            }
         }
 
         // === STEP 2: Calculate aligned fraction and global metrics ===
@@ -1478,7 +1532,7 @@ fn process_mag_group(
     accum_ref: Option<&TimingAccum>,
 ) -> Option<MagGroupResult> {
     use crate::blob::{encode_dense_blob, smooth_dense_values, EncodedBlob};
-    use crate::types::{get_value_scale, Encoding, VARIABLES};
+    use crate::types::get_value_scale;
 
     let mag_len = group.mag_length as usize;
     if mag_len == 0 || group.members.is_empty() { return None; }
@@ -1493,6 +1547,10 @@ fn process_mag_group(
         supplementary_reads: Vec<i32>,
         mapq: Vec<i32>,
         coverage_reduced: Vec<i32>,
+        sum_insert_sizes: Vec<u64>,
+        count_insert_sizes: Vec<u64>,
+        sum_read_lengths: Vec<u64>,
+        count_read_lengths: Vec<u64>,
     }
     impl DenseAccum {
         fn new(len: usize) -> Self {
@@ -1504,6 +1562,10 @@ fn process_mag_group(
                 supplementary_reads: vec![0i32; len],
                 mapq: vec![0i32; len],
                 coverage_reduced: vec![0i32; len],
+                sum_insert_sizes: vec![0u64; len],
+                count_insert_sizes: vec![0u64; len],
+                sum_read_lengths: vec![0u64; len],
+                count_read_lengths: vec![0u64; len],
             }
         }
     }
@@ -1518,6 +1580,7 @@ fn process_mag_group(
     let mut all_topology = Vec::new();
     let mut mapped_reads: u64 = 0;
     let mut contig_lengths_ordered: Vec<u32> = Vec::new();
+    let mut sparse_accum: Vec<SparseFeatureData> = Vec::new();
 
     for member in &group.members {
         let off = member.offset_in_mag as usize;
@@ -1590,7 +1653,16 @@ fn process_mag_group(
         // mapq: average per position
         for i in 0..n.min(arrays.sum_mapq.len()) {
             let pr = arrays.primary_reads[i];
-            accum.mapq[off + i] = if pr > 0 { (arrays.sum_mapq[i] as f64 / pr as f64 * 100.0).round() as i32 } else { 0 };
+            accum.mapq[off + i] = if pr > 0 { (arrays.sum_mapq[i] as f64 / pr as f64 * get_value_scale("mapq").multiplier()).round() as i32 } else { 0 };
+        }
+        // insert_sizes / read_lengths: accumulate raw sums and counts
+        for i in 0..n.min(arrays.sum_insert_sizes.len()) {
+            accum.sum_insert_sizes[off + i] += arrays.sum_insert_sizes[i];
+            accum.count_insert_sizes[off + i] += arrays.count_insert_sizes[i];
+        }
+        for i in 0..n.min(arrays.sum_read_lengths.len()) {
+            accum.sum_read_lengths[off + i] += arrays.sum_read_lengths[i];
+            accum.count_read_lengths[off + i] += arrays.count_read_lengths[i];
         }
 
         // Build per-contig presence
@@ -1604,14 +1676,14 @@ fn process_mag_group(
             let sq_diff: f64 = arrays.primary_reads.windows(2)
                 .map(|w| { let d = w[1] as f64 - w[0] as f64; d * d })
                 .sum::<f64>() / (nn - 1) as f64;
-            (sq_diff.sqrt() / mean_cov * 1000000.0) as f32
+            (sq_diff.sqrt() / mean_cov * crate::types::get_column_scale("Coverage", "Coverage_relative_coverage_roughness")) as f32
         } else { 0.0 };
         let coverage_coefficient_of_variation = if !arrays.primary_reads.is_empty() && coverage_mean > 0.0 {
             let mean_cov = coverage_mean as f64;
             let nn = arrays.primary_reads.len() as f64;
             let var: f64 = arrays.primary_reads.iter()
                 .map(|&x| { let d = x as f64 - mean_cov; d * d }).sum::<f64>() / nn;
-            (var.sqrt() / mean_cov * 1_000_000.0) as f32
+            (var.sqrt() / mean_cov * crate::types::get_column_scale("Coverage", "Coverage_coefficient_of_variation")) as f32
         } else { 0.0 };
 
         presences.push(PresenceData {
@@ -1628,13 +1700,22 @@ fn process_mag_group(
         });
         mapped_reads += primary_count;
 
-        // Encode per-contig blobs (existing logic, unchanged)
+        // Encode per-contig blobs and collect sparse intermediate data
         let ts = accum_ref.map(|_| std::time::Instant::now());
         let mut blob_output: Vec<(String, i64, EncodedBlob)> = Vec::new();
+        let sparse_start = sparse_accum.len();
         let (pkg, metrics) = add_features_from_arrays(
             &mut arrays, &member.ref_name, member.contig_id, config, is_circular, seq_type, flags,
             primary_count, repeats, cds_index.as_ref(), &mut blob_output,
+            Some(&mut sparse_accum),
         );
+        // Shift sparse positions from contig-local to MAG coordinates
+        let mag_offset = member.offset_in_mag;
+        for sd in &mut sparse_accum[sparse_start..] {
+            for p in &mut sd.positions {
+                *p += mag_offset;
+            }
+        }
         contig_blobs.extend(blob_output);
         if let Some(p) = pkg { all_packaging.push(p); }
         if let Some((mis, micro, side, topo)) = metrics {
@@ -1687,35 +1768,82 @@ fn process_mag_group(
         mag_blobs.push(("coverage_reduced".into(), encode_dense_blob(&accum.coverage_reduced, get_value_scale("coverage_reduced"), group.mag_length)));
     }
 
-    // insert_sizes / read_lengths: accumulate from per-contig blobs since they
-    // use derived values (running average, not raw counts). Use existing sparse
-    // aggregation path below — they're dense but small and the decode is cheap.
-
-    // --- Aggregate sparse MAG blobs from per-contig encoded blobs ---
-    // Reuses existing aggregation: decode per-contig blob → shift positions → encode.
-    // Sparse data is small so the decode cost is negligible.
-    for var in VARIABLES.iter() {
-        if crate::mag_blob::contig_blob_config_pub(var.name).is_some() { continue; }
-        let is_dense_already_handled = matches!(var.name,
-            "primary_reads" | "primary_reads_plus_only" | "primary_reads_minus_only" |
-            "secondary_reads" | "supplementary_reads" | "mapq" | "coverage_reduced"
-        );
-        if is_dense_already_handled { continue; }
-
-        let members_and_blobs: Vec<(crate::mag_blob::MagMember, &EncodedBlob)> = group.members.iter()
-            .filter_map(|m| {
-                let blob = contig_blobs.iter().find(|(fname, cid, _)| fname == var.name && *cid == m.contig_id);
-                blob.map(|(_, _, b)| (crate::mag_blob::MagMember { contig_id: m.contig_id, offset: m.offset_in_mag, length: m.ref_length as u32 }, b))
-            })
+    // --- Encode insert_sizes / read_lengths from raw accumulators ---
+    if flags.paired_read_metrics {
+        let is_scale = get_value_scale("insert_sizes").multiplier();
+        let mut is_i32: Vec<i32> = accum.sum_insert_sizes.iter().zip(&accum.count_insert_sizes)
+            .map(|(&s, &c)| if c > 0 { (s as f64 / c as f64 * is_scale).round() as i32 } else { 0 })
             .collect();
-        if members_and_blobs.is_empty() { continue; }
+        smooth_per_contig(&mut is_i32, &group.members, vp);
+        let mut encoded = encode_dense_blob(&is_i32, get_value_scale("insert_sizes"), group.mag_length);
+        encoded.chunks = Vec::new();
+        mag_blobs.push(("insert_sizes".into(), encoded));
+    }
+    if flags.long_read_metrics && seq_type.is_long() {
+        let rl_scale = get_value_scale("read_lengths").multiplier();
+        let mut rl_i32: Vec<i32> = accum.sum_read_lengths.iter().zip(&accum.count_read_lengths)
+            .map(|(&s, &c)| if c > 0 { (s as f64 / c as f64 * rl_scale).round() as i32 } else { 0 })
+            .collect();
+        smooth_per_contig(&mut rl_i32, &group.members, vp);
+        let mut encoded = encode_dense_blob(&rl_i32, get_value_scale("read_lengths"), group.mag_length);
+        encoded.chunks = Vec::new();
+        mag_blobs.push(("read_lengths".into(), encoded));
+    }
 
-        let encoded = match var.encoding {
-            Encoding::Dense => crate::mag_blob::aggregate_feature_dense_inmem(&members_and_blobs, group.mag_length, var.value_scale),
-            Encoding::Sparse => crate::mag_blob::aggregate_feature_sparse_inmem(&members_and_blobs, group.mag_length, var.value_scale),
-        };
-        if !encoded.zoom.is_empty() {
-            mag_blobs.push((var.name.to_string(), encoded));
+    // --- Encode sparse MAG blobs from accumulated intermediate data ---
+    {
+        use crate::blob::{encode_sparse_blob, MetadataFlags, EventMeta};
+
+        struct SparseAccumEntry {
+            positions: Vec<u32>,
+            values: Vec<i32>,
+            metadata: Vec<EventMeta>,
+            flags: MetadataFlags,
+        }
+
+        let mut by_feature: HashMap<&str, SparseAccumEntry> = HashMap::new();
+        for sd in sparse_accum {
+            let entry = by_feature.entry(sd.feature_name).or_insert_with(|| SparseAccumEntry {
+                positions: Vec::new(),
+                values: Vec::new(),
+                metadata: Vec::new(),
+                flags: MetadataFlags { sparse: true, ..Default::default() },
+            });
+            entry.flags.has_stats    |= sd.flags.has_stats;
+            entry.flags.has_sequence |= sd.flags.has_sequence;
+            entry.flags.has_codons   |= sd.flags.has_codons;
+            entry.flags.has_partner  |= sd.flags.has_partner;
+            let meta = sd.metadata.unwrap_or_default();
+            for (i, p) in sd.positions.into_iter().enumerate() {
+                entry.positions.push(p);
+                entry.values.push(sd.values[i]);
+                entry.metadata.push(meta.get(i).cloned().unwrap_or_default());
+            }
+        }
+
+        for (feature_name, mut entry) in by_feature {
+            if entry.positions.is_empty() { continue; }
+            // Sort by position for encode_sparse_blob
+            let mut order: Vec<usize> = (0..entry.positions.len()).collect();
+            order.sort_unstable_by_key(|&i| entry.positions[i]);
+            entry.positions = order.iter().map(|&i| entry.positions[i]).collect();
+            entry.values = order.iter().map(|&i| entry.values[i]).collect();
+            entry.metadata = order.iter().map(|&i| entry.metadata[i].clone()).collect();
+
+            let scale = get_value_scale(feature_name);
+            let has_any_meta = entry.flags.has_stats || entry.flags.has_sequence
+                || entry.flags.has_codons || entry.flags.has_partner;
+            let meta_ref = if has_any_meta {
+                Some(entry.metadata.as_slice())
+            } else {
+                None
+            };
+            let mut encoded = encode_sparse_blob(
+                &entry.positions, &entry.values, meta_ref,
+                entry.flags, scale, group.mag_length,
+            );
+            encoded.chunks = Vec::new();
+            mag_blobs.push((feature_name.to_string(), encoded));
         }
     }
 
@@ -2025,7 +2153,7 @@ pub fn process_sample(
 
                     let ts = accum_ref.map(|_| std::time::Instant::now());
                     let mut feature_blobs: Vec<(String, i64, crate::blob::EncodedBlob)> = Vec::new();
-                    let (packaging_info, metrics_info) = add_features_from_arrays(&mut arrays, ref_name, contig_id, config, is_circular, seq_type, flags, primary_count, repeats, cds_index.as_ref(), &mut feature_blobs);
+                    let (packaging_info, metrics_info) = add_features_from_arrays(&mut arrays, ref_name, contig_id, config, is_circular, seq_type, flags, primary_count, repeats, cds_index.as_ref(), &mut feature_blobs, None);
                     let coverage_median = arrays.coverage_median() as f32;
                     let coverage_trimmed_mean = arrays.coverage_trimmed_mean(0.05) as f32;
 
@@ -2042,7 +2170,7 @@ pub fn process_sample(
                             })
                             .sum::<f64>() / (n - 1) as f64;
                         let root_diff = sum_squared_diff.sqrt() / mean_cov;
-                        (root_diff * 1000000.0) as f32
+                        (root_diff * crate::types::get_column_scale("Coverage", "Coverage_relative_coverage_roughness")) as f32
                     } else {
                         0.0
                     };
@@ -2058,7 +2186,7 @@ pub fn process_sample(
                             })
                             .sum::<f64>() / n;
                         let cv = variance.sqrt() / mean_cov;
-                        (cv * 1_000_000.0) as f32
+                        (cv * crate::types::get_column_scale("Coverage", "Coverage_coefficient_of_variation")) as f32
                     } else {
                         0.0
                     };
@@ -2538,7 +2666,7 @@ pub fn run_all_samples(
                             position2: p2,
                             position1prime: p1p,
                             position2prime: p2p,
-                            pident: pident_int as f64 / 100.0,
+                            pident: pident_int as f64 / crate::types::get_column_scale("Contig_directRepeats", "Pident"),
                             is_direct: *is_direct,
                         });
                     }
@@ -2755,6 +2883,7 @@ pub fn run_all_samples(
     let n_contigs_with_seq = blast_contigs.iter().filter(|c| c.sequence.is_some()).count();
 
     let t_autoblast = if config.enable_timing { Some(std::time::Instant::now()) } else { None };
+    let mut mag_contig_sparse_raw: Vec<crate::mag_blob::ContigSparseRaw> = Vec::new();
     let repeats = if config.blast && has_sequences {
         if config.view_mode == ViewMode::Mag {
             let blast_names: HashSet<&str> = blast_contigs.iter().map(|c| c.name.as_str()).collect();
@@ -2773,7 +2902,8 @@ pub fn run_all_samples(
             db_writer.compute_duplication_percentages(&reps)?;
             if inter_count > 0 {
                 let t_hit_features = std::time::Instant::now();
-                db_writer.write_mag_hit_features()?;
+                let hit_raw = db_writer.write_mag_hit_features()?;
+                mag_contig_sparse_raw.extend(hit_raw);
                 eprintln!("  Per-position hit features: {:.1}s", t_hit_features.elapsed().as_secs_f64());
             }
             reps
@@ -2828,7 +2958,8 @@ pub fn run_all_samples(
     let new_contig_ids: Vec<i64> = new_contigs_for_blast.iter()
         .filter_map(|c| db_writer.get_contig_id(&c.name))
         .collect();
-    db_writer.convert_repeat_blobs(&new_contig_ids)?;
+    let repeat_raw = db_writer.convert_repeat_blobs(&new_contig_ids)?;
+    mag_contig_sparse_raw.extend(repeat_raw);
 
     // Write MAG rows after per-contig GC/duplication stats are finalized.
     if config.view_mode == ViewMode::Mag && !mag_contig_map.is_empty() {
@@ -2839,10 +2970,10 @@ pub fn run_all_samples(
         db_writer.write_mags(&mag_contig_map)?;
     }
 
-    // Aggregate per-contig blobs into MAG-scale blobs once. Sample-independent.
+    // Build MAG contig blobs directly from raw GC / repeat / hit data.
     let mag_contig_blob_secs = if config.view_mode == ViewMode::Mag && !mag_contig_map.is_empty() {
         let t = std::time::Instant::now();
-        crate::mag_blob::build_mag_contig_blobs_all(&db_writer)?;
+        crate::mag_blob::build_mag_contig_blobs_from_raw(&db_writer, &gc_data, mag_contig_sparse_raw)?;
         let secs = t.elapsed().as_secs_f64();
         if config.enable_timing {
             eprintln!("MAG contig-blob aggregation: {:.3} s", secs);

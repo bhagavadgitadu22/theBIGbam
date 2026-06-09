@@ -1,22 +1,39 @@
-## Decode maps for integer-encoded DB columns (applied before display).
-## Contig and MAG tables share the same scaling rules.
-_SUMMARY_DECODE = {
-    "Duplication_percentage": lambda v: round(v / 10.0, 1),
-    "GC_sd": lambda v: round(v / 100.0, 2),
-    "GC_skew_amplitude": lambda v: round(v / 100.0, 2),
-    "Positive_GC_skew_windows_percentage": lambda v: round(v / 10.0, 1),
-}
-_CONTIG_DECODE = _SUMMARY_DECODE
-_MAG_DECODE = _SUMMARY_DECODE
+## Column scales loaded from Column_scales DB table (single source of truth).
+## _cached_scales is populated on first call to _get_column_scales(conn).
+_cached_scales = None
 
-## Inverse of _SUMMARY_DECODE: maps column name → DB scale factor.
-## user_value * scale = db_value.  Spinner step = 1/scale.
-_FILTER_ENCODE = {
-    "Duplication_percentage": 10.0,
-    "GC_sd": 100.0,
-    "GC_skew_amplitude": 100.0,
-    "Positive_GC_skew_windows_percentage": 10.0,
-}
+def _get_column_scales(conn):
+    """Load Column_scales from DB and cache. Returns {column_name: scale}."""
+    global _cached_scales
+    if _cached_scales is not None:
+        return _cached_scales
+    try:
+        rows = conn.execute(
+            "SELECT Column_name, Scale FROM Column_scales WHERE Feature_name IN ('Contig', 'Coverage', 'Side_misassembly')"
+        ).fetchall()
+        _cached_scales = {r[0]: float(r[1]) for r in rows}
+    except Exception:
+        _cached_scales = {}
+    return _cached_scales
+
+def _make_decode_map(conn):
+    """Build {column_name: decode_lambda} from Column_scales for display."""
+    scales = _get_column_scales(conn)
+    decode = {}
+    for col, scale in scales.items():
+        if scale != 1:
+            digits = max(0, len(str(int(scale))) - 1)
+            s = scale
+            decode[col] = lambda v, _s=s, _d=digits: round(v / _s, _d)
+    return decode
+
+def _make_filter_encode(conn):
+    """Build {column_name: scale} from Column_scales for filter encoding."""
+    scales = _get_column_scales(conn)
+    return {col: scale for col, scale in scales.items() if scale != 1}
+
+## Populated at runtime from Column_scales via _make_filter_encode(conn).
+_FILTER_ENCODE = {}
 
 
 ## Helper to build an HTML table from query rows with optional column filtering and decoding
@@ -208,7 +225,7 @@ def generate_and_open_peruse_html(conn, contig_name, sample_names, *, mag_name=N
                     mag_table_html = _build_row_table_html(
                         [mag_row], mag_col_names,
                         skip_cols=("MAG_id",),
-                        decode_map=_MAG_DECODE,
+                        decode_map=_make_decode_map(conn),
                     )
             except Exception:
                 pass
@@ -266,7 +283,7 @@ def generate_and_open_peruse_html(conn, contig_name, sample_names, *, mag_name=N
                     [contig_row] if contig_row else [],
                     contig_col_names,
                     skip_cols=("Contig_id",),
-                    decode_map=_CONTIG_DECODE,
+                    decode_map=_make_decode_map(conn),
                 )
             except Exception:
                 pass
@@ -293,7 +310,7 @@ def generate_and_open_peruse_html(conn, contig_name, sample_names, *, mag_name=N
                     mag_table_html = _build_row_table_html(
                         [mag_row], mag_col_names,
                         skip_cols=("MAG_id",),
-                        decode_map=_MAG_DECODE,
+                        decode_map=_make_decode_map(conn),
                     )
             except Exception:
                 pass

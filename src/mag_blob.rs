@@ -1,34 +1,31 @@
 //! MAG-scale blob aggregation.
 //!
-//! Aggregates per-contig `Feature_blob` / `Contig_blob` data into a single
-//! MAG-wide blob pair (zoom + chunks) and persists it to the `MAG_blob` /
+//! Builds MAG-wide zoom-only BLOBs and persists them to the `MAG_blob` /
 //! `MAG_contig_blob` tables. Downstream the Python plotting layer fetches
 //! one row per subplot instead of stitching per-contig blobs together —
 //! preserving the DNAFeaturesViewer y_range in the gene map and guaranteeing
 //! every member contig contributes at least one zoom bin regardless of length.
 //!
 //! Entry points:
-//! - `build_mag_contig_blobs_all` — sample-independent. Runs once in
-//!   pre-sample setup, after every Contig_blob source has been written.
+//! - `build_mag_contig_blobs_from_raw` — sample-independent. Builds
+//!   MAG_contig_blob rows directly from raw GC / repeat / hit data.
 //! - `build_mag_member_lookup` — builds contig→MAG mapping for the
 //!   processing side to group jobs by MAG.
-//! - `aggregate_feature_dense_inmem` / `aggregate_feature_sparse_inmem` —
-//!   used by `process_mag_group` (in `processing.rs`) for remaining features.
 //! - `compute_mag_coverage_stats_from_raw` — MAG coverage stats from raw
 //!   accumulated per-position values (no decode needed).
 
 use std::collections::HashMap;
 
 use anyhow::Result;
-use duckdb::{params, Connection};
+use duckdb::Connection;
 
 use crate::blob::{
-    decode_dense_from_chunks, decode_sparse_from_chunks, encode_dense_blob, encode_sparse_blob,
+    encode_dense_blob, encode_sparse_blob,
     EncodedBlob, EventMeta, MetadataFlags,
 };
-use crate::db::DbWriter;
+use crate::db::{DbWriter, GCContentData};
 use crate::gc_content::{DEFAULT_GC_CONTENT_WINDOW_SIZE, DEFAULT_GC_SKEW_WINDOW_SIZE};
-use crate::types::{feature_name_to_id, get_encoding, Encoding, ValueScale, VARIABLES};
+use crate::types::get_value_scale;
 
 /// How `EventMeta.partner` is interpreted for a sparse Contig_blob feature.
 /// Drives offset adjustment during MAG aggregation.
@@ -43,34 +40,25 @@ enum PartnerKind {
     Position,
 }
 
-/// Per-feature window size + partner semantics for features stored in
-/// `Contig_blob` (i.e. sample-independent contig-scoped data).
-///
-/// The Dense/Sparse routing itself comes from `types::get_encoding`, so
-/// `VARIABLES` stays authoritative. `window_size == 1` means one value per
-/// base-pair (the common case for sparse events and for the repeat RLE
-/// re-expansion).
-struct ContigBlobConfig {
-    window_size: u32,
-    partner_kind: PartnerKind,
-}
-
-fn contig_blob_config(name: &str) -> Option<ContigBlobConfig> {
+fn contig_blob_partner_kind(name: &str) -> PartnerKind {
     match name {
-        "gc_content" => Some(ContigBlobConfig { window_size: DEFAULT_GC_CONTENT_WINDOW_SIZE as u32, partner_kind: PartnerKind::None }),
-        "gc_skew"    => Some(ContigBlobConfig { window_size: DEFAULT_GC_SKEW_WINDOW_SIZE as u32, partner_kind: PartnerKind::None }),
-        "direct_repeat_count"      => Some(ContigBlobConfig { window_size: 1, partner_kind: PartnerKind::None }),
-        "inverted_repeat_count"    => Some(ContigBlobConfig { window_size: 1, partner_kind: PartnerKind::None }),
-        "direct_repeat_identity"   => Some(ContigBlobConfig { window_size: 1, partner_kind: PartnerKind::Position }),
-        "inverted_repeat_identity" => Some(ContigBlobConfig { window_size: 1, partner_kind: PartnerKind::Position }),
-        "hit_count_within_mag"     => Some(ContigBlobConfig { window_size: 1, partner_kind: PartnerKind::None }),
-        "hit_identity_within_mag"  => Some(ContigBlobConfig { window_size: 1, partner_kind: PartnerKind::ContigId }),
-        _ => None,
+        "direct_repeat_identity"   => PartnerKind::Position,
+        "inverted_repeat_identity" => PartnerKind::Position,
+        "hit_identity_within_mag"  => PartnerKind::ContigId,
+        _ => PartnerKind::None,
     }
 }
 
-pub fn contig_blob_config_pub(name: &str) -> Option<()> {
-    contig_blob_config(name).map(|_| ())
+/// Raw per-contig sparse feature data returned by DB writers so MAG blobs
+/// can be built directly without decode→re-encode.
+pub struct ContigSparseRaw {
+    pub feature_name: &'static str,
+    pub contig_id: i64,
+    pub contig_length: u32,
+    pub positions: Vec<u32>,
+    pub values: Vec<i32>,
+    pub metadata: Option<Vec<EventMeta>>,
+    pub flags: MetadataFlags,
 }
 
 pub struct MagMember {
@@ -114,10 +102,14 @@ pub fn build_mag_member_lookup(db_writer: &DbWriter) -> Result<crate::processing
     Ok(out)
 }
 
-/// Sample-independent aggregation: Contig_blob → MAG_contig_blob.
-/// Runs once in pre-sample setup, after GC content / GC skew / repeat blob
-/// conversion / MAG hit features have all written their Contig_blob rows.
-pub fn build_mag_contig_blobs_all(db_writer: &DbWriter) -> Result<()> {
+/// Build MAG_contig_blob rows directly from raw GC, repeat, and hit data.
+/// Runs once in pre-sample setup, after per-contig Contig_blob rows have been
+/// written. No decode→re-encode — uses raw arrays/sparse data directly.
+pub fn build_mag_contig_blobs_from_raw(
+    db_writer: &DbWriter,
+    gc_data: &[GCContentData],
+    sparse_raw: Vec<ContigSparseRaw>,
+) -> Result<()> {
     if !db_writer.is_mag_mode() {
         return Ok(());
     }
@@ -126,11 +118,144 @@ pub fn build_mag_contig_blobs_all(db_writer: &DbWriter) -> Result<()> {
     if mags.is_empty() {
         return Ok(());
     }
+
+    // Build contig_name → contig_id map from DbWriter for GC data lookup.
+    let contig_name_to_id = db_writer.contig_name_to_id_map();
+
+    // Index sparse raw data by contig_id for fast lookup.
+    let mut sparse_by_cid: HashMap<i64, Vec<&ContigSparseRaw>> = HashMap::new();
+    for entry in &sparse_raw {
+        sparse_by_cid.entry(entry.contig_id).or_default().push(entry);
+    }
+
+    // Index GC data by contig_id.
+    let mut gc_by_cid: HashMap<i64, &GCContentData> = HashMap::new();
+    for gd in gc_data {
+        if let Some(&cid) = contig_name_to_id.get(&gd.contig_name) {
+            gc_by_cid.insert(cid, gd);
+        }
+    }
+
     for (mag_id, members) in &mags {
         let mag_length: u32 = members.iter().map(|m| m.length).sum();
-        build_mag_contig_blobs(db_writer, &conn, *mag_id, members, mag_length)?;
+        let mut blobs: Vec<(String, EncodedBlob)> = Vec::new();
+
+        // --- GC content (dense, windowed) ---
+        build_gc_mag_blob(
+            &gc_by_cid, members, mag_length,
+            "gc_content", DEFAULT_GC_CONTENT_WINDOW_SIZE as u32,
+            |gd| gd.gc_values.iter().map(|&v| v as i32).collect(),
+            &mut blobs,
+        );
+
+        // --- GC skew (dense, windowed) ---
+        build_gc_mag_blob(
+            &gc_by_cid, members, mag_length,
+            "gc_skew", DEFAULT_GC_SKEW_WINDOW_SIZE as u32,
+            |gd| gd.skew_values.iter().map(|&v| v as i32).collect(),
+            &mut blobs,
+        );
+
+        // --- Sparse contig features (repeats, hits) ---
+        // Group per-MAG sparse data by feature_name.
+        let mut sparse_by_feature: HashMap<&str, Vec<(&ContigSparseRaw, &MagMember)>> = HashMap::new();
+        for m in members {
+            if let Some(entries) = sparse_by_cid.get(&m.contig_id) {
+                for entry in entries {
+                    sparse_by_feature.entry(entry.feature_name).or_default().push((entry, m));
+                }
+            }
+        }
+
+        for (feature_name, entries) in sparse_by_feature {
+            let partner_kind = contig_blob_partner_kind(feature_name);
+
+            let mut all_pos: Vec<u32> = Vec::new();
+            let mut all_val: Vec<i32> = Vec::new();
+            let mut all_meta: Vec<EventMeta> = Vec::new();
+            let mut union_flags = MetadataFlags { sparse: true, ..Default::default() };
+
+            for (entry, m) in &entries {
+                union_flags.has_stats    |= entry.flags.has_stats;
+                union_flags.has_sequence |= entry.flags.has_sequence;
+                union_flags.has_codons   |= entry.flags.has_codons;
+                union_flags.has_partner  |= entry.flags.has_partner;
+                let meta_slice = entry.metadata.as_deref();
+                for (i, &p) in entry.positions.iter().enumerate() {
+                    all_pos.push(p + m.offset);
+                    all_val.push(entry.values[i]);
+                    let mut em = meta_slice.and_then(|ms| ms.get(i)).cloned().unwrap_or_default();
+                    if partner_kind == PartnerKind::Position {
+                        if let Some(ref mut pv) = em.partner {
+                            if *pv >= 0 { *pv += m.offset as i32; }
+                        }
+                    }
+                    all_meta.push(em);
+                }
+            }
+
+            if all_pos.is_empty() { continue; }
+            let mut order: Vec<usize> = (0..all_pos.len()).collect();
+            order.sort_unstable_by_key(|&i| all_pos[i]);
+            let sorted_pos: Vec<u32> = order.iter().map(|&i| all_pos[i]).collect();
+            let sorted_val: Vec<i32> = order.iter().map(|&i| all_val[i]).collect();
+            let sorted_meta: Vec<EventMeta> = order.iter().map(|&i| all_meta[i].clone()).collect();
+
+            let scale = get_value_scale(feature_name);
+            let has_any_meta = union_flags.has_stats || union_flags.has_sequence
+                || union_flags.has_codons || union_flags.has_partner;
+            let meta_ref = if has_any_meta { Some(sorted_meta.as_slice()) } else { None };
+            let mut encoded = encode_sparse_blob(
+                &sorted_pos, &sorted_val, meta_ref, union_flags, scale, mag_length,
+            );
+            encoded.chunks = Vec::new();
+            blobs.push((feature_name.to_string(), encoded));
+        }
+
+        if !blobs.is_empty() {
+            db_writer.write_mag_contig_blobs(&conn, *mag_id, &blobs)?;
+        }
     }
     Ok(())
+}
+
+fn build_gc_mag_blob(
+    gc_by_cid: &HashMap<i64, &GCContentData>,
+    members: &[MagMember],
+    mag_length: u32,
+    feature_name: &str,
+    window_size: u32,
+    extract_values: impl Fn(&GCContentData) -> Vec<i32>,
+    blobs: &mut Vec<(String, EncodedBlob)>,
+) {
+    let mut mag_values = vec![0i32; mag_length as usize];
+    let mut any = false;
+    let w = window_size as usize;
+
+    for m in members {
+        let gd = match gc_by_cid.get(&m.contig_id) {
+            Some(gd) => gd,
+            None => continue,
+        };
+        let values = extract_values(gd);
+        if values.is_empty() { continue; }
+
+        let off = m.offset as usize;
+        let contig_end = (off + m.length as usize).min(mag_values.len());
+        for (i, &v) in values.iter().enumerate() {
+            let s = off + i * w;
+            if s >= contig_end { break; }
+            let e = (s + w).min(contig_end);
+            for slot in &mut mag_values[s..e] { *slot = v; }
+        }
+        any = true;
+    }
+
+    if !any { return; }
+    let scale = get_value_scale(feature_name);
+    let mut encoded = encode_dense_blob(&mag_values, scale, mag_length);
+    encoded.chunks = Vec::new();
+    blobs.push((feature_name.to_string(), encoded));
 }
 
 // ---------------------------------------------------------------------------
@@ -139,7 +264,6 @@ pub fn build_mag_contig_blobs_all(db_writer: &DbWriter) -> Result<()> {
 
 /// Returns `[(MAG_id, [MagMember ordered by Offset_in_MAG])]`.
 fn load_mag_members(conn: &Connection) -> Result<Vec<(i64, Vec<MagMember>)>> {
-    // Ensure MAG table exists — non-MAG DBs won't have it.
     let has_mag_tables: bool = conn.query_row(
         "SELECT COUNT(*) > 0 FROM information_schema.tables
          WHERE table_name = 'MAG_contigs_association'",
@@ -176,254 +300,6 @@ fn load_mag_members(conn: &Connection) -> Result<Vec<(i64, Vec<MagMember>)>> {
         });
     }
     Ok(out)
-}
-
-// ---------------------------------------------------------------------------
-// Sample-feature blobs (Feature_blob → MAG_blob) — in-memory aggregators
-// ---------------------------------------------------------------------------
-
-/// Convert `EncodedBlob.chunks` (`Vec<Vec<u8>>`, indexed by chunk_idx) into the
-/// `(chunk_idx, data)` shape the existing chunk decoders expect.
-fn chunks_with_idx(blob: &EncodedBlob) -> Vec<(i32, Vec<u8>)> {
-    blob.chunks
-        .iter()
-        .enumerate()
-        .map(|(i, data)| (i as i32, data.clone()))
-        .collect()
-}
-
-pub fn aggregate_feature_dense_inmem(
-    members_and_blobs: &[(MagMember, &EncodedBlob)],
-    mag_length: u32,
-    scale: ValueScale,
-) -> EncodedBlob {
-    let mut mag_values = vec![0i32; mag_length as usize];
-    let mut any = false;
-
-    for (m, blob) in members_and_blobs {
-        if blob.chunks.is_empty() { continue; }
-        let chunks = chunks_with_idx(blob);
-        let values = decode_dense_from_chunks(&chunks, m.length);
-        let off = m.offset as usize;
-        let end = (off + m.length as usize).min(mag_values.len());
-        let copy_n = end - off;
-        if copy_n > 0 && copy_n <= values.len() {
-            mag_values[off..end].copy_from_slice(&values[..copy_n]);
-        }
-        any = true;
-    }
-
-    if !any {
-        return empty_blob();
-    }
-    let mut encoded = encode_dense_blob(&mag_values, scale, mag_length);
-    encoded.chunks = Vec::new(); // MAG chunks not stored — assembled on the fly from per-contig chunks
-    encoded
-}
-
-pub fn aggregate_feature_sparse_inmem(
-    members_and_blobs: &[(MagMember, &EncodedBlob)],
-    mag_length: u32,
-    scale: ValueScale,
-) -> EncodedBlob {
-    let mut all_pos: Vec<u32> = Vec::new();
-    let mut all_val: Vec<i32> = Vec::new();
-    let mut all_meta: Vec<EventMeta> = Vec::new();
-    let mut union_flags = MetadataFlags { sparse: true, ..Default::default() };
-
-    for (m, blob) in members_and_blobs {
-        if blob.chunks.is_empty() { continue; }
-        let chunks = chunks_with_idx(blob);
-        let (positions, values, meta, flags) = decode_sparse_from_chunks(&chunks);
-        union_flags.has_stats    |= flags.has_stats;
-        union_flags.has_sequence |= flags.has_sequence;
-        union_flags.has_codons   |= flags.has_codons;
-        union_flags.has_partner  |= flags.has_partner;
-        for (i, p) in positions.iter().enumerate() {
-            all_pos.push(p + m.offset);
-            all_val.push(values[i]);
-            all_meta.push(meta.get(i).cloned().unwrap_or_default());
-        }
-    }
-
-    if all_pos.is_empty() {
-        return empty_blob();
-    }
-    // Sort by position — zoom level computation is order-independent, but
-    // encode_sparse_blob builds the zoom from sorted positions internally.
-    let mut order: Vec<usize> = (0..all_pos.len()).collect();
-    order.sort_unstable_by_key(|&i| all_pos[i]);
-    let all_pos: Vec<u32> = order.iter().map(|&i| all_pos[i]).collect();
-    let all_val: Vec<i32> = order.iter().map(|&i| all_val[i]).collect();
-    let all_meta: Vec<EventMeta> = order.iter().map(|&i| all_meta[i].clone()).collect();
-    let mut encoded = encode_sparse_blob(
-        &all_pos, &all_val,
-        Some(&all_meta), union_flags, scale, mag_length,
-    );
-    encoded.chunks = Vec::new(); // MAG chunks not stored — assembled on the fly from per-contig chunks
-    encoded
-}
-
-// ---------------------------------------------------------------------------
-// Contig-level blobs (Contig_blob → MAG_contig_blob)
-// ---------------------------------------------------------------------------
-
-fn build_mag_contig_blobs(
-    db_writer: &DbWriter,
-    conn: &Connection,
-    mag_id: i64,
-    members: &[MagMember],
-    mag_length: u32,
-) -> Result<()> {
-    let mut blobs: Vec<(String, EncodedBlob)> = Vec::new();
-
-    for var in VARIABLES.iter() {
-        let cfg = match contig_blob_config(var.name) {
-            Some(c) => c,
-            None => continue,
-        };
-        let fid = match feature_name_to_id(var.name) { Some(v) => v, None => continue };
-
-        let encoded = match get_encoding(var.name) {
-            Encoding::Dense => aggregate_contig_dense(
-                conn, fid, members, mag_length, var.value_scale, cfg.window_size,
-            )?,
-            Encoding::Sparse => aggregate_contig_sparse(
-                conn, fid, members, mag_length, var.value_scale, cfg.partner_kind,
-            )?,
-        };
-
-        if !encoded.zoom.is_empty() {
-            blobs.push((var.name.to_string(), encoded));
-        }
-    }
-
-    if !blobs.is_empty() {
-        db_writer.write_mag_contig_blobs(conn, mag_id, &blobs)?;
-    }
-    Ok(())
-}
-
-fn aggregate_contig_dense(
-    conn: &Connection,
-    fid: i16,
-    members: &[MagMember],
-    mag_length: u32,
-    scale: ValueScale,
-    window_size: u32,
-) -> Result<EncodedBlob> {
-    let mut mag_values = vec![0i32; mag_length as usize];
-    let mut any = false;
-
-    for m in members {
-        let chunks = load_contig_chunks(conn, m.contig_id, fid)?;
-        if chunks.is_empty() { continue; }
-
-        // For windowed features the source array has ceil(contig_length/window_size)
-        // values; for per-bp features it's contig_length.
-        let num_values = if window_size <= 1 {
-            m.length
-        } else {
-            m.length.div_ceil(window_size)
-        };
-        let values = decode_dense_from_chunks(&chunks, num_values);
-
-        // Expand to per-bp at MAG offset (no-op when window_size==1).
-        let off = m.offset as usize;
-        let contig_end = (off + m.length as usize).min(mag_values.len());
-        if window_size <= 1 {
-            let copy_n = contig_end - off;
-            mag_values[off..contig_end].copy_from_slice(&values[..copy_n.min(values.len())]);
-        } else {
-            let w = window_size as usize;
-            for (i, v) in values.iter().enumerate() {
-                let s = off + i * w;
-                if s >= contig_end { break; }
-                let e = (s + w).min(contig_end);
-                for slot in &mut mag_values[s..e] { *slot = *v; }
-            }
-        }
-        any = true;
-    }
-
-    if !any {
-        return Ok(empty_blob());
-    }
-    let mut encoded = encode_dense_blob(&mag_values, scale, mag_length);
-    encoded.chunks = Vec::new(); // MAG chunks not stored — assembled on the fly from per-contig chunks
-    Ok(encoded)
-}
-
-fn aggregate_contig_sparse(
-    conn: &Connection,
-    fid: i16,
-    members: &[MagMember],
-    mag_length: u32,
-    scale: ValueScale,
-    partner_kind: PartnerKind,
-) -> Result<EncodedBlob> {
-    let mut all_pos: Vec<u32> = Vec::new();
-    let mut all_val: Vec<i32> = Vec::new();
-    let mut all_meta: Vec<EventMeta> = Vec::new();
-    let mut union_flags = MetadataFlags { sparse: true, ..Default::default() };
-
-    for m in members {
-        let chunks = load_contig_chunks(conn, m.contig_id, fid)?;
-        if chunks.is_empty() { continue; }
-        let (positions, values, meta, flags) = decode_sparse_from_chunks(&chunks);
-        union_flags.has_stats    |= flags.has_stats;
-        union_flags.has_sequence |= flags.has_sequence;
-        union_flags.has_codons   |= flags.has_codons;
-        union_flags.has_partner  |= flags.has_partner;
-        for (i, p) in positions.iter().enumerate() {
-            all_pos.push(p + m.offset);
-            all_val.push(values[i]);
-            let mut em = meta.get(i).cloned().unwrap_or_default();
-            // Partner positions are contig-local and must be shifted into
-            // MAG coordinates. ContigId partners are global ids — leave as-is.
-            if partner_kind == PartnerKind::Position {
-                if let Some(p) = em.partner {
-                    if p >= 0 {
-                        em.partner = Some(p + m.offset as i32);
-                    }
-                }
-            }
-            all_meta.push(em);
-        }
-    }
-
-    if all_pos.is_empty() {
-        return Ok(empty_blob());
-    }
-    // Sort by position — encode_sparse_blob uses binary search (partition_point)
-    // to assign events to chunks, which requires sorted input.
-    let mut order: Vec<usize> = (0..all_pos.len()).collect();
-    order.sort_unstable_by_key(|&i| all_pos[i]);
-    let all_pos: Vec<u32> = order.iter().map(|&i| all_pos[i]).collect();
-    let all_val: Vec<i32> = order.iter().map(|&i| all_val[i]).collect();
-    let all_meta: Vec<EventMeta> = order.iter().map(|&i| all_meta[i].clone()).collect();
-    let mut encoded = encode_sparse_blob(
-        &all_pos, &all_val,
-        Some(&all_meta), union_flags, scale, mag_length,
-    );
-    encoded.chunks = Vec::new();
-    Ok(encoded)
-}
-
-fn load_contig_chunks(
-    conn: &Connection,
-    contig_id: i64,
-    fid: i16,
-) -> Result<Vec<(i32, Vec<u8>)>> {
-    let mut stmt = conn.prepare(
-        "SELECT Chunk_idx, Data FROM Contig_blob_chunk
-         WHERE Contig_id = ? AND Feature_id = ?
-         ORDER BY Chunk_idx"
-    )?;
-    let rows = stmt.query_map(params![contig_id, fid], |r| {
-        Ok((r.get::<_, i32>(0)?, r.get::<_, Vec<u8>>(1)?))
-    })?;
-    Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
 }
 
 // ---------------------------------------------------------------------------
@@ -516,23 +392,23 @@ pub fn compute_mag_coverage_stats_from_raw(
         (sum_sq_diff as f64 / rough_denom as f64).sqrt() / mean_raw
     } else { 0.0 };
 
+    let s_m = crate::types::get_column_scale("Coverage", "Coverage_mean");
+    let s_af = crate::types::get_column_scale("Coverage", "Aligned_fraction_percentage");
+    let s_cv = crate::types::get_column_scale("Coverage", "Coverage_coefficient_of_variation");
+    let s_rcr = crate::types::get_column_scale("Coverage", "Coverage_relative_coverage_roughness");
     MagCoverageStats {
         mag_length,
-        aligned_fraction_pct_x10: (af_raw * 10.0).round() as i32,
-        expected_aligned_fraction_pct_x10: (expected_af_raw * 10.0).round() as i32,
+        aligned_fraction_pct_x10: (af_raw * s_af).round() as i32,
+        expected_aligned_fraction_pct_x10: (expected_af_raw * s_af).round() as i32,
         read_count: total_read_count,
-        coverage_mean_x10: (mean_raw * 10.0).round() as i32,
-        coverage_median_x10: (median_raw * 10.0).round() as i32,
-        coverage_trimmed_mean_x10: (trimmed_raw * 10.0).round() as i32,
-        coverage_cv_x1e6: (cv_raw * 1_000_000.0).round() as i32,
-        coverage_roughness_x1e6: (roughness_raw * 1_000_000.0).round() as i32,
+        coverage_mean_x10: (mean_raw * s_m).round() as i32,
+        coverage_median_x10: (median_raw * s_m).round() as i32,
+        coverage_trimmed_mean_x10: (trimmed_raw * s_m).round() as i32,
+        coverage_cv_x1e6: (cv_raw * s_cv).round() as i32,
+        coverage_roughness_x1e6: (roughness_raw * s_rcr).round() as i32,
     }
 }
 
 // ---------------------------------------------------------------------------
 // Misc
 // ---------------------------------------------------------------------------
-
-fn empty_blob() -> EncodedBlob {
-    EncodedBlob { zoom: Vec::new(), chunks: Vec::new() }
-}

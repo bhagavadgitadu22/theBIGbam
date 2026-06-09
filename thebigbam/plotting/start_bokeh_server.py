@@ -15,7 +15,7 @@ from .plotting_data_per_sample import generate_bokeh_plot_per_sample, generate_b
 from .plotting_data_all_samples import generate_bokeh_plot_all_samples
 from ..database.database_getters import get_filtering_metadata, resolve_distinct_values, resolve_histogram_bins, resolve_value_counts, ANNOTATION_EXCLUDED_COLUMNS, is_mag_mode, get_mag_contig_map
 from .searchable_select import SearchableSelect
-from .perusing_data import _FILTER_ENCODE
+from .perusing_data import _FILTER_ENCODE, _make_filter_encode
 
 def preload_db_data(db_path, enable_timing=False):
     """Run all expensive DB queries once at startup. Returns a dict of pure data."""
@@ -25,6 +25,8 @@ def preload_db_data(db_path, enable_timing=False):
 
     conn = _duckdb.connect(db_path, read_only=True)
     cur = conn.cursor()
+
+    _FILTER_ENCODE.update(_make_filter_encode(conn))
 
     if enable_timing:
         _t = time.perf_counter()

@@ -17,17 +17,6 @@ Tables are grouped by what they describe. Not all tables are present in every da
 | **MAG** *(MAG)*                     | `MAG_id`              | One row per MAG bin. Stores name, total length, N50, number of contigs, GC statistics                                           |
 | **MAG_contigs_association** *(MAG)* | `(MAG_id, Contig_id)` | Maps contigs to their MAG. `Offset_in_MAG` gives the cumulative bp offset under longest-first ordering                          |
 
-### Per-contig-per-sample metrics
-
-| Table                        | Key                      | Description                                                                                                                                      |
-| ---------------------------- | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **Coverage** *(BAM)*         | `(Contig_id, Sample_id)` | Contig-level coverage summaries: mean, median, trimmed mean, coefficient of variation, relative coverage roughness, aligned fraction, read count |
-| **MAG_coverage** *(MAG)*     | `(MAG_id, Sample_id)`    | Same metrics as Coverage but aggregated at MAG level                                                                                             |
-| **Misassembly** *(BAM)*      | `(Contig_id, Sample_id)` | Event counts at >=50% prevalence threshold: mismatches, deletions, insertions, clippings, collapse/expansion bp                                  |
-| **Microdiversity** *(BAM)*   | `(Contig_id, Sample_id)` | Event counts at >=10% prevalence threshold, plus microdiverse bp on reference and reads                                                          |
-| **Side_misassembly** *(BAM)* | `(Contig_id, Sample_id)` | Left/right contig-end clipping events: collapse/expansion at each end, misjoint mates                                                            |
-| **Topology** *(BAM)*         | `(Contig_id, Sample_id)` | Circularisation metrics: circularising reads/inserts, median circularising length                                                                |
-
 ### Per-position data (BLOB storage)
 
 | Table                          | Key                                             | Description                                                                     |
@@ -39,14 +28,20 @@ Tables are grouped by what they describe. Not all tables are present in every da
 | **MAG_blob** *(MAG)*           | `(MAG_id, Sample_id, Feature_id)`               | Zoom-level summary BLOB for MAG-scale mapping features                          |
 | **MAG_contig_blob** *(MAG)*    | `(MAG_id, Feature_id)`                          | Zoom-level summary BLOB for MAG-scale contig features                           |
 
-### Phage packaging
+### Per-contig-per-sample metrics
 
-| Table                        | Key            | Description                                                                                        |
-| ---------------------------- | -------------- | -------------------------------------------------------------------------------------------------- |
-| **Phage_mechanisms** *(BAM)* | `Packaging_id` | One row per detected packaging mechanism per contig per sample                                     |
-| **Phage_termini** *(BAM)*    | `Terminus_id`  | Individual terminus areas linked to `Phage_mechanisms`, with Poisson and clipping test diagnostics |
+| Table                        | Key                      | Description                                                                                                                                      |
+| ---------------------------- | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **Coverage** *(BAM)*         | `(Contig_id, Sample_id)` | Contig-level coverage summaries: mean, median, trimmed mean, coefficient of variation, relative coverage roughness, aligned fraction, read count |
+| **MAG_coverage** *(BAM,MAG)* | `(MAG_id, Sample_id)`    | Same metrics as Coverage but aggregated at MAG level                                                                                             |
+| **Misassembly** *(BAM)*      | `(Contig_id, Sample_id)` | Event counts at >=50% prevalence threshold: mismatches, deletions, insertions, clippings, collapse/expansion bp                                  |
+| **Microdiversity** *(BAM)*   | `(Contig_id, Sample_id)` | Event counts at >=10% prevalence threshold, plus microdiverse bp on reference and reads                                                          |
+| **Side_misassembly** *(BAM)* | `(Contig_id, Sample_id)` | Left/right contig-end clipping events: collapse/expansion at each end, misjoint mates                                                            |
+| **Topology** *(BAM)*         | `(Contig_id, Sample_id)` | Circularisation metrics: circularising reads/inserts, median circularising length                                                                |
+| **Phage_mechanisms** *(BAM)* | `Packaging_id`           | One row per detected packaging mechanism per contig per sample                                                                                   |
+| **Phage_termini** *(BAM)*    | `Terminus_id`            | Individual terminus areas linked to `Phage_mechanisms`, with Poisson and clipping test diagnostics## Phage packaging                             |
 
-### Annotations
+### Contig annotations
 
 | Table                      | Key                              | Description                                                                                                                       |
 | -------------------------- | -------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
@@ -59,13 +54,13 @@ Tables are grouped by what they describe. Not all tables are present in every da
 | **Codon_table**            | `Codon`                          | Standard genetic code lookup (64 codons)                                                                                          |
 | **Annotated_types**        | `Type_id`                        | Distinct annotation type values ordered by frequency                                                                              |
 
-### Repeats and BLAST hits
+### Contig repeats and BLAST hits
 
-| Table                         | Key                                     | Description                                                             |
-| ----------------------------- | --------------------------------------- | ----------------------------------------------------------------------- |
-| **Contig_directRepeats**      | `(Contig_id, positions)`                | Direct repeats detected by nucmer. Pident stored as integer x100        |
-| **Contig_invertedRepeats**    | `(Contig_id, positions)`                | Inverted repeats detected by nucmer. Pident stored as integer x100      |
-| **Contig_blast_hits** *(MAG)* | `(Contig_id_1, Contig_id_2, positions)` | Inter-contig BLAST hits, stored canonically (id_1 <= id_2). Pident x100 |
+| Table                         | Key                                     | Description                                                |
+| ----------------------------- | --------------------------------------- | ---------------------------------------------------------- |
+| **Contig_directRepeats**      | `(Contig_id, positions)`                | Direct repeats detected by BLAST self-alignment            |
+| **Contig_invertedRepeats**    | `(Contig_id, positions)`                | Inverted repeats detected by BLAST self-alignment          |
+| **Contig_blast_hits** *(MAG)* | `(Contig_id_1, Contig_id_2, positions)` | Inter-contig BLAST hits, stored canonically (id_1 <= id_2) |
 
 ### Visualization metadata
 
@@ -80,36 +75,23 @@ Tables are grouped by what they describe. Not all tables are present in every da
 
 ### Views
 
-Views compute derived metrics on the fly from the tables above. They are not stored — removing a sample or contig automatically updates all view results.
+Views compute derived metrics on the fly from the tables above. They are not stored, removing a sample or contig automatically updates all view results.
 
 | View                                        | Description                                                                                                             |
 | ------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
 | **Contig_annotation**                       | Joins `Contig_annotation_core` + `Annotation_sequence` + `Annotation_segments` into a single convenient row per feature |
-| **Explicit_coverage**                       | Human-readable coverage with RPKM and TPM computed on the fly                                                           |
-| **Explicit_misassembly**                    | Misassembly counts normalized per 100 kbp                                                                               |
-| **Explicit_microdiversity**                 | Microdiversity counts normalized per 100 kbp                                                                            |
-| **Explicit_side_misassembly**               | Side misassembly with normalized misjoint mates                                                                         |
-| **Explicit_topology**                       | Circularisation metrics with human-readable names                                                                       |
-| **Explicit_phage_mechanisms**               | Packaging mechanisms with contig/sample names                                                                           |
-| **Explicit_phage_termini**                  | Terminus areas with contig/sample names and all diagnostics                                                             |
+| **Explicit_coverage**                       | Human-readable `Coverage` table with RPKM and TPM computed on the fly                                                   |
+| **Explicit_misassembly**                    | `Misassembly` counts normalized per 100 kbp                                                                             |
+| **Explicit_microdiversity**                 | `Microdiversity` counts normalized per 100 kbp                                                                          |
+| **Explicit_side_misassembly**               | `Side_misassembly` with normalized misjoint mates                                                                       |
+| **Explicit_topology**                       | `Topology` metrics with human-readable names                                                                            |
+| **Explicit_phage_mechanisms**               | `Packaging_mechanisms` with contig/sample names                                                                         |
+| **Explicit_phage_termini**                  | `Packaging_termini` with contig/sample names and all diagnostics                                                        |
 | **MAG_annotation_core** *(MAG)*             | Annotations shifted to MAG coordinates via `Offset_in_MAG`                                                              |
-| **Contig_blast_hits_symmetric** *(MAG)*     | BLAST hits in both directions (both (A,B) and (B,A))                                                                    |
-| **Explicit_coverage_per_MAG** *(MAG)*       | MAG-level coverage with RPKM and TPM                                                                                    |
-| **Explicit_misassembly_per_MAG** *(MAG)*    | MAG-level misassembly counts per 100 kbp                                                                                |
-| **Explicit_microdiversity_per_MAG** *(MAG)* | MAG-level microdiversity counts per 100 kbp                                                                             |
-
----
-
-## Integer scaling conventions
-
-All feature values are stored as **INTEGER** in DuckDB for efficient columnar compression. Real-valued quantities are scaled up before storage and scaled back down on read. The `Column_scales` table documents every scaling factor, but the main conventions are:
-
-| Scale      | Used for                                                                | Example                      |
-| ---------- | ----------------------------------------------------------------------- | ---------------------------- |
-| x10        | Aligned fraction, duplication percentage                                | 95.3% stored as 953          |
-| x100       | Coverage mean/median/trimmed mean, MAPQ, repeat Pident, GC sd/amplitude | 42.57x stored as 4257        |
-| x1000      | Coverage-relative sparse features, GC content/skew per-position values  | 12.5 per-mille stored as 125 |
-| x1,000,000 | Coefficient of variation, relative coverage roughness                   | 0.000832 stored as 832       |
+| **Contig_blast_hits_symmetric** *(MAG)*     | BLAST hits from `Contig_blast_hits` in both directions (both (A,B) and (B,A))                                           |
+| **Explicit_coverage_per_MAG** *(MAG)*       | Human-readable `MAG_coverage` table with RPKM and TPM computed on the fly                                               |
+| **Explicit_misassembly_per_MAG** *(MAG)*    | MAG-level `Misassembly`` counts per 100 kbp                                                                             |
+| **Explicit_microdiversity_per_MAG** *(MAG)* | MAG-level `Microdiversity`` counts per 100 kbp                                                                          |
 
 ---
 
@@ -145,3 +127,46 @@ Conversely, `thebigbam inspect` always returns base-resolution data, never zoom 
 In MAG mode, per-contig BLOBs are still written as usual. In addition, MAG-wide zoom-only BLOBs are built by concatenating per-contig data (shifted by each contig's Offset_in_MAG). MAG_blob stores one zoom BLOB per MAG per sample per mapping feature. MAG_contig_blob stores one zoom BLOB per MAG per contig-level feature (GC, repeats). 
 
 No MAG-level base-resolution chunks are stored, in order to avoid redundant data duplication. For zoomed-in views, the viewer retrieves data directly from the per-contig chunk tables and uses coordinate offsets to map MAG-level positions back to contig coordinates.
+
+---
+
+## Integer scaling conventions
+
+All values are stored as **INTEGER**. To achieve that, real quantities are multiplied by a fixed scale factor before storage and divided back when fetching the data. The `Column_scales` table documents every scaling factor so that any consumer (Rust, SQL, and Python) can decode values without hardcoded knowledge of scales. The delta+zigzag+varint+zstd BLOB encoding pipeline requires integer inputs, so BLOB values are scaled for the same reason.
+
+### Single source of truth
+
+Every scale factor is defined once in the Rust constant arrays in `src/types.rs`:
+
+- **`COLUMN_SCALES`**: scale factors for SQL INTEGER columns of metric tables.
+- **`VARIABLES` / `ValueScale`**: scale factors for BLOB feature values. The `ValueScale` enum (`Raw`, `Times10`, `Times100`, `Times1000`) is encoded in each BLOB header byte.
+- **`METADATA_STATS_SCALE`** and **`METADATA_PREVALENCE_SCALE`**: scale factors for sparse event metadata fields associated to some features (stored inside the binary metadata section of feature sparse BLOBs).
+
+At database creation, all scale factors are written to the `Column_scales` table. The `Explicit_*` SQL views read their divisors from this Rust array. The Python plotting and analysis code reads scales from the `Column_scales` table at runtime.
+
+### SQL INTEGER columns
+
+These are metric and summary columns in non-BLOB tables. The scale factor must be applied manually when querying with raw SQL (the `Explicit_*` views already handle this).
+
+| Scale      | Columns                                                                     | Example                |
+| ---------- | --------------------------------------------------------------------------- | ---------------------- |
+| x1         | GC_mean (integer 0-100), read/event counts                                  | 42 stored as 42        |
+| x10        | Coverage_mean/median/trimmed_mean, Aligned_fraction, Duplication_percentage | 42.5 stored as 425     |
+| x100       | GC_sd, GC_skew_amplitude, Pident, Tau, Clipped_ratio                        | 0.95 stored as 95      |
+| x1,000,000 | Coverage_coefficient_of_variation, Coverage_relative_coverage_roughness     | 0.000832 stored as 832 |
+
+### BLOB feature values
+
+| Scale    | Features                                                                                                                             | Why                              |
+| -------- | ------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------- |
+| x1 (Raw) | primary_reads, strand counts, secondary/supplementary, coverage_reduced, splicings, gc_content (0-100 per window), repeat/hit counts | Already integers (counts)        |
+| x10      | insert_sizes, read_lengths                                                                                                           | Averages per position (float)    |
+| x100     | mapq, gc_skew, repeat/hit identity                                                                                                   | Averages or ratios (float)       |
+| x1000    | mismatches, deletions, insertions, clippings, non_inward_pairs, mate_not_mapped, mate_on_another_contig, reads_starts, reads_ends    | Coverage-relative ratios (float) |
+
+### BLOB sparse event metadata
+
+| Scale | Field               | What it represents                              |
+| ----- | ------------------- | ----------------------------------------------- |
+| x100  | mean, median, std   | Length statistics of the dominant variant       |
+| x1000 | sequence_prevalence | Fraction of reads carrying the dominant variant |

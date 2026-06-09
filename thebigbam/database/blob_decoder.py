@@ -39,8 +39,12 @@ def gc_window_size(feature_name):
         return GC_SKEW_WINDOW_SIZE
     return 1
 
-# Scale factor mapping
+# Scale factor mapping (must match src/types.rs ValueScale)
 SCALE_DIVISORS = {0: 1, 1: 100, 2: 1000, 3: 10}
+
+# Sparse event metadata scales (must match src/types.rs METADATA_*_SCALE)
+METADATA_STATS_SCALE = 100.0
+METADATA_PREVALENCE_SCALE = 1000.0
 
 # Codon/AA tables (must match src/blob.rs)
 CODON_TABLE = [
@@ -265,11 +269,11 @@ def _decode_chunk_metadata(meta_data, event_count, has_stats, has_sequence, has_
     n = event_count
 
     if has_stats:
-        result["mean"] = np.frombuffer(meta_data[pos:pos + n * 4], dtype="<i4") / 100.0
+        result["mean"] = np.frombuffer(meta_data[pos:pos + n * 4], dtype="<i4") / METADATA_STATS_SCALE
         pos += n * 4
-        result["median"] = np.frombuffer(meta_data[pos:pos + n * 4], dtype="<i4") / 100.0
+        result["median"] = np.frombuffer(meta_data[pos:pos + n * 4], dtype="<i4") / METADATA_STATS_SCALE
         pos += n * 4
-        result["std"] = np.frombuffer(meta_data[pos:pos + n * 4], dtype="<i4") / 100.0
+        result["std"] = np.frombuffer(meta_data[pos:pos + n * 4], dtype="<i4") / METADATA_STATS_SCALE
         pos += n * 4
 
     if has_sequence:
@@ -283,7 +287,7 @@ def _decode_chunk_metadata(meta_data, event_count, has_stats, has_sequence, has_
             else:
                 sequences.append(None)
         result["sequence"] = sequences
-        result["sequence_prevalence"] = np.frombuffer(meta_data[pos:pos + n * 2], dtype="<i2").astype(np.float64) / 10.0
+        result["sequence_prevalence"] = np.frombuffer(meta_data[pos:pos + n * 2], dtype="<i2").astype(np.float64) / (METADATA_PREVALENCE_SCALE / 100.0)
         pos += n * 2
 
     if has_codons:
@@ -408,15 +412,15 @@ def _decode_sparse_metadata(blob, header, event_count):
     # Stats: mean[], median[], std[] as i32 arrays
     if header["has_stats"]:
         mean_bytes = meta_data[pos:pos + n * 4]
-        result["mean"] = np.frombuffer(mean_bytes, dtype="<i4") / 100.0
+        result["mean"] = np.frombuffer(mean_bytes, dtype="<i4") / METADATA_STATS_SCALE
         pos += n * 4
 
         median_bytes = meta_data[pos:pos + n * 4]
-        result["median"] = np.frombuffer(median_bytes, dtype="<i4") / 100.0
+        result["median"] = np.frombuffer(median_bytes, dtype="<i4") / METADATA_STATS_SCALE
         pos += n * 4
 
         std_bytes = meta_data[pos:pos + n * 4]
-        result["std"] = np.frombuffer(std_bytes, dtype="<i4") / 100.0
+        result["std"] = np.frombuffer(std_bytes, dtype="<i4") / METADATA_STATS_SCALE
         pos += n * 4
 
     # Sequences: [len: u8, bytes[len]] per event, then prevalence[n] as i16
@@ -434,7 +438,7 @@ def _decode_sparse_metadata(blob, header, event_count):
         result["sequence"] = sequences
 
         prev_bytes = meta_data[pos:pos + n * 2]
-        result["sequence_prevalence"] = np.frombuffer(prev_bytes, dtype="<i2").astype(np.float64) / 10.0
+        result["sequence_prevalence"] = np.frombuffer(prev_bytes, dtype="<i2").astype(np.float64) / (METADATA_PREVALENCE_SCALE / 100.0)
         pos += n * 2
 
     # Codons: category[], codon_id[], aa_id[] each as u8 arrays

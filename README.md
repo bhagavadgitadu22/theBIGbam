@@ -485,7 +485,7 @@ Run `thebigbam analysis -h` to display the list of available analysis scripts. R
 - [Applying theBIGbam to real projects](docs/USAGE.md)
 - [Features](docs/FEATURES.md)
 - [Compression](docs/COMPRESSION.md)
-- [Database structure](docs/DATABASE_STRUCTURE.md) TO-DO
+- [Database structure](docs/DATABASE_STRUCTURE.md)
 - [Filters](docs/FILTERS.md)
 - [Misalignment](docs/MISALIGNMENT.md) TO-DO
 - [Phage packaging](docs/PHAGE_PACKAGING.md)

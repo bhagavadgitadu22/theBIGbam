@@ -291,15 +291,16 @@ pub fn compute_all_metrics(
         None
     };
 
+    let collapse_scale = 100.0 * crate::types::get_column_scale("Side_misassembly", "Contig_start_collapse_percentage");
     let side = SideMisassemblyData {
         contig_id,
         contig_name: contig_name.to_string(),
         coverage_first_position: primary_reads.first().copied().unwrap_or(0),
-        contig_start_collapse_percentage: left_result.map(|(p, _, _)| (p * 1000.0).round() as i32),
+        contig_start_collapse_percentage: left_result.map(|(p, _, _)| (p * collapse_scale).round() as i32),
         contig_start_collapse_bp: left_result.map(|(_, _, m)| m),
         contig_start_expansion_bp: left_result.map(|(_, d, _)| d),
         coverage_last_position: primary_reads.last().copied().unwrap_or(0),
-        contig_end_collapse_percentage: right_result.map(|(p, _, _)| (p * 1000.0).round() as i32),
+        contig_end_collapse_percentage: right_result.map(|(p, _, _)| (p * collapse_scale).round() as i32),
         contig_end_collapse_bp: right_result.map(|(_, _, m)| m),
         contig_end_expansion_bp: right_result.map(|(_, d, _)| d),
         contig_end_misjoint_mates: contig_end_misjoint,

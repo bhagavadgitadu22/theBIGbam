@@ -388,13 +388,19 @@ impl DbWriter {
         let mut appender = conn.appender("Coverage")
             .context("Failed to create Coverage appender")?;
 
+        use crate::types::get_column_scale;
+        let s_af  = get_column_scale("Coverage", "Aligned_fraction_percentage");
+        let s_eaf = get_column_scale("Coverage", "Expected_aligned_fraction");
+        let s_m   = get_column_scale("Coverage", "Coverage_mean");
+        let s_med = get_column_scale("Coverage", "Coverage_median");
+        let s_tm  = get_column_scale("Coverage", "Coverage_trimmed_mean");
         for p in presences {
-            let cov_pct = (p.coverage_pct * 10.0).round() as i32;
-            let expected_af = (p.expected_aligned_fraction * 10.0).round() as i32;
+            let cov_pct = (p.coverage_pct as f64 * s_af).round() as i32;
+            let expected_af = (p.expected_aligned_fraction as f64 * s_eaf).round() as i32;
             let read_count = p.read_count as i64;
-            let cov_mean = (p.coverage_mean * 10.0).round() as i32;
-            let cov_median = (p.coverage_median * 10.0).round() as i32;
-            let cov_trimmed_mean = (p.coverage_trimmed_mean * 10.0).round() as i32;
+            let cov_mean = (p.coverage_mean as f64 * s_m).round() as i32;
+            let cov_median = (p.coverage_median as f64 * s_med).round() as i32;
+            let cov_trimmed_mean = (p.coverage_trimmed_mean as f64 * s_tm).round() as i32;
             let cov_sd = p.coverage_coefficient_of_variation.round() as i32;
             let cov_var = p.coverage_relative_coverage_roughness.round() as i32;
             appender.append_row(params![p.contig_id, sample_id, cov_pct, expected_af, read_count, cov_mean, cov_median, cov_trimmed_mean, cov_sd, cov_var])?;
@@ -455,9 +461,10 @@ impl DbWriter {
                 ])?;
 
                 // Insert left termini (status = "start")
+                let s_tau = crate::types::get_column_scale("Phage_termini", "Tau");
+                let s_cr = crate::types::get_column_scale("Phage_termini", "Clipped_ratio");
                 for terminus in &pkg.left_termini {
-                    // Store tau as integer (×100)
-                    let tau_int = (terminus.tau * 100.0).round() as i32;
+                    let tau_int = (terminus.tau * s_tau).round() as i32;
                     let passed_poisson_str = if terminus.passed_poisson_test { "yes" } else { "no" };
                     let passed_clipping_str = if terminus.passed_clipping_test { "yes" } else { "no" };
                     let size = terminus.size;
@@ -480,7 +487,7 @@ impl DbWriter {
                         compact_pvalue(terminus.adjusted_pvalue),
                         passed_clipping_str,
                         terminus.sum_clippings as i64,
-                        (terminus.clipped_ratio * 100.0).round() as i32,
+                        (terminus.clipped_ratio * s_cr).round() as i32,
                         terminus.expected_clippings.round() as i64
                     ])?;
                     terminus_id += 1;
@@ -488,7 +495,7 @@ impl DbWriter {
 
                 // Insert right termini (status = "end")
                 for terminus in &pkg.right_termini {
-                    let tau_int = (terminus.tau * 100.0).round() as i32;
+                    let tau_int = (terminus.tau * s_tau).round() as i32;
                     let passed_poisson_str = if terminus.passed_poisson_test { "yes" } else { "no" };
                     let passed_clipping_str = if terminus.passed_clipping_test { "yes" } else { "no" };
                     let size = terminus.size;
@@ -511,7 +518,7 @@ impl DbWriter {
                         compact_pvalue(terminus.adjusted_pvalue),
                         passed_clipping_str,
                         terminus.sum_clippings as i64,
-                        (terminus.clipped_ratio * 100.0).round() as i32,
+                        (terminus.clipped_ratio * s_cr).round() as i32,
                         terminus.expected_clippings.round() as i64
                     ])?;
                     terminus_id += 1;
@@ -738,8 +745,12 @@ impl DbWriter {
                         .and_then(|dot_pos| self.contig_name_to_id.get(&dup.contig_name[..dot_pos]))
                 });
             if let Some(&contig_id) = contig_id_opt {
-                // Store pident as INTEGER (×100)
-                let pident_int = (dup.pident * 100.0).round() as i32;
+                let pident_scale = if dup.is_direct {
+                    crate::types::get_column_scale("Contig_directRepeats", "Pident")
+                } else {
+                    crate::types::get_column_scale("Contig_invertedRepeats", "Pident")
+                };
+                let pident_int = (dup.pident * pident_scale).round() as i32;
 
                 if dup.is_direct {
                     direct_appender.append_row(params![
@@ -845,8 +856,8 @@ impl DbWriter {
             // Sum the total base pairs covered by merged intervals
             let total_bp: i64 = merged.iter().map(|(start, end)| (*end - *start + 1) as i64).sum();
 
-            // Calculate percentage (rounded to integer)
-            let percentage = ((total_bp as f64 / contig_length as f64) * 1000.0).round() as i32;
+            let dup_scale = crate::types::get_column_scale("Contig", "Duplication_percentage");
+            let percentage = ((total_bp as f64 / contig_length as f64) * 100.0 * dup_scale).round() as i32;
 
             // Update the Contig table
             conn.execute(
@@ -986,14 +997,14 @@ impl DbWriter {
     /// upsert-only. Intended to run once, in pre-sample setup, after
     /// `write_repeats` but before the per-sample loop, so MAG-scale aggregation
     /// can read repeat data from `Contig_blob` like everything else.
-    pub fn convert_repeat_blobs(&self, new_contig_ids: &[i64]) -> Result<()> {
+    pub fn convert_repeat_blobs(&self, new_contig_ids: &[i64]) -> Result<Vec<crate::mag_blob::ContigSparseRaw>> {
         if new_contig_ids.is_empty() {
-            return Ok(());
+            return Ok(Vec::new());
         }
         let conn = self.lock_conn()?;
         let id_list = new_contig_ids.iter().map(|id| id.to_string()).collect::<Vec<_>>().join(",");
         Self::build_materialized_repeat_tables(&conn, &id_list)?;
-        Self::write_repeat_features_to_blob_static(&conn)?;
+        let raw = Self::write_repeat_features_to_blob_static(&conn)?;
         for table in &[
             "Contig_direct_repeat_count", "Contig_inverted_repeat_count",
             "Contig_direct_repeat_identity", "Contig_inverted_repeat_identity",
@@ -1001,7 +1012,7 @@ impl DbWriter {
             conn.execute(&format!("DROP TABLE IF EXISTS {}", table), [])
                 .with_context(|| format!("Failed to drop intermediate table {}", table))?;
         }
-        Ok(())
+        Ok(raw)
     }
 
     /// Build the four CTAS aggregates over `Contig_directRepeats` /
@@ -1058,6 +1069,9 @@ impl DbWriter {
         )
         .context("Failed to create Contig_inverted_repeat_count table")?;
 
+        let pident_dr = crate::types::get_column_scale("Contig_directRepeats", "Pident");
+        let pident_ir = crate::types::get_column_scale("Contig_invertedRepeats", "Pident");
+
         conn.execute(
             &format!("CREATE TABLE Contig_direct_repeat_identity AS
             WITH boundaries AS (
@@ -1071,7 +1085,7 @@ impl DbWriter {
                 FROM boundaries
             )
             SELECT s.Contig_id, s.seg_start AS First_position, s.seg_end AS Last_position,
-                   MAX(r.Pident) / 100.0 AS Value,
+                   MAX(r.Pident) / {pident_dr:.1} AS Value,
                    arg_max(LEAST(r.Position1prime, r.Position2prime),    r.Pident) AS Partner_start,
                    arg_max(GREATEST(r.Position1prime, r.Position2prime), r.Pident) AS Partner_end
             FROM segments s
@@ -1097,7 +1111,7 @@ impl DbWriter {
                 FROM boundaries
             )
             SELECT s.Contig_id, s.seg_start AS First_position, s.seg_end AS Last_position,
-                   MAX(r.Pident) / 100.0 AS Value,
+                   MAX(r.Pident) / {pident_ir:.1} AS Value,
                    arg_max(LEAST(r.Position1prime, r.Position2prime),    r.Pident) AS Partner_start,
                    arg_max(GREATEST(r.Position1prime, r.Position2prime), r.Pident) AS Partner_end
             FROM segments s
@@ -1118,9 +1132,10 @@ impl DbWriter {
     /// segment's plateau value) so a plateau renders correctly through the anchor-insertion
     /// logic. Identity features carry `EventMeta.partner` = partner position (from the
     /// max-Pident repeat) on the first event of each segment.
-    fn write_repeat_features_to_blob_static(conn: &Connection) -> Result<()> {
+    fn write_repeat_features_to_blob_static(conn: &Connection) -> Result<Vec<crate::mag_blob::ContigSparseRaw>> {
         use crate::blob::{encode_sparse_blob, EventMeta, MetadataFlags};
         use crate::types::{get_encoding, get_value_scale, Encoding};
+        let mut raw_output: Vec<crate::mag_blob::ContigSparseRaw> = Vec::new();
 
         // Resolve feature IDs from VARIABLES so they stay in sync with types.rs
         // and can't collide with other features like hit_count_within_mag (id 5)
@@ -1230,7 +1245,7 @@ impl DbWriter {
                     if first_pos < 0 || last_pos < first_pos {
                         continue;
                     }
-                    let v = if is_identity { (value * 100.0).round() as i32 } else { value as i32 };
+                    let v = if is_identity { (value * scale.multiplier()).round() as i32 } else { value as i32 };
                     let s = (first_pos as u32).min(contig_length.saturating_sub(1));
                     let e = (last_pos as u32).min(contig_length.saturating_sub(1));
 
@@ -1263,12 +1278,21 @@ impl DbWriter {
                         *contig_id, feature_id, chunk_idx as i16, chunk_data.as_slice()
                     ])?;
                 }
+                raw_output.push(crate::mag_blob::ContigSparseRaw {
+                    feature_name,
+                    contig_id: *contig_id,
+                    contig_length,
+                    positions,
+                    values,
+                    metadata: if is_identity { Some(meta) } else { None },
+                    flags,
+                });
             }
         }
 
         appender.flush().context("Failed to flush Contig_blob appender")?;
         chunk_appender.flush().context("Failed to flush Contig_blob_chunk appender")?;
-        Ok(())
+        Ok(raw_output)
     }
 
     /// Update Contig table with GC statistics (average, sd) and GC skew stats.
@@ -1280,11 +1304,14 @@ impl DbWriter {
         )?;
 
         for data in gc_data {
+            let s_sd = crate::types::get_column_scale("Contig", "GC_sd");
+            let s_amp = crate::types::get_column_scale("Contig", "GC_skew_amplitude");
+            let s_pos = crate::types::get_column_scale("Contig", "Positive_GC_skew_windows_percentage");
             stmt.execute(params![
-                data.stats.average.round() as i32,                    // GC_mean as int (0-100)
-                (data.stats.sd * 100.0).round() as i32,               // GC_sd * 100
-                (data.skew_stats.amplitude * 100.0).round() as i32,   // GC_skew_amplitude * 100
-                (data.skew_stats.percent_positive * 10.0).round() as i32, // Positive_GC_skew_windows_percentage as int (0-1000, ×10)
+                data.stats.average.round() as i32,
+                (data.stats.sd * s_sd).round() as i32,
+                (data.skew_stats.amplitude * s_amp).round() as i32,
+                (data.skew_stats.percent_positive * s_pos).round() as i32,
                 &data.contig_name
             ])?;
         }
@@ -1423,9 +1450,9 @@ impl DbWriter {
     /// Contig_blast_hits table. Produces two Sparse features per contig:
     ///   - hit_count_within_mag    (count of hits covering the position)
     ///   - hit_identity_within_mag (max Pident across hits, ×100; partner contig_id stored as metadata)
-    pub fn write_mag_hit_features(&self) -> Result<()> {
+    pub fn write_mag_hit_features(&self) -> Result<Vec<crate::mag_blob::ContigSparseRaw>> {
         if !self.is_mag_mode {
-            return Ok(());
+            return Ok(Vec::new());
         }
         use crate::blob::{encode_sparse_blob, EventMeta, MetadataFlags};
 
@@ -1536,12 +1563,13 @@ impl DbWriter {
 
         let count_flags = MetadataFlags::default();
         let ident_flags = MetadataFlags { has_partner: true, ..MetadataFlags::default() };
+        let mut raw_output: Vec<crate::mag_blob::ContigSparseRaw> = Vec::new();
 
-        for (contig_id, pos_vec, count_vec, ident_vec, meta_vec) in &results {
-            let clen = *contig_lengths.get(contig_id).unwrap_or(&0);
+        for (contig_id, pos_vec, count_vec, ident_vec, meta_vec) in results {
+            let clen = *contig_lengths.get(&contig_id).unwrap_or(&0);
 
             debug_assert_eq!(crate::types::get_encoding("hit_count_within_mag"), crate::types::Encoding::Sparse);
-            let enc_count = encode_sparse_blob(pos_vec, count_vec, None, count_flags,
+            let enc_count = encode_sparse_blob(&pos_vec, &count_vec, None, count_flags,
                 crate::types::get_value_scale("hit_count_within_mag"), clen);
             appender.append_row(params![contig_id, hit_count_fid, enc_count.zoom])?;
             for (i, chunk) in enc_count.chunks.iter().enumerate() {
@@ -1549,17 +1577,36 @@ impl DbWriter {
             }
 
             debug_assert_eq!(crate::types::get_encoding("hit_identity_within_mag"), crate::types::Encoding::Sparse);
-            let enc_ident = encode_sparse_blob(pos_vec, ident_vec, Some(meta_vec), ident_flags,
+            let enc_ident = encode_sparse_blob(&pos_vec, &ident_vec, Some(&meta_vec), ident_flags,
                 crate::types::get_value_scale("hit_identity_within_mag"), clen);
             appender.append_row(params![contig_id, hit_ident_fid, enc_ident.zoom])?;
             for (i, chunk) in enc_ident.chunks.iter().enumerate() {
                 chunk_appender.append_row(params![contig_id, hit_ident_fid, i as i16, chunk.as_slice()])?;
             }
+
+            raw_output.push(crate::mag_blob::ContigSparseRaw {
+                feature_name: "hit_count_within_mag",
+                contig_id,
+                contig_length: clen,
+                positions: pos_vec.clone(),
+                values: count_vec,
+                metadata: None,
+                flags: count_flags,
+            });
+            raw_output.push(crate::mag_blob::ContigSparseRaw {
+                feature_name: "hit_identity_within_mag",
+                contig_id,
+                contig_length: clen,
+                positions: pos_vec,
+                values: ident_vec,
+                metadata: Some(meta_vec),
+                flags: ident_flags,
+            });
         }
 
         appender.flush().context("Failed to flush Contig_blob appender")?;
         chunk_appender.flush().context("Failed to flush Contig_blob_chunk appender")?;
-        Ok(())
+        Ok(raw_output)
     }
 
     /// Finalize the database after all samples are processed.
@@ -1711,6 +1758,10 @@ impl DbWriter {
     /// Get the contig ID for a contig name.
     pub fn get_contig_id(&self, name: &str) -> Option<i64> {
         self.contig_name_to_id.get(name).copied()
+    }
+
+    pub fn contig_name_to_id_map(&self) -> &HashMap<String, i64> {
+        &self.contig_name_to_id
     }
 
     /// Get all contig names currently in the database.
@@ -2103,47 +2154,24 @@ fn create_core_tables(conn: &Connection, has_bam: bool, is_mag_mode: bool) -> Re
     .context("Failed to create Column_scales table")?;
 
     // Populate default scaling factors
-    let scale_entries: &[(&str, &str, i32)] = &[
-        // Coverage table columns (×100 for integer storage)
-        ("Coverage", "Coverage_mean", 100),
-        ("Coverage", "Coverage_median", 100),
-        ("Coverage", "Coverage_trimmed_mean", 100),
-        ("Coverage", "Coverage_coefficient_of_variation", 1_000_000),
-        ("Coverage", "Coverage_relative_coverage_roughness", 1_000_000),
-        ("Coverage", "Aligned_fraction_percentage", 100),
-        ("Coverage", "Expected_aligned_fraction", 100),
-        // MapQ (×100 for decimal precision)
-        ("mapq", "Value", 100),
-        // Coverage-relative features (×1000 for per-mille)
-        ("mismatches", "Value_relative", 1000),
-        ("deletions", "Value_relative", 1000),
-        ("insertions", "Value_relative", 1000),
-        ("left_clippings", "Value_relative", 1000),
-        ("right_clippings", "Value_relative", 1000),
-        ("non_inward_pairs", "Value_relative", 1000),
-        ("mate_not_mapped", "Value_relative", 1000),
-        ("mate_on_another_contig", "Value_relative", 1000),
-        ("reads_starts", "Value_relative", 1000),
-        ("reads_ends", "Value_relative", 1000),
-        // GC content/skew (×1000 for 3 decimal places)
-        ("gc_content", "Value", 1000),
-        ("gc_skew", "Value", 1000),
-        // Contig-level GC stats (GC_mean is integer 0-100; sd/amplitude ×100)
-        ("Contig", "GC_mean", 1),
-        ("Contig", "GC_sd", 100),
-        ("Contig", "GC_skew_amplitude", 100),
-        // Repeat identity (×100)
-        ("Contig_directRepeats", "Pident", 100),
-        ("Contig_invertedRepeats", "Pident", 100),
-    ];
-
     {
         let mut appender = conn.appender("Column_scales")
             .context("Failed to create Column_scales appender")?;
-        for (feature, column, scale) in scale_entries {
+        // SQL INTEGER columns — from COLUMN_SCALES in types.rs
+        for (feature, column, scale) in crate::types::COLUMN_SCALES {
             appender.append_row(params![*feature, *column, *scale])
                 .context("Failed to append Column_scales row")?;
         }
+        // BLOB feature values — from VARIABLES in types.rs
+        for v in &crate::types::VARIABLES {
+            appender.append_row(params![v.name, "Value", v.value_scale.multiplier() as i32])
+                .context("Failed to append Column_scales row")?;
+        }
+        // BLOB sparse metadata — from constants in types.rs
+        appender.append_row(params!["sparse_metadata", "mean", crate::types::METADATA_STATS_SCALE as i32])?;
+        appender.append_row(params!["sparse_metadata", "median", crate::types::METADATA_STATS_SCALE as i32])?;
+        appender.append_row(params!["sparse_metadata", "std", crate::types::METADATA_STATS_SCALE as i32])?;
+        appender.append_row(params!["sparse_metadata", "sequence_prevalence", crate::types::METADATA_PREVALENCE_SCALE as i32])?;
         appender.flush().context("Failed to flush Column_scales appender")?;
     }
 
@@ -3078,9 +3106,20 @@ fn create_views(conn: &Connection, has_bam: bool, is_mag_mode: bool) -> Result<(
     // Repeat features are converted to Contig_blob via DbWriter::convert_repeat_blobs,
     // called in pre-sample setup so MAG-scale aggregation can read them.
     if has_bam {
+    use crate::types::get_column_scale;
+    let s_af  = get_column_scale("Coverage", "Aligned_fraction_percentage");
+    let s_eaf = get_column_scale("Coverage", "Expected_aligned_fraction");
+    let s_m   = get_column_scale("Coverage", "Coverage_mean");
+    let s_med = get_column_scale("Coverage", "Coverage_median");
+    let s_tm  = get_column_scale("Coverage", "Coverage_trimmed_mean");
+    let s_cv  = get_column_scale("Coverage", "Coverage_coefficient_of_variation");
+    let s_rcr = get_column_scale("Coverage", "Coverage_relative_coverage_roughness");
+    let s_sc  = get_column_scale("Side_misassembly", "Contig_start_collapse_percentage");
+    let s_ec  = get_column_scale("Side_misassembly", "Contig_end_collapse_percentage");
+
     // Explicit_coverage VIEW with RPKM and TPM
     conn.execute(
-        "CREATE VIEW Explicit_coverage AS
+        &format!("CREATE VIEW Explicit_coverage AS
          WITH rpkm_base AS (
              SELECT
                  p.Contig_id,
@@ -3098,21 +3137,21 @@ fn create_views(conn: &Connection, has_bam: bool, is_mag_mode: bool) -> Result<(
          SELECT
              c.Contig_name,
              s.Sample_name,
-             p.Aligned_fraction_percentage / 10.0 AS Aligned_fraction_percentage,
-             p.Expected_aligned_fraction / 10.0 AS Expected_aligned_fraction,
+             p.Aligned_fraction_percentage / {s_af:.1} AS Aligned_fraction_percentage,
+             p.Expected_aligned_fraction / {s_eaf:.1} AS Expected_aligned_fraction,
              p.Read_count,
-             p.Coverage_mean / 10.0 AS Coverage_mean,
-             p.Coverage_median / 10.0 AS Coverage_median,
-             p.Coverage_trimmed_mean / 10.0 AS Coverage_trimmed_mean,
+             p.Coverage_mean / {s_m:.1} AS Coverage_mean,
+             p.Coverage_median / {s_med:.1} AS Coverage_median,
+             p.Coverage_trimmed_mean / {s_tm:.1} AS Coverage_trimmed_mean,
              rb.RPKM,
              CASE WHEN rs.total_rpkm > 0 THEN (rb.RPKM / rs.total_rpkm) * 1e6 ELSE 0 END AS TPM,
-             ROUND(p.Coverage_coefficient_of_variation / 1000000.0, 2) AS Coverage_coefficient_of_variation,
-             ROUND(p.Coverage_relative_coverage_roughness / 1000000.0, 4) AS Relative_coverage_roughness
+             ROUND(p.Coverage_coefficient_of_variation / {s_cv:.1}, 2) AS Coverage_coefficient_of_variation,
+             ROUND(p.Coverage_relative_coverage_roughness / {s_rcr:.1}, 4) AS Relative_coverage_roughness
          FROM Coverage p
          JOIN Contig c ON p.Contig_id = c.Contig_id
          JOIN Sample s ON p.Sample_id = s.Sample_id
          JOIN rpkm_base rb ON p.Contig_id = rb.Contig_id AND p.Sample_id = rb.Sample_id
-         JOIN rpkm_sum rs ON p.Sample_id = rs.Sample_id",
+         JOIN rpkm_sum rs ON p.Sample_id = rs.Sample_id"),
         [],
     )
     .context("Failed to create Explicit_coverage VIEW")?;
@@ -3161,16 +3200,16 @@ fn create_views(conn: &Connection, has_bam: bool, is_mag_mode: bool) -> Result<(
 
     // Explicit_side_misassembly VIEW (JOINs with Coverage for normalization)
     conn.execute(
-        "CREATE VIEW Explicit_side_misassembly AS
+        &format!("CREATE VIEW Explicit_side_misassembly AS
          SELECT
              c.Contig_name,
              s.Sample_name,
              COALESCE(sm.Coverage_first_position, 0) AS Coverage_first_position,
-             COALESCE(sm.Contig_start_collapse_percentage, 0) / 10.0 AS Contig_start_collapse_prevalence,
+             COALESCE(sm.Contig_start_collapse_percentage, 0) / {s_sc:.1} AS Contig_start_collapse_prevalence,
              COALESCE(sm.Contig_start_collapse_bp, 0) AS Contig_start_collapse_bp,
              COALESCE(sm.Contig_start_expansion_bp, 0) AS Contig_start_expansion_bp,
              COALESCE(sm.Coverage_last_position, 0) AS Coverage_last_position,
-             COALESCE(sm.Contig_end_collapse_percentage, 0) / 10.0 AS Contig_end_collapse_prevalence,
+             COALESCE(sm.Contig_end_collapse_percentage, 0) / {s_ec:.1} AS Contig_end_collapse_prevalence,
              COALESCE(sm.Contig_end_collapse_bp, 0) AS Contig_end_collapse_bp,
              COALESCE(sm.Contig_end_expansion_bp, 0) AS Contig_end_expansion_bp,
              CASE WHEN s.Sequencing_type = 'paired-short' THEN COALESCE(sm.Contig_end_misjoint_mates, 0) ELSE NULL END AS Contig_end_misjoint_mates,
@@ -3178,7 +3217,7 @@ fn create_views(conn: &Connection, has_bam: bool, is_mag_mode: bool) -> Result<(
          FROM Side_misassembly sm
          JOIN Contig c ON sm.Contig_id = c.Contig_id
          JOIN Sample s ON sm.Sample_id = s.Sample_id
-         LEFT JOIN Coverage cov ON sm.Contig_id = cov.Contig_id AND sm.Sample_id = cov.Sample_id",
+         LEFT JOIN Coverage cov ON sm.Contig_id = cov.Contig_id AND sm.Sample_id = cov.Sample_id"),
         [],
     )
     .context("Failed to create Explicit_side_misassembly VIEW")?;
@@ -3294,7 +3333,7 @@ fn create_views(conn: &Connection, has_bam: bool, is_mag_mode: bool) -> Result<(
         // from the MAG_coverage table, populated during MAG-by-MAG processing.
 
         conn.execute(
-            "CREATE VIEW Explicit_coverage_per_MAG AS
+            &format!("CREATE VIEW Explicit_coverage_per_MAG AS
              WITH rpkm_base_mag AS (
                  SELECT
                      mca.MAG_id,
@@ -3314,21 +3353,21 @@ fn create_views(conn: &Connection, has_bam: bool, is_mag_mode: bool) -> Result<(
              SELECT
                  mg.MAG_name,
                  s.Sample_name,
-                 mc.Aligned_fraction_percentage / 10.0                                                   AS Aligned_fraction_percentage,
-                 mc.Expected_aligned_fraction / 10.0                                                      AS Expected_aligned_fraction,
+                 mc.Aligned_fraction_percentage / {s_af:.1}                                                AS Aligned_fraction_percentage,
+                 mc.Expected_aligned_fraction / {s_eaf:.1}                                                AS Expected_aligned_fraction,
                  mc.Read_count                                                                           AS Read_count,
-                 mc.Coverage_mean / 10.0                                                                 AS Coverage_mean,
-                 mc.Coverage_median / 10.0                                                               AS Coverage_median,
-                 mc.Coverage_trimmed_mean / 10.0                                                         AS Coverage_trimmed_mean,
+                 mc.Coverage_mean / {s_m:.1}                                                              AS Coverage_mean,
+                 mc.Coverage_median / {s_med:.1}                                                          AS Coverage_median,
+                 mc.Coverage_trimmed_mean / {s_tm:.1}                                                     AS Coverage_trimmed_mean,
                  rbm.RPKM                                                                                AS RPKM,
                  CASE WHEN rsm.total_rpkm > 0 THEN (rbm.RPKM / rsm.total_rpkm) * 1e6 ELSE 0 END          AS TPM,
-                 ROUND(mc.Coverage_coefficient_of_variation / 1000000.0, 2)                              AS Coverage_coefficient_of_variation,
-                 ROUND(mc.Coverage_relative_coverage_roughness / 1000000.0, 4)                           AS Relative_coverage_roughness
+                 ROUND(mc.Coverage_coefficient_of_variation / {s_cv:.1}, 2)                              AS Coverage_coefficient_of_variation,
+                 ROUND(mc.Coverage_relative_coverage_roughness / {s_rcr:.1}, 4)                           AS Relative_coverage_roughness
              FROM MAG_coverage mc
              JOIN MAG mg    ON mg.MAG_id   = mc.MAG_id
              JOIN Sample s  ON s.Sample_id = mc.Sample_id
              JOIN rpkm_base_mag rbm ON rbm.MAG_id = mc.MAG_id AND rbm.Sample_id = mc.Sample_id
-             JOIN rpkm_sum_mag  rsm ON rsm.Sample_id = mc.Sample_id",
+             JOIN rpkm_sum_mag  rsm ON rsm.Sample_id = mc.Sample_id"),
             [],
         )
         .context("Failed to create Explicit_coverage_per_MAG VIEW")?;

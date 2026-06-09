@@ -405,7 +405,7 @@ impl FeatureArrays {
                 3 => b'T',
                 _ => 0,
             };
-            let percentage_x10 = (prevalence * 1000.0) as i32;
+            let percentage_x10 = (prevalence * crate::types::METADATA_PREVALENCE_SCALE) as i32;
             (base, percentage_x10)
         }).collect()
     }
@@ -426,7 +426,7 @@ impl FeatureArrays {
             if total_reads == 0 { return None; }
             let prevalence = max_count as f64 / total_reads as f64;
             if prevalence < threshold { return None; }
-            let percentage_x10 = (prevalence * 1000.0) as i32;
+            let percentage_x10 = (prevalence * crate::types::METADATA_PREVALENCE_SCALE) as i32;
             let seq_str = String::from_utf8_lossy(dom_seq).into_owned();
             Some((pos, (seq_str, percentage_x10)))
         }).collect()

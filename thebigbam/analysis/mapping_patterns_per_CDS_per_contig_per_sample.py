@@ -459,6 +459,12 @@ def run(args):
 
     conn = duckdb.connect(args.db, read_only=True)
 
+    _cov_scales = {r[0]: float(r[1]) for r in conn.execute(
+        "SELECT Column_name, Scale FROM Column_scales WHERE Feature_name = 'Coverage'"
+    ).fetchall()}
+    _s_af = _cov_scales.get("Aligned_fraction_percentage", 10.0)
+    _s_tm = _cov_scales.get("Coverage_trimmed_mean", 10.0)
+
     from thebigbam.database.database_getters import is_mag_mode
     mag_mode = is_mag_mode(conn)
     contig_to_mag = {}
@@ -477,7 +483,7 @@ def run(args):
         }
         if _table_exists(conn, "MAG_coverage"):
             mag_cov_map = {
-                (r[0], r[1]): (r[2] / 10.0, r[3] / 10.0)
+                (r[0], r[1]): (r[2] / _s_af, r[3] / _s_tm)
                 for r in conn.execute(
                     "SELECT MAG_id, Sample_id, Aligned_fraction_percentage, "
                     "Coverage_trimmed_mean FROM MAG_coverage"
@@ -559,8 +565,8 @@ def run(args):
         file=sys.stderr, flush=True,
     )
 
-    af_threshold = args.min_aligned_fraction * 10
-    cov_threshold = args.min_coverage_depth * 10
+    af_threshold = args.min_aligned_fraction * _s_af
+    cov_threshold = args.min_coverage_depth * _s_tm
 
     total_rows = 0
 
@@ -573,9 +579,9 @@ def run(args):
         for sample_id, sample_name in samples:
             if has_coverage:
                 qualifying = conn.execute(
-                    """
-                    SELECT Contig_id, Aligned_fraction_percentage / 10.0,
-                           Coverage_trimmed_mean / 10.0
+                    f"""
+                    SELECT Contig_id, Aligned_fraction_percentage / {_s_af},
+                           Coverage_trimmed_mean / {_s_tm}
                     FROM Coverage
                     WHERE Sample_id = ?
                       AND Aligned_fraction_percentage >= ?
