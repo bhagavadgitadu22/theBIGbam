@@ -71,6 +71,7 @@ pub struct DbWriter {
     /// True when the pipeline is running in MAG view; gates creation of MAG
     /// tables, per-MAG explicit views, and the inter-contig blast-hits table.
     is_mag_mode: bool,
+    has_annotations: bool,
     contig_name_to_id: HashMap<String, i64>,
     contig_id_to_length: HashMap<i64, i32>,
     terminase_cache: HashMap<i64, Vec<(i32, i32)>>,
@@ -105,7 +106,8 @@ impl DbWriter {
         configure_for_bulk_writes(&conn);
 
         // Create tables
-        create_core_tables(&conn, has_bam, is_mag_mode)?;
+        let has_annotations = !annotations.is_empty();
+        create_core_tables(&conn, has_bam, is_mag_mode, has_annotations)?;
         create_variable_tables(&conn)?;
 
         // Insert contigs
@@ -117,14 +119,16 @@ impl DbWriter {
         // Insert codon table (standard genetic code)
         insert_codon_table(&conn)?;
 
-        // Insert annotations and their qualifiers
-        insert_annotations(&conn, annotations)?;
+        if has_annotations {
+            // Insert annotations and their qualifiers
+            insert_annotations(&conn, annotations)?;
 
-        // Insert contig-level qualifiers from source features
-        insert_contig_qualifiers(&conn, contig_qualifiers)?;
+            // Insert contig-level qualifiers from source features
+            insert_contig_qualifiers(&conn, contig_qualifiers)?;
 
-        // Populate Annotated_types table with distinct Type values from Contig_annotation
-        populate_annotated_types(&conn)?;
+            // Populate Annotated_types table with distinct Type values from Contig_annotation
+            populate_annotated_types(&conn)?;
+        }
 
         // Build contig name -> id mapping
         let contig_name_to_id: HashMap<String, i64> = contigs
@@ -145,6 +149,7 @@ impl DbWriter {
             conn: Mutex::new(conn),
             has_bam,
             is_mag_mode,
+            has_annotations,
             contig_name_to_id,
             contig_id_to_length,
             terminase_cache,
@@ -296,10 +301,16 @@ impl DbWriter {
         let contig_id_to_length = build_contig_length_cache(&conn);
         let terminase_cache = build_terminase_cache(&conn);
 
+        let has_annotations: bool = conn.query_row(
+            "SELECT COUNT(*) > 0 FROM information_schema.tables WHERE table_name = 'Contig_annotation_core'",
+            [], |r| r.get(0),
+        ).unwrap_or(false);
+
         Ok(Self {
             conn: Mutex::new(conn),
             has_bam,
             is_mag_mode,
+            has_annotations,
             contig_name_to_id,
             contig_id_to_length,
             terminase_cache,
@@ -1299,22 +1310,41 @@ impl DbWriter {
     /// Called after computing GC content and GC skew for all contigs.
     pub fn update_contig_gc_stats(&self, gc_data: &[GCContentData]) -> Result<()> {
         let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
-        let mut stmt = conn.prepare(
-            "UPDATE Contig SET GC_mean = ?, GC_sd = ?, GC_skew_amplitude = ?, Positive_GC_skew_windows_percentage = ? WHERE Contig_name = ?"
-        )?;
 
+        let s_sd = crate::types::get_column_scale("Contig", "GC_sd") as f32;
+        let s_amp = crate::types::get_column_scale("Contig", "GC_skew_amplitude") as f32;
+        let s_pos = crate::types::get_column_scale("Contig", "Positive_GC_skew_windows_percentage") as f32;
+
+        conn.execute(
+            "CREATE TEMPORARY TABLE IF NOT EXISTS tmp_gc (
+                name TEXT, gc_mean INTEGER, gc_sd INTEGER, skew_amp INTEGER, pos_pct INTEGER
+            )", [],
+        ).context("Failed to create tmp_gc table")?;
+
+        let mut app = conn.appender("tmp_gc")
+            .context("Failed to create tmp_gc appender")?;
         for data in gc_data {
-            let s_sd = crate::types::get_column_scale("Contig", "GC_sd") as f32;
-            let s_amp = crate::types::get_column_scale("Contig", "GC_skew_amplitude") as f32;
-            let s_pos = crate::types::get_column_scale("Contig", "Positive_GC_skew_windows_percentage") as f32;
-            stmt.execute(params![
+            app.append_row(params![
+                &data.contig_name,
                 data.stats.average.round() as i32,
                 (data.stats.sd * s_sd).round() as i32,
                 (data.skew_stats.amplitude * s_amp).round() as i32,
                 (data.skew_stats.percent_positive * s_pos).round() as i32,
-                &data.contig_name
             ])?;
         }
+        app.flush().context("Failed to flush tmp_gc appender")?;
+
+        conn.execute(
+            "UPDATE Contig SET
+                GC_mean = t.gc_mean,
+                GC_sd = t.gc_sd,
+                GC_skew_amplitude = t.skew_amp,
+                Positive_GC_skew_windows_percentage = t.pos_pct
+            FROM tmp_gc t WHERE Contig.Contig_name = t.name", [],
+        ).context("Failed to bulk-update Contig GC stats")?;
+
+        conn.execute("DELETE FROM tmp_gc", [])
+            .context("Failed to clear tmp_gc")?;
 
         Ok(())
     }
@@ -1740,27 +1770,33 @@ impl DbWriter {
     pub fn finalize(self) -> Result<()> {
         let has_bam = self.has_bam;
         let is_mag_mode = self.is_mag_mode;
+        let has_annotations = self.has_annotations;
         let conn = self.conn.into_inner().unwrap();
 
-        // Create derived views (in extend mode, views were dropped in open())
-        create_views(&conn, has_bam, is_mag_mode)?;
+        let t = std::time::Instant::now();
+        create_views(&conn, has_bam, is_mag_mode, has_annotations)?;
+        eprintln!("  finalize: create_views          {:.3}s", t.elapsed().as_secs_f64());
 
-        // Delete Variable entries for features without data
+        let t = std::time::Instant::now();
         cleanup_unused_variables(&conn)?;
+        eprintln!("  finalize: cleanup_unused_vars   {:.3}s", t.elapsed().as_secs_f64());
 
-        // Drop empty module tables and their views (prevents empty UI sections)
         if has_bam {
+            let t = std::time::Instant::now();
             drop_empty_tables(&conn)?;
+            eprintln!("  finalize: drop_empty_tables     {:.3}s", t.elapsed().as_secs_f64());
         }
 
-        // Populate Number_of_samples on Contig (contig-mode) or MAG (MAG-mode)
         if has_bam {
+            let t = std::time::Instant::now();
             update_sample_counts(&conn, is_mag_mode)?;
+            eprintln!("  finalize: update_sample_counts  {:.3}s", t.elapsed().as_secs_f64());
         }
 
-        // Force checkpoint to compress data and write to disk
+        let t = std::time::Instant::now();
         conn.execute("CHECKPOINT", [])
             .context("Failed to checkpoint database")?;
+        eprintln!("  finalize: CHECKPOINT            {:.3}s", t.elapsed().as_secs_f64());
 
         Ok(())
     }
@@ -1882,7 +1918,7 @@ fn compact_pvalue(p: f64) -> String {
 }
 
 /// Create core database tables (no indexes - DuckDB uses zone maps).
-fn create_core_tables(conn: &Connection, has_bam: bool, is_mag_mode: bool) -> Result<()> {
+fn create_core_tables(conn: &Connection, has_bam: bool, is_mag_mode: bool, has_annotations: bool) -> Result<()> {
     conn.execute(
         "CREATE TABLE Contig (
             Contig_id INTEGER PRIMARY KEY,
@@ -2284,15 +2320,7 @@ fn create_core_tables(conn: &Connection, has_bam: bool, is_mag_mode: bool) -> Re
     .context("Failed to create Topology table")?;
     } // end if has_bam (Misassembly, Microdiversity, Side_misassembly, Topology)
 
-    // Structural annotation data only — qualifiers go in Annotation_qualifier.
-    // Main_isoform flags the canonical transcript per (locus_tag, feature_type):
-    //   - The first mRNA seen in file order per locus_tag is the main mRNA.
-    //   - CDS/exon rows whose Parent_annotation_id points at the main mRNA
-    //     inherit Main_isoform = TRUE.
-    //   - For features without an mRNA parent (prokaryotic CDS, tRNA, ...),
-    //     the first occurrence per (locus_tag, feature_type) is main.
-    // Parent_annotation_id links CDS/exon children to their parent mRNA
-    // (populated from GFF3 Parent= or GenBank segment containment matching).
+    if has_annotations {
     conn.execute(
         "CREATE TABLE Contig_annotation_core (
             Annotation_id INTEGER PRIMARY KEY,
@@ -2308,11 +2336,6 @@ fn create_core_tables(conn: &Connection, has_bam: bool, is_mag_mode: bool) -> Re
     )
     .context("Failed to create Contig_annotation_core table")?;
 
-    // Sub-intervals of spliced CDS / mRNA features. Only populated when a
-    // feature has two or more segments (GenBank join(...), GFF3 exon/CDS
-    // children collapsed into their parent mRNA). Unspliced features have
-    // no rows here — their bounding box in Contig_annotation_core is
-    // sufficient.
     conn.execute(
         "CREATE TABLE Annotation_segments (
             Annotation_id INTEGER,
@@ -2330,7 +2353,6 @@ fn create_core_tables(conn: &Connection, has_bam: bool, is_mag_mode: bool) -> Re
     )
     .context("Failed to create Annotation_segments index")?;
 
-    // Key-value store for all annotation qualifiers (product, function, locus_tag, phrog, gene, note, db_xref, ...)
     conn.execute(
         "CREATE TABLE Annotation_qualifier (
             Annotation_id INTEGER,
@@ -2341,7 +2363,6 @@ fn create_core_tables(conn: &Connection, has_bam: bool, is_mag_mode: bool) -> Re
     )
     .context("Failed to create Annotation_qualifier table")?;
 
-    // Key-value store for contig-level qualifiers from GenBank "source" features (organism, host, strain, ...)
     conn.execute(
         "CREATE TABLE Contig_qualifier (
             Contig_id INTEGER,
@@ -2352,7 +2373,6 @@ fn create_core_tables(conn: &Connection, has_bam: bool, is_mag_mode: bool) -> Re
     )
     .context("Failed to create Contig_qualifier table")?;
 
-    // Heavy sequence data stored separately — only queried for codon analysis and export
     conn.execute(
         "CREATE TABLE Annotation_sequence (
             Annotation_id INTEGER PRIMARY KEY,
@@ -2365,10 +2385,6 @@ fn create_core_tables(conn: &Connection, has_bam: bool, is_mag_mode: bool) -> Re
     )
     .context("Failed to create Annotation_sequence table")?;
 
-    // Convenience view that pivots common qualifiers into columns for backward compatibility.
-    // All existing Python queries use this view.
-    // `Segments` is a list of {start, end} structs in genomic order when the
-    // feature is spliced, NULL otherwise.
     conn.execute(
         "CREATE VIEW Contig_annotation AS
          SELECT ca.Annotation_id, ca.Contig_id, ca.\"Start\", ca.\"End\", ca.Strand, ca.\"Type\",
@@ -2390,10 +2406,6 @@ fn create_core_tables(conn: &Connection, has_bam: bool, is_mag_mode: bool) -> Re
     )
     .context("Failed to create Contig_annotation view")?;
 
-    // View that exposes every contig annotation in MAG coordinates (only
-    // usable rows exist when MAG_contigs_association has been populated).
-    // Used by the MAG-view gene map, which plots a single MAG-wide SeqRecord
-    // through DNAFeaturesViewer.
     let has_mag_assoc: bool = conn.query_row(
         "SELECT COUNT(*) > 0 FROM information_schema.tables
          WHERE table_name = 'MAG_contigs_association'",
@@ -2418,6 +2430,7 @@ fn create_core_tables(conn: &Connection, has_bam: bool, is_mag_mode: bool) -> Re
         )
         .context("Failed to create MAG_annotation_core view")?;
     }
+    } // end if has_annotations
 
     conn.execute(
         "CREATE TABLE Variable (
@@ -2441,7 +2454,7 @@ fn create_core_tables(conn: &Connection, has_bam: bool, is_mag_mode: bool) -> Re
     )
     .context("Failed to create Variable table")?;
 
-    // Annotated_types table - stores distinct Type values from Contig_annotation ordered by frequency
+    if has_annotations {
     conn.execute(
         "CREATE TABLE Annotated_types (
             Type_id INTEGER PRIMARY KEY,
@@ -2451,6 +2464,7 @@ fn create_core_tables(conn: &Connection, has_bam: bool, is_mag_mode: bool) -> Re
         [],
     )
     .context("Failed to create Annotated_types table")?;
+    }
 
     // Constants_for_plotting table - stores metadata flags about database content
     // Pre-computed at database creation time (not per-request)
@@ -3109,7 +3123,7 @@ fn create_variable_tables(conn: &Connection) -> Result<()> {
 }
 
 /// Create materialized tables and views after all data is inserted.
-fn create_views(conn: &Connection, has_bam: bool, is_mag_mode: bool) -> Result<()> {
+fn create_views(conn: &Connection, has_bam: bool, is_mag_mode: bool, _has_annotations: bool) -> Result<()> {
     // All per-sample features (including primary_reads) are now stored in Feature_blob.
     // Repeat features are converted to Contig_blob via DbWriter::convert_repeat_blobs,
     // called in pre-sample setup so MAG-scale aggregation can read them.

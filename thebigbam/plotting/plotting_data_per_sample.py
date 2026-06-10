@@ -1,5 +1,6 @@
 import colorsys
 import hashlib
+import time
 import numpy as np
 from Bio.Seq import Seq
 from Bio.SeqRecord import SeqRecord
@@ -1958,6 +1959,7 @@ def generate_bokeh_plot_per_sample(conn, list_features, contig_name, sample_name
     metadata_cache = get_variable_metadata_batch(cur, requested_features)
     contig_features, sample_features = split_contig_vs_sample_features(metadata_cache, requested_features)
 
+    t_features = time.perf_counter()
     # Add contig-level features (don't require sample_id)
     if contig_features:
         for feature in contig_features:
@@ -2025,6 +2027,8 @@ def generate_bokeh_plot_per_sample(conn, list_features, contig_name, sample_name
                 if fname in PRIMARY_RELATIVE_SUBPLOTS:
                     fig.y_range = Range1d(0, primary_max)
 
+    print(f"[timing]   feature subplots ({len(subplots)} plots): {time.perf_counter() - t_features:.3f}s", flush=True)
+
     # --- Optional MAG track (only when a MAG is selected in MAG-mode DBs) ---
     mag_fig = None
     if mag_name:
@@ -2035,6 +2039,7 @@ def generate_bokeh_plot_per_sample(conn, list_features, contig_name, sample_name
             mag_fig = None
 
     # --- Combine all figures in a single grid with one shared toolbar ---
+    t_grid = time.perf_counter()
     top_plots = [mag_fig] if mag_fig is not None else []
     if annotation_fig:
         if not subplots:
@@ -2046,6 +2051,8 @@ def generate_bokeh_plot_per_sample(conn, list_features, contig_name, sample_name
         if not subplots and not top_plots:
             raise ValueError("No plots to display")
         grid = gridplot([[p] for p in (top_plots + subplots)], merge_tools=True, sizing_mode='stretch_width')
+    n_total = len(top_plots) + (1 if annotation_fig else 0) + len(subplots)
+    print(f"[timing]   gridplot ({n_total} figures): {time.perf_counter() - t_grid:.3f}s", flush=True)
 
     return grid
 
@@ -2468,6 +2475,7 @@ def generate_bokeh_plot_mag_view(conn, list_features, mag_name, sample_name, xst
     metadata_cache = get_variable_metadata_batch(cur, requested_features)
     contig_features, sample_features = split_contig_vs_sample_features(metadata_cache, requested_features)
 
+    t_features = time.perf_counter()
     subplots = []
 
     # --- Sequence subplot (stitched across member contigs) ---
@@ -2553,11 +2561,16 @@ def generate_bokeh_plot_mag_view(conn, list_features, mag_name, sample_name, xst
             except Exception as e:
                 print(f"Error processing sample feature '{feature}' for MAG: {e}", flush=True)
 
+    print(f"[timing]   MAG feature subplots ({len(subplots)} plots): {time.perf_counter() - t_features:.3f}s", flush=True)
+
     # --- Assemble grid ---
+    t_grid = time.perf_counter()
     top_plots = [mag_fig] if mag_fig is not None else []
     all_plots = top_plots + ([annotation_fig] if annotation_fig is not None else []) + subplots
 
     if not all_plots:
         raise ValueError("No plots to display for MAG view")
 
-    return gridplot([[p] for p in all_plots], merge_tools=True, sizing_mode='stretch_width')
+    grid = gridplot([[p] for p in all_plots], merge_tools=True, sizing_mode='stretch_width')
+    print(f"[timing]   gridplot ({len(all_plots)} figures): {time.perf_counter() - t_grid:.3f}s", flush=True)
+    return grid

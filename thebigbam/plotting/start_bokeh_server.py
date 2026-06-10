@@ -1827,10 +1827,10 @@ def create_layout(db_path, preloaded, enable_timing=False):
         row_data["threshold_span"] = threshold_span
         null_stats = resolve_column_null_stats(db_path, filtering_metadata, category, col_name)
         if null_stats is not None:
-            non_null_count, null_count = null_stats
+            non_null_count, total_possible = null_stats
             label_html = (
                 f'<span style="font-size:11px; color:#666; font-style:italic;">'
-                f'Used {non_null_count:,} times ({null_count:,} NULL values)</span>'
+                f'Used {non_null_count:,} times (out of {total_possible:,} possible)</span>'
             )
             dist_label = pn.pane.HTML(label_html, sizing_mode="stretch_width", margin=(2, 5, 0, 5))
             return [dist_label, pane]
@@ -1936,10 +1936,10 @@ def create_layout(db_path, preloaded, enable_timing=False):
         row_data["bridge_input"] = bridge
         null_stats = resolve_column_null_stats(db_path, filtering_metadata, category, col_name)
         if null_stats is not None:
-            non_null_count, null_count = null_stats
+            non_null_count, total_possible = null_stats
             label_html = (
                 f'<span style="font-size:11px; color:#666; font-style:italic;">'
-                f'Used {non_null_count:,} times ({null_count:,} NULL values)</span>'
+                f'Used {non_null_count:,} times (out of {total_possible:,} possible)</span>'
             )
             dist_label = pn.pane.HTML(label_html, sizing_mode="stretch_width", margin=(2, 5, 0, 5))
             return [dist_label, pane, bridge_pane]
@@ -2271,6 +2271,15 @@ def create_layout(db_path, preloaded, enable_timing=False):
                     result = build_text_treemap(row_data, category, col_name, current_input_ref, hist_container)
                     if result and row_data['loading_gen'] == gen:
                         hist_container.objects = result
+                else:
+                    null_stats = resolve_column_null_stats(db_path, filtering_metadata, category, col_name)
+                    if null_stats is not None and row_data['loading_gen'] == gen:
+                        non_null_count, total_possible = null_stats
+                        label_html = (
+                            f'<span style="font-size:11px; color:#666; font-style:italic;">'
+                            f'Used {non_null_count:,} times (out of {total_possible:,} possible)</span>'
+                        )
+                        hist_container.objects = [pn.pane.HTML(label_html, sizing_mode="stretch_width", margin=(2, 5, 0, 5))]
             curdoc().add_next_tick_callback(_do_load)
 
         dist_toggle.on_click(toggle_distribution)

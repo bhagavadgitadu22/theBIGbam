@@ -1,3 +1,4 @@
+import time
 import duckdb
 
 # Columns to exclude from annotation filtering UI (internal/metadata columns)
@@ -216,6 +217,7 @@ def get_filtering_metadata(db_path: str) -> dict:
         }
     }
     """
+    t0 = time.perf_counter()
     conn = duckdb.connect(db_path, read_only=True)
     has_mags = is_mag_mode(conn)
 
@@ -390,6 +392,7 @@ def get_filtering_metadata(db_path: str) -> dict:
         result = new_result
 
     conn.close()
+    print(f"[timing] get_filtering_metadata: {time.perf_counter() - t0:.3f}s", flush=True)
     return result
 
 
@@ -413,6 +416,7 @@ def resolve_distinct_values(db_path: str, filtering_metadata: dict,
     if col_info.get('type') != 'text':
         return []
 
+    t0 = time.perf_counter()
     conn = duckdb.connect(db_path, read_only=True)
     distinct_values = []
 
@@ -450,6 +454,7 @@ def resolve_distinct_values(db_path: str, filtering_metadata: dict,
 
     # Cache result so we don't query again
     col_info['distinct_values'] = distinct_values
+    print(f"[timing] resolve_distinct_values({category}.{col_name}): {time.perf_counter() - t0:.3f}s ({len(distinct_values)} values)", flush=True)
     return distinct_values
 
 
@@ -990,6 +995,7 @@ def resolve_histogram_bins(db_path: str, filtering_metadata: dict,
             val_expr = f'LOG10("{col_name}")'
         null_filter += f' AND "{col_name}" > 0'
 
+    t0 = time.perf_counter()
     conn = duckdb.connect(db_path, read_only=True)
     try:
         row = conn.execute(
@@ -1032,6 +1038,7 @@ def resolve_histogram_bins(db_path: str, filtering_metadata: dict,
         conn.close()
 
     col_info[cache_key] = result
+    print(f"[timing] resolve_histogram_bins({category}.{col_name}): {time.perf_counter() - t0:.3f}s", flush=True)
     return result
 
 
@@ -1047,6 +1054,7 @@ def resolve_value_counts(db_path: str, filtering_metadata: dict,
 
     source_override = col_info.get('source')
     qualifier_key = col_info.get('qualifier_key')
+    t0 = time.perf_counter()
     conn = duckdb.connect(db_path, read_only=True)
     try:
         if qualifier_key and source_override in ('Contig_qualifier', 'Annotation_qualifier'):
@@ -1073,6 +1081,7 @@ def resolve_value_counts(db_path: str, filtering_metadata: dict,
         conn.close()
 
     col_info['value_counts'] = counts
+    print(f"[timing] resolve_value_counts({category}.{col_name}): {time.perf_counter() - t0:.3f}s", flush=True)
     return counts
 
 def resolve_column_null_stats(
@@ -1081,7 +1090,12 @@ def resolve_column_null_stats(
     category: str,
     col_name: str,
 ) -> tuple[int, int] | None:
-    """Return (non_null_count, null_count) for a column.
+    """Return (non_null_count, total_possible) for a column.
+
+    ``total_possible`` is the total number of entities in the category
+    (contigs, samples, MAGs, contig/sample pairs, etc.).
+    For qualifier columns this is the row count of the parent table,
+    not just rows that have that qualifier key.
 
     Queries the underlying table once and caches the result in
     ``filtering_metadata[category]['columns'][col_name]['null_stats']`` so
@@ -1104,23 +1118,27 @@ def resolve_column_null_stats(
     try:
         if qualifier_key and source_override in ("Contig_qualifier", "Annotation_qualifier"):
             row = conn.execute(
-                f'SELECT '
-                f'  COUNT(*) FILTER (WHERE "Value" IS NOT NULL), '
-                f'  COUNT(*) FILTER (WHERE "Value" IS NULL) '
+                f'SELECT COUNT(*) FILTER (WHERE "Value" IS NOT NULL) '
                 f'FROM {source_override} WHERE "Key" = ?',
                 [qualifier_key],
             ).fetchone()
+            non_null = int(row[0]) if row else 0
+            parent = "Contig" if source_override == "Contig_qualifier" else "Contig_annotation"
+            total_row = conn.execute(f'SELECT COUNT(*) FROM {parent}').fetchone()
+            total = int(total_row[0]) if total_row else 0
         elif source:
             row = conn.execute(
                 f'SELECT '
                 f'  COUNT(*) FILTER (WHERE "{col_name}" IS NOT NULL), '
-                f'  COUNT(*) FILTER (WHERE "{col_name}" IS NULL) '
+                f'  COUNT(*) '
                 f'FROM {source}'
             ).fetchone()
+            non_null = int(row[0]) if row else 0
+            total = int(row[1]) if row else 0
         else:
             col_info["null_stats"] = None
             return None
-        result: tuple[int, int] | None = (int(row[0]), int(row[1])) if row else (0, 0)
+        result: tuple[int, int] | None = (non_null, total)
     except duckdb.Error as exc:
         print(f"[resolve_column_null_stats] {exc}", flush=True)
         result = None
