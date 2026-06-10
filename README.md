@@ -482,18 +482,20 @@ Run `thebigbam analysis -h` to display the list of available analysis scripts. R
 
 # Additional in-depth documentation pages
 
-- [Applying theBIGbam to real projects](docs/USAGE.md)
-- [Features](docs/FEATURES.md)
-- [Compression](docs/COMPRESSION.md)
-- [Database structure](docs/DATABASE_STRUCTURE.md)
-- [Filters](docs/FILTERS.md)
-- [Misalignment](docs/MISALIGNMENT.md) TO-DO
-- [Phage packaging](docs/PHAGE_PACKAGING.md)
-- [Assembly check](docs/ASSEMBLY_CHECK.md) TO-DO, to merge with FILTERS.md
-- [Database](docs/DATABASE.md) TO-DO
-- [Visualization](docs/VISUALIZATION.md) TO-DO
-- [Plot interpretation](docs/PLOT_INTERPRETATION.md) TO-DO, discard?
 - [On mapping with circular genome support](docs/CIRCULAR_MAPPING.md)
+- [What features can theBIGbam compute?](docs/FEATURES.md)
+- [What summary metrics can theBIGbam compute per contig/MAG/sample?](docs/FILTERS.md)
+- [How is the phage packaging assignment done? (TECHNICAL)](docs/PHAGE_PACKAGING.md)
+- [More details about theBIGbam compression](docs/COMPRESSION.md)
+- [How are theBIGbam databases structured?](docs/DATABASE_STRUCTURE.md)
+- [How to manipulate theBIGbam databases after their creation?](docs/DATABASE.md)
+
+
+
+- [Misalignment](docs/MISALIGNMENT.md) TO-DO
+- [Assembly check](docs/ASSEMBLY_CHECK.md) TO-DO, to merge with FILTERS.md
+- [Visualization](docs/VISUALIZATION.md) TO-DO
+- [Plot interpretation](docs/PLOT_INTERPRETATION.md) TO-DO, discard
 - [Developers note](docs/DEVELOPERS_NOTE.md) TO-DO, to merge with contributing?
 - [Contributing](CONTRIBUTING.md) TO-DO
 - Installation guide to remove?

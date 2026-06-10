@@ -693,6 +693,50 @@ def _table_has_column(conn, table_name, column_name):
     return column_name in cols
 
 
+def _recompute_sample_counts(conn):
+    """Recompute Number_of_samples on Contig (and MAG if in MAG mode)."""
+    if _table_exists(conn, 'Contig') and _table_has_column(conn, 'Contig', 'Number_of_samples'):
+        conn.execute("""
+            UPDATE Contig SET Number_of_samples = (
+                SELECT COUNT(DISTINCT Sample_id) FROM Coverage
+                WHERE Coverage.Contig_id = Contig.Contig_id)
+        """)
+    if _table_exists(conn, 'MAG') and _table_has_column(conn, 'MAG', 'Number_of_samples'):
+        conn.execute("""
+            UPDATE MAG SET Number_of_samples = (
+                SELECT COUNT(DISTINCT c.Sample_id)
+                FROM Coverage c
+                JOIN MAG_contigs_association mca ON mca.Contig_id = c.Contig_id
+                WHERE mca.MAG_id = MAG.MAG_id)
+        """)
+
+
+def _recompute_mapped_reads(conn):
+    """Recompute Number_of_mapped_reads from remaining Coverage entries."""
+    if _table_exists(conn, 'Sample') and _table_exists(conn, 'Coverage'):
+        conn.execute("""
+            UPDATE Sample SET Number_of_mapped_reads = (
+                SELECT COALESCE(SUM(Read_count), 0) FROM Coverage
+                WHERE Coverage.Sample_id = Sample.Sample_id)
+        """)
+
+
+def _delete_contig_annotations(conn, contig_id):
+    """Delete annotation data for a contig (core table + sub-tables)."""
+    if not _table_exists(conn, 'Contig_annotation_core'):
+        return
+    anno_ids = [r[0] for r in conn.execute(
+        "SELECT Annotation_id FROM Contig_annotation_core WHERE Contig_id = ?", [contig_id]
+    ).fetchall()]
+    if anno_ids:
+        placeholders = ','.join('?' * len(anno_ids))
+        for table in ['Annotation_segments', 'Annotation_qualifier', 'Annotation_sequence']:
+            if _table_exists(conn, table):
+                conn.execute(f'DELETE FROM "{table}" WHERE Annotation_id IN ({placeholders})', anno_ids)
+    _delete_from(conn, 'Contig_qualifier', 'Contig_id', contig_id)
+    _delete_from(conn, 'Contig_annotation_core', 'Contig_id', contig_id)
+
+
 def remove_sample(db_path, sample_name):
     """Remove a sample and all its associated data from the database."""
     conn = duckdb.connect(db_path)
@@ -723,6 +767,8 @@ def remove_sample(db_path, sample_name):
     for table in [
         'Phage_mechanisms', 'Coverage', 'Misassembly', 'Microdiversity',
         'Side_misassembly', 'Topology',
+        'Feature_blob', 'Feature_blob_chunk',
+        'MAG_blob', 'MAG_coverage',
     ]:
         _delete_from(conn, table, 'Sample_id', sample_id)
 
@@ -733,14 +779,22 @@ def remove_sample(db_path, sample_name):
 
     # Delete the sample row itself
     conn.execute("DELETE FROM Sample WHERE Sample_id = ?", [sample_id])
+
+    _recompute_sample_counts(conn)
     update_database_metadata(conn)
     conn.close()
     print(f"Removed sample '{sample_name}' and all associated data.", flush=True)
 
 
 def remove_contig(db_path, contig_name):
-    """Remove a contig and all its associated data from the database."""
+    """Remove a contig and all its associated data from the database (contig-mode only)."""
     conn = duckdb.connect(db_path)
+
+    if _table_exists(conn, 'MAG'):
+        conn.close()
+        print("Error: cannot remove individual contigs in a MAG-mode database. "
+              "Use remove-mag instead.", flush=True)
+        return
 
     row = conn.execute(
         "SELECT Contig_id FROM Contig WHERE Contig_name = ?", [contig_name]
@@ -759,15 +813,20 @@ def remove_contig(db_path, contig_name):
             [contig_id],
         )
 
+    # Delete annotation sub-tables (Contig_annotation is a VIEW, not a table)
+    _delete_contig_annotations(conn, contig_id)
+
     # Delete from all fixed tables that reference Contig_id
     for table in [
         'Phage_mechanisms', 'Coverage', 'Misassembly', 'Microdiversity',
         'Side_misassembly', 'Topology',
-        'Contig_sequence', 'Contig_annotation',
+        'Contig_sequence',
         'Contig_directRepeats', 'Contig_invertedRepeats',
         'Contig_GCContent', 'Contig_GCSkew',
         'Contig_direct_repeat_count', 'Contig_inverted_repeat_count',
         'Contig_direct_repeat_identity', 'Contig_inverted_repeat_identity',
+        'Contig_blob', 'Contig_blob_chunk',
+        'Feature_blob', 'Feature_blob_chunk',
     ]:
         _delete_from(conn, table, 'Contig_id', contig_id)
 
@@ -778,6 +837,8 @@ def remove_contig(db_path, contig_name):
 
     # Delete the contig row itself
     conn.execute("DELETE FROM Contig WHERE Contig_id = ?", [contig_id])
+
+    _recompute_mapped_reads(conn)
     update_database_metadata(conn)
     conn.close()
     print(f"Removed contig '{contig_name}' and all associated data.", flush=True)
@@ -829,16 +890,28 @@ def remove_mag(db_path, mag_name):
                 [contig_id],
             )
 
+        # Annotation sub-tables (Contig_annotation is a VIEW, not a table)
+        _delete_contig_annotations(conn, contig_id)
+
         for table in [
             'Phage_mechanisms', 'Coverage', 'Misassembly', 'Microdiversity',
             'Side_misassembly', 'Topology',
-            'Contig_sequence', 'Contig_annotation',
+            'Contig_sequence',
             'Contig_directRepeats', 'Contig_invertedRepeats',
             'Contig_GCContent', 'Contig_GCSkew',
             'Contig_direct_repeat_count', 'Contig_inverted_repeat_count',
             'Contig_direct_repeat_identity', 'Contig_inverted_repeat_identity',
+            'Contig_blob', 'Contig_blob_chunk',
+            'Feature_blob', 'Feature_blob_chunk',
         ]:
             _delete_from(conn, table, 'Contig_id', contig_id)
+
+        # Inter-contig BLAST hits (dual-column foreign key)
+        if _table_exists(conn, 'Contig_blast_hits'):
+            conn.execute(
+                "DELETE FROM Contig_blast_hits WHERE Contig_id_1 = ? OR Contig_id_2 = ?",
+                [contig_id, contig_id],
+            )
 
         # Dynamic feature tables
         for ft in _get_feature_tables(conn):
@@ -851,6 +924,9 @@ def remove_mag(db_path, mag_name):
     # Delete association rows and the MAG row itself
     _delete_from(conn, 'MAG_contigs_association', 'MAG_id', mag_id)
     conn.execute("DELETE FROM MAG WHERE MAG_id = ?", [mag_id])
+
+    _recompute_mapped_reads(conn)
+    _recompute_sample_counts(conn)
     update_database_metadata(conn)
     conn.close()
     print(f"Removed MAG '{mag_name}' and all associated data ({len(contig_ids)} contigs).", flush=True)

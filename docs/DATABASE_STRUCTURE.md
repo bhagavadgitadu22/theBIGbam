@@ -1,6 +1,8 @@
 # Database Structure
 
-theBIGbam stores all computed data in a single DuckDB file. This page describes the table layout and the BLOB encoding used for per-position data. This information is primarily relevant for users querying the database directly with SQL or developers interested in helping improve theBIGbam. 
+theBIGbam stores all computed data in a single DuckDB file. We chose DuckDB for database management due to its columnar structure, which enables efficient storage and fast SQL-like queries, and because it is an embedded engine that avoids the need for a separate server process. While DuckDB may face limitations when scaling to extremely large databases (~ 1 TB or more), theBIGbam is expected to remain well below this mark in typical use cases.
+
+This page describes the table layout and the BLOB encoding used for per-position data. This information is primarily relevant for users querying the database directly with SQL or developers interested in helping improve theBIGbam.
 
 ---
 

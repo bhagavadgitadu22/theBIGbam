@@ -52,12 +52,12 @@ All qualifiers extracted from the annotation files during the calculate operatio
 
 # Sample filters
 
-| Metric                 | Definition                                                                               |
-| ---------------------- | ---------------------------------------------------------------------------------------- |
-| Sequencing_type        | Type of sequencing technology used for the sample (long, paired-short, single-short)     |
-| Number_of_reads        | Total number of sequencing reads generated for the sample                                |
-| Number_of_mapped_reads | Number of sequencing reads that successfully map to the contigs                          |
-| Circular mapping       | Whether the mapping of this samples was done using the circular done of theBIGbam or not |
+| Metric                 | Definition                                                                                        |
+| ---------------------- | ------------------------------------------------------------------------------------------------- |
+| Sequencing_type        | Type of sequencing technology used for the sample (long, paired-short, single-short)              |
+| Number_of_reads        | Total number of sequencing reads generated for the sample                                         |
+| Number_of_mapped_reads | Number of sequencing reads that successfully map to the contigs kept by theBIGbam for this sample |
+| Circular mapping       | Whether the mapping of this samples was done using the circular done of theBIGbam or not          |
 
 Additional columns might be available depending on the information you added per sample using *thebigbam add-sample-metadata* command.
 
