@@ -1780,13 +1780,17 @@ def create_layout(db_path, preloaded, enable_timing=False):
             from bokeh.io import curdoc
             hist_container = row_data["hist_container"]
             hist_container.loading = True
+            row_data['loading_gen'] += 1
+            gen = row_data['loading_gen']
             def _do_rebuild():
+                if row_data['loading_gen'] != gen:
+                    return
                 row_data["histogram_pane"] = None
                 row_data["histogram_fig"] = None
                 row_data["threshold_span"] = None
                 result = build_numeric_histogram(row_data, category, col_name, spinner, log_mode=new_log_x, log_y=new_log_y)
                 if result:
-                    hist_container.objects = [result]
+                    hist_container.objects = result
                 hist_container.loading = False
             curdoc().add_next_tick_callback(_do_rebuild)
 
@@ -1812,6 +1816,15 @@ def create_layout(db_path, preloaded, enable_timing=False):
         log_x_btn.on_click(_on_log_x)
         log_y_btn.on_click(_on_log_y)
 
+        pane = pn.Column(
+            pn.Row(log_x_btn, log_y_btn, margin=0),
+            hist_pane,
+            sizing_mode="stretch_width", margin=0,
+            styles={'background': 'white', 'border-radius': '5px', 'padding': '5px'},
+        )
+        row_data["histogram_pane"] = pane
+        row_data["histogram_fig"] = fig
+        row_data["threshold_span"] = threshold_span
         null_stats = resolve_column_null_stats(db_path, filtering_metadata, category, col_name)
         if null_stats is not None:
             non_null_count, null_count = null_stats
@@ -1820,24 +1833,8 @@ def create_layout(db_path, preloaded, enable_timing=False):
                 f'Used {non_null_count:,} times ({null_count:,} NULL values)</span>'
             )
             dist_label = pn.pane.HTML(label_html, sizing_mode="stretch_width", margin=(2, 5, 0, 5))
-            pane = pn.Column(
-                dist_label,
-                pn.Row(log_x_btn, log_y_btn, margin=0),
-                hist_pane,
-                sizing_mode="stretch_width", margin=0,
-                styles={'background': 'white', 'border-radius': '5px', 'padding': '5px'},
-            )
-        else:
-            pane = pn.Column(
-                pn.Row(log_x_btn, log_y_btn, margin=0),
-                hist_pane,
-                sizing_mode="stretch_width", margin=0,
-                styles={'background': 'white', 'border-radius': '5px', 'padding': '5px'},
-            )
-        row_data["histogram_pane"] = pane
-        row_data["histogram_fig"] = fig
-        row_data["threshold_span"] = threshold_span
-        return pane
+            return [dist_label, pane]
+        return [pane]
 
     def build_text_treemap(row_data, category, col_name, input_ref, hist_container):
         """Build a 1D treemap showing value distribution for a text column."""
@@ -2100,6 +2097,8 @@ def create_layout(db_path, preloaded, enable_timing=False):
             refresh_on_filter_change()
 
             # --- deferred: DB queries for distinct values + inset rebuild ---
+            row_data['loading_gen'] += 1
+            gen = row_data['loading_gen']
             def _deferred_update():
                 if is_text:
                     current_op = comparison_select.value
@@ -2114,7 +2113,7 @@ def create_layout(db_path, preloaded, enable_timing=False):
                         current_input_ref['is_panel'] = True
                         new_input.param.watch(lambda event: refresh_on_filter_change(), 'value')
 
-                if had_inset:
+                if had_inset and row_data['loading_gen'] == gen:
                     if is_text:
                         result = build_text_treemap(row_data, category, col_name, current_input_ref, hist_container)
                         if result:
@@ -2124,7 +2123,7 @@ def create_layout(db_path, preloaded, enable_timing=False):
                     elif not col_info.get('is_bool'):
                         result = build_numeric_histogram(row_data, category, col_name, current_input_ref['widget'])
                         if result:
-                            hist_container.objects = [result]
+                            hist_container.objects = result
                         else:
                             hist_container.objects = []
                     else:
@@ -2216,9 +2215,11 @@ def create_layout(db_path, preloaded, enable_timing=False):
             'bridge_input': None,
             'log_mode': False,
             'log_y': False,
+            'loading_gen': 0,
         }
 
         def remove_row_callback(event):
+            row_data['loading_gen'] += 1
             # Don't allow removal if this is the only query row across all sections
             if count_total_query_rows() <= 1:
                 return
@@ -2245,27 +2246,32 @@ def create_layout(db_path, preloaded, enable_timing=False):
 
         def toggle_distribution(event):
             from bokeh.io import curdoc
-            def _do_toggle():
-                if hist_container.objects:
-                    hist_container.objects = []
-                    row_data['histogram_pane'] = None
-                    row_data['histogram_fig'] = None
-                    row_data['threshold_span'] = None
-                    row_data['treemap_pane'] = None
-                    row_data['bridge_input'] = None
-                else:
-                    category = category_select.value
-                    col_name = subcategory_select.value
-                    col_info = filtering_metadata.get(category, {}).get('columns', {}).get(col_name, {})
-                    if col_info.get('type') == 'numeric' and not col_info.get('is_bool'):
-                        result = build_numeric_histogram(row_data, category, col_name, current_input_ref['widget'])
-                        if result:
-                            hist_container.objects = [result]
-                    elif col_info.get('type') == 'text':
-                        result = build_text_treemap(row_data, category, col_name, current_input_ref, hist_container)
-                        if result:
-                            hist_container.objects = result
-            curdoc().add_next_tick_callback(_do_toggle)
+            if hist_container.objects:
+                row_data['loading_gen'] += 1
+                hist_container.objects = []
+                row_data['histogram_pane'] = None
+                row_data['histogram_fig'] = None
+                row_data['threshold_span'] = None
+                row_data['treemap_pane'] = None
+                row_data['bridge_input'] = None
+                return
+            row_data['loading_gen'] += 1
+            gen = row_data['loading_gen']
+            def _do_load():
+                if row_data['loading_gen'] != gen:
+                    return
+                category = category_select.value
+                col_name = subcategory_select.value
+                col_info = filtering_metadata.get(category, {}).get('columns', {}).get(col_name, {})
+                if col_info.get('type') == 'numeric' and not col_info.get('is_bool'):
+                    result = build_numeric_histogram(row_data, category, col_name, current_input_ref['widget'])
+                    if result and row_data['loading_gen'] == gen:
+                        hist_container.objects = result
+                elif col_info.get('type') == 'text':
+                    result = build_text_treemap(row_data, category, col_name, current_input_ref, hist_container)
+                    if result and row_data['loading_gen'] == gen:
+                        hist_container.objects = result
+            curdoc().add_next_tick_callback(_do_load)
 
         dist_toggle.on_click(toggle_distribution)
 
