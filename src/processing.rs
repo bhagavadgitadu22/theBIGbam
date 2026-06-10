@@ -28,7 +28,7 @@ use crate::compress::{
     add_compressed_feature_with_stats,
 };
 use crate::db::{DbWriter, MisassemblyData, MicrodiversityData, SideMisassemblyData, TopologyData, GCContentData, RepeatsData};
-use crate::gc_content::{compute_gc_content, compute_gc_skew, GCParams};
+use crate::gc_content::{compute_gc_content_and_skew, GCParams};
 use crate::features::{CdsIndex, FeatureArrays, ModuleFlags, compute_codon_changes_from_summaries};
 use crate::parser::{parse_annotations, compute_annotation_sequences};
 use crate::types::{
@@ -1528,7 +1528,7 @@ fn process_mag_group(
     config: &ProcessConfig,
     is_circular: bool,
     repeats: &[RepeatsData],
-    annos_by_contig: &HashMap<i64, Vec<&FeatureAnnotation>>,
+    cds_indexes: &HashMap<i64, CdsIndex>,
     accum_ref: Option<&TimingAccum>,
 ) -> Option<MagGroupResult> {
     use crate::blob::{encode_dense_blob, smooth_dense_values, EncodedBlob};
@@ -1587,22 +1587,7 @@ fn process_mag_group(
         let clen = member.ref_length;
         contig_lengths_ordered.push(clen as u32);
 
-        // CDS index
-        let ts = accum_ref.map(|_| std::time::Instant::now());
-        let cds_index = if flags.mapping_metrics {
-            match annos_by_contig.get(&member.contig_id) {
-                Some(slice) if !slice.is_empty() => {
-                    let idx = CdsIndex::from_contig_annotations(slice);
-                    if idx.is_empty() { None } else { Some(idx) }
-                }
-                _ => None,
-            }
-        } else {
-            None
-        };
-        if let (Some(a), Some(t)) = (accum_ref, ts) {
-            a.cds_index_ns.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
-        }
+        let cds_index = cds_indexes.get(&member.contig_id);
 
         // Process contig streaming (no per-contig AF filtering in MAG mode)
         let ts = accum_ref.map(|_| std::time::Instant::now());
@@ -1706,7 +1691,7 @@ fn process_mag_group(
         let sparse_start = sparse_accum.len();
         let (pkg, metrics) = add_features_from_arrays(
             &mut arrays, &member.ref_name, member.contig_id, config, is_circular, seq_type, flags,
-            primary_count, repeats, cds_index.as_ref(), &mut blob_output,
+            primary_count, repeats, cds_index, &mut blob_output,
             Some(&mut sparse_accum),
         );
         // Shift sparse positions from contig-local to MAG coordinates
@@ -1909,7 +1894,7 @@ pub fn process_sample(
     repeats: &[RepeatsData],
     _annotations: &[FeatureAnnotation],
     contig_by_name: &HashMap<&str, usize>,
-    annos_by_contig: &HashMap<i64, Vec<&FeatureAnnotation>>,
+    cds_indexes: &HashMap<i64, CdsIndex>,
     mag_member_lookup: Option<&MagMemberLookup>,
 ) -> Result<SampleProcessResult> {
     let sample_name = bam_path
@@ -2035,7 +2020,7 @@ pub fn process_sample(
 
                 chunk.iter().filter_map(move |group| {
                     let bam = bam.as_mut()?;
-                    process_mag_group(bam, group, seq_type, flags, config, is_circular, repeats, annos_by_contig, accum_ref)
+                    process_mag_group(bam, group, seq_type, flags, config, is_circular, repeats, cds_indexes, accum_ref)
                 })
             })
             .collect();
@@ -2093,21 +2078,7 @@ pub fn process_sample(
                     let contig_id = *contig_id;
                     let ref_length = *ref_length;
 
-                    let ts = accum_ref.map(|_| std::time::Instant::now());
-                    let cds_index = if flags.mapping_metrics {
-                        match annos_by_contig.get(&contig_id) {
-                            Some(slice) if !slice.is_empty() => {
-                                let idx = CdsIndex::from_contig_annotations(slice);
-                                if idx.is_empty() { None } else { Some(idx) }
-                            }
-                            _ => None,
-                        }
-                    } else {
-                        None
-                    };
-                    if let (Some(a), Some(t)) = (accum_ref, ts) {
-                        a.cds_index_ns.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
-                    }
+                    let cds_index = cds_indexes.get(&contig_id);
 
                     let ts = accum_ref.map(|_| std::time::Instant::now());
                     let mut phase_t: Option<BamPhaseTimings> = accum_ref.map(|_| BamPhaseTimings::default());
@@ -2153,7 +2124,7 @@ pub fn process_sample(
 
                     let ts = accum_ref.map(|_| std::time::Instant::now());
                     let mut feature_blobs: Vec<(String, i64, crate::blob::EncodedBlob)> = Vec::new();
-                    let (packaging_info, metrics_info) = add_features_from_arrays(&mut arrays, ref_name, contig_id, config, is_circular, seq_type, flags, primary_count, repeats, cds_index.as_ref(), &mut feature_blobs, None);
+                    let (packaging_info, metrics_info) = add_features_from_arrays(&mut arrays, ref_name, contig_id, config, is_circular, seq_type, flags, primary_count, repeats, cds_index, &mut feature_blobs, None);
                     let coverage_median = arrays.coverage_median() as f32;
                     let coverage_trimmed_mean = arrays.coverage_trimmed_mean(0.05) as f32;
 
@@ -2930,11 +2901,14 @@ pub fn run_all_samples(
     // 7. Compute and write GC content and GC skew from sequence data (only for new contigs)
     let t_gc = if config.enable_timing { Some(std::time::Instant::now()) } else { None };
     let gc_data: Vec<GCContentData> = blast_contigs
-        .iter()
+        .par_iter()
         .filter_map(|contig| {
             contig.sequence.as_ref().map(|seq| {
-                let (gc_values, stats) = compute_gc_content(seq, config.gc_params.gc_content_window_size);
-                let (skew_values, skew_stats) = compute_gc_skew(seq, config.gc_params.gc_skew_window_size);
+                let (gc_values, stats, skew_values, skew_stats) = compute_gc_content_and_skew(
+                    seq,
+                    config.gc_params.gc_content_window_size,
+                    config.gc_params.gc_skew_window_size,
+                );
                 GCContentData {
                     contig_name: contig.name.clone(),
                     gc_values,
@@ -3025,43 +2999,37 @@ pub fn run_all_samples(
 
 /// For a single sample, identify MAGs that fail the aligned-fraction or
 /// coverage-depth thresholds and return the set of member contig names to drop.
-/// All member contigs contribute their length to the denominator (even if they
-/// have zero reads), so absent contigs correctly penalise the MAG aggregate.
+/// Uses the actual MagCoverageStats (the values written to the database) so the
+/// filter decision is consistent with the stored Aligned_fraction_percentage.
 fn filter_failing_mags(
     presences: &[PresenceData],
     mag_contig_map: &[(String, Vec<String>)],
-    contig_lengths: &HashMap<String, usize>,
+    mag_results: &MagResultVec,
     min_aligned_fraction: f64,
     min_coverage_depth: f64,
 ) -> (HashSet<String>, usize) {
-    let presence_map: HashMap<&str, &PresenceData> = presences
+    let s_af = crate::types::get_column_scale("Coverage", "Aligned_fraction_percentage");
+    let s_m = crate::types::get_column_scale("Coverage", "Coverage_mean");
+
+    let stats_by_name: HashMap<&str, &crate::mag_blob::MagCoverageStats> = mag_results
         .iter()
-        .map(|p| (p.contig_name.as_str(), p))
+        .map(|(name, _, _, stats)| (name.as_str(), stats))
         .collect();
 
     let mut drop_set: HashSet<String> = HashSet::new();
     let mut n_dropped: usize = 0;
 
-    for (_mag_name, members) in mag_contig_map {
-        let mut num_af: f64 = 0.0;
-        let mut num_cov: f64 = 0.0;
-        let mut total_len: f64 = 0.0;
-
-        for cname in members {
-            let clen = *contig_lengths.get(cname).unwrap_or(&0) as f64;
-            total_len += clen;
-            if let Some(p) = presence_map.get(cname.as_str()) {
-                num_af += p.coverage_pct as f64 * clen;
-                num_cov += p.coverage_mean as f64 * clen;
-            }
-        }
-
-        if total_len == 0.0 {
-            continue;
-        }
-
-        let af_mag = num_af / total_len;
-        let cov_mag = num_cov / total_len;
+    for (mag_name, members) in mag_contig_map {
+        let (af_mag, cov_mag) = if let Some(stats) = stats_by_name.get(mag_name.as_str()) {
+            (
+                stats.aligned_fraction_pct_x10 as f64 / s_af,
+                stats.coverage_mean_x10 as f64 / s_m,
+            )
+        } else {
+            // MAG had no data at all (all contigs had zero reads)
+            let has_any_presence = members.iter().any(|c| presences.iter().any(|p| p.contig_name == *c));
+            if has_any_presence { continue; } else { (0.0, 0.0) }
+        };
 
         let af_fail = min_aligned_fraction > 0.0 && af_mag < min_aligned_fraction;
         let cov_fail = min_coverage_depth > 0.0 && cov_mag < min_coverage_depth;
@@ -3254,10 +3222,6 @@ fn process_samples_parallel(
     let min_af = config.min_aligned_fraction;
     let min_cov = config.min_coverage_depth;
     let mag_map_owned: Vec<(String, Vec<String>)> = mag_contig_map.to_vec();
-    let contig_length_map: HashMap<String, usize> = contigs.iter()
-        .map(|c| (c.name.clone(), c.length))
-        .collect();
-
     // Build MagMemberLookup before writer thread takes db_writer
     let mag_member_lookup: Option<MagMemberLookup> = if is_mag_mode {
         Some(crate::mag_blob::build_mag_member_lookup(&db_writer)?)
@@ -3281,7 +3245,7 @@ fn process_samples_parallel(
             let (presences, packaging, misassembly, microdiversity, side_misassembly, topology, feature_blobs, mag_results) =
                 if is_mag_mode && !mag_map_owned.is_empty() {
                     let (drop_set, n_dropped) = filter_failing_mags(
-                        &result.presences, &mag_map_owned, &contig_length_map, min_af, min_cov,
+                        &result.presences, &mag_map_owned, &result.mag_results, min_af, min_cov,
                     );
                     mag_drops += n_dropped;
                     if !drop_set.is_empty() {
@@ -3387,14 +3351,19 @@ fn process_samples_parallel(
         }
         map
     };
-    let annos_by_contig: HashMap<i64, Vec<&FeatureAnnotation>> = if flags.mapping_metrics
+    let cds_indexes: HashMap<i64, CdsIndex> = if flags.mapping_metrics
         && !annotations.is_empty()
     {
-        let mut map: HashMap<i64, Vec<&FeatureAnnotation>> = HashMap::new();
+        let mut annos_by_contig: HashMap<i64, Vec<&FeatureAnnotation>> = HashMap::new();
         for a in annotations.iter() {
-            map.entry(a.contig_id).or_default().push(a);
+            annos_by_contig.entry(a.contig_id).or_default().push(a);
         }
-        map
+        annos_by_contig.into_iter()
+            .filter_map(|(contig_id, annos)| {
+                let idx = CdsIndex::from_contig_annotations(&annos);
+                if idx.is_empty() { None } else { Some((contig_id, idx)) }
+            })
+            .collect()
     } else {
         HashMap::new()
     };
@@ -3406,7 +3375,7 @@ fn process_samples_parallel(
         let sample_start = std::time::Instant::now();
 
         let sample_circular = circularity_map.get(bam_path).copied().unwrap_or(false);
-        match process_sample(bam_path, contigs, flags, config, sample_circular, repeats, annotations, &contig_by_name, &annos_by_contig, mag_member_lookup_ref) {
+        match process_sample(bam_path, contigs, flags, config, sample_circular, repeats, annotations, &contig_by_name, &cds_indexes, mag_member_lookup_ref) {
             Ok(mut r) => {
                 let sample_time = sample_start.elapsed().as_secs_f64();
                 if let Some(ref mut t) = r.timings {
@@ -3516,9 +3485,6 @@ fn process_samples_sequential(
     let total = bam_files.len();
     let start_time = std::time::Instant::now();
     let is_mag_mode = config.view_mode == ViewMode::Mag;
-    let contig_length_map: HashMap<String, usize> = contigs.iter()
-        .map(|c| (c.name.clone(), c.length))
-        .collect();
     let mut mag_drops: usize = 0;
 
     let pb = if is_tty {
@@ -3560,14 +3526,19 @@ fn process_samples_sequential(
         }
         map
     };
-    let annos_by_contig: HashMap<i64, Vec<&FeatureAnnotation>> = if flags.mapping_metrics
+    let cds_indexes: HashMap<i64, CdsIndex> = if flags.mapping_metrics
         && !annotations.is_empty()
     {
-        let mut map: HashMap<i64, Vec<&FeatureAnnotation>> = HashMap::new();
+        let mut annos_by_contig: HashMap<i64, Vec<&FeatureAnnotation>> = HashMap::new();
         for a in annotations.iter() {
-            map.entry(a.contig_id).or_default().push(a);
+            annos_by_contig.entry(a.contig_id).or_default().push(a);
         }
-        map
+        annos_by_contig.into_iter()
+            .filter_map(|(contig_id, annos)| {
+                let idx = CdsIndex::from_contig_annotations(&annos);
+                if idx.is_empty() { None } else { Some((contig_id, idx)) }
+            })
+            .collect()
     } else {
         HashMap::new()
     };
@@ -3576,7 +3547,7 @@ fn process_samples_sequential(
         let sample_start = std::time::Instant::now();
 
         let sample_circular = circularity_map.get(bam_path).copied().unwrap_or(false);
-        match process_sample(bam_path, contigs, flags, config, sample_circular, repeats, annotations, &contig_by_name, &annos_by_contig, mag_member_lookup.as_ref()) {
+        match process_sample(bam_path, contigs, flags, config, sample_circular, repeats, annotations, &contig_by_name, &cds_indexes, mag_member_lookup.as_ref()) {
             Ok(mut r) => {
                 let process_elapsed = sample_start.elapsed();
                 processing_time_total += process_elapsed;
@@ -3587,7 +3558,7 @@ fn process_samples_sequential(
                 let (presences, packaging, misassembly, microdiversity, side_misassembly, topology, feature_blobs, mag_results) =
                     if is_mag_mode && !mag_contig_map.is_empty() {
                         let (drop_set, n_dropped) = filter_failing_mags(
-                            &r.presences, mag_contig_map, &contig_length_map,
+                            &r.presences, mag_contig_map, &r.mag_results,
                             config.min_aligned_fraction, config.min_coverage_depth,
                         );
                         mag_drops += n_dropped;

@@ -466,27 +466,34 @@ fn parse_gff3_attributes(attrs_str: &str) -> HashMap<String, String> {
 /// Normalize GFF3 attribute aliases into canonical GenBank qualifier names.
 /// Ensures the Contig_annotation view works consistently regardless of format.
 fn normalize_gff_qualifiers(qualifiers: &mut HashMap<String, String>) {
-    // product: GFF3 tools use Name, name, description, or product
+    // product: normalize casing only
     if !qualifiers.contains_key("product") {
-        if let Some(val) = qualifiers
-            .get("Product")
-            .or_else(|| qualifiers.get("Name"))
-            .or_else(|| qualifiers.get("name"))
-            .or_else(|| qualifiers.get("description"))
-            .cloned()
-        {
+        if let Some(val) = qualifiers.get("Product").cloned() {
             qualifiers.insert("product".to_string(), val);
         }
     }
-    // function: GFF3 tools use note/Note as a fallback
+    // name: normalize casing only
+    if !qualifiers.contains_key("name") {
+        if let Some(val) = qualifiers.get("Name").cloned() {
+            qualifiers.insert("name".to_string(), val);
+        }
+    }
+    // description: normalize casing only
+    if !qualifiers.contains_key("description") {
+        if let Some(val) = qualifiers.get("Description").cloned() {
+            qualifiers.insert("description".to_string(), val);
+        }
+    }
+    // function: normalize casing only
     if !qualifiers.contains_key("function") {
-        if let Some(val) = qualifiers
-            .get("Function")
-            .or_else(|| qualifiers.get("note"))
-            .or_else(|| qualifiers.get("Note"))
-            .cloned()
-        {
+        if let Some(val) = qualifiers.get("Function").cloned() {
             qualifiers.insert("function".to_string(), val);
+        }
+    }
+    // note: normalize casing only
+    if !qualifiers.contains_key("note") {
+        if let Some(val) = qualifiers.get("Note").cloned() {
+            qualifiers.insert("note".to_string(), val);
         }
     }
     // phrog: normalize casing

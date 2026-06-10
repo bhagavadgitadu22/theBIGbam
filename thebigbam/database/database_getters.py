@@ -1074,3 +1074,59 @@ def resolve_value_counts(db_path: str, filtering_metadata: dict,
 
     col_info['value_counts'] = counts
     return counts
+
+def resolve_column_null_stats(
+    db_path: str,
+    filtering_metadata: dict,
+    category: str,
+    col_name: str,
+) -> tuple[int, int] | None:
+    """Return (non_null_count, null_count) for a column.
+
+    Queries the underlying table once and caches the result in
+    ``filtering_metadata[category]['columns'][col_name]['null_stats']`` so
+    repeated calls (e.g. log-toggle rebuilds) are free.
+
+    Returns ``None`` when the column or its source cannot be resolved.
+    """
+    cat_meta = filtering_metadata.get(category, {})
+    col_info = cat_meta.get("columns", {}).get(col_name, {})
+    if not col_info:
+        return None
+    if "null_stats" in col_info:
+        return col_info["null_stats"]
+
+    source_override = col_info.get("source")
+    qualifier_key = col_info.get("qualifier_key")
+    source = source_override or cat_meta.get("source", "")
+
+    conn = duckdb.connect(db_path, read_only=True)
+    try:
+        if qualifier_key and source_override in ("Contig_qualifier", "Annotation_qualifier"):
+            row = conn.execute(
+                f'SELECT '
+                f'  COUNT(*) FILTER (WHERE "Value" IS NOT NULL), '
+                f'  COUNT(*) FILTER (WHERE "Value" IS NULL) '
+                f'FROM {source_override} WHERE "Key" = ?',
+                [qualifier_key],
+            ).fetchone()
+        elif source:
+            row = conn.execute(
+                f'SELECT '
+                f'  COUNT(*) FILTER (WHERE "{col_name}" IS NOT NULL), '
+                f'  COUNT(*) FILTER (WHERE "{col_name}" IS NULL) '
+                f'FROM {source}'
+            ).fetchone()
+        else:
+            col_info["null_stats"] = None
+            return None
+        result: tuple[int, int] | None = (int(row[0]), int(row[1])) if row else (0, 0)
+    except duckdb.Error as exc:
+        print(f"[resolve_column_null_stats] {exc}", flush=True)
+        result = None
+    finally:
+        conn.close()
+
+    col_info["null_stats"] = result
+    return result
+

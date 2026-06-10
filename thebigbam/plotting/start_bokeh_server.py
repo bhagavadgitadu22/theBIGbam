@@ -13,7 +13,7 @@ from bokeh.models.widgets import CheckboxGroup, HelpButton, Button, RadioButtonG
 # Import the plotting function from the repo
 from .plotting_data_per_sample import generate_bokeh_plot_per_sample, generate_bokeh_plot_mag_view, DEFAULT_GENEMAP_WINDOW, DEFAULT_SEQUENCE_WINDOW, _DEFAULT_MAX_BASE_RESOLUTION
 from .plotting_data_all_samples import generate_bokeh_plot_all_samples
-from ..database.database_getters import get_filtering_metadata, resolve_distinct_values, resolve_histogram_bins, resolve_value_counts, ANNOTATION_EXCLUDED_COLUMNS, is_mag_mode, get_mag_contig_map
+from ..database.database_getters import get_filtering_metadata, resolve_distinct_values, resolve_histogram_bins, resolve_value_counts, resolve_column_null_stats, ANNOTATION_EXCLUDED_COLUMNS, is_mag_mode, get_mag_contig_map
 from .searchable_select import SearchableSelect
 from .perusing_data import _FILTER_ENCODE, _make_filter_encode
 
@@ -543,9 +543,11 @@ def create_layout(db_path, preloaded, enable_timing=False):
                 except (ValueError, TypeError):
                     return set()
 
-            # Re-encode human-readable value to DB integer scale
+            # Re-encode human-readable value to DB integer scale only for raw
+            # tables (Contig, Sample, MAG).  Explicit_* views already store
+            # decoded values so re-encoding would double-encode.
             _enc = _FILTER_ENCODE.get(column_name)
-            if _enc and not is_bool and col_type == "numeric":
+            if _enc and not is_bool and col_type == "numeric" and category in ("Contig", "Sample", "MAG"):
                 value = round(value * _enc)
 
             # value is always the last param; refresh it after coercion
@@ -1667,7 +1669,7 @@ def create_layout(db_path, preloaded, enable_timing=False):
 
         scale = _FILTER_ENCODE.get(col_name)
         bin_result = resolve_histogram_bins(db_path, filtering_metadata, category, col_name,
-                                            n_bins=50, log_mode=log_mode, scale=scale)
+                                            n_bins=50, log_mode=log_mode)
         if bin_result is None:
             row_data["histogram_pane"] = None
             row_data["histogram_fig"] = None
@@ -1810,12 +1812,28 @@ def create_layout(db_path, preloaded, enable_timing=False):
         log_x_btn.on_click(_on_log_x)
         log_y_btn.on_click(_on_log_y)
 
-        pane = pn.Column(
-            pn.Row(log_x_btn, log_y_btn, margin=0),
-            hist_pane,
-            sizing_mode="stretch_width", margin=0,
-            styles={'background': 'white', 'border-radius': '5px', 'padding': '5px'},
-        )
+        null_stats = resolve_column_null_stats(db_path, filtering_metadata, category, col_name)
+        if null_stats is not None:
+            non_null_count, null_count = null_stats
+            label_html = (
+                f'<span style="font-size:11px; color:#666; font-style:italic;">'
+                f'Used {non_null_count:,} times ({null_count:,} NULL values)</span>'
+            )
+            dist_label = pn.pane.HTML(label_html, sizing_mode="stretch_width", margin=(2, 5, 0, 5))
+            pane = pn.Column(
+                dist_label,
+                pn.Row(log_x_btn, log_y_btn, margin=0),
+                hist_pane,
+                sizing_mode="stretch_width", margin=0,
+                styles={'background': 'white', 'border-radius': '5px', 'padding': '5px'},
+            )
+        else:
+            pane = pn.Column(
+                pn.Row(log_x_btn, log_y_btn, margin=0),
+                hist_pane,
+                sizing_mode="stretch_width", margin=0,
+                styles={'background': 'white', 'border-radius': '5px', 'padding': '5px'},
+            )
         row_data["histogram_pane"] = pane
         row_data["histogram_fig"] = fig
         row_data["threshold_span"] = threshold_span
@@ -1919,6 +1937,15 @@ def create_layout(db_path, preloaded, enable_timing=False):
         pane = pn.pane.Bokeh(fig, sizing_mode="stretch_width", margin=(0, 0, 0, 0))
         row_data["treemap_pane"] = pane
         row_data["bridge_input"] = bridge
+        null_stats = resolve_column_null_stats(db_path, filtering_metadata, category, col_name)
+        if null_stats is not None:
+            non_null_count, null_count = null_stats
+            label_html = (
+                f'<span style="font-size:11px; color:#666; font-style:italic;">'
+                f'Used {non_null_count:,} times ({null_count:,} NULL values)</span>'
+            )
+            dist_label = pn.pane.HTML(label_html, sizing_mode="stretch_width", margin=(2, 5, 0, 5))
+            return [dist_label, pane, bridge_pane]
         return [pane, bridge_pane]
 
     def create_query_row(section_data):
@@ -1997,12 +2024,18 @@ def create_layout(db_path, preloaded, enable_timing=False):
         current_input_ref = {'widget': initial_input, 'is_panel': initial_is_panel}
 
         def update_input_widget(col_name):
-            """Update the input widget based on column type."""
+            """Update the input widget based on column type.
+
+            Synchronous part: update comparison/input widgets from metadata
+            (no DB call) and clear the inset immediately.  Deferred part:
+            resolve distinct values and rebuild the inset via next-tick.
+            """
+            from bokeh.io import curdoc
             category = category_select.value
             col_info = filtering_metadata.get(category, {}).get('columns', {}).get(col_name, {})
             is_text = col_info.get('type') == 'text'
 
-            # Update comparison options based on type
+            # --- synchronous: update comparison + input widget (no DB) ---
             if is_text:
                 comparison_select.options = ["=", "!=", "has", "has not"]
                 if comparison_select.value not in comparison_select.options:
@@ -2012,7 +2045,6 @@ def create_layout(db_path, preloaded, enable_timing=False):
                 if comparison_select.value not in comparison_select.options:
                     comparison_select.value = "="
 
-            # Create new input widget
             if is_text:
                 current_op = comparison_select.value
                 if current_op in ("has", "has not"):
@@ -2022,15 +2054,13 @@ def create_layout(db_path, preloaded, enable_timing=False):
                     current_input_ref['is_panel'] = False
                     new_input.on_change('value', lambda attr, old, new: refresh_on_filter_change())
                 else:
-                    distinct_values = resolve_distinct_values(db_path, filtering_metadata, category, col_name)
-                    new_input = SearchableSelect(
-                        value="", options=distinct_values,
-                        placeholder="Search...", width=90
+                    placeholder_input = SearchableSelect(
+                        value="", options=[],
+                        placeholder="Loading...", width=90
                     )
-                    input_container.objects = [new_input]
-                    current_input_ref['widget'] = new_input
+                    input_container.objects = [placeholder_input]
+                    current_input_ref['widget'] = placeholder_input
                     current_input_ref['is_panel'] = True
-                    new_input.param.watch(lambda event: refresh_on_filter_change(), 'value')
             else:
                 _enc_scale = _FILTER_ENCODE.get(col_name)
                 _step = 1.0 / _enc_scale if _enc_scale else 1
@@ -2048,25 +2078,59 @@ def create_layout(db_path, preloaded, enable_timing=False):
                     refresh_on_filter_change()
                 new_input.on_change('value', _on_spinner_change)
 
-            # Rebuild distribution visualization if currently visible
-            if hist_container.objects:
-                hist_container.objects = []
+            # --- synchronous: clear inset immediately, show spinner if rebuilding ---
+            had_inset = bool(hist_container.objects)
+            if had_inset:
+                _spinner_html = pn.pane.HTML(
+                    '<div style="display:flex;align-items:center;gap:8px;padding:8px 0;">'
+                    '<div style="width:18px;height:18px;border:2px solid #ddd;border-top:2px solid #888;'
+                    'border-radius:50%;animation:spin 0.8s linear infinite;"></div>'
+                    '<span style="font-size:11px;color:#888;font-style:italic;">Loading...</span>'
+                    '</div>'
+                    '<style>@keyframes spin{to{transform:rotate(360deg)}}</style>',
+                    sizing_mode="stretch_width", margin=(2, 5, 0, 5),
+                )
+                hist_container.objects = [_spinner_html]
                 row_data['histogram_pane'] = None
                 row_data['histogram_fig'] = None
                 row_data['threshold_span'] = None
                 row_data['treemap_pane'] = None
                 row_data['bridge_input'] = None
-                if is_text:
-                    result = build_text_treemap(row_data, category, col_name, current_input_ref, hist_container)
-                    if result:
-                        hist_container.objects = result
-                elif not col_info.get('is_bool'):
-                    result = build_numeric_histogram(row_data, category, col_name, current_input_ref['widget'])
-                    if result:
-                        hist_container.objects = [result]
 
-            # Immediately apply the new default value to contig/sample filtering
             refresh_on_filter_change()
+
+            # --- deferred: DB queries for distinct values + inset rebuild ---
+            def _deferred_update():
+                if is_text:
+                    current_op = comparison_select.value
+                    if current_op not in ("has", "has not"):
+                        distinct_values = resolve_distinct_values(db_path, filtering_metadata, category, col_name)
+                        new_input = SearchableSelect(
+                            value="", options=distinct_values,
+                            placeholder="Search...", width=90
+                        )
+                        input_container.objects = [new_input]
+                        current_input_ref['widget'] = new_input
+                        current_input_ref['is_panel'] = True
+                        new_input.param.watch(lambda event: refresh_on_filter_change(), 'value')
+
+                if had_inset:
+                    if is_text:
+                        result = build_text_treemap(row_data, category, col_name, current_input_ref, hist_container)
+                        if result:
+                            hist_container.objects = result
+                        else:
+                            hist_container.objects = []
+                    elif not col_info.get('is_bool'):
+                        result = build_numeric_histogram(row_data, category, col_name, current_input_ref['widget'])
+                        if result:
+                            hist_container.objects = [result]
+                        else:
+                            hist_container.objects = []
+                    else:
+                        hist_container.objects = []
+
+            curdoc().add_next_tick_callback(_deferred_update)
 
         def update_subcategories(attr, old, new):
             """Update column options when category changes."""
@@ -2084,6 +2148,7 @@ def create_layout(db_path, preloaded, enable_timing=False):
 
         def update_input_on_operator_change(attr, old, new):
             """Swap input widget between TextInput and SearchableSelect based on operator."""
+            from bokeh.io import curdoc
             category = category_select.value
             col_name = subcategory_select.value
             col_info = filtering_metadata.get(category, {}).get('columns', {}).get(col_name, {})
@@ -2097,15 +2162,24 @@ def create_layout(db_path, preloaded, enable_timing=False):
                     current_input_ref['is_panel'] = False
                     new_input.on_change('value', lambda attr, old, new: refresh_on_filter_change())
                 else:
-                    distinct_values = resolve_distinct_values(db_path, filtering_metadata, category, col_name)
-                    new_input = SearchableSelect(
-                        value="", options=distinct_values,
-                        placeholder="Search...", width=90
+                    placeholder_input = SearchableSelect(
+                        value="", options=[],
+                        placeholder="Loading...", width=90
                     )
-                    input_container.objects = [new_input]
-                    current_input_ref['widget'] = new_input
+                    input_container.objects = [placeholder_input]
+                    current_input_ref['widget'] = placeholder_input
                     current_input_ref['is_panel'] = True
-                    new_input.param.watch(lambda event: refresh_on_filter_change(), 'value')
+                    def _deferred_resolve():
+                        distinct_values = resolve_distinct_values(db_path, filtering_metadata, category, col_name)
+                        new_input = SearchableSelect(
+                            value="", options=distinct_values,
+                            placeholder="Search...", width=90
+                        )
+                        input_container.objects = [new_input]
+                        current_input_ref['widget'] = new_input
+                        current_input_ref['is_panel'] = True
+                        new_input.param.watch(lambda event: refresh_on_filter_change(), 'value')
+                    curdoc().add_next_tick_callback(_deferred_resolve)
 
             refresh_on_filter_change()
 
