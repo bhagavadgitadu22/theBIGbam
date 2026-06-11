@@ -245,13 +245,21 @@ impl TimingAccum {
 #[derive(Default, Clone)]
 struct PreSampleTimings {
     parse_secs: f64,
+    parse_rss_mb: f64,
     db_create_secs: f64,
+    db_create_rss_mb: f64,
     autoblast_secs: f64,
+    autoblast_rss_mb: f64,
     gc_secs: [f64; 4],
+    gc_rss_mb: f64,
     repeat_blob_secs: f64,
+    repeat_rss_mb: f64,
     write_mags_secs: f64,
+    write_mags_rss_mb: f64,
     mag_contig_blob_secs: f64,
+    mag_contig_blob_rss_mb: f64,
     cds_build_secs: f64,
+    cds_build_rss_mb: f64,
 }
 
 /// Check if a BAM file is missing MD tags by sampling first few reads.
@@ -2532,6 +2540,7 @@ pub fn run_all_samples(
         compute_annotation_sequences(&contigs, &mut annotations);
     }
     let parse_secs = t_parse.map(|t| t.elapsed().as_secs_f64()).unwrap_or(0.0);
+    let parse_rss_mb = if config.enable_timing { get_rss_mb() } else { 0.0 };
 
     if let Some(parent) = output_db.parent() {
         fs::create_dir_all(parent).context("Failed to create output directory")?;
@@ -2850,6 +2859,7 @@ pub fn run_all_samples(
     };
 
     let db_create_secs = t_db_create.map(|t| t.elapsed().as_secs_f64()).unwrap_or(0.0);
+    let db_create_rss_mb = if config.enable_timing { get_rss_mb() } else { 0.0 };
 
     // 5. Auto-detect circularity per sample (now with contigs available for length comparison)
     let circularity_map = if !bam_files.is_empty() {
@@ -2913,6 +2923,7 @@ pub fn run_all_samples(
         Vec::new()
     };
     let autoblast_secs = t_autoblast.map(|t| t.elapsed().as_secs_f64()).unwrap_or(0.0);
+    let autoblast_rss_mb = if config.enable_timing { get_rss_mb() } else { 0.0 };
 
     let repeats = if repeats.is_empty() && !repeats_from_db.is_empty() {
         repeats_from_db
@@ -2981,6 +2992,7 @@ pub fn run_all_samples(
         gc_write_blob_ns as f64 / 1e9,
         gc_update_stats_ns as f64 / 1e9,
     ];
+    let gc_rss_mb = if config.enable_timing { get_rss_mb() } else { 0.0 };
 
     // Convert repeat detections into per-contig blobs (only for new contigs).
     let t_repeat_blob = if config.enable_timing { Some(std::time::Instant::now()) } else { None };
@@ -2990,6 +3002,7 @@ pub fn run_all_samples(
     let repeat_raw = db_writer.convert_repeat_blobs(&new_contig_ids)?;
     mag_contig_sparse_raw.extend(repeat_raw);
     let repeat_blob_secs = t_repeat_blob.map(|t| t.elapsed().as_secs_f64()).unwrap_or(0.0);
+    let repeat_rss_mb = if config.enable_timing { get_rss_mb() } else { 0.0 };
 
     // Write MAG rows after per-contig GC/duplication stats are finalized.
     let t_write_mags = if config.enable_timing { Some(std::time::Instant::now()) } else { None };
@@ -3001,6 +3014,7 @@ pub fn run_all_samples(
         db_writer.write_mags(&mag_contig_map)?;
     }
     let write_mags_secs = t_write_mags.map(|t| t.elapsed().as_secs_f64()).unwrap_or(0.0);
+    let write_mags_rss_mb = if config.enable_timing { get_rss_mb() } else { 0.0 };
 
     // Build MAG contig blobs directly from raw GC / repeat / hit data.
     let mag_contig_blob_secs = if config.view_mode == ViewMode::Mag && !mag_contig_map.is_empty() {
@@ -3012,22 +3026,23 @@ pub fn run_all_samples(
         }
         secs
     } else { 0.0 };
+    let mag_contig_blob_rss_mb = if config.enable_timing { get_rss_mb() } else { 0.0 };
 
     // Write pre-sample timing block
     if let Some(ref mut f) = timing_file {
         use std::io::Write;
         let _ = writeln!(f, "=== Pre-sample phases ===");
-        let _ = writeln!(f, "  Annotation+FASTA parse: {:>9.3} s", parse_secs);
-        let _ = writeln!(f, "  DB create/open       : {:>10.3} s", db_create_secs);
+        let _ = writeln!(f, "  Annotation+FASTA parse: {:>9.3} s  [RSS: {:.0} MB]", parse_secs, parse_rss_mb);
+        let _ = writeln!(f, "  DB create/open       : {:>10.3} s  [RSS: {:.0} MB]", db_create_secs, db_create_rss_mb);
         let _ = writeln!(f, "  Contigs with sequence: {}", n_contigs_with_seq);
-        let _ = writeln!(f, "  Autoblast            : {:>10.3} s", autoblast_secs);
-        let _ = writeln!(f, "  GC content + skew    : {:>10.3} s", gc_secs[0]);
+        let _ = writeln!(f, "  Autoblast            : {:>10.3} s  [RSS: {:.0} MB]", autoblast_secs, autoblast_rss_mb);
+        let _ = writeln!(f, "  GC content + skew    : {:>10.3} s  [RSS: {:.0} MB]", gc_secs[0], gc_rss_mb);
         let _ = writeln!(f, "    compute            : {:>10.3} s", gc_secs[1]);
         let _ = writeln!(f, "    write blobs        : {:>10.3} s", gc_secs[2]);
         let _ = writeln!(f, "    update stats       : {:>10.3} s", gc_secs[3]);
-        let _ = writeln!(f, "  Repeat blob conversion: {:>9.3} s", repeat_blob_secs);
-        let _ = writeln!(f, "  Write MAGs           : {:>10.3} s", write_mags_secs);
-        let _ = writeln!(f, "  MAG contig blobs     : {:>10.3} s", mag_contig_blob_secs);
+        let _ = writeln!(f, "  Repeat blob conversion: {:>9.3} s  [RSS: {:.0} MB]", repeat_blob_secs, repeat_rss_mb);
+        let _ = writeln!(f, "  Write MAGs           : {:>10.3} s  [RSS: {:.0} MB]", write_mags_secs, write_mags_rss_mb);
+        let _ = writeln!(f, "  MAG contig blobs     : {:>10.3} s  [RSS: {:.0} MB]", mag_contig_blob_secs, mag_contig_blob_rss_mb);
     }
 
     // If no BAM files provided, skip sample processing (genbank-only mode)
@@ -3060,13 +3075,21 @@ pub fn run_all_samples(
     }
     let pre_timings = PreSampleTimings {
         parse_secs,
+        parse_rss_mb,
         db_create_secs,
+        db_create_rss_mb,
         autoblast_secs,
+        autoblast_rss_mb,
         gc_secs,
+        gc_rss_mb,
         repeat_blob_secs,
+        repeat_rss_mb,
         write_mags_secs,
+        write_mags_rss_mb,
         mag_contig_blob_secs,
+        mag_contig_blob_rss_mb,
         cds_build_secs: 0.0, // filled in process_samples_parallel/sequential
+        cds_build_rss_mb: 0.0,
     };
     let result = process_samples_parallel(&bam_files, &contigs, flags, config, &circularity_map, db_writer, &repeats, &annotations, output_db, timing_file, pre_timings, &mag_contig_map)?;
 
@@ -3336,9 +3359,10 @@ fn process_samples_parallel(
         HashMap::new()
     };
     pre_timings.cds_build_secs = t_cds.elapsed().as_secs_f64();
+    pre_timings.cds_build_rss_mb = get_rss_mb();
     if let Some(ref mut f) = timing_file {
         use std::io::Write;
-        let _ = writeln!(f, "  CDS index build      : {:>10.3} s", pre_timings.cds_build_secs);
+        let _ = writeln!(f, "  CDS index build      : {:>10.3} s  [RSS: {:.0} MB]", pre_timings.cds_build_secs, pre_timings.cds_build_rss_mb);
         let _ = writeln!(f);
     }
 
@@ -3447,15 +3471,19 @@ fn process_samples_parallel(
         }
 
         // Finalize database
+        let rss_before_finalize = get_rss_mb();
         let t_finalize = std::time::Instant::now();
         db_writer.finalize()?;
         let finalize_secs = t_finalize.elapsed().as_secs_f64();
+        let rss_after_finalize = get_rss_mb();
         write_pb_clone.finish();
 
         if let Some(ref mut f) = timing_file {
             use std::io::Write;
             let _ = writeln!(f, "\n=== Post-sample phases ===");
+            let _ = writeln!(f, "  RSS before finalize  : {:>10.0} MB", rss_before_finalize);
             let _ = writeln!(f, "  DB finalize          : {:>10.3} s", finalize_secs);
+            let _ = writeln!(f, "  RSS after finalize   : {:>10.0} MB", rss_after_finalize);
         }
 
         Ok((written_count, write_start.elapsed(), all_timings, mag_drops))
@@ -3636,9 +3664,10 @@ fn process_samples_sequential(
         HashMap::new()
     };
     pre_timings.cds_build_secs = t_cds.elapsed().as_secs_f64();
+    pre_timings.cds_build_rss_mb = get_rss_mb();
     if let Some(ref mut f) = timing_file {
         use std::io::Write;
-        let _ = writeln!(f, "  CDS index build      : {:>10.3} s", pre_timings.cds_build_secs);
+        let _ = writeln!(f, "  CDS index build      : {:>10.3} s  [RSS: {:.0} MB]", pre_timings.cds_build_secs, pre_timings.cds_build_rss_mb);
         let _ = writeln!(f);
     }
 
@@ -3767,9 +3796,11 @@ fn process_samples_sequential(
     }
 
     // Finalize database
+    let rss_before_finalize = get_rss_mb();
     let t_finalize = std::time::Instant::now();
     db_writer.finalize()?;
     let finalize_secs = t_finalize.elapsed().as_secs_f64();
+    let rss_after_finalize = get_rss_mb();
     pb.finish_with_message("Done");
     if !is_tty {
         eprintln!("Done ({:.2}s)", start_time.elapsed().as_secs_f64());
@@ -3778,7 +3809,9 @@ fn process_samples_sequential(
     if let Some(ref mut f) = timing_file {
         use std::io::Write;
         let _ = writeln!(f, "\n=== Post-sample phases ===");
+        let _ = writeln!(f, "  RSS before finalize  : {:>10.0} MB", rss_before_finalize);
         let _ = writeln!(f, "  DB finalize          : {:>10.3} s", finalize_secs);
+        let _ = writeln!(f, "  RSS after finalize   : {:>10.0} MB", rss_after_finalize);
     }
 
     // Append grand totals to the timing log
@@ -3803,6 +3836,46 @@ fn ns_to_s(ns: u64) -> f64 {
     ns as f64 / 1e9
 }
 
+fn get_rss_mb() -> f64 {
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(status) = std::fs::read_to_string("/proc/self/status") {
+            for line in status.lines() {
+                if line.starts_with("VmRSS:") {
+                    if let Some(kb_str) = line.split_whitespace().nth(1) {
+                        if let Ok(kb) = kb_str.parse::<u64>() {
+                            return kb as f64 / 1024.0;
+                        }
+                    }
+                }
+            }
+        }
+        0.0
+    }
+    #[cfg(not(target_os = "linux"))]
+    { 0.0 }
+}
+
+fn get_peak_rss_mb() -> f64 {
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(status) = std::fs::read_to_string("/proc/self/status") {
+            for line in status.lines() {
+                if line.starts_with("VmHWM:") {
+                    if let Some(kb_str) = line.split_whitespace().nth(1) {
+                        if let Ok(kb) = kb_str.parse::<u64>() {
+                            return kb as f64 / 1024.0;
+                        }
+                    }
+                }
+            }
+        }
+        0.0
+    }
+    #[cfg(not(target_os = "linux"))]
+    { 0.0 }
+}
+
 fn timing_log_path(output_db: &Path) -> PathBuf {
     let mut p = output_db.as_os_str().to_owned();
     p.push(".timings.log");
@@ -3822,6 +3895,7 @@ fn open_timing_log(output_db: &Path, threads: usize, n_samples: usize) -> Result
     writeln!(f, "Output DB    : {}", output_db.display())?;
     writeln!(f, "Threads      : {}", threads)?;
     writeln!(f, "Samples      : {}", n_samples)?;
+    writeln!(f, "Memory       : RSS tracked via /proc/self/status")?;
     writeln!(f, "=============================================================\n")?;
 
     eprintln!("Timing log: {}", log_path.display());
@@ -3831,7 +3905,7 @@ fn open_timing_log(output_db: &Path, threads: usize, n_samples: usize) -> Result
 /// Append one sample's timing breakdown to an already-open timing log.
 fn write_sample_timing(f: &mut fs::File, t: &SampleTimings, threads: usize) -> Result<()> {
     use std::io::Write;
-    writeln!(f, "Sample: {}", t.sample_name)?;
+    writeln!(f, "Sample: {}  [RSS: {:.0} MB]", t.sample_name, get_rss_mb())?;
     writeln!(f, "  BAM path             : {}", t.bam_path)?;
     writeln!(f, "  Contigs in BAM       : {}", t.n_contigs_in_bam)?;
     writeln!(f, "  Contigs processed    : {}", t.n_contigs_processed)?;
@@ -3878,17 +3952,17 @@ fn finish_timing_log(
     writeln!(f, "GRAND TOTALS")?;
     writeln!(f, "=============================================================")?;
     writeln!(f, "  ---- Pre-sample phases ----")?;
-    writeln!(f, "  Annotation+FASTA parse: {:>9.3} s", pt.parse_secs)?;
-    writeln!(f, "  DB create/open       : {:>10.3} s", pt.db_create_secs)?;
-    writeln!(f, "  Autoblast            : {:>10.3} s", pt.autoblast_secs)?;
-    writeln!(f, "  GC content + skew    : {:>10.3} s", pt.gc_secs[0])?;
+    writeln!(f, "  Annotation+FASTA parse: {:>9.3} s  [RSS: {:.0} MB]", pt.parse_secs, pt.parse_rss_mb)?;
+    writeln!(f, "  DB create/open       : {:>10.3} s  [RSS: {:.0} MB]", pt.db_create_secs, pt.db_create_rss_mb)?;
+    writeln!(f, "  Autoblast            : {:>10.3} s  [RSS: {:.0} MB]", pt.autoblast_secs, pt.autoblast_rss_mb)?;
+    writeln!(f, "  GC content + skew    : {:>10.3} s  [RSS: {:.0} MB]", pt.gc_secs[0], pt.gc_rss_mb)?;
     writeln!(f, "    compute            : {:>10.3} s", pt.gc_secs[1])?;
     writeln!(f, "    write blobs        : {:>10.3} s", pt.gc_secs[2])?;
     writeln!(f, "    update stats       : {:>10.3} s", pt.gc_secs[3])?;
-    writeln!(f, "  Repeat blob conversion: {:>9.3} s", pt.repeat_blob_secs)?;
-    writeln!(f, "  Write MAGs           : {:>10.3} s", pt.write_mags_secs)?;
-    writeln!(f, "  MAG contig blobs     : {:>10.3} s", pt.mag_contig_blob_secs)?;
-    writeln!(f, "  CDS index build      : {:>10.3} s", pt.cds_build_secs)?;
+    writeln!(f, "  Repeat blob conversion: {:>9.3} s  [RSS: {:.0} MB]", pt.repeat_blob_secs, pt.repeat_rss_mb)?;
+    writeln!(f, "  Write MAGs           : {:>10.3} s  [RSS: {:.0} MB]", pt.write_mags_secs, pt.write_mags_rss_mb)?;
+    writeln!(f, "  MAG contig blobs     : {:>10.3} s  [RSS: {:.0} MB]", pt.mag_contig_blob_secs, pt.mag_contig_blob_rss_mb)?;
+    writeln!(f, "  CDS index build      : {:>10.3} s  [RSS: {:.0} MB]", pt.cds_build_secs, pt.cds_build_rss_mb)?;
     writeln!(f, "  ---- Per-sample phases ----")?;
     let sum_dur = |g: fn(&SampleTimings) -> std::time::Duration| -> f64 {
         timings.iter().map(|t| g(t).as_secs_f64()).sum()
@@ -3918,6 +3992,9 @@ fn finish_timing_log(
     writeln!(f, "  Insert sample        : {:>10.3} s", sum_ns(|t| t.insert_sample_ns))?;
     writeln!(f, "  Write contig data    : {:>10.3} s", sum_ns(|t| t.write_contig_data_ns))?;
     writeln!(f, "  Write MAG data       : {:>10.3} s", sum_ns(|t| t.mag_write_ns))?;
+    writeln!(f, "  ---- Memory ----")?;
+    writeln!(f, "  Peak RSS (VmHWM)     : {:>10.0} MB", get_peak_rss_mb())?;
+    writeln!(f, "  Current RSS          : {:>10.0} MB", get_rss_mb())?;
     Ok(())
 }
 

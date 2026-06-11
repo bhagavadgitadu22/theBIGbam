@@ -5,7 +5,7 @@ import numpy as np
 from Bio.Seq import Seq
 from Bio.SeqRecord import SeqRecord
 from Bio.SeqFeature import SeqFeature, FeatureLocation
-from bokeh.models import Range1d, ColumnDataSource, HoverTool, WheelZoomTool, NumeralTickFormatter, TapTool
+from bokeh.models import Range1d, ColumnDataSource, HoverTool, WheelZoomTool, BoxZoomTool, NumeralTickFormatter, TapTool
 from bokeh.layouts import gridplot
 from bokeh.palettes import Viridis256
 from bokeh.plotting import figure
@@ -53,6 +53,7 @@ def make_bokeh_mag_track(conn, mag_name, height=30, shared_xrange=None):
         wheel = WheelZoomTool(dimensions='width')
         fig.add_tools(wheel)
         fig.toolbar.active_scroll = wheel
+        fig.add_tools(BoxZoomTool(dimensions='width'))
     fig.yaxis.visible = False
     fig.xgrid.grid_line_color = None
     fig.ygrid.grid_line_color = None
@@ -460,6 +461,7 @@ def make_bokeh_genemap(conn, contig_id, locus_name, locus_size, subplot_size, sh
     wheel = WheelZoomTool(dimensions='width')  # only x-axis
     annotation_fig.add_tools(wheel)
     annotation_fig.toolbar.active_scroll = wheel
+    annotation_fig.add_tools(BoxZoomTool(dimensions='width'))
 
     annotation_fig.x_range = shared_xrange
 
@@ -636,14 +638,14 @@ def make_bokeh_subplot(feature_dict, height, x_range, sample_title=None, show_to
             if has_mean:
                 tooltips.append(("Std", "@std{0.00}"))
             if has_any_sequences:
-                tooltips.append(("Sequence", "@sequence"))
+                tooltips.append(("Main variant", "@sequence"))
                 tooltips.append(("Prevalence", "@sequence_prevalence_str"))
         elif has_any_sequences:
             has_codon_data = any("codon_category" in d for d in feature_dict)
             tooltips = [
                 ("Position", "@x{0,0}"),
                 ("Value", "@y{0.00}"),
-                ("Sequence", "@sequence"),
+                ("Main variant", "@sequence"),
                 ("Prevalence", "@sequence_prevalence_str"),
             ]
             if has_codon_data:
@@ -678,6 +680,7 @@ def make_bokeh_subplot(feature_dict, height, x_range, sample_title=None, show_to
     wheel = WheelZoomTool(dimensions='width')
     p.add_tools(wheel)
     p.toolbar.active_scroll = wheel
+    p.add_tools(BoxZoomTool(dimensions='width'))
 
     return p
 
@@ -729,6 +732,7 @@ def _build_nucleotide_figure(positions, colors, nucleotides, height, x_range):
     wheel = WheelZoomTool(dimensions='width')
     p.add_tools(wheel)
     p.toolbar.active_scroll = wheel
+    p.add_tools(BoxZoomTool(dimensions='width'))
     return p
 
 
@@ -902,6 +906,7 @@ def _build_translated_figure(cds_entries, codon_info, xstart, xend, height, x_ra
     wheel = WheelZoomTool(dimensions='width')
     p.add_tools(wheel)
     p.toolbar.active_scroll = wheel
+    p.add_tools(BoxZoomTool(dimensions='width'))
     return p
 
 
@@ -1485,7 +1490,7 @@ def _format_zoom_for_bokeh(zoom_data, type_picked, xstart=None, xend=None):
 
 
 ### Function to get features of one variable
-def get_feature_data(cur, feature, contig_id, sample_id, xstart=None, xend=None, variable_metadata=None, max_base_resolution=None, min_relative_value=0.0, window_for_zoom=None):
+def get_feature_data(cur, feature, contig_id, sample_id, xstart=None, xend=None, variable_metadata=None, max_base_resolution=None, min_relative_value=0.0, window_for_zoom=None, enable_timing=False):
     """Get feature data for plotting from BLOB storage.
 
     Decodes Feature_blob (sample-level) or Contig_blob (contig-level) entries.
@@ -1501,6 +1506,9 @@ def get_feature_data(cur, feature, contig_id, sample_id, xstart=None, xend=None,
         variable_metadata: Optional cached result from get_variable_metadata()
         max_base_resolution: Window size (bp) below which base resolution is used
     """
+    if enable_timing:
+        import time as _time
+        _t_func = _time.perf_counter()
     # Get rendering info from Variable table (Type and Size are quoted - reserved words in DuckDB)
     if variable_metadata is not None:
         rows = variable_metadata
@@ -1649,12 +1657,15 @@ def get_feature_data(cur, feature, contig_id, sample_id, xstart=None, xend=None,
                     list_feature_dict.append(feature_dict)
             continue
 
+    if enable_timing:
+        print(f"[timing]     get_feature_data '{feature}': {_time.perf_counter() - _t_func:.3f}s "
+              f"({len(list_feature_dict)} results)", flush=True)
     return list_feature_dict
 
 
 
 
-def get_feature_data_batch(cur, feature, contig_id, sample_ids, xstart=None, xend=None, variable_metadata=None, max_base_resolution=None, min_relative_value=0.0):
+def get_feature_data_batch(cur, feature, contig_id, sample_ids, xstart=None, xend=None, variable_metadata=None, max_base_resolution=None, min_relative_value=0.0, enable_timing=False):
     """Get feature data for multiple samples in a single batch query.
 
     Decodes Feature_blob (sample-level) or Contig_blob (contig-level) entries.
@@ -1673,6 +1684,9 @@ def get_feature_data_batch(cur, feature, contig_id, sample_ids, xstart=None, xen
     Returns:
         Dict mapping sample_id to list_feature_dict (same format as get_feature_data returns)
     """
+    if enable_timing:
+        import time as _time
+        _t_func = _time.perf_counter()
     if variable_metadata is not None:
         rows = variable_metadata
     else:
@@ -1834,6 +1848,10 @@ def get_feature_data_batch(cur, feature, contig_id, sample_ids, xstart=None, xen
         # All features should be handled by BLOB paths above.
         # If we reach here, the feature is not supported or missing.
 
+    if enable_timing:
+        n_with_data = sum(1 for v in result.values() if v)
+        print(f"[timing]     get_feature_data_batch '{feature}' ({len(sample_ids)} samples): "
+              f"{_time.perf_counter() - _t_func:.3f}s ({n_with_data} with data)", flush=True)
     return result
 
 
@@ -1893,7 +1911,7 @@ def parse_requested_features(list_features):
 
 
 ### Function to generate the bokeh plot
-def generate_bokeh_plot_per_sample(conn, list_features, contig_name, sample_name, xstart=None, xend=None, subplot_size=100, genbank_path=None, feature_types=None, plot_isoforms=True, plot_sequence=False, plot_translated_sequence=False, same_y_scale=False, genemap_size=None, sequence_size=None, translated_sequence_size=None, max_base_resolution=None, max_genemap_window=None, max_sequence_window=None, min_relative_value=0.0, feature_label_key=None, custom_colors=None, mag_name=None):
+def generate_bokeh_plot_per_sample(conn, list_features, contig_name, sample_name, xstart=None, xend=None, subplot_size=100, genbank_path=None, feature_types=None, plot_isoforms=True, plot_sequence=False, plot_translated_sequence=False, same_y_scale=False, genemap_size=None, sequence_size=None, translated_sequence_size=None, max_base_resolution=None, max_genemap_window=None, max_sequence_window=None, min_relative_value=0.0, feature_label_key=None, custom_colors=None, mag_name=None, enable_timing=False):
     """Generate a Bokeh plot for a single sample."""
     cur = conn.cursor()
 
@@ -1968,7 +1986,8 @@ def generate_bokeh_plot_per_sample(conn, list_features, contig_name, sample_name
                     cur, feature, contig_id, None, xstart, xend,
                     variable_metadata=metadata_cache.get(feature),
                     max_base_resolution=max_base_resolution,
-                    min_relative_value=min_relative_value
+                    min_relative_value=min_relative_value,
+                    enable_timing=enable_timing,
                 )
                 subplot_feature = make_bokeh_subplot(list_feature_dict, subplot_size, shared_xrange, show_tooltips=True)
                 if subplot_feature is not None:
@@ -1992,7 +2011,8 @@ def generate_bokeh_plot_per_sample(conn, list_features, contig_name, sample_name
                     cur, feature, contig_id, sample_id, xstart, xend,
                     variable_metadata=metadata_cache.get(feature),
                     max_base_resolution=max_base_resolution,
-                    min_relative_value=min_relative_value
+                    min_relative_value=min_relative_value,
+                    enable_timing=enable_timing,
                 )
                 subplot_feature = make_bokeh_subplot(list_feature_dict, subplot_size, shared_xrange, show_tooltips=True)
                 if subplot_feature is not None:
@@ -2014,7 +2034,7 @@ def generate_bokeh_plot_per_sample(conn, list_features, contig_name, sample_name
         # If Primary alignments not plotted, fetch its data to find the max
         if primary_max == 0:
             try:
-                primary_data = get_feature_data(cur, "Primary alignments", contig_id, sample_id, xstart, xend)
+                primary_data = get_feature_data(cur, "Primary alignments", contig_id, sample_id, xstart, xend, enable_timing=enable_timing)
                 for d in primary_data:
                     if d["y"]:
                         primary_max = max(primary_max, max(d["y"]))
@@ -2027,7 +2047,8 @@ def generate_bokeh_plot_per_sample(conn, list_features, contig_name, sample_name
                 if fname in PRIMARY_RELATIVE_SUBPLOTS:
                     fig.y_range = Range1d(0, primary_max)
 
-    print(f"[timing]   feature subplots ({len(subplots)} plots): {time.perf_counter() - t_features:.3f}s", flush=True)
+    if enable_timing:
+        print(f"[timing]   feature subplots ({len(subplots)} plots): {time.perf_counter() - t_features:.3f}s", flush=True)
 
     # --- Optional MAG track (only when a MAG is selected in MAG-mode DBs) ---
     mag_fig = None
@@ -2052,7 +2073,8 @@ def generate_bokeh_plot_per_sample(conn, list_features, contig_name, sample_name
             raise ValueError("No plots to display")
         grid = gridplot([[p] for p in (top_plots + subplots)], merge_tools=True, sizing_mode='stretch_width')
     n_total = len(top_plots) + (1 if annotation_fig else 0) + len(subplots)
-    print(f"[timing]   gridplot ({n_total} figures): {time.perf_counter() - t_grid:.3f}s", flush=True)
+    if enable_timing:
+        print(f"[timing]   gridplot ({n_total} figures): {time.perf_counter() - t_grid:.3f}s", flush=True)
 
     return grid
 
@@ -2410,11 +2432,12 @@ def make_bokeh_genemap_mag(conn, mag_id, mag_name, mag_length, subplot_size,
     wheel = WheelZoomTool(dimensions='width')
     annotation_fig.add_tools(wheel)
     annotation_fig.toolbar.active_scroll = wheel
+    annotation_fig.add_tools(BoxZoomTool(dimensions='width'))
     annotation_fig.x_range = shared_xrange
     return annotation_fig
 
 
-def generate_bokeh_plot_mag_view(conn, list_features, mag_name, sample_name, xstart=None, xend=None, subplot_size=100, genbank_path=None, feature_types=None, plot_isoforms=True, plot_sequence=False, plot_translated_sequence=False, same_y_scale=False, genemap_size=None, sequence_size=None, translated_sequence_size=None, max_base_resolution=None, max_genemap_window=None, max_sequence_window=None, min_relative_value=0.0, feature_label_key=None, custom_colors=None, is_all=False, allowed_samples=None, max_samples=None):
+def generate_bokeh_plot_mag_view(conn, list_features, mag_name, sample_name, xstart=None, xend=None, subplot_size=100, genbank_path=None, feature_types=None, plot_isoforms=True, plot_sequence=False, plot_translated_sequence=False, same_y_scale=False, genemap_size=None, sequence_size=None, translated_sequence_size=None, max_base_resolution=None, max_genemap_window=None, max_sequence_window=None, min_relative_value=0.0, feature_label_key=None, custom_colors=None, is_all=False, allowed_samples=None, max_samples=None, enable_timing=False):
     """Generate a concatenated Bokeh plot for a MAG (all contigs, longest-first).
 
     All contigs are placed consecutively on a shared x-axis (longest first), with
@@ -2561,7 +2584,8 @@ def generate_bokeh_plot_mag_view(conn, list_features, mag_name, sample_name, xst
             except Exception as e:
                 print(f"Error processing sample feature '{feature}' for MAG: {e}", flush=True)
 
-    print(f"[timing]   MAG feature subplots ({len(subplots)} plots): {time.perf_counter() - t_features:.3f}s", flush=True)
+    if enable_timing:
+        print(f"[timing]   MAG feature subplots ({len(subplots)} plots): {time.perf_counter() - t_features:.3f}s", flush=True)
 
     # --- Assemble grid ---
     t_grid = time.perf_counter()
@@ -2572,5 +2596,6 @@ def generate_bokeh_plot_mag_view(conn, list_features, mag_name, sample_name, xst
         raise ValueError("No plots to display for MAG view")
 
     grid = gridplot([[p] for p in all_plots], merge_tools=True, sizing_mode='stretch_width')
-    print(f"[timing]   gridplot ({len(all_plots)} figures): {time.perf_counter() - t_grid:.3f}s", flush=True)
+    if enable_timing:
+        print(f"[timing]   gridplot ({len(all_plots)} figures): {time.perf_counter() - t_grid:.3f}s", flush=True)
     return grid

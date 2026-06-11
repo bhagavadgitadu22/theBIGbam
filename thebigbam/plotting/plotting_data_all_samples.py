@@ -6,7 +6,7 @@ from bokeh.layouts import gridplot
 from .plotting_data_per_sample import get_contig_info, get_feature_data, get_feature_data_batch, get_variable_metadata, make_bokeh_subplot, make_bokeh_genemap, make_bokeh_sequence_subplot, make_bokeh_translated_sequence_subplot, DEFAULT_GENEMAP_WINDOW
 
 ### Function to generate the bokeh plot
-def generate_bokeh_plot_all_samples(conn, variable, contig_name, xstart=None, xend=None, subplot_size=130, genbank_path=None, genome_features=None, allowed_samples=None, feature_types=None, plot_isoforms=True, plot_sequence=False, plot_translated_sequence=False, same_y_scale=False, genemap_size=None, sequence_size=None, translated_sequence_size=None, order_by_column=None, max_base_resolution=None, max_genemap_window=None, min_relative_value=0.0, feature_label_key=None, custom_colors=None, max_samples=None):
+def generate_bokeh_plot_all_samples(conn, variable, contig_name, xstart=None, xend=None, subplot_size=130, genbank_path=None, genome_features=None, allowed_samples=None, feature_types=None, plot_isoforms=True, plot_sequence=False, plot_translated_sequence=False, same_y_scale=False, genemap_size=None, sequence_size=None, translated_sequence_size=None, order_by_column=None, max_base_resolution=None, max_genemap_window=None, min_relative_value=0.0, feature_label_key=None, custom_colors=None, max_samples=None, enable_timing=False):
     """Generate a Bokeh plot showing all samples for a single variable.
 
     Args:
@@ -166,8 +166,9 @@ def generate_bokeh_plot_all_samples(conn, variable, contig_name, xstart=None, xe
     try:
         var_metadata = get_variable_metadata(cur, variable)
         t_batch = time.perf_counter()
-        batch_results = get_feature_data_batch(cur, variable, contig_id, sample_ids, xstart, xend, variable_metadata=var_metadata, max_base_resolution=max_base_resolution, min_relative_value=min_relative_value)
-        print(f"[timing]   get_feature_data_batch ({len(sample_ids)} samples): {time.perf_counter() - t_batch:.3f}s", flush=True)
+        batch_results = get_feature_data_batch(cur, variable, contig_id, sample_ids, xstart, xend, variable_metadata=var_metadata, max_base_resolution=max_base_resolution, min_relative_value=min_relative_value, enable_timing=enable_timing)
+        if enable_timing:
+            print(f"[timing]   get_feature_data_batch ({len(sample_ids)} samples): {time.perf_counter() - t_batch:.3f}s", flush=True)
         t_subplots = time.perf_counter()
         for sample_id, sample_name in zip(sample_ids, sample_names):
             list_feature_dict = batch_results.get(sample_id, [])
@@ -181,7 +182,8 @@ def generate_bokeh_plot_all_samples(conn, variable, contig_name, xstart=None, xe
             subplot_feature = make_bokeh_subplot(list_feature_dict, subplot_size, shared_xrange, sample_title=sample_name, show_tooltips=True)
             if subplot_feature is not None:
                 subplots.append(subplot_feature)
-        print(f"[timing]   make_bokeh_subplot x{len(subplots)}: {time.perf_counter() - t_subplots:.3f}s", flush=True)
+        if enable_timing:
+            print(f"[timing]   make_bokeh_subplot x{len(subplots)}: {time.perf_counter() - t_subplots:.3f}s", flush=True)
     except Exception as e:
         print(f"Error batch-processing variable '{variable}': {e}", flush=True)
 
@@ -203,6 +205,7 @@ def generate_bokeh_plot_all_samples(conn, variable, contig_name, xstart=None, xe
 
     t_grid = time.perf_counter()
     grid = gridplot([[p] for p in all_plots], merge_tools=True, sizing_mode='stretch_width')
-    print(f"[timing]   gridplot ({len(all_plots)} figures): {time.perf_counter() - t_grid:.3f}s", flush=True)
+    if enable_timing:
+        print(f"[timing]   gridplot ({len(all_plots)} figures): {time.perf_counter() - t_grid:.3f}s", flush=True)
 
     return grid

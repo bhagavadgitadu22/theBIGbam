@@ -194,7 +194,7 @@ def get_mag_contig_map(conn):
     return mag_to_contigs, contig_to_mag
 
 
-def get_filtering_metadata(db_path: str) -> dict:
+def get_filtering_metadata(db_path: str, enable_timing: bool = False) -> dict:
     """
     Get column metadata for Filtering2 UI.
 
@@ -392,12 +392,13 @@ def get_filtering_metadata(db_path: str) -> dict:
         result = new_result
 
     conn.close()
-    print(f"[timing] get_filtering_metadata: {time.perf_counter() - t0:.3f}s", flush=True)
+    if enable_timing:
+        print(f"[timing] get_filtering_metadata: {time.perf_counter() - t0:.3f}s", flush=True)
     return result
 
 
 def resolve_distinct_values(db_path: str, filtering_metadata: dict,
-                            category: str, col_name: str) -> list:
+                            category: str, col_name: str, enable_timing: bool = False) -> list:
     """Fetch and cache distinct values for a text column on demand.
 
     First call for a given (category, col_name) runs the query; subsequent
@@ -454,7 +455,8 @@ def resolve_distinct_values(db_path: str, filtering_metadata: dict,
 
     # Cache result so we don't query again
     col_info['distinct_values'] = distinct_values
-    print(f"[timing] resolve_distinct_values({category}.{col_name}): {time.perf_counter() - t0:.3f}s ({len(distinct_values)} values)", flush=True)
+    if enable_timing:
+        print(f"[timing] resolve_distinct_values({category}.{col_name}): {time.perf_counter() - t0:.3f}s ({len(distinct_values)} values)", flush=True)
     return distinct_values
 
 
@@ -965,7 +967,7 @@ if __name__ == '__main__':
 def resolve_histogram_bins(db_path: str, filtering_metadata: dict,
                            category: str, col_name: str,
                            n_bins: int = 50, log_mode: bool = False,
-                           scale: float | None = None) -> tuple | None:
+                           scale: float | None = None, enable_timing: bool = False) -> tuple | None:
     """Compute histogram bins in SQL and cache. Returns (edges, counts) numpy arrays."""
     import numpy as np
     cat_meta = filtering_metadata.get(category, {})
@@ -1038,12 +1040,14 @@ def resolve_histogram_bins(db_path: str, filtering_metadata: dict,
         conn.close()
 
     col_info[cache_key] = result
-    print(f"[timing] resolve_histogram_bins({category}.{col_name}): {time.perf_counter() - t0:.3f}s", flush=True)
+    if enable_timing:
+        n_bins = len(result) if result else 0
+        print(f"[timing] resolve_histogram_bins({category}.{col_name}): {time.perf_counter() - t0:.3f}s ({n_bins} bins)", flush=True)
     return result
 
 
 def resolve_value_counts(db_path: str, filtering_metadata: dict,
-                          category: str, col_name: str) -> list | None:
+                          category: str, col_name: str, enable_timing: bool = False) -> list | None:
     """Fetch and cache (value, count) pairs for a text column (for treemap display)."""
     cat_meta = filtering_metadata.get(category, {})
     col_info = cat_meta.get('columns', {}).get(col_name, {})
@@ -1081,7 +1085,9 @@ def resolve_value_counts(db_path: str, filtering_metadata: dict,
         conn.close()
 
     col_info['value_counts'] = counts
-    print(f"[timing] resolve_value_counts({category}.{col_name}): {time.perf_counter() - t0:.3f}s", flush=True)
+    if enable_timing:
+        n_vals = len(counts) if counts else 0
+        print(f"[timing] resolve_value_counts({category}.{col_name}): {time.perf_counter() - t0:.3f}s ({n_vals} values)", flush=True)
     return counts
 
 def resolve_column_null_stats(

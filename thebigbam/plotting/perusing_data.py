@@ -192,9 +192,9 @@ def build_mag_summary_data(conn, mag_name, sample_names):
     return content
 
 
-## Function to generate HTML and open in new browser window
-def generate_and_open_peruse_html(conn, contig_name, sample_names, *, mag_name=None, is_mag_view=False):
-    """Generate HTML summary and open in new browser window.
+## Function to generate HTML summary string
+def generate_peruse_html(conn, contig_name, sample_names, *, mag_name=None, is_mag_view=False):
+    """Generate HTML summary and return as string.
 
     Args:
         conn: DuckDB connection
@@ -204,11 +204,8 @@ def generate_and_open_peruse_html(conn, contig_name, sample_names, *, mag_name=N
         is_mag_view: When True, show MAG-level summary instead of contig-level
 
     Returns:
-        True if successful, False otherwise
+        HTML string, or None on error
     """
-    import tempfile
-    import webbrowser
-
     try:
         cur = conn.cursor()
 
@@ -269,7 +266,7 @@ def generate_and_open_peruse_html(conn, contig_name, sample_names, *, mag_name=N
                 html_parts.append("<h3>MAG metrics:</h3>")
                 html_parts.extend(mag_metrics)
             html_parts.extend(["</body>", "</html>"])
-            html_content = "\n".join(html_parts)
+            return "\n".join(html_parts)
 
         # --- Contig view: contig characs + parent MAG characs + sample characs + MAG metrics + contig metrics ---
         else:
@@ -364,80 +361,13 @@ def generate_and_open_peruse_html(conn, contig_name, sample_names, *, mag_name=N
                 html_parts.append("<h3>Contig metrics:</h3>")
                 html_parts.extend(contig_content)
             html_parts.extend(["</body>", "</html>"])
-            html_content = "\n".join(html_parts)
-        
-        # Write to temporary file and open in new window
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.html', delete=False, encoding='utf-8') as f:
-            f.write(html_content)
-            temp_path = f.name
-        
-        # Open in new browser window/tab
-        from pathlib import Path
-        import subprocess
-        import sys
-        import os
-        
-        opened = False
-        
-        # Check if running in WSL (Windows Subsystem for Linux)
-        is_wsl = 'microsoft' in os.uname().release.lower() if hasattr(os, 'uname') else False
-        
-        if sys.platform == 'win32':
-            # Windows: use os.startfile
-            os.startfile(temp_path)
-            opened = True
-        elif is_wsl:
-            # WSL: convert path and use Windows browser via cmd.exe
-            # Convert /mnt/c/... to C:\...
-            if temp_path.startswith('/mnt/'):
-                win_path = temp_path.replace('/mnt/', '').replace('/', '\\')
-                win_path = win_path[0].upper() + ':' + win_path[1:]
-            else:
-                # For /tmp paths, use wslpath or keep as-is for wslview
-                try:
-                    result = subprocess.run(['wslpath', '-w', temp_path], capture_output=True, text=True)
-                    win_path = result.stdout.strip() if result.returncode == 0 else temp_path
-                except Exception:
-                    win_path = temp_path
-            
-            # Try wslview first (from wslu package), then cmd.exe
-            try:
-                subprocess.Popen(['wslview', temp_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                opened = True
-            except (FileNotFoundError, PermissionError):
-                try:
-                    subprocess.Popen(['cmd.exe', '/c', 'start', '', win_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                    opened = True
-                except Exception:
-                    pass
-        elif sys.platform == 'darwin':
-            # macOS: use 'open' command
-            subprocess.Popen(['open', temp_path])
-            opened = True
-        else:
-            # Native Linux: try browsers directly
-            file_url = Path(temp_path).as_uri()
-            for cmd in ['firefox', 'google-chrome', 'chromium', 'chromium-browser', 'xdg-open']:
-                try:
-                    subprocess.Popen([cmd, file_url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                    opened = True
-                    break
-                except (FileNotFoundError, PermissionError):
-                    continue
-        
-        if not opened:
-            # Fallback to webbrowser module
-            file_url = Path(temp_path).as_uri()
-            webbrowser.open(file_url, new=2)
-        
-        print(f"[perusing_data] Opened {temp_path} in browser", flush=True)
-        return True
-        
+            return "\n".join(html_parts)
+
     except Exception as e:
         import traceback
         tb = traceback.format_exc()
         print(f"[perusing_data] Exception: {tb}", flush=True)
-        return False
+        return None
 
 
 ## Helper function to build summary data for peruse button

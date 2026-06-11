@@ -17,11 +17,42 @@ from ..database.database_getters import get_filtering_metadata, resolve_distinct
 from .searchable_select import SearchableSelect
 from .perusing_data import _FILTER_ENCODE, _make_filter_encode
 
+def _get_rss_mb():
+    try:
+        with open('/proc/self/status') as f:
+            for line in f:
+                if line.startswith('VmRSS:'):
+                    return int(line.split()[1]) / 1024
+    except OSError:
+        pass
+    try:
+        import resource
+        return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+    except Exception:
+        pass
+    return 0.0
+
+def _estimate_grid_data_size(grid):
+    import sys
+    from bokeh.models import ColumnDataSource
+    total_bytes = 0
+    n_sources = 0
+    for ref in grid.references():
+        if isinstance(ref, ColumnDataSource):
+            n_sources += 1
+            for col_data in ref.data.values():
+                if hasattr(col_data, 'nbytes'):
+                    total_bytes += col_data.nbytes
+                else:
+                    total_bytes += sys.getsizeof(col_data)
+    return total_bytes, n_sources, len(grid.references())
+
 def preload_db_data(db_path, enable_timing=False):
     """Run all expensive DB queries once at startup. Returns a dict of pure data."""
     import duckdb as _duckdb
     if enable_timing:
         _t_total = time.perf_counter()
+        print(f"[timing] RSS at preload start: {_get_rss_mb():.0f} MB", flush=True)
 
     conn = _duckdb.connect(db_path, read_only=True)
     cur = conn.cursor()
@@ -171,7 +202,7 @@ def preload_db_data(db_path, enable_timing=False):
 
     if enable_timing:
         _t = time.perf_counter()
-    filtering_metadata = get_filtering_metadata(db_path)
+    filtering_metadata = get_filtering_metadata(db_path, enable_timing=enable_timing)
     if enable_timing:
         print(f"[timing] Preload: filtering metadata: {time.perf_counter() - _t:.3f}s", flush=True)
 
@@ -188,6 +219,7 @@ def preload_db_data(db_path, enable_timing=False):
 
     if enable_timing:
         print(f"[timing] Preload total: {time.perf_counter() - _t_total:.3f}s", flush=True)
+        print(f"[timing] RSS at preload end: {_get_rss_mb():.0f} MB", flush=True)
 
     return {
         'annotation_types': annotation_types,
@@ -875,16 +907,7 @@ def create_layout(db_path, preloaded, enable_timing=False):
             gc.collect()
 
             if enable_timing:
-                try:
-                    with open('/proc/self/status') as _f:
-                        for _line in _f:
-                            if _line.startswith('VmRSS:'):
-                                mem_mb = int(_line.split()[1]) / 1024
-                                break
-                except OSError:
-                    import resource
-                    mem_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
-                print(f"[timing] Memory (current RSS) at APPLY start: {mem_mb:.0f} MB", flush=True)
+                print(f"[timing] Memory (current RSS) at APPLY start: {_get_rss_mb():.0f} MB", flush=True)
                 t_apply_start = time.perf_counter()
             contig = widgets['contig_select'].value
             has_samples = widgets['has_samples']
@@ -1072,6 +1095,7 @@ def create_layout(db_path, preloaded, enable_timing=False):
                     is_all=is_all,
                     allowed_samples=mag_allowed_samples,
                     max_samples=int(max_samples_input.value),
+                    enable_timing=enable_timing,
                 )
                 if enable_timing:
                     print(f"[timing] generate_bokeh_plot_mag_view (DB queries + plotting): {time.perf_counter() - t_plot:.3f}s", flush=True)
@@ -1106,8 +1130,18 @@ def create_layout(db_path, preloaded, enable_timing=False):
                 download_mag_metrics_button.visible = bool(has_samples)
                 download_data_button.visible = True
                 command_hint_pane.visible = False
+                if enable_timing:
+                    print(f"[timing] RSS after plot generation: {_get_rss_mb():.0f} MB", flush=True)
+                    n_contigs = len(widgets['mag_to_contigs'].get(active_mag, []))
+                    print(f"[timing] Sending: MAG view for '{active_mag}', sample='{sample}', "
+                          f"is_all={is_all}, features={len(mag_requested_features)}, contigs={n_contigs}", flush=True)
+                    data_bytes, n_sources, n_models = _estimate_grid_data_size(grid)
+                    print(f"[timing] Data to frontend: {data_bytes / 1024 / 1024:.1f} MB approx "
+                          f"({n_models} models, {n_sources} data sources)", flush=True)
+                    t_send = time.perf_counter()
                 main_placeholder.objects = [pn.Column(toolbar_row, command_hint_pane, grid, sizing_mode="stretch_both")]
                 if enable_timing:
+                    print(f"[timing] Sending to frontend (objects assignment): {time.perf_counter() - t_send:.3f}s", flush=True)
                     print(f"[timing] Total APPLY (MAG view): {time.perf_counter() - t_apply_start:.3f}s", flush=True)
                 return
             # --- end of MAG view early path ---
@@ -1227,7 +1261,8 @@ def create_layout(db_path, preloaded, enable_timing=False):
                     max_genemap_window=max_genemap_window, min_relative_value=min_coverage_freq,
                     feature_label_key=feature_label_key,
                     custom_colors=custom_colors if custom_colors else None,
-                    max_samples=int(max_samples_input.value)
+                    max_samples=int(max_samples_input.value),
+                    enable_timing=enable_timing,
                 )
                 if enable_timing:
                     print(f"[timing] generate_bokeh_plot_all_samples (DB queries + plotting): {time.perf_counter() - t_plot:.3f}s", flush=True)
@@ -1265,7 +1300,8 @@ def create_layout(db_path, preloaded, enable_timing=False):
                     min_relative_value=min_coverage_freq,
                     feature_label_key=feature_label_key,
                     custom_colors=custom_colors if custom_colors else None,
-                    mag_name=active_mag
+                    mag_name=active_mag,
+                    enable_timing=enable_timing,
                 )
                 if enable_timing:
                     print(f"[timing] generate_bokeh_plot_per_sample (DB queries + plotting): {time.perf_counter() - t_plot:.3f}s", flush=True)
@@ -1315,8 +1351,18 @@ def create_layout(db_path, preloaded, enable_timing=False):
             command_hint_pane.visible = False
 
             # Display the plot
+            if enable_timing:
+                print(f"[timing] RSS after plot generation: {_get_rss_mb():.0f} MB", flush=True)
+                view_label = "all samples" if is_all else f"one sample ({sample})"
+                print(f"[timing] Sending: contig='{contig}', view={view_label}, "
+                      f"features={len(requested_features) if not is_all else '1 variable + genome'}", flush=True)
+                data_bytes, n_sources, n_models = _estimate_grid_data_size(grid)
+                print(f"[timing] Data to frontend: {data_bytes / 1024 / 1024:.1f} MB approx "
+                      f"({n_models} models, {n_sources} data sources)", flush=True)
+                t_send = time.perf_counter()
             main_placeholder.objects = [pn.Column(toolbar_row, command_hint_pane, grid, sizing_mode="stretch_both")]
             if enable_timing:
+                print(f"[timing] Sending to frontend (objects assignment): {time.perf_counter() - t_send:.3f}s", flush=True)
                 view_name = "all samples" if is_all else "one sample"
                 print(f"[timing] Total APPLY ({view_name}): {time.perf_counter() - t_apply_start:.3f}s", flush=True)
 
@@ -1330,17 +1376,9 @@ def create_layout(db_path, preloaded, enable_timing=False):
             main_placeholder.objects = [pn.pane.HTML(f"<pre>Error building plot:\n{tb}</pre>")]
         finally:
             if enable_timing:
-                try:
-                    with open('/proc/self/status') as _f:
-                        for _line in _f:
-                            if _line.startswith('VmRSS:'):
-                                mem_mb = int(_line.split()[1]) / 1024
-                                break
-                except OSError:
-                    import resource
-                    mem_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
-                print(f"[timing] Memory (current RSS) at APPLY end: {mem_mb:.0f} MB", flush=True)
+                print(f"[timing] Memory (current RSS) at APPLY end: {_get_rss_mb():.0f} MB", flush=True)
                 _timing_state['t_sent'] = time.perf_counter()
+                _timing_state['t_apply_start'] = t_apply_start
                 _timing_state['label'] = 'APPLY'
                 _timing_ping.value = f"apply_{time.perf_counter()}"
             main_placeholder.loading = False
@@ -1348,66 +1386,66 @@ def create_layout(db_path, preloaded, enable_timing=False):
 
     ## Peruse button callback function
     def peruse_clicked():
-        """Generate and open summary tables in a new browser window."""
-        from .perusing_data import generate_and_open_peruse_html
+        """Generate summary tables and open in client browser via JavaScript."""
+        from .perusing_data import generate_peruse_html
         if enable_timing:
             t_peruse = time.perf_counter()
 
         is_mag_view = widgets['has_mags'] and widgets['view_radio'].active == 0
 
         if is_mag_view:
-            # MAG view: show MAG characs + sample characs + MAG metrics
             mag = widgets['mag_select'].value
             if not mag:
                 print("[start_bokeh_server] Peruse: No MAG selected", flush=True)
                 return
             sample = widgets['sample_select'].value
             sample_names = [sample] if sample else []
-            generate_and_open_peruse_html(conn, None, sample_names, mag_name=mag, is_mag_view=True)
+            html_content = generate_peruse_html(conn, None, sample_names, mag_name=mag, is_mag_view=True)
             if enable_timing:
                 print(f"[timing] SHOW SUMMARY (MAG view): {time.perf_counter() - t_peruse:.3f}s", flush=True)
-            return
-
-        # Contig view
-        contig = widgets['contig_select'].value
-        if not contig:
-            print("[start_bokeh_server] Peruse: No contig selected", flush=True)
-            return
-
-        parent_mag = widgets['contig_to_mag'].get(contig)
-
-        has_samples = widgets['has_samples']
-        if not has_samples:
-            sample_names = []
         else:
-            is_all = (views.active == 1)
+            contig = widgets['contig_select'].value
+            if not contig:
+                print("[start_bokeh_server] Peruse: No contig selected", flush=True)
+                return
 
-            if is_all:
-                # All Samples view: get filtered samples
-                filtered_samples = [s for s in orig_samples if widgets['sample_name_to_id'].get(s) in widgets['cid_to_sids'].get(widgets['contig_name_to_id'].get(contig), set())]
-                # Apply Filtering2 query builder conditions
-                filtering_pairs = get_filtering_filtered_pairs()
-                if filtering_pairs is not None:
-                    allowed_samples = {pair[1] for pair in filtering_pairs}
-                    filtered_samples = [s for s in filtered_samples if s in allowed_samples]
+            parent_mag = widgets['contig_to_mag'].get(contig)
 
-                if not filtered_samples:
-                    print("[start_bokeh_server] Peruse: No samples match filters", flush=True)
-                    return
-
-                sample_names = filtered_samples
+            has_samples = widgets['has_samples']
+            if not has_samples:
+                sample_names = []
             else:
-                # One Sample view: use selected sample
-                sample = widgets['sample_select'].value
-                if not sample:
-                    print("[start_bokeh_server] Peruse: No sample selected", flush=True)
-                    return
-                sample_names = [sample]
+                is_all = (views.active == 1)
 
-        # Generate and open HTML in new window
-        generate_and_open_peruse_html(conn, contig, sample_names, mag_name=parent_mag, is_mag_view=False)
-        if enable_timing:
-            print(f"[timing] SHOW SUMMARY (contig view, {len(sample_names)} samples): {time.perf_counter() - t_peruse:.3f}s", flush=True)
+                if is_all:
+                    filtered_samples = [s for s in orig_samples if widgets['sample_name_to_id'].get(s) in widgets['cid_to_sids'].get(widgets['contig_name_to_id'].get(contig), set())]
+                    filtering_pairs = get_filtering_filtered_pairs()
+                    if filtering_pairs is not None:
+                        allowed_samples = {pair[1] for pair in filtering_pairs}
+                        filtered_samples = [s for s in filtered_samples if s in allowed_samples]
+
+                    if not filtered_samples:
+                        print("[start_bokeh_server] Peruse: No samples match filters", flush=True)
+                        return
+
+                    sample_names = filtered_samples
+                else:
+                    sample = widgets['sample_select'].value
+                    if not sample:
+                        print("[start_bokeh_server] Peruse: No sample selected", flush=True)
+                        return
+                    sample_names = [sample]
+
+            html_content = generate_peruse_html(conn, contig, sample_names, mag_name=parent_mag, is_mag_view=False)
+            if enable_timing:
+                print(f"[timing] SHOW SUMMARY (contig view, {len(sample_names)} samples): {time.perf_counter() - t_peruse:.3f}s", flush=True)
+
+        if not html_content:
+            return
+
+        import base64
+        b64 = base64.b64encode(html_content.encode('utf-8')).decode('ascii')
+        summary_carrier.text = b64
 
     ## Download functionality using Panel FileDownload widgets
     import io
@@ -1437,7 +1475,11 @@ def create_layout(db_path, preloaded, enable_timing=False):
                 if (cb_obj.value) {
                     requestAnimationFrame(() => {
                         requestAnimationFrame(() => {
-                            ack.value = cb_obj.value;
+                            var mem = '';
+                            if (window.performance && performance.memory) {
+                                mem = '|heap=' + Math.round(performance.memory.usedJSHeapSize / 1024 / 1024);
+                            }
+                            ack.value = cb_obj.value + mem;
                         });
                     });
                 }
@@ -1447,7 +1489,14 @@ def create_layout(db_path, preloaded, enable_timing=False):
             if new and 't_sent' in _timing_state:
                 elapsed = time.perf_counter() - _timing_state['t_sent']
                 label = _timing_state.get('label', 'unknown')
-                print(f"[timing] Client-side render '{label}' (round-trip): {elapsed:.3f}s", flush=True)
+                heap_str = ''
+                if '|heap=' in new:
+                    heap_mb = new.split('|heap=')[1]
+                    heap_str = f" [JS heap: {heap_mb} MB]"
+                print(f"[timing] Frontend render '{label}' (page refresh): {elapsed:.3f}s{heap_str}", flush=True)
+                if 't_apply_start' in _timing_state:
+                    total_flow = time.perf_counter() - _timing_state['t_apply_start']
+                    print(f"[timing] Total flow (query -> send -> render): {total_flow:.3f}s", flush=True)
         _timing_ack.on_change('value', _on_timing_ack)
 
     def _get_shared_xrange(grid):
@@ -1669,7 +1718,7 @@ def create_layout(db_path, preloaded, enable_timing=False):
 
         scale = _FILTER_ENCODE.get(col_name)
         bin_result = resolve_histogram_bins(db_path, filtering_metadata, category, col_name,
-                                            n_bins=50, log_mode=log_mode)
+                                            n_bins=50, log_mode=log_mode, enable_timing=enable_timing)
         if bin_result is None:
             row_data["histogram_pane"] = None
             row_data["histogram_fig"] = None
@@ -1843,7 +1892,7 @@ def create_layout(db_path, preloaded, enable_timing=False):
         from bokeh.models.callbacks import CustomJS
         from bokeh.palettes import Category20_20
 
-        value_counts = resolve_value_counts(db_path, filtering_metadata, category, col_name)
+        value_counts = resolve_value_counts(db_path, filtering_metadata, category, col_name, enable_timing=enable_timing)
         if not value_counts:
             row_data["treemap_pane"] = None
             return None
@@ -1992,7 +2041,7 @@ def create_layout(db_path, preloaded, enable_timing=False):
 
         # Create initial input widget based on column type
         if initial_is_text:
-            distinct_values = resolve_distinct_values(db_path, filtering_metadata, initial_category, initial_column)
+            distinct_values = resolve_distinct_values(db_path, filtering_metadata, initial_category, initial_column, enable_timing=enable_timing)
             initial_input = SearchableSelect(
                 value="", options=distinct_values,
                 placeholder="Search...", width=90
@@ -2103,7 +2152,7 @@ def create_layout(db_path, preloaded, enable_timing=False):
                 if is_text:
                     current_op = comparison_select.value
                     if current_op not in ("has", "has not"):
-                        distinct_values = resolve_distinct_values(db_path, filtering_metadata, category, col_name)
+                        distinct_values = resolve_distinct_values(db_path, filtering_metadata, category, col_name, enable_timing=enable_timing)
                         new_input = SearchableSelect(
                             value="", options=distinct_values,
                             placeholder="Search...", width=90
@@ -2169,7 +2218,7 @@ def create_layout(db_path, preloaded, enable_timing=False):
                     current_input_ref['widget'] = placeholder_input
                     current_input_ref['is_panel'] = True
                     def _deferred_resolve():
-                        distinct_values = resolve_distinct_values(db_path, filtering_metadata, category, col_name)
+                        distinct_values = resolve_distinct_values(db_path, filtering_metadata, category, col_name, enable_timing=enable_timing)
                         new_input = SearchableSelect(
                             value="", options=distinct_values,
                             placeholder="Search...", width=90
@@ -2796,7 +2845,7 @@ def create_layout(db_path, preloaded, enable_timing=False):
         initial_key = color_qualifier_options[0] if color_qualifier_options else ""
         initial_info = annotation_meta.get(initial_key, {})
         initial_is_text = initial_info.get('type') == 'text'
-        initial_distinct = resolve_distinct_values(db_path, filtering_metadata, 'Annotations', initial_key) if initial_is_text else []
+        initial_distinct = resolve_distinct_values(db_path, filtering_metadata, 'Annotations', initial_key, enable_timing=enable_timing) if initial_is_text else []
 
         qualifier_select = Select(
             options=[(k, k.replace("_", " ").replace("percentage", "(%)")) for k in color_qualifier_options],
@@ -2862,7 +2911,7 @@ def create_layout(db_path, preloaded, enable_timing=False):
             """Rebuild operator options and the value widget for the new column type."""
             col_info = annotation_meta.get(col_name, {})
             is_text = col_info.get('type') == 'text'
-            distinct = resolve_distinct_values(db_path, filtering_metadata, 'Annotations', col_name) if is_text else []
+            distinct = resolve_distinct_values(db_path, filtering_metadata, 'Annotations', col_name, enable_timing=enable_timing) if is_text else []
 
             # Swap operator options for the new type; preserve current operator
             # if still valid, otherwise default back to "=".
@@ -2900,7 +2949,7 @@ def create_layout(db_path, preloaded, enable_timing=False):
                     _swap_value_widget(new_input, is_panel)
                 elif not want_text_input and not isinstance(cur, SearchableSelect):
                     col_name_val = qualifier_select.value
-                    distinct = resolve_distinct_values(db_path, filtering_metadata, 'Annotations', col_name_val)
+                    distinct = resolve_distinct_values(db_path, filtering_metadata, 'Annotations', col_name_val, enable_timing=enable_timing)
                     new_input, is_panel = _build_color_value_widget(True, new, distinct)
                     _swap_value_widget(new_input, is_panel)
 
@@ -3378,6 +3427,21 @@ def create_layout(db_path, preloaded, enable_timing=False):
     )
     peruse_button.on_click(lambda event: peruse_clicked())
 
+    # Hidden carrier to send summary HTML to client browser via JS
+    from bokeh.models import Div as BokehDiv
+    from bokeh.models.callbacks import CustomJS
+    summary_carrier = BokehDiv(text="", visible=False)
+    summary_carrier.js_on_change('text', CustomJS(code="""
+        var b64 = cb_obj.text;
+        if (!b64) return;
+        var bin = atob(b64);
+        var bytes = new Uint8Array(bin.length);
+        for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+        var blob = new Blob([bytes], {type: 'text/html;charset=utf-8'});
+        window.open(URL.createObjectURL(blob), '_blank');
+        cb_obj.text = '';
+    """))
+
     # Download contig metrics - Panel FileDownload widget (contig view only)
     download_metrics_button = pn.widgets.FileDownload(
         callback=make_contig_metrics_download_callback,
@@ -3617,7 +3681,7 @@ def create_layout(db_path, preloaded, enable_timing=False):
     )
 
     # Wrap everything in a Flex container
-    layout = pn.Row(controls_column, main_placeholder, sizing_mode="stretch_both", css_classes=["main-layout"])
+    layout = pn.Row(controls_column, main_placeholder, pn.pane.Bokeh(summary_carrier), sizing_mode="stretch_both", css_classes=["main-layout"])
     layout.stylesheets = [stylesheet]
 
     if enable_timing:

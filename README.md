@@ -60,7 +60,9 @@ conda activate thebigbam
 python3.10 -m pip install thebigbam
 ```
 
-In the example we used conda, but the dependencies can be installed using any package manager (e.g. `apt` on Linux, `brew` on macOS) or from the binaries provided on their respective websites. If you do not plan to use the per-sample mapping command, `samtools`, `minimap2`, and `bwa-mem2` are optional.
+In the example we used conda, but the dependencies can be installed using any package manager (e.g. `apt` on Linux, `brew` on macOS) or from the binaries provided on their respective websites. If you do not plan to use the per-sample mapping command, `samtools`, `minimap2`, and `bwa-mem2` are optional. If you do not need to within-contig repeats (for instance to find DTR/ITR), `blast` is optional.
+
+To install the lastest version directly from GitHub, follow [the developer's guide](docs/DEVELOPERS_NOTE.md).
 
 ## Check installation succeeded
 
@@ -480,25 +482,49 @@ Run `thebigbam analysis -h` to display the list of available analysis scripts. R
 
 ---
 
-# Additional in-depth documentation pages
+# Getting help
+
+If meeting any problem using theBIGbam, please open an issue with:
+
+- A clear description of the problem
+- Your OS, Python version, and theBIGbam version (`thebigbam --version`)
+- Any relevant error messages or log output
+
+If a functionality is missing for your use case, open an issue to explain what you want to do and what features you envisioned to bridge the gap!
+
+---
+
+# Citing theBIGbam
+
+TO-DO
+
+---
+
+# In-depth documentation pages
 
 - [On mapping with circular genome support](docs/CIRCULAR_MAPPING.md)
+
 - [What features can theBIGbam compute?](docs/FEATURES.md)
+
 - [What summary metrics can theBIGbam compute per contig/MAG/sample?](docs/FILTERS.md)
+
 - [How is the phage packaging assignment done? (TECHNICAL)](docs/PHAGE_PACKAGING.md)
+
 - [More details about theBIGbam compression](docs/COMPRESSION.md)
+
 - [How are theBIGbam databases structured?](docs/DATABASE_STRUCTURE.md)
+
 - [How to manipulate theBIGbam databases after their creation?](docs/DATABASE.md)
 
-
+- [How can I contribute to theBIGbam?](docs/DEVELOPERS_NOTE.md)
 
 - [Misalignment](docs/MISALIGNMENT.md) TO-DO
+
 - [Assembly check](docs/ASSEMBLY_CHECK.md) TO-DO, to merge with FILTERS.md
+
 - [Visualization](docs/VISUALIZATION.md) TO-DO
+
 - [Plot interpretation](docs/PLOT_INTERPRETATION.md) TO-DO, discard
-- [Developers note](docs/DEVELOPERS_NOTE.md) TO-DO, to merge with contributing?
-- [Contributing](CONTRIBUTING.md) TO-DO
-- Installation guide to remove?
 
 TO-DO: check the list!
 Specify that links only work on main github page not pypi page

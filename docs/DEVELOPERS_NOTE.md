@@ -1,76 +1,75 @@
 # Developer Notes
 
-## Building for development
+## Installing from GitHub
 
-Install in editable mode with maturin (Rust changes take effect after rebuild, Python changes take effect immediately):
+### Prerequisites
+
+| Requirement       | Why                                     | Install                                                                                          |
+| ----------------- | --------------------------------------- | ------------------------------------------------------------------------------------------------ |
+| **Rust** (stable) | Compiles the Rust extension via maturin | `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \| sh` then `source $HOME/.cargo/env` |
+| **Python ≥ 3.10** | Minimum supported version               | Check with `python --version`                                                                    |
+
+A **virtual environment** is recommended to avoid conflicts with system packages:
 
 ```bash
-pip install maturin
+python -m venv thebigbam-env
+source thebigbam-env/bin/activate
+```
+
+Or with conda:
+
+```bash
+conda create -n thebigbam python=3.10
+conda activate thebigbam
+```
+
+### Build and install
+
+```bash
+git clone https://github.com/bhagavadgitadu22/theBIGbam
+cd theBIGbam
+pip install .
+```
+
+`pip install .` automatically invokes [maturin](https://www.maturin.rs/) (the build backend declared in `pyproject.toml`), compiles the Rust extension with full optimizations, and installs all Python dependencies.
+
+### Verify
+
+Test your install as explained in [the main page](../README.md#check-installation-succeeded)
+
+---
+
+## Modifying theBIGbam
+
+Thank you for your interest in contributing to theBIGbam! To start coding, you will need to:
+
+- Fork the repository
+- Create a feature branch (`git checkout -b my-feature`)
+- Make your changes
+- Compile the tool with maturin and test everything works
+- Run tests: `pytest tests/`
+- Submit a pull request from your fork to the main GitHub repository with a clear description of your changes
+
+### Compiling with maturin
+
+The standard `pip install .` uses maturin as a build backend behind the scenes, but does not install the `maturin` CLI itself. For development, you need it explicitly so you can rebuild the tool with `maturin develop`:
+
+```bash
+pip install "maturin>=1.4,<2.0"
+```
+
+After running a first compilation with maturin, you will not need to recompile when modifying Python files. You will need to do so after modifying Rust files though with:
+
+```bash
 maturin develop --release
 ```
 
-To speed up repeated builds, set a persistent target directory so Cargo does not recompile from scratch:
+Building the tool can be quite long if building from scratch. To speed up repeated builds, set a persistent target directory so Cargo does not recompile everything:
 
 ```bash
 export CARGO_TARGET_DIR=~/.cargo-target/thebigbam
-maturin develop --release
 ```
 
-For faster compilation without optimization (useful during development):
+If working from an HPC cluster, you might need to load llvm (open-source compiler)  if available with `module load llvm`.
 
-```bash
-maturin develop  # Without --release
-```
-
-## HPC cluster setup
-
-On HPC systems, you may need to load the LLVM module before compiling:
-
-```bash
-module load llvm
-```
-
-If compilation fails with clang/libclang errors:
-
-```bash
-sudo apt install -y clang libclang-dev  # Debian/Ubuntu
-```
-
-## Serving plots remotely
-
-To access the Bokeh server running on a remote cluster, use SSH port forwarding:
-
-```bash
-# On the cluster
-thebigbam serve --db my_database.db --port 5006
-
-# On your local machine
-ssh -N -L 5006:localhost:5006 user@cluster.example.com
-# Then open http://localhost:5006 in your browser
-```
-
-## Querying the database directly
-
-You can inspect the DuckDB database directly using the DuckDB CLI:
-
-```bash
-duckdb my_database.db "SELECT * FROM Explicit_phage_mechanisms;"
-duckdb my_database.db "SELECT * FROM Explicit_coverage LIMIT 10;"
-duckdb my_database.db "SHOW TABLES;"
-```
-
-## Running tests
-
-```bash
-# Rust tests
-cargo test
-
-# Build Python bindings
-maturin develop --release
-
-# Python tests
-pytest tests/ -v
-
-# Single test with output
-pytest tests/test_pipeline.py::test_calculate_linear_bams -v -s
-```
+For faster compilation without optimization, use `maturin develop` without `--release`.
