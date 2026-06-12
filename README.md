@@ -24,6 +24,7 @@ Built with **Rust** for fast BAM processing and **Python + Bokeh** for interacti
     + [Which features can I calculate?](#which-features-can-i-calculate)
     + [Database compression](#database-compression)
     + [Metrics computed per contig/MAG and per sample](#metrics-computed-per-contigmag-and-per-sample)
+  * [Parallelisation](#parallelisation)
   * [Visualization](#visualization)
     + [Serving from a remote server](#serving-from-a-remote-server)
     + [Web interface overview](#web-interface-overview)
@@ -40,7 +41,9 @@ Built with **Rust** for fast BAM processing and **Python + Bokeh** for interacti
   * [Exporting data](#exporting-data)
   * [Inspecting data](#inspecting-data)
   * [Analyse data](#analyse-data)
-- [Additional in-depth documentation pages](#additional-in-depth-documentation-pages)
+- [Getting help](#getting-help)
+- [Citing theBIGbam](#citing-thebigbam)
+- [In-depth documentation](#in-depth-documentation)
 
 ---
 
@@ -161,7 +164,7 @@ If only annotation files are provided, contig-level data (annotations, GC conten
 
 If only BAM files are provided, assembly files of contigs (FASTA format) can be supplied with `-a` to allow the computation of sequence-dependent, mapping-derived features.
 
-By default, `thebigbam calculate` is run independently per contig. If --view mag is chosen instead, the input path provided to `-g` or `-a` must be a directory comprising one file per MAG.
+By default, `thebigbam calculate` is run independently per contig. When using `--view mag` with multiple MAGs, the path provided to `-g` or `-a` must be a directory containing one file per MAG; the contig membership of each MAG is inferred from these files. When using `--view mag` for a single organism, to visualize the entire organism on the same plot (see the [MAG track image](docs/EXPLORATION.md#exploration)) and compute metrics at the MAG level, `-g` and `-a` can instead point directly to a single file describing that organism.
 
 #### Alignment files
 
@@ -234,7 +237,7 @@ To further reduce the size of the database, values per feature are filtered rath
   
   $\text{max}(\text{run}) - \text{min}(\text{run}) > r \times \text{min}(\text{run})$
   
-  Where r is the **--variation_percentage**. This mode produces significantly smaller databases at the cost of per-position precision, making it suitable for visualization and long-term storage when storage space is limited.
+  Where r is the **--variation_percentage**. This mode produces significantly smaller databases at the cost of per-position precision, making it suitable for visualization and long-term storage when storage space is limited. In our experience, setting **--variation_percentage** to 50% reduces the database size by an additional factor of approximately two.
 
 The output is a DuckDB database that is typically **10-100 times smaller** than the original BAM files while retaining the essential characteristics of the mapping data. When using **theBIGbam** only for annotation files, the main objective is visualization, as the output database is typically similar in size to the original file.
 
@@ -259,7 +262,7 @@ A description of all metrics is available in [the filters section](docs/FILTERS.
 
 ## Parallelisation
 
-Using multiple threads during theBIGbam calculation substantially improves performance while read processing remains the main bottleneck. However, beyond a certain number of threads (around 16 in my experience), performance gains become limited because writing to the DuckDB database becomes the dominant bottleneck. Since database writing is currently single-threaded, we recommend using around 16 CPU cores. Additional cores are unlikely to provide substantial speed improvements.
+Using multiple threads during theBIGbam calculation (`--threads` option) substantially improves performance while read processing remains the main bottleneck. However, beyond a certain number of threads (around 16 in my experience), performance gains become limited because writing to the DuckDB database becomes the dominant bottleneck. Since database writing is currently single-threaded, we recommend using around 16 CPU cores. Additional cores are unlikely to provide substantial speed improvements.
 
 ## Visualization
 

@@ -6,8 +6,6 @@ This document describes all features computed from the input files by theBIGbam 
 
 1 additional module comprises genomic features computed from the annotation or assembly file provided.
 
-
-
 ---
 
 ## Coverage module
