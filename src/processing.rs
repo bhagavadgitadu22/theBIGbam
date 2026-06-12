@@ -3083,9 +3083,19 @@ pub fn run_all_samples(
         eprintln!("Database populated with {} contigs and {} annotations", contigs.len(), annotations.len());
 
         let t_finalize = if config.enable_timing { Some(std::time::Instant::now()) } else { None };
-        db_writer.finalize()?;
+        let ft = db_writer.finalize()?;
         if let Some(t) = t_finalize {
-            eprintln!("DB finalize: {:.3} s", t.elapsed().as_secs_f64());
+            if let Some(ref mut f) = timing_file {
+                use std::io::Write;
+                let _ = writeln!(f, "\n=== Finalize ===");
+                let _ = writeln!(f, "  DB finalize          : {:>10.3} s", t.elapsed().as_secs_f64());
+                let _ = writeln!(f, "    create_views       : {:>10.3} s", ft.create_views_secs);
+                let _ = writeln!(f, "    cleanup_vars       : {:>10.3} s", ft.cleanup_vars_secs);
+                let _ = writeln!(f, "    drop_empty_tables  : {:>10.3} s", ft.drop_empty_secs);
+                let _ = writeln!(f, "    update_counts      : {:>10.3} s", ft.update_counts_secs);
+                let _ = writeln!(f, "    CHECKPOINT         : {:>10.3} s", ft.checkpoint_secs);
+                let _ = f.flush();
+            }
         }
 
         return Ok(ProcessResult {
@@ -3520,7 +3530,7 @@ fn process_samples_parallel(
         // Finalize database
         let rss_before_finalize = get_rss_mb();
         let t_finalize = std::time::Instant::now();
-        db_writer.finalize()?;
+        let ft = db_writer.finalize()?;
         let finalize_secs = t_finalize.elapsed().as_secs_f64();
         let rss_after_finalize = get_rss_mb();
         write_pb_clone.finish();
@@ -3530,6 +3540,11 @@ fn process_samples_parallel(
             let _ = writeln!(f, "\n=== Post-sample phases ===");
             let _ = writeln!(f, "  RSS before finalize  : {:>10.0} MB", rss_before_finalize);
             let _ = writeln!(f, "  DB finalize          : {:>10.3} s", finalize_secs);
+            let _ = writeln!(f, "    create_views       : {:>10.3} s", ft.create_views_secs);
+            let _ = writeln!(f, "    cleanup_vars       : {:>10.3} s", ft.cleanup_vars_secs);
+            let _ = writeln!(f, "    drop_empty_tables  : {:>10.3} s", ft.drop_empty_secs);
+            let _ = writeln!(f, "    update_counts      : {:>10.3} s", ft.update_counts_secs);
+            let _ = writeln!(f, "    CHECKPOINT         : {:>10.3} s", ft.checkpoint_secs);
             let _ = writeln!(f, "  RSS after finalize   : {:>10.0} MB", rss_after_finalize);
             let _ = f.flush();
         }
@@ -3858,7 +3873,7 @@ fn process_samples_sequential(
     // Finalize database
     let rss_before_finalize = get_rss_mb();
     let t_finalize = std::time::Instant::now();
-    db_writer.finalize()?;
+    let ft = db_writer.finalize()?;
     let finalize_secs = t_finalize.elapsed().as_secs_f64();
     let rss_after_finalize = get_rss_mb();
     pb.finish_with_message("Done");
@@ -3871,6 +3886,11 @@ fn process_samples_sequential(
         let _ = writeln!(f, "\n=== Post-sample phases ===");
         let _ = writeln!(f, "  RSS before finalize  : {:>10.0} MB", rss_before_finalize);
         let _ = writeln!(f, "  DB finalize          : {:>10.3} s", finalize_secs);
+        let _ = writeln!(f, "    create_views       : {:>10.3} s", ft.create_views_secs);
+        let _ = writeln!(f, "    cleanup_vars       : {:>10.3} s", ft.cleanup_vars_secs);
+        let _ = writeln!(f, "    drop_empty_tables  : {:>10.3} s", ft.drop_empty_secs);
+        let _ = writeln!(f, "    update_counts      : {:>10.3} s", ft.update_counts_secs);
+        let _ = writeln!(f, "    CHECKPOINT         : {:>10.3} s", ft.checkpoint_secs);
         let _ = writeln!(f, "  RSS after finalize   : {:>10.0} MB", rss_after_finalize);
         let _ = f.flush();
     }

@@ -82,6 +82,14 @@ pub struct DbWriter {
     next_terminus_id: Mutex<i64>,
 }
 
+pub struct FinalizeTimings {
+    pub create_views_secs: f64,
+    pub cleanup_vars_secs: f64,
+    pub drop_empty_secs: f64,
+    pub update_counts_secs: f64,
+    pub checkpoint_secs: f64,
+}
+
 impl DbWriter {
     /// Expose the underlying connection to sibling modules (e.g. `mag_blob`)
     /// that need to both read existing blob data and append MAG-scale blobs
@@ -1775,7 +1783,7 @@ impl DbWriter {
         Ok(())
     }
 
-    pub fn finalize(self) -> Result<()> {
+    pub fn finalize(self) -> Result<FinalizeTimings> {
         let has_bam = self.has_bam;
         let is_mag_mode = self.is_mag_mode;
         let has_annotations = self.has_annotations;
@@ -1783,30 +1791,40 @@ impl DbWriter {
 
         let t = std::time::Instant::now();
         create_views(&conn, has_bam, is_mag_mode, has_annotations)?;
-        eprintln!("  finalize: create_views          {:.3}s", t.elapsed().as_secs_f64());
+        let create_views_secs = t.elapsed().as_secs_f64();
 
         let t = std::time::Instant::now();
         cleanup_unused_variables(&conn)?;
-        eprintln!("  finalize: cleanup_unused_vars   {:.3}s", t.elapsed().as_secs_f64());
+        let cleanup_vars_secs = t.elapsed().as_secs_f64();
 
-        if has_bam {
+        let drop_empty_secs = if has_bam {
             let t = std::time::Instant::now();
             drop_empty_tables(&conn)?;
-            eprintln!("  finalize: drop_empty_tables     {:.3}s", t.elapsed().as_secs_f64());
-        }
+            t.elapsed().as_secs_f64()
+        } else {
+            0.0
+        };
 
-        if has_bam {
+        let update_counts_secs = if has_bam {
             let t = std::time::Instant::now();
             update_sample_counts(&conn, is_mag_mode)?;
-            eprintln!("  finalize: update_sample_counts  {:.3}s", t.elapsed().as_secs_f64());
-        }
+            t.elapsed().as_secs_f64()
+        } else {
+            0.0
+        };
 
         let t = std::time::Instant::now();
         conn.execute("CHECKPOINT", [])
             .context("Failed to checkpoint database")?;
-        eprintln!("  finalize: CHECKPOINT            {:.3}s", t.elapsed().as_secs_f64());
+        let checkpoint_secs = t.elapsed().as_secs_f64();
 
-        Ok(())
+        Ok(FinalizeTimings {
+            create_views_secs,
+            cleanup_vars_secs,
+            drop_empty_secs,
+            update_counts_secs,
+            checkpoint_secs,
+        })
     }
 
     /// Get the contig ID for a contig name.
@@ -3479,10 +3497,8 @@ fn cleanup_unused_variables(conn: &Connection) -> Result<()> {
         .filter_map(|r| r.ok())
         .collect();
 
-    let mut deleted_count = 0;
     for (var_name, table_name) in rows {
         if table_name == "Feature_blob" {
-            // Check if any row exists for this feature's Feature_id
             if let Some(fid) = feature_name_to_id(&var_name) {
                 let has_data: bool = conn
                     .query_row(
@@ -3496,16 +3512,10 @@ fn cleanup_unused_variables(conn: &Connection) -> Result<()> {
                 }
             }
         } else if table_name == "Contig_blob" {
-            // Contig-level variables — always kept
             continue;
         }
 
         conn.execute("DELETE FROM Variable WHERE Variable_name = ?1", params![var_name])?;
-        deleted_count += 1;
-    }
-
-    if deleted_count > 0 {
-        eprintln!("Removed {} unused variable entries from database", deleted_count);
     }
 
     Ok(())
