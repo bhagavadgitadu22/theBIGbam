@@ -35,7 +35,7 @@ pip install .
 
 ### Verify
 
-Test your install as explained in [the main page](../README.md#check-installation-succeeded)
+Test your install as explained in [the main page](../README.md#check-installation-succeeded).
 
 ---
 

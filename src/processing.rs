@@ -4063,15 +4063,15 @@ fn finish_timing_log(
     writeln!(f)?;
     let pre_sample_timed = pt.parse_secs + pt.db_create_secs + pt.circ_secs
         + pt.autoblast_secs + pt.gc_secs[0] + pt.repeat_blob_secs
-        + pt.write_mags_secs + pt.mag_contig_blob_secs + pt.cds_build_secs;
-    let per_sample_timed: f64 = timings.iter().map(|t| t.total.as_secs_f64()).sum();
-    let total_timed = pre_sample_timed + per_sample_timed;
+        + pt.write_mags_secs + pt.mag_contig_blob_secs;
+    let sample_phase_wall = total_wall.as_secs_f64();
+    let total_timed = pre_sample_timed + sample_phase_wall;
     let real_wall_secs = run_start.elapsed().as_secs_f64();
     let untimed = real_wall_secs - total_timed;
     writeln!(f, "  ---- Timed vs real ----")?;
     writeln!(f, "  Pre-sample timed     : {:>10.3} s", pre_sample_timed)?;
-    writeln!(f, "  Per-sample timed     : {:>10.3} s", per_sample_timed)?;
-    writeln!(f, "  Total timed          : {:>10.3} s", total_timed)?;
+    writeln!(f, "  Sample phase (wall)  : {:>10.3} s  (CDS build + samples + finalize)", sample_phase_wall)?;
+    writeln!(f, "  Total accounted      : {:>10.3} s", total_timed)?;
     writeln!(f, "  Wall-clock real      : {:>10.3} s", real_wall_secs)?;
     writeln!(f, "  Untimed (gap)        : {:>10.3} s  ({:.1}%)", untimed, if real_wall_secs > 0.0 { untimed / real_wall_secs * 100.0 } else { 0.0 })?;
     Ok(())

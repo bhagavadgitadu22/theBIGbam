@@ -164,7 +164,7 @@ If only annotation files are provided, contig-level data (annotations, GC conten
 
 If only BAM files are provided, assembly files of contigs (FASTA format) can be supplied with `-a` to allow the computation of sequence-dependent, mapping-derived features.
 
-By default, `thebigbam calculate` is run independently per contig. When using `--view mag` with multiple MAGs, the path provided to `-g` or `-a` must be a directory containing one file per MAG; the contig membership of each MAG is inferred from these files. When using `--view mag` for a single organism, to visualize the entire organism on the same plot (see the [MAG track image](docs/EXPLORATION.md#exploration)) and compute metrics at the MAG level, `-g` and `-a` can instead point directly to a single file describing that organism.
+By default, `thebigbam calculate` is run independently per contig. When using `--view mag` with multiple MAGs, the path provided to `-g` or `-a` must be a directory containing one file per MAG; the contig membership of each MAG is inferred from these files. When using `--view mag` for a single organism, to visualize the entire organism on the same plot (see the [MAG track image](docs/USAGE.md#exploration)) and compute metrics at the MAG level, `-g` and `-a` can instead point directly to a single file describing that organism.
 
 #### Alignment files
 
@@ -529,6 +529,6 @@ TO-DO
 
 - [How to manipulate theBIGbam databases after their creation?](docs/DATABASE.md)
 
-- [More details about theBIGbam visualisation](docs/VISUALISATION.md)
+- [More details about theBIGbam visualisation](docs/VISUALIZATION.md)
 
 - [How can I contribute to theBIGbam?](docs/DEVELOPERS_NOTE.md)

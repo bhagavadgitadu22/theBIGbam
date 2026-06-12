@@ -1,6 +1,6 @@
 # Compression and information loss
 
-A few additional information losses occur during `thebigbam calculate`, beyond those described on the [main page](READMD.md#database-compression).
+A few additional information losses occur during `thebigbam calculate`, beyond those described on the [main page](../README.md#database-compression).
 
 ## GC content and GC skew windowing
 

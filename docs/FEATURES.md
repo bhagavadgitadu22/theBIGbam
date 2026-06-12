@@ -22,7 +22,7 @@ Features describing read alignment depth and quality across the genome.
 | Other alignments     | Supplementary  | Reads flagged as supplementary (SAM flag 0x800) - chimeric alignments where different parts of the read map to different locations | Structural variants, chimeric sequences                              |
 | MAPQ                 | MAPQ           | Average confidence of read alignments at each position. See the **warning** below though                                           | Filtering reads                                                      |
 
-**Warning:** MAPQ scoring varies between aligners (BWA, Bowtie2, minimap2, etc.), See this [blog](https://sequencing.qcfail.com/articles/mapq-values-are-really-useful-but-their-implementation-is-a-mess/) for more detail. Also MAPQ are not reliable when using thebigbam mapping with `--circular`  option. See [On mapping with circular genome support](docs/CIRCULAR_MAPPING.md) for details.
+**Warning:** MAPQ scoring varies between aligners (BWA, Bowtie2, minimap2, etc.), See this [blog](https://sequencing.qcfail.com/articles/mapq-values-are-really-useful-but-their-implementation-is-a-mess/) for more detail. Also MAPQ are not reliable when using thebigbam mapping with `--circular`  option. See [On mapping with circular genome support](CIRCULAR_MAPPING.md) for details.
 
 ---
 
