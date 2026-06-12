@@ -6,6 +6,8 @@ This document describes all features computed from the input files by theBIGbam 
 
 1 additional module comprises genomic features computed from the annotation or assembly file provided.
 
+
+
 ---
 
 ## Coverage module
@@ -16,13 +18,11 @@ Features describing read alignment depth and quality across the genome.
 
 | Subplot              | Feature        | Description                                                                                                                        | Use case                                                             |
 |:-------------------- | -------------- | ---------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------- |
-| Primary alignments   | Primary reads  | The number of reads covering each position, counting only primary alignments*                                                      | Abundance per position                                               |
-| Alignments by strand | Strand + and - | Separation of primary alignments by strand (+ and -)*                                                                              | Library preparation, amplification, sequencing, or mapping artifacts |
-| Other alignments     | Secondary      | Reads flagged as secondary (SAM flag 0x100) - alternative alignments when a read maps to multiple locations*                       | Repetitive or ambiguous regions                                      |
+| Primary alignments   | Primary reads  | The number of reads covering each position, counting only primary alignments                                                       | Abundance per position                                               |
+| Alignments by strand | Strand + and - | Separation of primary alignments by strand (+ and -)                                                                               | Library preparation, amplification, sequencing, or mapping artifacts |
+| Other alignments     | Secondary      | Reads flagged as secondary (SAM flag 0x100) - alternative alignments when a read maps to multiple locations                        | Repetitive or ambiguous regions                                      |
 | Other alignments     | Supplementary  | Reads flagged as supplementary (SAM flag 0x800) - chimeric alignments where different parts of the read map to different locations | Structural variants, chimeric sequences                              |
 | MAPQ                 | MAPQ           | Average confidence of read alignments at each position. See the **warning** below though                                           | Filtering reads                                                      |
-
-\* A position counts as covered only if the read has a true match at that position (based on CIGAR/MD)
 
 **Warning:** MAPQ scoring varies between aligners (BWA, Bowtie2, minimap2, etc.), See this [blog](https://sequencing.qcfail.com/articles/mapq-values-are-really-useful-but-their-implementation-is-a-mess/) for more detail. Also MAPQ are not reliable when using thebigbam mapping with `--circular`  option. See [On mapping with circular genome support](docs/CIRCULAR_MAPPING.md) for details.
 

@@ -72,7 +72,9 @@ Check main command works:
 thebigbam -h
 ```
 
-You can download the tests directory from the git repository to assess your installation:
+You should see the list of commands available with theBIGbam appear. You can see the help for any function with `thebigbam <function_name> -h`.
+
+Then you can download the tests directory from the git repository to assess your installation:
 
 ```bash
 git clone --filter=blob:none --sparse https://github.com/bhagavadgitadu22/theBIGbam
@@ -165,6 +167,8 @@ By default, `thebigbam calculate` is run independently per contig. If --view mag
 
 **Parameter:** --bam_files DIRECTORY, short-version -b
 
+`theBIGbam calculate` **will use all the alignments provided: if you want to filter your mappings you should do it beforehand**. You can use the dedicated options if mapping in theBIGbam (see the [Mapping](README.md#mapping) section), or you can do it with any tool you like (samtools, `coverm filter`).
+
 Your mapping files need to be **sorted BAM files with MD tags**. If you have mapping files but not in the right format, SAMtools is your friend! 
 
 ```bash
@@ -203,6 +207,8 @@ All mapping-derived modules are computed and stored in the database unless you p
 - **Long-reads:** computes per-position average length of reads
 - **Paired-reads:** computes per-position average insert size of reads along with the number of incorrect pair orientations (non-inward pairs, mates unmapped or mapping or another contig)
 - **Phage termini:** compute per-position coverage for primary-reads starting with an exact match (a short clipping < 5 bp is tolerated). Among those reads, the number of mapped reads starting and ending is computed. **This module requires sequences** to be provided to find terminal repeats
+
+**Important precision:** Except for the Misalignment module, the RNA module and the read starts/ends of the Termini module, coverage tracks are not CIGAR/MD-aware: **we monitor "how many reads span this position" and not "how many reads truly match at this position**. That means mismatches and deletions still count as covered. CIGAR N spans (splices) are substracted though.
 
 **When sequences are provided**, the **Genome** module is computed. It calculates GC content, GC skew and the repeats contained within each contig/MAG using an autoblast. Annotations (e.g. positions of the coding sequences and their functions) are also saved when available (GenBank file provided).
 
@@ -250,6 +256,10 @@ Metrics belong to several categories:
 - **Phage termini**
 
 A description of all metrics is available in [the filters section](docs/FILTERS.md).
+
+## Parallelisation
+
+Using multiple threads during theBIGbam calculation substantially improves performance while read processing remains the main bottleneck. However, beyond a certain number of threads (around 16 in my experience), performance gains become limited because writing to the DuckDB database becomes the dominant bottleneck. Since database writing is currently single-threaded, we recommend using around 16 CPU cores. Additional cores are unlikely to provide substantial speed improvements.
 
 ## Visualization
 
@@ -517,7 +527,5 @@ TO-DO
 - [How to manipulate theBIGbam databases after their creation?](docs/DATABASE.md)
 
 - [More details about theBIGbam visualisation](docs/VISUALISATION.md)
-
-- [Some tips on how to interpret the plots](docs/PLOT_INTERPRETATION.md)
 
 - [How can I contribute to theBIGbam?](docs/DEVELOPERS_NOTE.md)

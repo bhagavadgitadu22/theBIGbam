@@ -3043,6 +3043,7 @@ pub fn run_all_samples(
         let _ = writeln!(f, "  Repeat blob conversion: {:>9.3} s  [RSS: {:.0} MB]", repeat_blob_secs, repeat_rss_mb);
         let _ = writeln!(f, "  Write MAGs           : {:>10.3} s  [RSS: {:.0} MB]", write_mags_secs, write_mags_rss_mb);
         let _ = writeln!(f, "  MAG contig blobs     : {:>10.3} s  [RSS: {:.0} MB]", mag_contig_blob_secs, mag_contig_blob_rss_mb);
+        let _ = f.flush();
     }
 
     // If no BAM files provided, skip sample processing (genbank-only mode)
@@ -3365,6 +3366,7 @@ fn process_samples_parallel(
         use std::io::Write;
         let _ = writeln!(f, "  CDS index build      : {:>10.3} s  [RSS: {:.0} MB]", pre_timings.cds_build_secs, pre_timings.cds_build_rss_mb);
         let _ = writeln!(f);
+        let _ = f.flush();
     }
 
     // Spawn dedicated writer thread
@@ -3495,6 +3497,7 @@ fn process_samples_parallel(
             let _ = writeln!(f, "  RSS before finalize  : {:>10.0} MB", rss_before_finalize);
             let _ = writeln!(f, "  DB finalize          : {:>10.3} s", finalize_secs);
             let _ = writeln!(f, "  RSS after finalize   : {:>10.0} MB", rss_after_finalize);
+            let _ = f.flush();
         }
 
         Ok((written_count, write_start.elapsed(), all_timings, mag_drops))
@@ -3680,6 +3683,7 @@ fn process_samples_sequential(
         use std::io::Write;
         let _ = writeln!(f, "  CDS index build      : {:>10.3} s  [RSS: {:.0} MB]", pre_timings.cds_build_secs, pre_timings.cds_build_rss_mb);
         let _ = writeln!(f);
+        let _ = f.flush();
     }
 
     for bam_path in bam_files {
@@ -3833,6 +3837,7 @@ fn process_samples_sequential(
         let _ = writeln!(f, "  RSS before finalize  : {:>10.0} MB", rss_before_finalize);
         let _ = writeln!(f, "  DB finalize          : {:>10.3} s", finalize_secs);
         let _ = writeln!(f, "  RSS after finalize   : {:>10.0} MB", rss_after_finalize);
+        let _ = f.flush();
     }
 
     // Append grand totals to the timing log
@@ -3918,6 +3923,7 @@ fn open_timing_log(output_db: &Path, threads: usize, n_samples: usize) -> Result
     writeln!(f, "Samples      : {}", n_samples)?;
     writeln!(f, "Memory       : RSS tracked via /proc/self/status")?;
     writeln!(f, "=============================================================\n")?;
+    let _ = f.flush();
 
     eprintln!("Timing log: {}", log_path.display());
     Ok(f)
@@ -3958,6 +3964,7 @@ fn write_sample_timing(f: &mut fs::File, t: &SampleTimings, threads: usize) -> R
     writeln!(f, "  Write contig data    : {:>10.3} s", ns_to_s(t.write_contig_data_ns))?;
     writeln!(f, "  Write MAG data       : {:>10.3} s", ns_to_s(t.mag_write_ns))?;
     writeln!(f)?;
+    let _ = f.flush();
     Ok(())
 }
 
