@@ -89,6 +89,13 @@ impl DbWriter {
         self.conn.lock().map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))
     }
 
+    pub fn checkpoint(&self) -> Result<()> {
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
+        conn.execute("CHECKPOINT", [])
+            .context("Failed to checkpoint database")?;
+        Ok(())
+    }
+
     /// Create a new database and return a writer for sequential sample insertion.
     pub fn create(
         db_path: &Path,

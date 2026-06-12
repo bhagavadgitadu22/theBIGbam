@@ -3317,6 +3317,7 @@ fn process_samples_parallel(
     let total_writer = total;
 
     let timing_threads = config.threads;
+    let enable_timing_writer = config.enable_timing;
 
     // MAG threshold filtering data (moved into writer thread)
     let is_mag_mode = config.view_mode == ViewMode::Mag;
@@ -3467,6 +3468,16 @@ fn process_samples_parallel(
                     let _ = write_sample_timing(f, &t, timing_threads);
                 }
                 all_timings.push(t);
+            }
+
+            // Flush DuckDB WAL to disk to bound memory — without this,
+            // all appended BLOB data stays resident until finalize().
+            let t_ckpt = std::time::Instant::now();
+            if let Err(e) = db_writer.checkpoint() {
+                eprintln!("WARNING: checkpoint failed after {}: {}", result.sample_name, e);
+            }
+            if enable_timing_writer {
+                eprintln!("  checkpoint: {:.3}s", t_ckpt.elapsed().as_secs_f64());
             }
         }
 
@@ -3762,6 +3773,16 @@ fn process_samples_sequential(
                         let _ = write_sample_timing(f, t, config.threads);
                     }
                     all_timings.push(t.clone());
+                }
+
+                // Flush DuckDB WAL to disk to bound memory — without this,
+                // all appended BLOB data stays resident until finalize().
+                let t_ckpt = std::time::Instant::now();
+                if let Err(e) = db_writer.checkpoint() {
+                    eprintln!("WARNING: checkpoint failed after {}: {}", r.sample_name, e);
+                }
+                if config.enable_timing {
+                    eprintln!("  checkpoint: {:.3}s", t_ckpt.elapsed().as_secs_f64());
                 }
 
                 let total_sample_time = sample_start.elapsed().as_secs_f64();

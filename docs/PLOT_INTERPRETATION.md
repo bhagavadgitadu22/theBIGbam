@@ -4,6 +4,20 @@ This guide provides practical tips for interpreting the visualizations produced 
 
 ---
 
+## On misassembly and microdiversity
+
+The misalignment module flags positions where mapped reads diverge substantially from the reference. These positions may reflect subpopula-tions missing a segment of the contig or carrying an extra segment. Dis-crepancies supported by more than 50% of locally aligned reads can also be considered misassemblies when they occur in the sample from which the contig was assembled.
+To quantify microdiversity and misassembly per contig per sample, base pairs present in reads but absent from the reference (collapses) and base pairs present in the reference but absent in reads (expansions) are computed at all flagged positions (microdiversity level) and at positions where > 50% of reads support the discrepancy (misassembly level) (Guo et al. 2025). Collapse size at each position is calculated as the average length of insertion and clipping events. The sum of collapses and expan-sions gives contig-level analogs of completeness and contamination.
+These metrics should be interpreted as approximations rather than exact measurements, as mapping files only provide contextual information up to the read length (typically ~150 bp for short reads). For instance, a clip-ping event may reflect a small (e.g. ~200 bp) or a large (e.g. >10 kbp) missing segment, yet the inferred length is inherently capped by read length (e.g. ~100 bp for short reads). As a result, those metrics tend to underestimate the size of missing or extra genomic segments.
+
+Complementary information from other modules can further confirm misassemblies or biologically meaningful subpopulations (microdiversity):
+
+- For the **Coverage module**: local peaks and troughs in primary reads depth ; presence of secondary or supplementary alignments suggests repeated regions within a contig or similarity to another contig
+
+- For the **Paired-Reads module**: increase in read insert size indicates that genomic segments may be missing from the reference, whereas a sharp decrease suggests additional sequence in some reads. Non-inward read pairs may indicate inversions, while missing mates point to incomplete assembly. Reads whose mates map to a different contig suggest a relationship between contigs, either due to shared genomic regions or because one represents the continuation of the other in the organism’s genome.
+
+
+
 ## Coverage vs Coverage Reduced
 
 These two coverage tracks use different counting rules and can yield different values at the same position:
@@ -46,14 +60,6 @@ Use the **"Plot relative to local coverage"** checkbox to normalize these counts
 
 ---
 
-## See Also
+# 
 
-- [FEATURES.md](FEATURES.md) — Complete reference for all computed features
-- [FILTERS.md](FILTERS.md) — Available filtering metrics for narrowing down contigs/samples
-- [ASSEMBLY_CHECK.md](ASSEMBLY_CHECK.md) — Detailed explanation of assembly quality metrics
-
-Complementary information from other modules can further confirm misassemblies or biologically meaningful subpopulations (microdiversity):
-
-- For the **Coverage module**: local peaks and troughs in primary reads depth ; presence of secondary or supplementary alignments suggests repeated regions within a contig or similarity to another contig
-
-- For the **Paired-Reads module**: increase in read insert size indicates that genomic segments may be missing from the reference, whereas a sharp decrease suggests additional sequence in some reads. Non-inward read pairs may indicate inversions, while missing mates point to incomplete assembly. Reads whose mates map to a different contig suggest a relationship between contigs, either due to shared genomic regions or because one represents the continuation of the other in the organism’s genome.
+ 

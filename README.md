@@ -500,7 +500,7 @@ TO-DO
 
 ---
 
-# In-depth documentation pages
+# In-depth documentation
 
 - [On mapping with circular genome support](docs/CIRCULAR_MAPPING.md)
 
@@ -516,17 +516,8 @@ TO-DO
 
 - [How to manipulate theBIGbam databases after their creation?](docs/DATABASE.md)
 
+- [More details about theBIGbam visualisation](docs/VISUALISATION.md)
+
+- [Some tips on how to interpret the plots](docs/PLOT_INTERPRETATION.md)
+
 - [How can I contribute to theBIGbam?](docs/DEVELOPERS_NOTE.md)
-
-- [Misalignment](docs/MISALIGNMENT.md) TO-DO
-
-- [Assembly check](docs/ASSEMBLY_CHECK.md) TO-DO, to merge with FILTERS.md
-
-- [Visualization](docs/VISUALIZATION.md) TO-DO
-
-- [Plot interpretation](docs/PLOT_INTERPRETATION.md) TO-DO, discard
-
-TO-DO: check the list!
-Specify that links only work on main github page not pypi page
-
-Crucial to have proper unitary tests and tests behind that! 
