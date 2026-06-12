@@ -30,6 +30,7 @@ use crate::types::{feature_name_to_id, ContigInfo, FeatureAnnotation, PackagingD
 fn configure_for_bulk_writes(conn: &Connection) {
     let _ = conn.execute_batch("SET threads TO 1");
     let _ = conn.execute_batch("SET wal_autocheckpoint='4GB'");
+    let _ = conn.execute_batch("SET memory_limit='1GB'");
 }
 
 fn build_contig_length_cache(conn: &Connection) -> HashMap<i64, i32> {
