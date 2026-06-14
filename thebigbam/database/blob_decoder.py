@@ -733,9 +733,19 @@ def decode_zoom_standalone(zoom_blob_bytes, target_bin_size, scale_divisor, zoom
 
     effective_bins = [10000] if num_zoom_levels == 1 else zoom_bin_sizes
 
-    # Decode zoom levels from offset 16
+    # Determine which zoom level indices match the target (or fallback).
+    bin_sizes_to_try = [target_bin_size]
+    fallback = [b for b in zoom_bin_sizes if b > target_bin_size]
+    if fallback:
+        bin_sizes_to_try.append(min(fallback))
+    wanted_indices = set()
+    for level_idx in range(num_zoom_levels):
+        bin_size = effective_bins[level_idx] if level_idx < len(effective_bins) else 10000
+        if bin_size in bin_sizes_to_try:
+            wanted_indices.add(level_idx)
+
+    # Decode zoom levels from offset 16, only decompressing wanted levels.
     offset = 16
-    levels = []
     for level_idx in range(num_zoom_levels):
         if offset + 4 > len(zoom_blob_bytes):
             break
@@ -743,6 +753,11 @@ def decode_zoom_standalone(zoom_blob_bytes, target_bin_size, scale_divisor, zoom
         offset += 4
         if offset + compressed_size > len(zoom_blob_bytes):
             break
+
+        if level_idx not in wanted_indices:
+            offset += compressed_size
+            continue
+
         level_data = _zstd_decompress(zoom_blob_bytes[offset:offset + compressed_size])
         offset += compressed_size
 
@@ -780,17 +795,7 @@ def decode_zoom_standalone(zoom_blob_bytes, target_bin_size, scale_divisor, zoom
                 pos += 4
                 bins.append({"mean": mean_val})
 
-        levels.append({"bin_size": bin_size, "bins": bins})
-
-    bin_sizes_to_try = [target_bin_size]
-    fallback = [b for b in zoom_bin_sizes if b > target_bin_size]
-    if fallback:
-        bin_sizes_to_try.append(min(fallback))
-
-    for try_size in bin_sizes_to_try:
-        for zoom in levels:
-            if zoom["bin_size"] == try_size:
-                return _zoom_bins_to_dict(zoom["bins"], try_size, contig_length, scale, is_sparse)
+        return _zoom_bins_to_dict(bins, bin_size, contig_length, scale, is_sparse)
 
     return None
 

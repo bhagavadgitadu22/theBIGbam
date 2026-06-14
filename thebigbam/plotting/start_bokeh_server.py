@@ -1149,6 +1149,36 @@ def create_layout(db_path, preloaded, enable_timing=False):
                     print(f"[timing] generate_bokeh_plot_mag_view (DB queries + plotting): {_step:.3f}s{_TIMING.tag(_step)}", flush=True)
                     print(f"[timing] Bokeh model count in grid: {len(grid.references())}{_TIMING.tag(0)}", flush=True)
 
+                # --- Benchmark: per-contig blob decode vs MAG blob ---
+                try:
+                    from .plotting_data_per_sample import benchmark_contig_blob_decode
+                    from ..database.database_getters import get_mag_id
+                    _bench_mag_id = get_mag_id(conn, active_mag)
+                    _bench_sample_id = None
+                    if sample:
+                        _sr = conn.execute(
+                            "SELECT Sample_id FROM Sample WHERE Sample_name=?",
+                            (sample,),
+                        ).fetchone()
+                        if _sr:
+                            _bench_sample_id = _sr[0]
+                    if _bench_mag_id is not None:
+                        _bench_mag_len = sum(
+                            int(r[1]) for r in conn.execute(
+                                "SELECT mca.Contig_id, c.Contig_length "
+                                "FROM MAG_contigs_association mca "
+                                "JOIN Contig c ON c.Contig_id = mca.Contig_id "
+                                "WHERE mca.MAG_id = ?", (_bench_mag_id,)
+                            ).fetchall()
+                        )
+                        benchmark_contig_blob_decode(
+                            conn.cursor(), _bench_mag_id, _bench_sample_id,
+                            mag_requested_features, _bench_mag_len,
+                            max_base_resolution=max_binning,
+                        )
+                except Exception as _bench_err:
+                    print(f"[timing] Benchmark error: {_bench_err}", flush=True)
+
                 new_xrange = _get_shared_xrange(grid)
                 if mag_preserve_xrange and new_xrange is not None:
                     new_xrange.start = mag_prev_xstart

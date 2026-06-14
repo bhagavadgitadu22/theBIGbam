@@ -1119,6 +1119,98 @@ def _get_contig_blob(cur, contig_id, feature_name):
     return row[0] if row else None
 
 
+def _get_feature_blobs_for_mag(cur, mag_id, sample_id, feature_name):
+    from thebigbam.database.blob_decoder import feature_name_to_id
+    fid = feature_name_to_id(feature_name, cur)
+    if fid is None:
+        return {}
+    cur.execute(
+        "SELECT mca.Contig_id, fb.Zoom_data "
+        "FROM Feature_blob fb "
+        "JOIN MAG_contigs_association mca ON mca.Contig_id = fb.Contig_id "
+        "WHERE mca.MAG_id = ? AND fb.Sample_id = ? AND fb.Feature_id = ?",
+        (mag_id, sample_id, fid),
+    )
+    return {int(r[0]): bytes(r[1]) if r[1] else None for r in cur.fetchall()}
+
+
+def _get_contig_blobs_for_mag(cur, mag_id, feature_name):
+    from thebigbam.database.blob_decoder import feature_name_to_id
+    fid = feature_name_to_id(feature_name, cur)
+    if fid is None:
+        return {}
+    cur.execute(
+        "SELECT mca.Contig_id, cb.Zoom_data "
+        "FROM Contig_blob cb "
+        "JOIN MAG_contigs_association mca ON mca.Contig_id = cb.Contig_id "
+        "WHERE mca.MAG_id = ? AND cb.Feature_id = ?",
+        (mag_id, fid),
+    )
+    return {int(r[0]): bytes(r[1]) if r[1] else None for r in cur.fetchall()}
+
+
+def benchmark_contig_blob_decode(cur, mag_id, sample_id, features, mag_length,
+                                  max_base_resolution=None):
+    import time
+    from thebigbam.database.database_getters import get_mag_members
+    from thebigbam.database.blob_decoder import (
+        get_blob_scale, get_zoom_bin_sizes, decode_zoom_standalone,
+    )
+
+    _threshold = max_base_resolution if max_base_resolution is not None else _DEFAULT_MAX_BASE_RESOLUTION
+    members = get_mag_members(cur, mag_id)
+    n_contigs = len(members)
+
+    rows_all = []
+    for feature in features:
+        md = get_variable_metadata(cur, feature)
+        if md:
+            rows_all.extend(md)
+
+    zoom_bins = get_zoom_bin_sizes(cur)
+    target_bin_size = zoom_bins[-1] if zoom_bins else 10000
+
+    t0 = time.perf_counter()
+    n_decoded = 0
+    n_fetched = 0
+    for row in rows_all:
+        _type, _color, _alpha, _fa, _size, title, feature_table = row
+        cur.execute(
+            "SELECT Variable_name FROM Variable WHERE Title=? AND Feature_table_name=?",
+            (title, feature_table),
+        )
+        vr = cur.fetchone()
+        if not vr:
+            continue
+        variable_name = vr[0]
+        scale_div = get_blob_scale(cur, variable_name)
+
+        if feature_table == "Feature_blob" and sample_id is not None:
+            blobs = _get_feature_blobs_for_mag(cur, mag_id, sample_id, variable_name)
+        elif feature_table == "Contig_blob":
+            blobs = _get_contig_blobs_for_mag(cur, mag_id, variable_name)
+        else:
+            continue
+
+        n_fetched += 1
+        for cid, clen, _off in members:
+            zb = blobs.get(cid)
+            if zb is None:
+                continue
+            result = decode_zoom_standalone(zb, target_bin_size, scale_div, zoom_bins)
+            if result is not None:
+                n_decoded += 1
+
+    elapsed = time.perf_counter() - t0
+    print(
+        f"[timing] Per-contig blob decode benchmark: "
+        f"{n_contigs} contigs, {n_fetched} feature queries, "
+        f"{n_decoded} blobs decoded in {elapsed:.3f}s",
+        flush=True,
+    )
+    return elapsed
+
+
 def _get_feature_chunks(cur, contig_id, sample_id, feature_name, start_pos, end_pos):
     """Fetch only the base-resolution chunks overlapping [start_pos, end_pos) from Feature_blob_chunk.
 
