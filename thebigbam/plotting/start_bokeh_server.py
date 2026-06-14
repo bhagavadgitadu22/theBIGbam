@@ -63,7 +63,7 @@ class _TimingPhase:
         real = time.perf_counter() - self._phase_start
         gap = real - self._phase_timed
         pct = (gap / real * 100) if real > 0 else 0
-        print(f"[timing] {label} done: timed={self._phase_timed:.3f}s real={real:.3f}s gap={gap:.3f}s ({pct:.1f}%)", flush=True)
+        print(f"[summary] {label} done: timed={self._phase_timed:.3f}s real={real:.3f}s gap={gap:.3f}s ({pct:.1f}%)", flush=True)
         self._phase_start = time.perf_counter()
         self._phase_timed = 0.0
 
@@ -928,6 +928,7 @@ def create_layout(db_path, preloaded, enable_timing=False):
             if enable_timing:
                 _step = time.perf_counter() - t_view
                 print(f"[timing] on_view_change (server): {_step:.3f}s{_TIMING.tag(_step)}", flush=True)
+                _TIMING.summary("View change")
                 _timing_state['t_sent'] = time.perf_counter()
                 _timing_state['label'] = 'view_change'
                 _timing_ping.value = f"view_{time.perf_counter()}"
@@ -1149,35 +1150,6 @@ def create_layout(db_path, preloaded, enable_timing=False):
                     print(f"[timing] generate_bokeh_plot_mag_view (DB queries + plotting): {_step:.3f}s{_TIMING.tag(_step)}", flush=True)
                     print(f"[timing] Bokeh model count in grid: {len(grid.references())}{_TIMING.tag(0)}", flush=True)
 
-                # --- Benchmark: per-contig blob decode vs MAG blob ---
-                try:
-                    from .plotting_data_per_sample import benchmark_contig_blob_decode
-                    from ..database.database_getters import get_mag_id
-                    _bench_mag_id = get_mag_id(conn, active_mag)
-                    _bench_sample_id = None
-                    if sample:
-                        _sr = conn.execute(
-                            "SELECT Sample_id FROM Sample WHERE Sample_name=?",
-                            (sample,),
-                        ).fetchone()
-                        if _sr:
-                            _bench_sample_id = _sr[0]
-                    if _bench_mag_id is not None:
-                        _bench_mag_len = sum(
-                            int(r[1]) for r in conn.execute(
-                                "SELECT mca.Contig_id, c.Contig_length "
-                                "FROM MAG_contigs_association mca "
-                                "JOIN Contig c ON c.Contig_id = mca.Contig_id "
-                                "WHERE mca.MAG_id = ?", (_bench_mag_id,)
-                            ).fetchall()
-                        )
-                        benchmark_contig_blob_decode(
-                            conn.cursor(), _bench_mag_id, _bench_sample_id,
-                            mag_requested_features, _bench_mag_len,
-                            max_base_resolution=max_binning,
-                        )
-                except Exception as _bench_err:
-                    print(f"[timing] Benchmark error: {_bench_err}", flush=True)
 
                 new_xrange = _get_shared_xrange(grid)
                 if mag_preserve_xrange and new_xrange is not None:
@@ -1462,6 +1434,7 @@ def create_layout(db_path, preloaded, enable_timing=False):
         finally:
             if enable_timing:
                 print(f"[timing] Memory (current RSS) at APPLY end: {_get_rss_mb():.0f} MB{_TIMING.tag(0)}", flush=True)
+                _TIMING.summary("APPLY")
                 _timing_state['t_sent'] = time.perf_counter()
                 _timing_state['t_apply_start'] = t_apply_start
                 _timing_state['label'] = 'APPLY'
@@ -1583,11 +1556,10 @@ def create_layout(db_path, preloaded, enable_timing=False):
                 if '|heap=' in new:
                     heap_mb = new.split('|heap=')[1]
                     heap_str = f" [JS heap: {heap_mb} MB]"
-                print(f"[timing] Frontend render '{label}' (page refresh): {elapsed:.3f}s{heap_str}{_TIMING.tag(elapsed)}", flush=True)
+                print(f"[timing] Frontend render '{label}' (page refresh): {elapsed:.3f}s{heap_str}", flush=True)
                 if 't_apply_start' in _timing_state:
                     total_flow = time.perf_counter() - _timing_state['t_apply_start']
-                    print(f"[timing] Total flow (query -> send -> render): {total_flow:.3f}s{_TIMING.tag(0)}", flush=True)
-                _TIMING.summary(label)
+                    print(f"[timing] Total flow (query -> send -> render): {total_flow:.3f}s", flush=True)
         _timing_ack.on_change('value', _on_timing_ack)
 
     def _get_shared_xrange(grid):

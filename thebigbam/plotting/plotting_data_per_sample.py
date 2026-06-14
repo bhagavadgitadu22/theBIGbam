@@ -1149,67 +1149,6 @@ def _get_contig_blobs_for_mag(cur, mag_id, feature_name):
     return {int(r[0]): bytes(r[1]) if r[1] else None for r in cur.fetchall()}
 
 
-def benchmark_contig_blob_decode(cur, mag_id, sample_id, features, mag_length,
-                                  max_base_resolution=None):
-    import time
-    from thebigbam.database.database_getters import get_mag_members
-    from thebigbam.database.blob_decoder import (
-        get_blob_scale, get_zoom_bin_sizes, decode_zoom_standalone,
-    )
-
-    _threshold = max_base_resolution if max_base_resolution is not None else _DEFAULT_MAX_BASE_RESOLUTION
-    members = get_mag_members(cur, mag_id)
-    n_contigs = len(members)
-
-    rows_all = []
-    for feature in features:
-        md = get_variable_metadata(cur, feature)
-        if md:
-            rows_all.extend(md)
-
-    zoom_bins = get_zoom_bin_sizes(cur)
-    target_bin_size = zoom_bins[-1] if zoom_bins else 10000
-
-    t0 = time.perf_counter()
-    n_decoded = 0
-    n_fetched = 0
-    for row in rows_all:
-        _type, _color, _alpha, _fa, _size, title, feature_table = row
-        cur.execute(
-            "SELECT Variable_name FROM Variable WHERE Title=? AND Feature_table_name=?",
-            (title, feature_table),
-        )
-        vr = cur.fetchone()
-        if not vr:
-            continue
-        variable_name = vr[0]
-        scale_div = get_blob_scale(cur, variable_name)
-
-        if feature_table == "Feature_blob" and sample_id is not None:
-            blobs = _get_feature_blobs_for_mag(cur, mag_id, sample_id, variable_name)
-        elif feature_table == "Contig_blob":
-            blobs = _get_contig_blobs_for_mag(cur, mag_id, variable_name)
-        else:
-            continue
-
-        n_fetched += 1
-        for cid, clen, _off in members:
-            zb = blobs.get(cid)
-            if zb is None:
-                continue
-            result = decode_zoom_standalone(zb, target_bin_size, scale_div, zoom_bins)
-            if result is not None:
-                n_decoded += 1
-
-    elapsed = time.perf_counter() - t0
-    print(
-        f"[timing] Per-contig blob decode benchmark: "
-        f"{n_contigs} contigs, {n_fetched} feature queries, "
-        f"{n_decoded} blobs decoded in {elapsed:.3f}s",
-        flush=True,
-    )
-    return elapsed
-
 
 def _get_feature_chunks(cur, contig_id, sample_id, feature_name, start_pos, end_pos):
     """Fetch only the base-resolution chunks overlapping [start_pos, end_pos) from Feature_blob_chunk.
@@ -2219,7 +2158,18 @@ def _assemble_mag_chunks_from_contigs(cur, mag_id, sample_id, variable_name,
     members = get_mag_members(cur, mag_id)
     scale_div = get_blob_scale(cur, variable_name)
     chunk_sz = get_chunk_size(cur)
-    sparse = is_sparse_zoom_blob(zoom_blob)
+    if zoom_blob is not None:
+        sparse = is_sparse_zoom_blob(zoom_blob)
+    else:
+        first_blob = None
+        for cid, _clen, _off in members:
+            if is_contig_blob:
+                first_blob = _get_contig_blob(cur, cid, variable_name)
+            else:
+                first_blob = _get_feature_blob(cur, cid, sample_id, variable_name)
+            if first_blob is not None:
+                break
+        sparse = is_sparse_zoom_blob(first_blob) if first_blob else False
 
     all_decoded = []
     for cid, clen, offset in members:
@@ -2253,21 +2203,80 @@ def _assemble_mag_chunks_from_contigs(cur, mag_id, sample_id, variable_name,
     return None
 
 
+def _stitch_contig_zoom_blobs(cur, mag_id, members, sample_id, variable_name,
+                               is_contig_blob, xs, xe, type_picked,
+                               scale_divisor, zoom_bin_sizes, max_base_resolution):
+    """Build MAG zoom data by stitching per-contig zoom blobs.
+
+    Fetches per-contig Zoom_data blobs in one batch query, decodes each,
+    shifts bin coordinates by contig offset, and concatenates.
+    """
+    import numpy as np
+    from thebigbam.database.blob_decoder import decode_zoom_standalone
+
+    if is_contig_blob:
+        blob_map = _get_contig_blobs_for_mag(cur, mag_id, variable_name)
+    else:
+        blob_map = _get_feature_blobs_for_mag(cur, mag_id, sample_id, variable_name)
+
+    if not blob_map:
+        return None
+
+    _threshold = max_base_resolution if max_base_resolution is not None else _DEFAULT_MAX_BASE_RESOLUTION
+    _window = xe - xs
+    target_bin_size = zoom_bin_sizes[-1]
+    for bs in zoom_bin_sizes:
+        if _window // bs <= 10_000:
+            target_bin_size = bs
+            break
+
+    all_bin_starts = []
+    all_bin_ends = []
+    all_means = []
+    all_maxes = []
+    is_sparse = None
+
+    for cid, clen, offset in members:
+        if offset + clen < xs or offset + 1 > xe:
+            continue
+        zb = blob_map.get(cid)
+        if zb is None:
+            continue
+        decoded = decode_zoom_standalone(zb, target_bin_size, scale_divisor, zoom_bin_sizes)
+        if decoded is None:
+            continue
+
+        if is_sparse is None:
+            is_sparse = decoded.get("sparse", False)
+
+        all_bin_starts.append(decoded["bin_start"] + offset)
+        all_bin_ends.append(decoded["bin_end"] + offset)
+        all_means.append(decoded["mean"])
+        if "max" in decoded:
+            all_maxes.append(decoded["max"])
+
+    if not all_bin_starts:
+        return None
+
+    merged = {
+        "bin_start": np.concatenate(all_bin_starts),
+        "bin_end": np.concatenate(all_bin_ends),
+        "mean": np.concatenate(all_means),
+        "sparse": is_sparse or False,
+    }
+    if all_maxes:
+        merged["max"] = np.concatenate(all_maxes)
+
+    return _format_zoom_for_bokeh(merged, type_picked, xs, xe)
+
+
 def get_mag_feature_data(cur, feature, mag_id, sample_id, mag_length,
                          xstart=None, xend=None, variable_metadata=None,
-                         max_base_resolution=None, min_relative_value=0.0):
-    """Read one MAG-wide blob per subplot from MAG_blob / MAG_contig_blob.
-
-    Shape of the returned list_feature_dict is identical to
-    get_feature_data(): `make_bokeh_subplot` consumes both the same way.
-    X-coordinates are already in MAG space — no offset arithmetic required.
-    """
-    from thebigbam.database.database_getters import (
-        get_mag_feature_zoom, get_mag_contig_zoom, get_mag_members,
-    )
-    from thebigbam.database.blob_decoder import (
-        get_blob_scale, get_zoom_bin_sizes, is_sparse_zoom_blob,
-    )
+                         max_base_resolution=None, min_relative_value=0.0,
+                         members=None):
+    """Build MAG-wide feature data by stitching per-contig blobs."""
+    from thebigbam.database.database_getters import get_mag_members
+    from thebigbam.database.blob_decoder import get_blob_scale, get_zoom_bin_sizes
 
     rows = variable_metadata if variable_metadata is not None else get_variable_metadata(cur, feature)
     xs = xstart if xstart is not None else 1
@@ -2275,6 +2284,9 @@ def get_mag_feature_data(cur, feature, mag_id, sample_id, mag_length,
     _threshold = max_base_resolution if max_base_resolution is not None else _DEFAULT_MAX_BASE_RESOLUTION
     _window = xe - xs
     _use_zoom = _window > _threshold
+
+    if members is None:
+        members = get_mag_members(cur, mag_id)
 
     list_feature_dict = []
     for row in rows:
@@ -2297,30 +2309,22 @@ def get_mag_feature_data(cur, feature, mag_id, sample_id, mag_length,
         _scale_div = get_blob_scale(cur, variable_name)
         _zoom_bins = get_zoom_bin_sizes(cur)
 
-        if feature_table == "Feature_blob":
-            zoom_blob = get_mag_feature_zoom(cur, mag_id, sample_id, variable_name)
-            if zoom_blob is None:
-                continue
-            if _use_zoom:
-                blob_dict = _blob_to_feature_dict(None, type_picked, xs, xe, max_base_resolution, zoom_blob_bytes=zoom_blob, scale_divisor=_scale_div, zoom_bin_sizes=_zoom_bins)
-            else:
-                blob_dict = _assemble_mag_chunks_from_contigs(
-                    cur, mag_id, sample_id, variable_name, zoom_blob,
-                    xs, xe, type_picked, is_contig_blob=False,
-                )
-        elif feature_table == "Contig_blob":
-            zoom_blob = get_mag_contig_zoom(cur, mag_id, variable_name)
-            if zoom_blob is None:
-                continue
-            if _use_zoom:
-                blob_dict = _blob_to_feature_dict(None, type_picked, xs, xe, max_base_resolution, zoom_blob_bytes=zoom_blob, scale_divisor=_scale_div, zoom_bin_sizes=_zoom_bins)
-            else:
-                blob_dict = _assemble_mag_chunks_from_contigs(
-                    cur, mag_id, None, variable_name, zoom_blob,
-                    xs, xe, type_picked, is_contig_blob=True,
-                )
-        else:
+        if feature_table not in ("Feature_blob", "Contig_blob"):
             continue
+        is_contig_blob = (feature_table == "Contig_blob")
+        _sample = None if is_contig_blob else sample_id
+
+        if _use_zoom:
+            blob_dict = _stitch_contig_zoom_blobs(
+                cur, mag_id, members, _sample, variable_name,
+                is_contig_blob, xs, xe, type_picked,
+                _scale_div, _zoom_bins, max_base_resolution,
+            )
+        else:
+            blob_dict = _assemble_mag_chunks_from_contigs(
+                cur, mag_id, _sample, variable_name, None,
+                xs, xe, type_picked, is_contig_blob=is_contig_blob,
+            )
 
         if blob_dict is None:
             continue
@@ -2578,17 +2582,19 @@ def generate_bokeh_plot_mag_view(conn, list_features, mag_name, sample_name, xst
 
     # --- Resolve sample ---
     sample_id = None
-    if sample_name:
+    if sample_name and not is_all:
         cur.execute("SELECT Sample_id, Sample_name FROM Sample WHERE Sample_name=?", (sample_name,))
         row = cur.fetchone()
         if row is None:
             raise ValueError(f"Sample not found: {sample_name}")
         sample_id, sample_name = row
-        print(f"Sample {sample_name} validated.", flush=True)
 
     requested_features = parse_requested_features(list_features)
     metadata_cache = get_variable_metadata_batch(cur, requested_features)
     contig_features, sample_features = split_contig_vs_sample_features(metadata_cache, requested_features)
+
+    from ..database.database_getters import get_mag_members
+    mag_members = get_mag_members(conn, mag_id)
 
     t_features = time.perf_counter()
     subplots = []
@@ -2621,6 +2627,7 @@ def generate_bokeh_plot_mag_view(conn, list_features, mag_name, sample_name, xst
                     variable_metadata=metadata_cache.get(feature),
                     max_base_resolution=max_base_resolution,
                     min_relative_value=min_relative_value,
+                    members=mag_members,
                 )
                 subplot = make_bokeh_subplot(combined_dicts, subplot_size, shared_xrange, show_tooltips=True)
                 if subplot is not None:
@@ -2633,8 +2640,9 @@ def generate_bokeh_plot_mag_view(conn, list_features, mag_name, sample_name, xst
         # ALL SAMPLES mode: one subplot per sample, each showing the concatenated MAG
         all_rows = cur.execute(
             "SELECT DISTINCT s.Sample_id, s.Sample_name FROM Sample s "
-            "JOIN MAG_blob mb ON mb.Sample_id = s.Sample_id "
-            "WHERE mb.MAG_id = ?",
+            "JOIN Feature_blob fb ON fb.Sample_id = s.Sample_id "
+            "JOIN MAG_contigs_association mca ON mca.Contig_id = fb.Contig_id "
+            "WHERE mca.MAG_id = ?",
             (mag_id,),
         ).fetchall()
         if allowed_samples is not None:
@@ -2652,6 +2660,7 @@ def generate_bokeh_plot_mag_view(conn, list_features, mag_name, sample_name, xst
                         variable_metadata=metadata_cache.get(feature),
                         max_base_resolution=max_base_resolution,
                         min_relative_value=min_relative_value,
+                        members=mag_members,
                     )
                     for d in combined_dicts:
                         d['title'] = sname
@@ -2669,6 +2678,7 @@ def generate_bokeh_plot_mag_view(conn, list_features, mag_name, sample_name, xst
                     variable_metadata=metadata_cache.get(feature),
                     max_base_resolution=max_base_resolution,
                     min_relative_value=min_relative_value,
+                    members=mag_members,
                 )
                 subplot = make_bokeh_subplot(combined_dicts, subplot_size, shared_xrange, show_tooltips=True)
                 if subplot is not None:
