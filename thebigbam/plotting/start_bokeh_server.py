@@ -47,23 +47,39 @@ def _estimate_grid_data_size(grid):
                     total_bytes += sys.getsizeof(col_data)
     return total_bytes, n_sources, len(grid.references())
 
-_SERVE_T0 = None
-_SERVE_CUMUL = 0.0
+class _TimingPhase:
+    def __init__(self):
+        self._phase_start = time.perf_counter()
+        self._phase_timed = 0.0
+        self._phase_name = "Startup"
 
-def _timing_tag(step_secs):
-    global _SERVE_CUMUL
-    if _SERVE_T0 is None:
-        return ""
-    _SERVE_CUMUL += step_secs
-    real = time.perf_counter() - _SERVE_T0
-    return f" (timed={_SERVE_CUMUL:.3f}s real={real:.3f}s)"
+    def tag(self, step_secs):
+        self._phase_timed += step_secs
+        real = time.perf_counter() - self._phase_start
+        return f" (timed={self._phase_timed:.3f}s real={real:.3f}s)"
+
+    def summary(self, name=None):
+        label = name or self._phase_name
+        real = time.perf_counter() - self._phase_start
+        gap = real - self._phase_timed
+        pct = (gap / real * 100) if real > 0 else 0
+        print(f"[timing] {label} done: timed={self._phase_timed:.3f}s real={real:.3f}s gap={gap:.3f}s ({pct:.1f}%)", flush=True)
+        self._phase_start = time.perf_counter()
+        self._phase_timed = 0.0
+
+    def start_phase(self, name):
+        self._phase_name = name
+        self._phase_start = time.perf_counter()
+        self._phase_timed = 0.0
+
+_TIMING = None
 
 def preload_db_data(db_path, enable_timing=False):
     """Run all expensive DB queries once at startup. Returns a dict of pure data."""
     import duckdb as _duckdb
     if enable_timing:
         _t_total = time.perf_counter()
-        print(f"[timing] RSS at preload start: {_get_rss_mb():.0f} MB{_timing_tag(0)}", flush=True)
+        print(f"[timing] RSS at preload start: {_get_rss_mb():.0f} MB{_TIMING.tag(0)}", flush=True)
 
     conn = _duckdb.connect(db_path, read_only=True)
     cur = conn.cursor()
@@ -83,7 +99,7 @@ def preload_db_data(db_path, enable_timing=False):
         annotation_types = []
     if enable_timing:
         _step = time.perf_counter() - _t
-        print(f"[timing] Preload: annotation types: {_step:.3f}s{_timing_tag(_step)}", flush=True)
+        print(f"[timing] Preload: annotation types: {_step:.3f}s{_TIMING.tag(_step)}", flush=True)
 
     if enable_timing:
         _t = time.perf_counter()
@@ -92,7 +108,7 @@ def preload_db_data(db_path, enable_timing=False):
     mags = sorted(mag_to_contigs.keys())
     if enable_timing:
         _step = time.perf_counter() - _t
-        print(f"[timing] Preload: MAG mode + contig map ({len(mags)} MAGs): {_step:.3f}s{_timing_tag(_step)}", flush=True)
+        print(f"[timing] Preload: MAG mode + contig map ({len(mags)} MAGs): {_step:.3f}s{_TIMING.tag(_step)}", flush=True)
 
     if enable_timing:
         _t = time.perf_counter()
@@ -104,7 +120,7 @@ def preload_db_data(db_path, enable_timing=False):
     contig_id_to_name = {r[0]: r[1] for r in rows}
     if enable_timing:
         _step = time.perf_counter() - _t
-        print(f"[timing] Preload: contigs query ({len(contigs)} contigs): {_step:.3f}s{_timing_tag(_step)}", flush=True)
+        print(f"[timing] Preload: contigs query ({len(contigs)} contigs): {_step:.3f}s{_TIMING.tag(_step)}", flush=True)
 
     mag_to_contig_offsets = {}
     for _mag_name, _contigs in mag_to_contigs.items():
@@ -132,11 +148,11 @@ def preload_db_data(db_path, enable_timing=False):
     has_samples = len(samples) > 0
     if enable_timing:
         _step = time.perf_counter() - _t
-        print(f"[timing] Preload: samples query ({len(samples)} samples): {_step:.3f}s{_timing_tag(_step)}", flush=True)
+        print(f"[timing] Preload: samples query ({len(samples)} samples): {_step:.3f}s{_TIMING.tag(_step)}", flush=True)
 
     if enable_timing:
         _t = time.perf_counter()
-        print(f"[timing] Preload: coverage presence mapping (querying)...{_timing_tag(0)}", flush=True)
+        print(f"[timing] Preload: coverage presence mapping (querying)...{_TIMING.tag(0)}", flush=True)
     sid_to_cids = {}
     cid_to_sids = {}
     if has_sample_table:
@@ -155,7 +171,7 @@ def preload_db_data(db_path, enable_timing=False):
     if enable_timing:
         n_pairs = sum(len(v) for v in sid_to_cids.values())
         _step = time.perf_counter() - _t
-        print(f"[timing] Preload: coverage presence mapping ({n_pairs} pairs): {_step:.3f}s{_timing_tag(_step)}", flush=True)
+        print(f"[timing] Preload: coverage presence mapping ({n_pairs} pairs): {_step:.3f}s{_TIMING.tag(_step)}", flush=True)
 
     if enable_timing:
         _t = time.perf_counter()
@@ -169,7 +185,7 @@ def preload_db_data(db_path, enable_timing=False):
         mag_to_sample_ids[_mag_name] = _s
     if enable_timing:
         _step = time.perf_counter() - _t
-        print(f"[timing] Preload: MAG→samples mapping: {_step:.3f}s{_timing_tag(_step)}", flush=True)
+        print(f"[timing] Preload: MAG→samples mapping: {_step:.3f}s{_TIMING.tag(_step)}", flush=True)
 
     if enable_timing:
         _t = time.perf_counter()
@@ -220,14 +236,14 @@ def preload_db_data(db_path, enable_timing=False):
         module_helps.append(combined_help)
     if enable_timing:
         _step = time.perf_counter() - _t
-        print(f"[timing] Preload: variable/module queries: {_step:.3f}s{_timing_tag(_step)}", flush=True)
+        print(f"[timing] Preload: variable/module queries: {_step:.3f}s{_TIMING.tag(_step)}", flush=True)
 
     if enable_timing:
         _t = time.perf_counter()
     filtering_metadata = get_filtering_metadata(db_path, enable_timing=enable_timing)
     if enable_timing:
         _step = time.perf_counter() - _t
-        print(f"[timing] Preload: filtering metadata: {_step:.3f}s{_timing_tag(_step)}", flush=True)
+        print(f"[timing] Preload: filtering metadata: {_step:.3f}s{_TIMING.tag(_step)}", flush=True)
 
     if enable_timing:
         _t = time.perf_counter()
@@ -237,14 +253,14 @@ def preload_db_data(db_path, enable_timing=False):
         subplot_to_varnames.setdefault(_subplot, []).append(_vname)
     if enable_timing:
         _step = time.perf_counter() - _t
-        print(f"[timing] Preload: subplot→varnames: {_step:.3f}s{_timing_tag(_step)}", flush=True)
+        print(f"[timing] Preload: subplot→varnames: {_step:.3f}s{_TIMING.tag(_step)}", flush=True)
 
     conn.close()
 
     if enable_timing:
         _step = time.perf_counter() - _t_total
-        print(f"[timing] Preload total: {_step:.3f}s{_timing_tag(0)}", flush=True)
-        print(f"[timing] RSS at preload end: {_get_rss_mb():.0f} MB{_timing_tag(0)}", flush=True)
+        print(f"[timing] Preload total: {_step:.3f}s{_TIMING.tag(0)}", flush=True)
+        print(f"[timing] RSS at preload end: {_get_rss_mb():.0f} MB{_TIMING.tag(0)}", flush=True)
 
     return {
         'annotation_types': annotation_types,
@@ -369,6 +385,8 @@ def build_controls(preloaded):
 
 def create_layout(db_path, preloaded, enable_timing=False):
     """Create and return the application layout for Panel serve."""
+    if enable_timing:
+        _TIMING.start_phase("Session init")
 
     ### Event functions
     ## Helper function to create collapsible section toggle callbacks
@@ -885,6 +903,7 @@ def create_layout(db_path, preloaded, enable_timing=False):
     # Views (One sample / All samples) callback: show/hide sample-related controls
     def on_view_change(attr, old, new):
         if enable_timing:
+            _TIMING.start_phase("View change")
             t_view = time.perf_counter()
         is_all = (new == 1)  # True means All samples
 
@@ -908,7 +927,7 @@ def create_layout(db_path, preloaded, enable_timing=False):
             update_section_titles()
             if enable_timing:
                 _step = time.perf_counter() - t_view
-                print(f"[timing] on_view_change (server): {_step:.3f}s{_timing_tag(_step)}", flush=True)
+                print(f"[timing] on_view_change (server): {_step:.3f}s{_TIMING.tag(_step)}", flush=True)
                 _timing_state['t_sent'] = time.perf_counter()
                 _timing_state['label'] = 'view_change'
                 _timing_ping.value = f"view_{time.perf_counter()}"
@@ -933,7 +952,8 @@ def create_layout(db_path, preloaded, enable_timing=False):
             gc.collect()
 
             if enable_timing:
-                print(f"[timing] Memory (current RSS) at APPLY start: {_get_rss_mb():.0f} MB{_timing_tag(0)}", flush=True)
+                _TIMING.start_phase("APPLY")
+                print(f"[timing] Memory (current RSS) at APPLY start: {_get_rss_mb():.0f} MB{_TIMING.tag(0)}", flush=True)
                 t_apply_start = time.perf_counter()
             contig = widgets['contig_select'].value
             has_samples = widgets['has_samples']
@@ -1086,7 +1106,7 @@ def create_layout(db_path, preloaded, enable_timing=False):
                 if enable_timing:
                     t_params = time.perf_counter()
                     _step = t_params - t_apply_start
-                    print(f"[timing] Parameter parsing: {_step:.3f}s{_timing_tag(_step)}", flush=True)
+                    print(f"[timing] Parameter parsing: {_step:.3f}s{_TIMING.tag(_step)}", flush=True)
 
                 # Preserve x-range when re-plotting same MAG/sample/range
                 mag_preserve_xrange = (
@@ -1126,8 +1146,8 @@ def create_layout(db_path, preloaded, enable_timing=False):
                 )
                 if enable_timing:
                     _step = time.perf_counter() - t_plot
-                    print(f"[timing] generate_bokeh_plot_mag_view (DB queries + plotting): {_step:.3f}s{_timing_tag(_step)}", flush=True)
-                    print(f"[timing] Bokeh model count in grid: {len(grid.references())}{_timing_tag(0)}", flush=True)
+                    print(f"[timing] generate_bokeh_plot_mag_view (DB queries + plotting): {_step:.3f}s{_TIMING.tag(_step)}", flush=True)
+                    print(f"[timing] Bokeh model count in grid: {len(grid.references())}{_TIMING.tag(0)}", flush=True)
 
                 new_xrange = _get_shared_xrange(grid)
                 if mag_preserve_xrange and new_xrange is not None:
@@ -1159,20 +1179,20 @@ def create_layout(db_path, preloaded, enable_timing=False):
                 download_data_button.visible = True
                 command_hint_pane.visible = False
                 if enable_timing:
-                    print(f"[timing] RSS after plot generation: {_get_rss_mb():.0f} MB{_timing_tag(0)}", flush=True)
+                    print(f"[timing] RSS after plot generation: {_get_rss_mb():.0f} MB{_TIMING.tag(0)}", flush=True)
                     n_contigs = len(widgets['mag_to_contigs'].get(active_mag, []))
                     print(f"[timing] Sending: MAG view for '{active_mag}', sample='{sample}', "
-                          f"is_all={is_all}, features={len(mag_requested_features)}, contigs={n_contigs}{_timing_tag(0)}", flush=True)
+                          f"is_all={is_all}, features={len(mag_requested_features)}, contigs={n_contigs}{_TIMING.tag(0)}", flush=True)
                     data_bytes, n_sources, n_models = _estimate_grid_data_size(grid)
                     print(f"[timing] Data to frontend: {data_bytes / 1024 / 1024:.1f} MB approx "
-                          f"({n_models} models, {n_sources} data sources){_timing_tag(0)}", flush=True)
+                          f"({n_models} models, {n_sources} data sources){_TIMING.tag(0)}", flush=True)
                     t_send = time.perf_counter()
                 main_placeholder.objects = [pn.Column(toolbar_row, command_hint_pane, grid, sizing_mode="stretch_both")]
                 if enable_timing:
                     _step = time.perf_counter() - t_send
-                    print(f"[timing] Sending to frontend (objects assignment): {_step:.3f}s{_timing_tag(_step)}", flush=True)
+                    print(f"[timing] Sending to frontend (objects assignment): {_step:.3f}s{_TIMING.tag(_step)}", flush=True)
                     _step = time.perf_counter() - t_apply_start
-                    print(f"[timing] Total APPLY (MAG view): {_step:.3f}s{_timing_tag(0)}", flush=True)
+                    print(f"[timing] Total APPLY (MAG view): {_step:.3f}s{_TIMING.tag(0)}", flush=True)
                 return
             # --- end of MAG view early path ---
 
@@ -1240,7 +1260,7 @@ def create_layout(db_path, preloaded, enable_timing=False):
             if enable_timing:
                 t_params = time.perf_counter()
                 _step = t_params - t_apply_start
-                print(f"[timing] Parameter parsing: {_step:.3f}s{_timing_tag(_step)}", flush=True)
+                print(f"[timing] Parameter parsing: {_step:.3f}s{_TIMING.tag(_step)}", flush=True)
 
             grid = None
             if is_all:
@@ -1297,8 +1317,8 @@ def create_layout(db_path, preloaded, enable_timing=False):
                 )
                 if enable_timing:
                     _step = time.perf_counter() - t_plot
-                    print(f"[timing] generate_bokeh_plot_all_samples (DB queries + plotting): {_step:.3f}s{_timing_tag(_step)}", flush=True)
-                    print(f"[timing] Bokeh model count in grid: {len(grid.references())}{_timing_tag(0)}", flush=True)
+                    print(f"[timing] generate_bokeh_plot_all_samples (DB queries + plotting): {_step:.3f}s{_TIMING.tag(_step)}", flush=True)
+                    print(f"[timing] Bokeh model count in grid: {len(grid.references())}{_TIMING.tag(0)}", flush=True)
             else:
                 # One-sample view: collect possibly-many requested features and call per-sample plot
                 requested_features = []
@@ -1337,8 +1357,8 @@ def create_layout(db_path, preloaded, enable_timing=False):
                 )
                 if enable_timing:
                     _step = time.perf_counter() - t_plot
-                    print(f"[timing] generate_bokeh_plot_per_sample (DB queries + plotting): {_step:.3f}s{_timing_tag(_step)}", flush=True)
-                    print(f"[timing] Bokeh model count in grid: {len(grid.references())}{_timing_tag(0)}", flush=True)
+                    print(f"[timing] generate_bokeh_plot_per_sample (DB queries + plotting): {_step:.3f}s{_TIMING.tag(_step)}", flush=True)
+                    print(f"[timing] Bokeh model count in grid: {len(grid.references())}{_TIMING.tag(0)}", flush=True)
 
             # Restore preserved x-range and update state
             new_xrange = _get_shared_xrange(grid)
@@ -1385,21 +1405,21 @@ def create_layout(db_path, preloaded, enable_timing=False):
 
             # Display the plot
             if enable_timing:
-                print(f"[timing] RSS after plot generation: {_get_rss_mb():.0f} MB{_timing_tag(0)}", flush=True)
+                print(f"[timing] RSS after plot generation: {_get_rss_mb():.0f} MB{_TIMING.tag(0)}", flush=True)
                 view_label = "all samples" if is_all else f"one sample ({sample})"
                 print(f"[timing] Sending: contig='{contig}', view={view_label}, "
-                      f"features={len(requested_features) if not is_all else '1 variable + genome'}{_timing_tag(0)}", flush=True)
+                      f"features={len(requested_features) if not is_all else '1 variable + genome'}{_TIMING.tag(0)}", flush=True)
                 data_bytes, n_sources, n_models = _estimate_grid_data_size(grid)
                 print(f"[timing] Data to frontend: {data_bytes / 1024 / 1024:.1f} MB approx "
-                      f"({n_models} models, {n_sources} data sources){_timing_tag(0)}", flush=True)
+                      f"({n_models} models, {n_sources} data sources){_TIMING.tag(0)}", flush=True)
                 t_send = time.perf_counter()
             main_placeholder.objects = [pn.Column(toolbar_row, command_hint_pane, grid, sizing_mode="stretch_both")]
             if enable_timing:
                 _step = time.perf_counter() - t_send
-                print(f"[timing] Sending to frontend (objects assignment): {_step:.3f}s{_timing_tag(_step)}", flush=True)
+                print(f"[timing] Sending to frontend (objects assignment): {_step:.3f}s{_TIMING.tag(_step)}", flush=True)
                 view_name = "all samples" if is_all else "one sample"
                 _step = time.perf_counter() - t_apply_start
-                print(f"[timing] Total APPLY ({view_name}): {_step:.3f}s{_timing_tag(0)}", flush=True)
+                print(f"[timing] Total APPLY ({view_name}): {_step:.3f}s{_TIMING.tag(0)}", flush=True)
 
         except Exception as e:
             peruse_button.visible = False
@@ -1411,7 +1431,7 @@ def create_layout(db_path, preloaded, enable_timing=False):
             main_placeholder.objects = [pn.pane.HTML(f"<pre>Error building plot:\n{tb}</pre>")]
         finally:
             if enable_timing:
-                print(f"[timing] Memory (current RSS) at APPLY end: {_get_rss_mb():.0f} MB{_timing_tag(0)}", flush=True)
+                print(f"[timing] Memory (current RSS) at APPLY end: {_get_rss_mb():.0f} MB{_TIMING.tag(0)}", flush=True)
                 _timing_state['t_sent'] = time.perf_counter()
                 _timing_state['t_apply_start'] = t_apply_start
                 _timing_state['label'] = 'APPLY'
@@ -1424,6 +1444,7 @@ def create_layout(db_path, preloaded, enable_timing=False):
         """Generate summary tables and open in client browser via JavaScript."""
         from .perusing_data import generate_peruse_html
         if enable_timing:
+            _TIMING.start_phase("Peruse")
             t_peruse = time.perf_counter()
 
         is_mag_view = widgets['has_mags'] and widgets['view_radio'].active == 0
@@ -1438,7 +1459,8 @@ def create_layout(db_path, preloaded, enable_timing=False):
             html_content = generate_peruse_html(conn, None, sample_names, mag_name=mag, is_mag_view=True)
             if enable_timing:
                 _step = time.perf_counter() - t_peruse
-                print(f"[timing] SHOW SUMMARY (MAG view): {_step:.3f}s{_timing_tag(_step)}", flush=True)
+                print(f"[timing] SHOW SUMMARY (MAG view): {_step:.3f}s{_TIMING.tag(_step)}", flush=True)
+                _TIMING.summary("Peruse")
         else:
             contig = widgets['contig_select'].value
             if not contig:
@@ -1475,7 +1497,8 @@ def create_layout(db_path, preloaded, enable_timing=False):
             html_content = generate_peruse_html(conn, contig, sample_names, mag_name=parent_mag, is_mag_view=False)
             if enable_timing:
                 _step = time.perf_counter() - t_peruse
-                print(f"[timing] SHOW SUMMARY (contig view, {len(sample_names)} samples): {_step:.3f}s{_timing_tag(_step)}", flush=True)
+                print(f"[timing] SHOW SUMMARY (contig view, {len(sample_names)} samples): {_step:.3f}s{_TIMING.tag(_step)}", flush=True)
+                _TIMING.summary("Peruse")
 
         if not html_content:
             return
@@ -1530,10 +1553,11 @@ def create_layout(db_path, preloaded, enable_timing=False):
                 if '|heap=' in new:
                     heap_mb = new.split('|heap=')[1]
                     heap_str = f" [JS heap: {heap_mb} MB]"
-                print(f"[timing] Frontend render '{label}' (page refresh): {elapsed:.3f}s{heap_str}{_timing_tag(elapsed)}", flush=True)
+                print(f"[timing] Frontend render '{label}' (page refresh): {elapsed:.3f}s{heap_str}{_TIMING.tag(elapsed)}", flush=True)
                 if 't_apply_start' in _timing_state:
                     total_flow = time.perf_counter() - _timing_state['t_apply_start']
-                    print(f"[timing] Total flow (query -> send -> render): {total_flow:.3f}s{_timing_tag(0)}", flush=True)
+                    print(f"[timing] Total flow (query -> send -> render): {total_flow:.3f}s{_TIMING.tag(0)}", flush=True)
+                _TIMING.summary(label)
         _timing_ack.on_change('value', _on_timing_ack)
 
     def _get_shared_xrange(grid):
@@ -1587,7 +1611,7 @@ def create_layout(db_path, preloaded, enable_timing=False):
         csv_content = download_contig_metrics_csv(db_path, contig, sample_names)
         if enable_timing:
             _step = time.perf_counter() - t_dl
-            print(f"[timing] DOWNLOAD CONTIG METRICS ({len(sample_names)} samples): {_step:.3f}s{_timing_tag(_step)}", flush=True)
+            print(f"[timing] DOWNLOAD CONTIG METRICS ({len(sample_names)} samples): {_step:.3f}s{_TIMING.tag(_step)}", flush=True)
         if csv_content:
             return io.StringIO(csv_content)
         return io.StringIO("")
@@ -1615,7 +1639,7 @@ def create_layout(db_path, preloaded, enable_timing=False):
         csv_content = download_mag_metrics_csv(db_path, mag, sample_names)
         if enable_timing:
             _step = time.perf_counter() - t_dl
-            print(f"[timing] DOWNLOAD MAG METRICS: {_step:.3f}s{_timing_tag(_step)}", flush=True)
+            print(f"[timing] DOWNLOAD MAG METRICS: {_step:.3f}s{_TIMING.tag(_step)}", flush=True)
         if csv_content:
             safe_mag = "".join(c if c.isalnum() or c in "-_" else "_" for c in mag)
             if download_widgets['mag_metrics']:
@@ -1635,7 +1659,7 @@ def create_layout(db_path, preloaded, enable_timing=False):
     widgets = build_controls(preloaded)
     if enable_timing:
         _step = time.perf_counter() - t_init
-        print(f"[timing] Session: widget creation: {_step:.3f}s{_timing_tag(_step)}", flush=True)
+        print(f"[timing] Session: widget creation: {_step:.3f}s{_TIMING.tag(_step)}", flush=True)
 
     _subplot_to_varnames = preloaded['subplot_to_varnames']
 
@@ -2515,7 +2539,7 @@ def create_layout(db_path, preloaded, enable_timing=False):
 
     if enable_timing:
         _step = time.perf_counter() - t_section
-        print(f"[timing]   Filtering section: {_step:.3f}s{_timing_tag(_step)}", flush=True)
+        print(f"[timing]   Filtering section: {_step:.3f}s{_TIMING.tag(_step)}", flush=True)
         t_section = time.perf_counter()
 
 
@@ -2685,7 +2709,7 @@ def create_layout(db_path, preloaded, enable_timing=False):
 
     if enable_timing:
         _step = time.perf_counter() - t_section
-        print(f"[timing]   Sample/Contig/MAG sections: {_step:.3f}s{_timing_tag(_step)}", flush=True)
+        print(f"[timing]   Sample/Contig/MAG sections: {_step:.3f}s{_TIMING.tag(_step)}", flush=True)
         t_section = time.perf_counter()
 
     ## Build Variables section - TWO SEPARATE SECTIONS for each view
@@ -3355,7 +3379,7 @@ def create_layout(db_path, preloaded, enable_timing=False):
 
     if enable_timing:
         _step = time.perf_counter() - t_section
-        print(f"[timing]   Variables + Genome/Annotations sections: {_step:.3f}s{_timing_tag(_step)}", flush=True)
+        print(f"[timing]   Variables + Genome/Annotations sections: {_step:.3f}s{_TIMING.tag(_step)}", flush=True)
         t_section = time.perf_counter()
 
     ## Plotting parameters section
@@ -3711,7 +3735,7 @@ def create_layout(db_path, preloaded, enable_timing=False):
 
     if enable_timing:
         _step = time.perf_counter() - t_section
-        print(f"[timing]   Plotting params + layout assembly: {_step:.3f}s{_timing_tag(_step)}", flush=True)
+        print(f"[timing]   Plotting params + layout assembly: {_step:.3f}s{_TIMING.tag(_step)}", flush=True)
 
     if enable_timing:
         controls_children.extend([_timing_ping, _timing_ack])
@@ -3730,9 +3754,10 @@ def create_layout(db_path, preloaded, enable_timing=False):
 
     if enable_timing:
         _step = time.perf_counter() - t_ui
-        print(f"[timing] Session: UI construction: {_step:.3f}s{_timing_tag(_step)}", flush=True)
+        print(f"[timing] Session: UI construction: {_step:.3f}s{_TIMING.tag(0)}", flush=True)
         _step = time.perf_counter() - t_init
-        print(f"[timing] Session ready (total: {_step:.3f}s){_timing_tag(0)}", flush=True)
+        print(f"[timing] Session ready (total: {_step:.3f}s){_TIMING.tag(0)}", flush=True)
+        _TIMING.summary("Session init")
 
     return layout
 
@@ -3742,9 +3767,8 @@ def add_serve_args(parser):
     parser.add_argument('--time', action='store_true', default=False, help="Print timing and memory diagnostics to the terminal")
 
 def run_serve(args):
-    global _SERVE_T0, _SERVE_CUMUL
-    _SERVE_T0 = time.perf_counter()
-    _SERVE_CUMUL = 0.0
+    global _TIMING
+    _TIMING = _TimingPhase()
     # Print database metadata if available
     import duckdb as _duckdb
     _conn = _duckdb.connect(args.db, read_only=True)
@@ -3773,6 +3797,8 @@ def run_serve(args):
 
     print("Preloading database data...", flush=True)
     preloaded = preload_db_data(args.db, enable_timing=enable_timing)
+    if enable_timing:
+        _TIMING.summary("Startup")
     print(f"Server ready. Open localhost:{args.port} in your browser.", flush=True)
 
     def create_app():

@@ -27,10 +27,16 @@ use crate::gc_content::{GCSkewStats, GCStats, DEFAULT_GC_CONTENT_WINDOW_SIZE, DE
 use crate::types::{feature_name_to_id, ContigInfo, FeatureAnnotation, PackagingData, PresenceData, VARIABLES};
 // Re-export new metric data structs (defined below in this file)
 
+const DUCKDB_MEMORY_LIMIT_GB: u64 = 8;
+
+// DuckDB overhead eats part of the budget (observed: 8 GB → 7.4 GiB usable).
+// Flush WAL at 25 % of the limit so blob-heavy samples never hit the ceiling.
+const BLOB_CHECKPOINT_BYTES: u64 = DUCKDB_MEMORY_LIMIT_GB * 1024 * 1024 * 1024 / 4;
+
 fn configure_for_bulk_writes(conn: &Connection) {
     let _ = conn.execute_batch("SET threads TO 1");
     let _ = conn.execute_batch("SET wal_autocheckpoint='4GB'");
-    let _ = conn.execute_batch("SET memory_limit='8GB'");
+    let _ = conn.execute_batch(&format!("SET memory_limit='{}GB'", DUCKDB_MEMORY_LIMIT_GB));
 }
 
 fn build_contig_length_cache(conn: &Connection) -> HashMap<i64, i32> {
@@ -405,6 +411,9 @@ impl DbWriter {
         // Insert topology data
         self.write_topology(&conn, sample_id, topology)?;
 
+        // Flush non-blob WAL data before the heavy blob writes
+        conn.execute("CHECKPOINT", []).ok();
+
         // Insert feature BLOBs (compressed format)
         self.write_feature_blobs(&conn, sample_id, feature_blobs)?;
 
@@ -647,18 +656,35 @@ impl DbWriter {
             .context("Failed to create Feature_blob appender")?;
         let mut chunk_appender = conn.appender("Feature_blob_chunk")
             .context("Failed to create Feature_blob_chunk appender")?;
+        let mut accumulated_bytes: u64 = 0;
 
         for (feature_name, contig_id, encoded) in blobs {
             if encoded.zoom.is_empty() {
                 continue;
             }
             if let Some(fid) = feature_name_to_id(feature_name) {
+                accumulated_bytes += encoded.zoom.len() as u64;
                 appender.append_row(params![contig_id, sample_id, fid as i32, encoded.zoom.as_slice()])?;
 
                 for (chunk_idx, chunk_data) in encoded.chunks.iter().enumerate() {
+                    accumulated_bytes += chunk_data.len() as u64;
                     chunk_appender.append_row(params![
                         contig_id, sample_id, fid as i32, chunk_idx as i16, chunk_data.as_slice()
                     ])?;
+                }
+
+                if accumulated_bytes >= BLOB_CHECKPOINT_BYTES {
+                    appender.flush().context("Failed to flush Feature_blob appender")?;
+                    chunk_appender.flush().context("Failed to flush Feature_blob_chunk appender")?;
+                    drop(appender);
+                    drop(chunk_appender);
+                    conn.execute("CHECKPOINT", [])
+                        .context("Failed to checkpoint during blob writes")?;
+                    accumulated_bytes = 0;
+                    appender = conn.appender("Feature_blob")
+                        .context("Failed to recreate Feature_blob appender")?;
+                    chunk_appender = conn.appender("Feature_blob_chunk")
+                        .context("Failed to recreate Feature_blob_chunk appender")?;
                 }
             }
         }
