@@ -27,15 +27,13 @@ use crate::gc_content::{GCSkewStats, GCStats, DEFAULT_GC_CONTENT_WINDOW_SIZE, DE
 use crate::types::{feature_name_to_id, ContigInfo, FeatureAnnotation, PackagingData, PresenceData, VARIABLES};
 // Re-export new metric data structs (defined below in this file)
 
-const DUCKDB_MEMORY_LIMIT_GB: u64 = 8;
+const DUCKDB_MEMORY_LIMIT_GB: u64 = 4;
 
-// DuckDB overhead eats part of the budget (observed: 8 GB → 7.4 GiB usable).
-// Flush WAL at 25 % of the limit so blob-heavy samples never hit the ceiling.
-const BLOB_CHECKPOINT_BYTES: u64 = DUCKDB_MEMORY_LIMIT_GB * 1024 * 1024 * 1024 / 4;
+const BLOB_CHECKPOINT_BYTES: u64 = DUCKDB_MEMORY_LIMIT_GB * 1024 * 1024 * 1024 / 8;
 
 fn configure_for_bulk_writes(conn: &Connection) {
     let _ = conn.execute_batch("SET threads TO 1");
-    let _ = conn.execute_batch("SET wal_autocheckpoint='4GB'");
+    let _ = conn.execute_batch("SET wal_autocheckpoint='1GB'");
     let _ = conn.execute_batch(&format!("SET memory_limit='{}GB'", DUCKDB_MEMORY_LIMIT_GB));
 }
 

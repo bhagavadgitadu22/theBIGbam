@@ -917,6 +917,9 @@ def create_layout(db_path, preloaded, enable_timing=False):
             variables_section_all.visible = is_all
             sample_params_header.visible = is_all
             sample_params_content.visible = False
+            mag_params_sort_sample_row.visible = (
+                is_all and mag_params_category_select.value != "Contig"
+            )
 
             # Refresh options while still locked (suppresses cascading callbacks)
             # Don't invalidate filtering cache - filtering is shared between views and hasn't changed
@@ -947,6 +950,7 @@ def create_layout(db_path, preloaded, enable_timing=False):
         from bokeh.io import curdoc
         doc = curdoc()
         doc.hold('combine')
+        t_apply_start = None
         try:
             current_plot_state['shared_xrange'] = None
             main_placeholder.objects = []
@@ -954,7 +958,7 @@ def create_layout(db_path, preloaded, enable_timing=False):
 
             if enable_timing:
                 _TIMING.start_phase("APPLY")
-                print(f"[timing] Memory (current RSS) at APPLY start: {_get_rss_mb():.0f} MB{_TIMING.tag(0)}", flush=True)
+                print(f"[timing] Memory (current RSS) at APPLY start: {_get_rss_mb():.0f} MB", flush=True)
                 t_apply_start = time.perf_counter()
             contig = widgets['contig_select'].value
             has_samples = widgets['has_samples']
@@ -1103,7 +1107,20 @@ def create_layout(db_path, preloaded, enable_timing=False):
                     mag_requested_features = [f for f in mag_requested_features if f != "Gene map"]
                     mag_allowed_samples = None
 
-                print(f"[start_bokeh_server] MAG view: mag={active_mag}, is_all={is_all}, sample={sample}, features={mag_requested_features}", flush=True)
+                # Read MAG contig sort parameters
+                _sort_cat = mag_params_category_select.value
+                _sort_metric = mag_params_metric_select.value
+                _sort_ascending = (mag_params_direction.active == 0)
+                _sort_source = _mag_sort_category_sources.get(_sort_cat)
+                _sort_sample_name = None
+                if _sort_cat != "Contig" and _sort_source:
+                    if is_all:
+                        _sort_sample_name = mag_params_sort_sample_select.value
+                    else:
+                        _sort_sample_name = sample
+
+                print(f"[start_bokeh_server] MAG view: mag={active_mag}, is_all={is_all}, sample={sample}, "
+                      f"sort={_sort_cat}/{_sort_metric}/{'asc' if _sort_ascending else 'desc'}, features={mag_requested_features}", flush=True)
                 if enable_timing:
                     t_params = time.perf_counter()
                     _step = t_params - t_apply_start
@@ -1144,6 +1161,8 @@ def create_layout(db_path, preloaded, enable_timing=False):
                     allowed_samples=mag_allowed_samples,
                     max_samples=int(max_samples_input.value),
                     enable_timing=enable_timing,
+                    sort_source=_sort_source, sort_metric=_sort_metric,
+                    sort_ascending=_sort_ascending, sort_sample_name=_sort_sample_name,
                 )
                 if enable_timing:
                     _step = time.perf_counter() - t_plot
@@ -1181,18 +1200,18 @@ def create_layout(db_path, preloaded, enable_timing=False):
                 download_data_button.visible = True
                 command_hint_pane.visible = False
                 if enable_timing:
-                    print(f"[timing] RSS after plot generation: {_get_rss_mb():.0f} MB{_TIMING.tag(0)}", flush=True)
+                    print(f"[timing] RSS after plot generation: {_get_rss_mb():.0f} MB", flush=True)
                     n_contigs = len(widgets['mag_to_contigs'].get(active_mag, []))
                     print(f"[timing] Sending: MAG view for '{active_mag}', sample='{sample}', "
-                          f"is_all={is_all}, features={len(mag_requested_features)}, contigs={n_contigs}{_TIMING.tag(0)}", flush=True)
+                          f"is_all={is_all}, features={len(mag_requested_features)}, contigs={n_contigs}", flush=True)
                     data_bytes, n_sources, n_models = _estimate_grid_data_size(grid)
                     print(f"[timing] Data to frontend: {data_bytes / 1024 / 1024:.1f} MB approx "
-                          f"({n_models} models, {n_sources} data sources){_TIMING.tag(0)}", flush=True)
+                          f"({n_models} models, {n_sources} data sources)", flush=True)
                     t_send = time.perf_counter()
                 main_placeholder.objects = [pn.Column(toolbar_row, command_hint_pane, grid, sizing_mode="stretch_both")]
                 if enable_timing:
                     _step = time.perf_counter() - t_send
-                    print(f"[timing] Sending to frontend (objects assignment): {_step:.3f}s{_TIMING.tag(_step)}", flush=True)
+                    print(f"[timing] Panel objects update: {_step:.3f}s{_TIMING.tag(_step)}", flush=True)
                     _step = time.perf_counter() - t_apply_start
                     print(f"[timing] Total APPLY (MAG view): {_step:.3f}s{_TIMING.tag(0)}", flush=True)
                 return
@@ -1407,18 +1426,18 @@ def create_layout(db_path, preloaded, enable_timing=False):
 
             # Display the plot
             if enable_timing:
-                print(f"[timing] RSS after plot generation: {_get_rss_mb():.0f} MB{_TIMING.tag(0)}", flush=True)
+                print(f"[timing] RSS after plot generation: {_get_rss_mb():.0f} MB", flush=True)
                 view_label = "all samples" if is_all else f"one sample ({sample})"
                 print(f"[timing] Sending: contig='{contig}', view={view_label}, "
-                      f"features={len(requested_features) if not is_all else '1 variable + genome'}{_TIMING.tag(0)}", flush=True)
+                      f"features={len(requested_features) if not is_all else '1 variable + genome'}", flush=True)
                 data_bytes, n_sources, n_models = _estimate_grid_data_size(grid)
                 print(f"[timing] Data to frontend: {data_bytes / 1024 / 1024:.1f} MB approx "
-                      f"({n_models} models, {n_sources} data sources){_TIMING.tag(0)}", flush=True)
+                      f"({n_models} models, {n_sources} data sources)", flush=True)
                 t_send = time.perf_counter()
             main_placeholder.objects = [pn.Column(toolbar_row, command_hint_pane, grid, sizing_mode="stretch_both")]
             if enable_timing:
                 _step = time.perf_counter() - t_send
-                print(f"[timing] Sending to frontend (objects assignment): {_step:.3f}s{_TIMING.tag(_step)}", flush=True)
+                print(f"[timing] Panel objects update: {_step:.3f}s{_TIMING.tag(_step)}", flush=True)
                 view_name = "all samples" if is_all else "one sample"
                 _step = time.perf_counter() - t_apply_start
                 print(f"[timing] Total APPLY ({view_name}): {_step:.3f}s{_TIMING.tag(0)}", flush=True)
@@ -1433,10 +1452,11 @@ def create_layout(db_path, preloaded, enable_timing=False):
             main_placeholder.objects = [pn.pane.HTML(f"<pre>Error building plot:\n{tb}</pre>")]
         finally:
             if enable_timing:
-                print(f"[timing] Memory (current RSS) at APPLY end: {_get_rss_mb():.0f} MB{_TIMING.tag(0)}", flush=True)
+                print(f"[timing] Memory (current RSS) at APPLY end: {_get_rss_mb():.0f} MB", flush=True)
                 _TIMING.summary("APPLY")
                 _timing_state['t_sent'] = time.perf_counter()
-                _timing_state['t_apply_start'] = t_apply_start
+                if t_apply_start is not None:
+                    _timing_state['t_apply_start'] = t_apply_start
                 _timing_state['label'] = 'APPLY'
                 _timing_ping.value = f"apply_{time.perf_counter()}"
             main_placeholder.loading = False
@@ -1556,7 +1576,7 @@ def create_layout(db_path, preloaded, enable_timing=False):
                 if '|heap=' in new:
                     heap_mb = new.split('|heap=')[1]
                     heap_str = f" [JS heap: {heap_mb} MB]"
-                print(f"[timing] Frontend render '{label}' (page refresh): {elapsed:.3f}s{heap_str}", flush=True)
+                print(f"[timing] Frontend render '{label}' (browser round-trip): {elapsed:.3f}s{heap_str}", flush=True)
                 if 't_apply_start' in _timing_state:
                     total_flow = time.perf_counter() - _timing_state['t_apply_start']
                     print(f"[timing] Total flow (query -> send -> render): {total_flow:.3f}s", flush=True)
@@ -3445,6 +3465,70 @@ def create_layout(db_path, preloaded, enable_timing=False):
     )
     plot_heights_toggle_btn.on_click(make_toggle_callback(plot_heights_toggle_btn, plot_heights_content))
 
+    # MAG parameters (contig ordering)
+    _mag_excluded_categories = {"Sample", "Annotations", "MAG", "MAG coverage",
+                                "MAG misassembly", "MAG microdiversity"}
+    _mag_sort_categories = [cat for cat in filtering_metadata
+                            if cat not in _mag_excluded_categories]
+    _mag_sort_category_sources = {cat: filtering_metadata[cat]['source'] for cat in _mag_sort_categories}
+
+    def _numeric_columns_for(category):
+        cols = filtering_metadata.get(category, {}).get('columns', {})
+        return [c for c, info in cols.items() if info.get('type') == 'numeric']
+
+    _initial_metrics = _numeric_columns_for("Contig") if "Contig" in _mag_sort_categories else []
+
+    mag_params_toggle_btn = Button(label="▶", width=20, height=20, button_type="primary", align="center", margin=0, stylesheets=[toggle_stylesheet])
+    mag_params_toggle_btn.styles = {'padding': '0px', 'line-height': '20px'}
+    mag_params_title = Div(text="MAG parameters", align="center")
+    mag_params_header = row(mag_params_toggle_btn, mag_params_title, sizing_mode="stretch_width", align="center", margin=(5, 0, 0, 0))
+    mag_params_header.visible = bool(widgets['has_mags'])
+
+    mag_params_category_label = Div(text="Category", margin=(5, 5, 5, 0))
+    mag_params_category_select = Select(
+        value=_mag_sort_categories[0] if _mag_sort_categories else "",
+        options=_mag_sort_categories,
+        sizing_mode="stretch_width", margin=(0, 5, 0, 5),
+    )
+    mag_params_category_row = row(mag_params_category_label, mag_params_category_select, sizing_mode="stretch_width", margin=(5, 0, 5, 0))
+
+    mag_params_metric_label = Div(text="Metric", margin=(5, 5, 5, 0))
+    mag_params_metric_select = Select(
+        value="Contig_length" if "Contig_length" in _initial_metrics else (_initial_metrics[0] if _initial_metrics else ""),
+        options=_initial_metrics if _initial_metrics else [""],
+        sizing_mode="stretch_width", margin=(0, 5, 0, 5),
+    )
+    mag_params_metric_row = row(mag_params_metric_label, mag_params_metric_select, sizing_mode="stretch_width", margin=(5, 0, 5, 0))
+
+    mag_params_direction = RadioButtonGroup(labels=["Ascending", "Descending"], active=1, sizing_mode="stretch_width", margin=(5, 5, 5, 5))
+    mag_params_direction_row = row(mag_params_direction, sizing_mode="stretch_width", margin=(5, 0, 5, 0))
+
+    mag_params_sort_sample_label = Div(text="Sort reference sample", margin=(5, 5, 5, 0))
+    mag_params_sort_sample_select = Select(
+        value=orig_samples[0] if orig_samples else "",
+        options=list(orig_samples) if orig_samples else [""],
+        sizing_mode="stretch_width", margin=(0, 5, 0, 5),
+    )
+    mag_params_sort_sample_row = row(mag_params_sort_sample_label, mag_params_sort_sample_select, sizing_mode="stretch_width", margin=(5, 0, 5, 0))
+    mag_params_sort_sample_row.visible = False
+
+    mag_params_content = pn.Column(
+        mag_params_category_row, mag_params_metric_row,
+        mag_params_direction_row, mag_params_sort_sample_row,
+        sizing_mode="stretch_width", visible=False,
+    )
+    mag_params_toggle_btn.on_click(make_toggle_callback(mag_params_toggle_btn, mag_params_content))
+
+    def _on_mag_sort_category_change(attr, old, new):
+        metrics = _numeric_columns_for(new)
+        mag_params_metric_select.options = metrics if metrics else [""]
+        mag_params_metric_select.value = metrics[0] if metrics else ""
+        is_sample_dep = (new != "Contig")
+        is_all = (views.active == 1)
+        mag_params_sort_sample_row.visible = is_sample_dep and is_all
+
+    mag_params_category_select.on_change('value', _on_mag_sort_category_change)
+
     # Sample parameters (only useful in All Samples view)
     sample_params_toggle_btn = Button(label="▶", width=20, height=20, button_type="primary", align="center", margin=0, stylesheets=[toggle_stylesheet])
     sample_params_toggle_btn.styles = {'padding': '0px', 'line-height': '20px'}
@@ -3473,6 +3557,7 @@ def create_layout(db_path, preloaded, enable_timing=False):
         min_coverage_freq_row,
         max_window_header, max_window_content,
         plot_heights_header, plot_heights_content,
+        mag_params_header, mag_params_content,
         sample_params_header, sample_params_content,
         sizing_mode="stretch_width"
     )

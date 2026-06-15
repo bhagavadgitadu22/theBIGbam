@@ -154,6 +154,70 @@ def get_mag_members(conn, mag_id):
     return [(int(cid), int(clen), int(off)) for cid, clen, off in rows]
 
 
+def _validate_column(conn, table, column):
+    """Check that column exists in table to prevent SQL injection."""
+    try:
+        cols = [r[0] for r in conn.execute(f"DESCRIBE {table}").fetchall()]
+    except duckdb.Error:
+        return False
+    return column in cols
+
+
+def _sorted_members_query(conn, mag_id, source_table, metric, ascending, sample_name=None):
+    """Shared implementation for sorted member queries.
+
+    Returns [(contig_id, contig_name, contig_length)] in the requested order.
+    """
+    if not _validate_column(conn, source_table, metric):
+        raise ValueError(f"Column {metric!r} not found in {source_table}")
+    direction = "ASC" if ascending else "DESC"
+    if source_table == "Contig":
+        rows = conn.execute(
+            f'SELECT mca.Contig_id, c.Contig_name, c.Contig_length '
+            f'FROM MAG_contigs_association mca '
+            f'JOIN Contig c ON c.Contig_id = mca.Contig_id '
+            f'WHERE mca.MAG_id = ? '
+            f'ORDER BY c."{metric}" {direction}',
+            [mag_id],
+        ).fetchall()
+    else:
+        if sample_name is None:
+            raise ValueError("sample_name required for sample-dependent sort")
+        rows = conn.execute(
+            f'SELECT mca.Contig_id, c.Contig_name, c.Contig_length '
+            f'FROM MAG_contigs_association mca '
+            f'JOIN Contig c ON c.Contig_id = mca.Contig_id '
+            f'JOIN {source_table} sv ON sv.Contig_name = c.Contig_name '
+            f'  AND sv.Sample_name = ? '
+            f'WHERE mca.MAG_id = ? '
+            f'ORDER BY sv."{metric}" {direction}',
+            [sample_name, mag_id],
+        ).fetchall()
+    return rows
+
+
+def get_mag_members_sorted(conn, mag_id, source_table, metric, ascending, sample_name=None):
+    """Return [(contig_id, contig_length, offset)] sorted by metric with recomputed offsets."""
+    rows = _sorted_members_query(conn, mag_id, source_table, metric, ascending, sample_name)
+    offset = 0
+    result = []
+    for cid, _cname, clen in rows:
+        result.append((int(cid), int(clen), offset))
+        offset += int(clen)
+    return result
+
+
+def get_mag_contigs_sorted(conn, mag_id, source_table, metric, ascending, sample_name=None):
+    """Return [(contig_name, contig_length, offset)] sorted by metric with recomputed offsets."""
+    rows = _sorted_members_query(conn, mag_id, source_table, metric, ascending, sample_name)
+    offset = 0
+    result = []
+    for _cid, cname, clen in rows:
+        result.append((str(cname), int(clen), offset))
+        offset += int(clen)
+    return result
+
+
 def get_mag_contig_zoom(cur, mag_id, feature_name):
     """Zoom blob bytes for one (MAG, Feature) in MAG_contig_blob, or None."""
     fid = _feature_id_for(cur, feature_name)

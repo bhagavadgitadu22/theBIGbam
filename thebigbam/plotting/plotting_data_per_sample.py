@@ -15,16 +15,16 @@ from dna_features_viewer import BiopythonTranslator
 _NULL_STRINGS = {'', 'none', 'null', 'nan'}
 
 
-def make_bokeh_mag_track(conn, mag_name, height=30, shared_xrange=None):
+def make_bokeh_mag_track(conn, mag_name, height=30, shared_xrange=None, members=None):
     """Build a MAG overview track: horizontal grey line spanning the MAG with
-    black vertical tick marks at each contig boundary. Contigs are arranged
-    longest-first (matches MAG_contigs_association write order).
+    black vertical tick marks at each contig boundary.
 
     Only boundaries and segments that overlap the visible window are rendered,
     so that large MAGs don't send unnecessary data to the browser.
     """
-    from ..database.database_getters import get_mag_contigs
-    members = get_mag_contigs(conn, mag_name)
+    if members is None:
+        from ..database.database_getters import get_mag_contigs
+        members = get_mag_contigs(conn, mag_name)
     if not members:
         return None
     total_len = sum(length for _n, length, _o in members)
@@ -762,14 +762,15 @@ def make_bokeh_sequence_subplot(conn, contig_name, xstart, xend, height, x_range
         return None
 
 
-def make_bokeh_sequence_subplot_mag(conn, mag_name, xstart, xend, height, x_range):
+def make_bokeh_sequence_subplot_mag(conn, mag_name, xstart, xend, height, x_range, members=None):
     """MAG-wide sequence track. For each member contig that overlaps the visible
     MAG window, fetches the overlapping substring and places nucleotide quads
     at their MAG-space positions.
     """
-    from ..database.database_getters import get_mag_contigs
     try:
-        members = get_mag_contigs(conn, mag_name)
+        if members is None:
+            from ..database.database_getters import get_mag_contigs
+            members = get_mag_contigs(conn, mag_name)
         if not members:
             return None
         cur = conn.cursor()
@@ -957,16 +958,17 @@ def make_bokeh_translated_sequence_subplot(conn, contig_name, xstart, xend, heig
         return None
 
 
-def make_bokeh_translated_sequence_subplot_mag(conn, mag_name, xstart, xend, height, x_range):
+def make_bokeh_translated_sequence_subplot_mag(conn, mag_name, xstart, xend, height, x_range, members=None):
     """MAG-wide translated sequence track. Collects CDS rows across every
     member contig that overlaps the visible MAG window, shifts positions +
     segments by each contig's MAG offset, then renders with a global lane
     assignment across all CDS in the window.
     """
-    from ..database.database_getters import get_mag_contigs
     try:
         cur = conn.cursor()
-        members = get_mag_contigs(conn, mag_name)
+        if members is None:
+            from ..database.database_getters import get_mag_contigs
+            members = get_mag_contigs(conn, mag_name)
         if not members:
             return None
         entries = []
@@ -2141,21 +2143,17 @@ def _merge_decoded_chunks(decoded_list):
 
 def _assemble_mag_chunks_from_contigs(cur, mag_id, sample_id, variable_name,
                                        zoom_blob, xs, xe, type_picked,
-                                       is_contig_blob=False):
-    """Build MAG base-resolution data on the fly from per-contig chunks.
-
-    Instead of reading from (now-removed) MAG_blob_chunk / MAG_contig_blob_chunk
-    tables, fetch the relevant per-contig chunks and shift positions by the
-    contig's offset in the MAG.
-    """
+                                       is_contig_blob=False, members=None):
+    """Build MAG base-resolution data on the fly from per-contig chunks."""
     import numpy as np
-    from thebigbam.database.database_getters import get_mag_members
     from thebigbam.database.blob_decoder import (
         decode_raw_chunks, decode_raw_sparse_chunks,
         get_blob_scale, get_chunk_size, is_sparse_zoom_blob,
     )
 
-    members = get_mag_members(cur, mag_id)
+    if members is None:
+        from thebigbam.database.database_getters import get_mag_members
+        members = get_mag_members(cur, mag_id)
     scale_div = get_blob_scale(cur, variable_name)
     chunk_sz = get_chunk_size(cur)
     if zoom_blob is not None:
@@ -2324,6 +2322,7 @@ def get_mag_feature_data(cur, feature, mag_id, sample_id, mag_length,
             blob_dict = _assemble_mag_chunks_from_contigs(
                 cur, mag_id, _sample, variable_name, None,
                 xs, xe, type_picked, is_contig_blob=is_contig_blob,
+                members=members,
             )
 
         if blob_dict is None:
@@ -2346,30 +2345,17 @@ def get_mag_feature_data(cur, feature, mag_id, sample_id, mag_length,
     return list_feature_dict
 
 
-def make_bokeh_genemap_mag(conn, mag_id, mag_name, mag_length, subplot_size,
-                           shared_xrange, xstart=None, xend=None,
-                           feature_types=None, plot_isoforms=True,
-                           feature_label_key=None, custom_colors=None,
-                           figure_width=30):
-    """MAG-wide gene map. Builds a single SeqRecord spanning the entire MAG
-    using MAG_annotation_core (coordinates already offset into MAG space),
-    then runs it through the same DNAFeaturesViewer path as
-    make_bokeh_genemap. This preserves the y_range DNAFeaturesViewer sets,
-    so features render at identical thickness to the Contig view.
-    """
-    cur = conn.cursor()
-
+def _fetch_genemap_from_mag_annotations(cur, mag_id, xstart, xend, feature_types, plot_isoforms):
+    """Fetch annotations from MAG_annotation_core (pre-baked MAG-space coordinates)."""
     position_filter = ""
     params = [mag_id]
     if xstart is not None and xend is not None:
         position_filter = ' AND mac."End" >= ? AND mac."Start" <= ?'
         params.extend([xstart, xend])
-
     type_filter = ""
     if feature_types:
         type_filter = f' AND mac."Type" IN ({",".join("?" * len(feature_types))})'
         params.extend(feature_types)
-
     base_select = (
         'SELECT mac.Annotation_id, mac."Start", mac."End", mac.Strand, mac."Type", '
         'pq.Value AS Product, fq.Value AS Function, lq.Value AS Locus_tag, '
@@ -2384,9 +2370,75 @@ def make_bokeh_genemap_mag(conn, mag_id, mag_name, mag_length, subplot_size,
         query = f'{base_select}{position_filter}{type_filter} AND (lq.Value IS NULL OR mac.Main_isoform = true)'
     else:
         query = f'{base_select}{position_filter}{type_filter}'
-
     cur.execute(query, tuple(params))
-    seq_ann_rows = cur.fetchall()
+    return cur.fetchall()
+
+
+def _fetch_genemap_from_contig_annotations(cur, mag_id, members, xstart, xend, feature_types, plot_isoforms):
+    """Fetch annotations from Contig_annotation_core and shift by member offsets.
+
+    members: [(contig_id, contig_length, offset)] — the ID-based variant.
+    """
+    if not members:
+        return []
+    contig_ids = [cid for cid, _clen, _off in members]
+    offset_map = {int(cid): off for cid, _clen, off in members}
+
+    placeholders = ','.join('?' * len(contig_ids))
+    params = list(contig_ids)
+    type_filter = ""
+    if feature_types:
+        type_filter = f' AND ca."Type" IN ({",".join("?" * len(feature_types))})'
+        params.extend(feature_types)
+    base_select = (
+        f'SELECT ca.Annotation_id, ca."Start", ca."End", ca.Strand, ca."Type", '
+        f'pq.Value AS Product, fq.Value AS Function, lq.Value AS Locus_tag, '
+        f'ca.Main_isoform, ca.Contig_id '
+        f'FROM Contig_annotation_core ca '
+        f'LEFT JOIN Annotation_qualifier pq ON pq.Annotation_id = ca.Annotation_id AND pq."Key" = \'product\' '
+        f'LEFT JOIN Annotation_qualifier fq ON fq.Annotation_id = ca.Annotation_id AND fq."Key" = \'function\' '
+        f'LEFT JOIN Annotation_qualifier lq ON lq.Annotation_id = ca.Annotation_id AND lq."Key" = \'locus_tag\' '
+        f'WHERE ca.Contig_id IN ({placeholders})'
+    )
+    if not plot_isoforms:
+        query = f'{base_select}{type_filter} AND (lq.Value IS NULL OR ca.Main_isoform = true)'
+    else:
+        query = f'{base_select}{type_filter}'
+    cur.execute(query, tuple(params))
+    raw_rows = cur.fetchall()
+
+    shifted = []
+    for row in raw_rows:
+        ann_id, start, end, strand, ftype, product, function, locus_tag, main_iso, contig_id = row
+        off = offset_map.get(int(contig_id), 0)
+        new_start = start + off
+        new_end = end + off
+        if xstart is not None and xend is not None:
+            if new_end < xstart or new_start > xend:
+                continue
+        shifted.append((ann_id, new_start, new_end, strand, ftype, product, function, locus_tag, main_iso))
+    return shifted
+
+
+def make_bokeh_genemap_mag(conn, mag_id, mag_name, mag_length, subplot_size,
+                           shared_xrange, xstart=None, xend=None,
+                           feature_types=None, plot_isoforms=True,
+                           feature_label_key=None, custom_colors=None,
+                           figure_width=30, members=None):
+    """MAG-wide gene map. When members is provided (reordered), queries
+    Contig_annotation_core and shifts coordinates by each contig's offset.
+    Otherwise uses MAG_annotation_core (pre-baked MAG-space coordinates).
+    """
+    cur = conn.cursor()
+
+    if members is not None:
+        seq_ann_rows = _fetch_genemap_from_contig_annotations(
+            cur, mag_id, members, xstart, xend, feature_types, plot_isoforms,
+        )
+    else:
+        seq_ann_rows = _fetch_genemap_from_mag_annotations(
+            cur, mag_id, xstart, xend, feature_types, plot_isoforms,
+        )
 
     ann_ids = [r[0] for r in seq_ann_rows]
     placeholders = ','.join('?' * len(ann_ids)) if ann_ids else ''
@@ -2533,22 +2585,26 @@ def make_bokeh_genemap_mag(conn, mag_id, mag_name, mag_length, subplot_size,
     return annotation_fig
 
 
-def generate_bokeh_plot_mag_view(conn, list_features, mag_name, sample_name, xstart=None, xend=None, subplot_size=100, genbank_path=None, feature_types=None, plot_isoforms=True, plot_sequence=False, plot_translated_sequence=False, same_y_scale=False, genemap_size=None, sequence_size=None, translated_sequence_size=None, max_base_resolution=None, max_genemap_window=None, max_sequence_window=None, min_relative_value=0.0, feature_label_key=None, custom_colors=None, is_all=False, allowed_samples=None, max_samples=None, enable_timing=False):
-    """Generate a concatenated Bokeh plot for a MAG (all contigs, longest-first).
-
-    All contigs are placed consecutively on a shared x-axis (longest first), with
-    a MAG overview track at the top showing contig boundaries.
-    """
+def generate_bokeh_plot_mag_view(conn, list_features, mag_name, sample_name, xstart=None, xend=None, subplot_size=100, genbank_path=None, feature_types=None, plot_isoforms=True, plot_sequence=False, plot_translated_sequence=False, same_y_scale=False, genemap_size=None, sequence_size=None, translated_sequence_size=None, max_base_resolution=None, max_genemap_window=None, max_sequence_window=None, min_relative_value=0.0, feature_label_key=None, custom_colors=None, is_all=False, allowed_samples=None, max_samples=None, enable_timing=False, sort_source=None, sort_metric=None, sort_ascending=True, sort_sample_name=None):
+    """Generate a concatenated Bokeh plot for a MAG with configurable contig ordering."""
     from ..database.database_getters import get_mag_contigs, get_mag_id
 
     cur = conn.cursor()
-    members = get_mag_contigs(conn, mag_name)
-    if not members:
-        raise ValueError(f"MAG not found or empty: {mag_name}")
-
     mag_id = get_mag_id(conn, mag_name)
     if mag_id is None:
         raise ValueError(f"MAG_id lookup failed for: {mag_name}")
+
+    if sort_source is not None and sort_metric:
+        from ..database.database_getters import get_mag_contigs_sorted, get_mag_members_sorted
+        members = get_mag_contigs_sorted(conn, mag_id, sort_source, sort_metric, sort_ascending, sort_sample_name)
+        mag_members = get_mag_members_sorted(conn, mag_id, sort_source, sort_metric, sort_ascending, sort_sample_name)
+    else:
+        from ..database.database_getters import get_mag_members
+        members = get_mag_contigs(conn, mag_name)
+        mag_members = get_mag_members(conn, mag_id)
+
+    if not members:
+        raise ValueError(f"MAG not found or empty: {mag_name}")
 
     total_len = sum(length for _n, length, _o in members)
     print(f"MAG {mag_name}: {len(members)} contigs, {total_len} bp total", flush=True)
@@ -2561,7 +2617,7 @@ def generate_bokeh_plot_mag_view(conn, list_features, mag_name, sample_name, xst
     # --- MAG track at top (same height as nucleotide sequence track) ---
     _seq_height = sequence_size if sequence_size is not None else subplot_size // 2
     try:
-        mag_fig = make_bokeh_mag_track(conn, mag_name, height=_seq_height, shared_xrange=shared_xrange)
+        mag_fig = make_bokeh_mag_track(conn, mag_name, height=_seq_height, shared_xrange=shared_xrange, members=members)
     except Exception as e:
         print(f"Error building MAG track for '{mag_name}': {e}", flush=True)
         mag_fig = None
@@ -2576,6 +2632,7 @@ def generate_bokeh_plot_mag_view(conn, list_features, mag_name, sample_name, xst
                 conn, mag_id, mag_name, total_len, _gm_size, shared_xrange, xstart, xend,
                 feature_types=feature_types, plot_isoforms=plot_isoforms,
                 feature_label_key=feature_label_key, custom_colors=custom_colors,
+                members=mag_members,
             )
         except Exception as e:
             print(f"Error building combined gene map for MAG '{mag_name}': {e}", flush=True)
@@ -2593,16 +2650,13 @@ def generate_bokeh_plot_mag_view(conn, list_features, mag_name, sample_name, xst
     metadata_cache = get_variable_metadata_batch(cur, requested_features)
     contig_features, sample_features = split_contig_vs_sample_features(metadata_cache, requested_features)
 
-    from ..database.database_getters import get_mag_members
-    mag_members = get_mag_members(conn, mag_id)
-
     t_features = time.perf_counter()
     subplots = []
 
     # --- Sequence subplot (stitched across member contigs) ---
     _seq_threshold = max_sequence_window if max_sequence_window is not None else DEFAULT_SEQUENCE_WINDOW
     if plot_sequence and xstart is not None and xend is not None and (xend - xstart) <= _seq_threshold:
-        seq_subplot = make_bokeh_sequence_subplot_mag(conn, mag_name, xstart, xend, _seq_height, shared_xrange)
+        seq_subplot = make_bokeh_sequence_subplot_mag(conn, mag_name, xstart, xend, _seq_height, shared_xrange, members=members)
         if seq_subplot:
             subplots.append(seq_subplot)
     elif plot_sequence and xstart is not None and xend is not None and (xend - xstart) > _seq_threshold:
@@ -2611,7 +2665,7 @@ def generate_bokeh_plot_mag_view(conn, list_features, mag_name, sample_name, xst
     # --- Translated-sequence subplot (CDS across member contigs) ---
     if plot_translated_sequence and xstart is not None and xend is not None and (xend - xstart) <= _seq_threshold:
         _trans_height = translated_sequence_size if translated_sequence_size is not None else (sequence_size if sequence_size is not None else subplot_size // 2)
-        trans_subplot = make_bokeh_translated_sequence_subplot_mag(conn, mag_name, xstart, xend, _trans_height, shared_xrange)
+        trans_subplot = make_bokeh_translated_sequence_subplot_mag(conn, mag_name, xstart, xend, _trans_height, shared_xrange, members=members)
         if trans_subplot:
             subplots.append(trans_subplot)
     elif plot_translated_sequence and xstart is not None and xend is not None and (xend - xstart) > _seq_threshold:
