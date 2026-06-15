@@ -499,8 +499,6 @@ impl DbWriter {
                 let s_cr = crate::types::get_column_scale("Phage_termini", "Clipped_ratio");
                 for terminus in &pkg.left_termini {
                     let tau_int = (terminus.tau * s_tau).round() as i32;
-                    let passed_poisson_str = if terminus.passed_poisson_test { "yes" } else { "no" };
-                    let passed_clipping_str = if terminus.passed_clipping_test { "yes" } else { "no" };
                     let size = terminus.size;
                     termini_appender.append_row(params![
                         terminus_id,
@@ -515,11 +513,11 @@ impl DbWriter {
                         terminus.coverage as i32,
                         tau_int,
                         terminus.number_peaks as i32,
-                        passed_poisson_str,
+                        terminus.passed_poisson_test,
                         terminus.expected_spc.round() as i64,
                         compact_pvalue(terminus.pvalue),
                         compact_pvalue(terminus.adjusted_pvalue),
-                        passed_clipping_str,
+                        terminus.passed_clipping_test,
                         terminus.sum_clippings as i64,
                         (terminus.clipped_ratio * s_cr).round() as i32,
                         terminus.expected_clippings.round() as i64
@@ -530,8 +528,6 @@ impl DbWriter {
                 // Insert right termini (status = "end")
                 for terminus in &pkg.right_termini {
                     let tau_int = (terminus.tau * s_tau).round() as i32;
-                    let passed_poisson_str = if terminus.passed_poisson_test { "yes" } else { "no" };
-                    let passed_clipping_str = if terminus.passed_clipping_test { "yes" } else { "no" };
                     let size = terminus.size;
                     termini_appender.append_row(params![
                         terminus_id,
@@ -546,11 +542,11 @@ impl DbWriter {
                         terminus.coverage as i32,
                         tau_int,
                         terminus.number_peaks as i32,
-                        passed_poisson_str,
+                        terminus.passed_poisson_test,
                         terminus.expected_spc.round() as i64,
                         compact_pvalue(terminus.pvalue),
                         compact_pvalue(terminus.adjusted_pvalue),
-                        passed_clipping_str,
+                        terminus.passed_clipping_test,
                         terminus.sum_clippings as i64,
                         (terminus.clipped_ratio * s_cr).round() as i32,
                         terminus.expected_clippings.round() as i64
@@ -689,55 +685,6 @@ impl DbWriter {
 
         appender.flush().context("Failed to flush Feature_blob appender")?;
         chunk_appender.flush().context("Failed to flush Feature_blob_chunk appender")?;
-        Ok(())
-    }
-
-    /// Write MAG-scale sample-feature zoom BLOBs to MAG_blob.
-    /// Base-resolution chunks are NOT stored — they are assembled on the fly
-    /// from per-contig chunks at display time.
-    pub fn write_mag_blobs(
-        &self,
-        conn: &Connection,
-        mag_id: i64,
-        sample_id: i64,
-        blobs: &[(String, crate::blob::EncodedBlob)],
-    ) -> Result<()> {
-        if blobs.is_empty() { return Ok(()); }
-
-        let mut appender = conn.appender("MAG_blob")
-            .context("Failed to create MAG_blob appender")?;
-
-        for (feature_name, encoded) in blobs {
-            if encoded.zoom.is_empty() { continue; }
-            let fid = match feature_name_to_id(feature_name) { Some(v) => v, None => continue };
-            appender.append_row(params![mag_id, sample_id, fid as i32, encoded.zoom.as_slice()])?;
-        }
-
-        appender.flush().context("Failed to flush MAG_blob appender")?;
-        Ok(())
-    }
-
-    /// Write MAG-scale contig-level feature zoom BLOBs to MAG_contig_blob.
-    /// Base-resolution chunks are NOT stored — they are assembled on the fly
-    /// from per-contig chunks at display time.
-    pub fn write_mag_contig_blobs(
-        &self,
-        conn: &Connection,
-        mag_id: i64,
-        blobs: &[(String, crate::blob::EncodedBlob)],
-    ) -> Result<()> {
-        if blobs.is_empty() { return Ok(()); }
-
-        let mut appender = conn.appender("MAG_contig_blob")
-            .context("Failed to create MAG_contig_blob appender")?;
-
-        for (feature_name, encoded) in blobs {
-            if encoded.zoom.is_empty() { continue; }
-            let fid = match feature_name_to_id(feature_name) { Some(v) => v, None => continue };
-            appender.append_row(params![mag_id, fid as i32, encoded.zoom.as_slice()])?;
-        }
-
-        appender.flush().context("Failed to flush MAG_contig_blob appender")?;
         Ok(())
     }
 
@@ -1048,14 +995,14 @@ impl DbWriter {
     /// upsert-only. Intended to run once, in pre-sample setup, after
     /// `write_repeats` but before the per-sample loop, so MAG-scale aggregation
     /// can read repeat data from `Contig_blob` like everything else.
-    pub fn convert_repeat_blobs(&self, new_contig_ids: &[i64]) -> Result<Vec<crate::mag_blob::ContigSparseRaw>> {
+    pub fn convert_repeat_blobs(&self, new_contig_ids: &[i64]) -> Result<()> {
         if new_contig_ids.is_empty() {
-            return Ok(Vec::new());
+            return Ok(());
         }
         let conn = self.lock_conn()?;
         let id_list = new_contig_ids.iter().map(|id| id.to_string()).collect::<Vec<_>>().join(",");
         Self::build_materialized_repeat_tables(&conn, &id_list)?;
-        let raw = Self::write_repeat_features_to_blob_static(&conn)?;
+        Self::write_repeat_features_to_blob_static(&conn)?;
         for table in &[
             "Contig_direct_repeat_count", "Contig_inverted_repeat_count",
             "Contig_direct_repeat_identity", "Contig_inverted_repeat_identity",
@@ -1063,7 +1010,7 @@ impl DbWriter {
             conn.execute(&format!("DROP TABLE IF EXISTS {}", table), [])
                 .with_context(|| format!("Failed to drop intermediate table {}", table))?;
         }
-        Ok(raw)
+        Ok(())
     }
 
     /// Build the four CTAS aggregates over `Contig_directRepeats` /
@@ -1183,10 +1130,9 @@ impl DbWriter {
     /// segment's plateau value) so a plateau renders correctly through the anchor-insertion
     /// logic. Identity features carry `EventMeta.partner` = partner position (from the
     /// max-Pident repeat) on the first event of each segment.
-    fn write_repeat_features_to_blob_static(conn: &Connection) -> Result<Vec<crate::mag_blob::ContigSparseRaw>> {
+    fn write_repeat_features_to_blob_static(conn: &Connection) -> Result<()> {
         use crate::blob::{encode_sparse_blob, EventMeta, MetadataFlags};
         use crate::types::{get_encoding, get_value_scale, Encoding};
-        let mut raw_output: Vec<crate::mag_blob::ContigSparseRaw> = Vec::new();
 
         // Resolve feature IDs from VARIABLES so they stay in sync with types.rs
         // and can't collide with other features like hit_count_within_mag (id 5)
@@ -1329,21 +1275,12 @@ impl DbWriter {
                         *contig_id, feature_id, chunk_idx as i16, chunk_data.as_slice()
                     ])?;
                 }
-                raw_output.push(crate::mag_blob::ContigSparseRaw {
-                    feature_name,
-                    contig_id: *contig_id,
-                    contig_length,
-                    positions,
-                    values,
-                    metadata: if is_identity { Some(meta) } else { None },
-                    flags,
-                });
             }
         }
 
         appender.flush().context("Failed to flush Contig_blob appender")?;
         chunk_appender.flush().context("Failed to flush Contig_blob_chunk appender")?;
-        Ok(raw_output)
+        Ok(())
     }
 
     /// Update Contig table with GC statistics (average, sd) and GC skew stats.
@@ -1520,9 +1457,9 @@ impl DbWriter {
     /// Contig_blast_hits table. Produces two Sparse features per contig:
     ///   - hit_count_within_mag    (count of hits covering the position)
     ///   - hit_identity_within_mag (max Pident across hits, ×100; partner contig_id stored as metadata)
-    pub fn write_mag_hit_features(&self) -> Result<Vec<crate::mag_blob::ContigSparseRaw>> {
+    pub fn write_mag_hit_features(&self) -> Result<()> {
         if !self.is_mag_mode {
-            return Ok(Vec::new());
+            return Ok(());
         }
         use crate::blob::{encode_sparse_blob, EventMeta, MetadataFlags};
 
@@ -1567,7 +1504,7 @@ impl DbWriter {
         }
 
         if hits_by_contig.is_empty() {
-            return Ok(vec![]);
+            return Ok(());
         }
 
         let total_contigs = hits_by_contig.len();
@@ -1633,7 +1570,6 @@ impl DbWriter {
 
         let count_flags = MetadataFlags::default();
         let ident_flags = MetadataFlags { has_partner: true, ..MetadataFlags::default() };
-        let mut raw_output: Vec<crate::mag_blob::ContigSparseRaw> = Vec::new();
 
         for (contig_id, pos_vec, count_vec, ident_vec, meta_vec) in results {
             let clen = *contig_lengths.get(&contig_id).unwrap_or(&0);
@@ -1653,30 +1589,11 @@ impl DbWriter {
             for (i, chunk) in enc_ident.chunks.iter().enumerate() {
                 chunk_appender.append_row(params![contig_id, hit_ident_fid, i as i16, chunk.as_slice()])?;
             }
-
-            raw_output.push(crate::mag_blob::ContigSparseRaw {
-                feature_name: "hit_count_within_mag",
-                contig_id,
-                contig_length: clen,
-                positions: pos_vec.clone(),
-                values: count_vec,
-                metadata: None,
-                flags: count_flags,
-            });
-            raw_output.push(crate::mag_blob::ContigSparseRaw {
-                feature_name: "hit_identity_within_mag",
-                contig_id,
-                contig_length: clen,
-                positions: pos_vec,
-                values: ident_vec,
-                metadata: Some(meta_vec),
-                flags: ident_flags,
-            });
         }
 
         appender.flush().context("Failed to flush Contig_blob appender")?;
         chunk_appender.flush().context("Failed to flush Contig_blob_chunk appender")?;
-        Ok(raw_output)
+        Ok(())
     }
 
     /// Finalize the database after all samples are processed.
@@ -2029,19 +1946,6 @@ fn create_core_tables(conn: &Connection, has_bam: bool, is_mag_mode: bool, has_a
         )
         .context("Failed to create MAG_contigs_association table")?;
 
-        // MAG-scale contig-feature blobs (GC content, GC skew, repeats) —
-        // mirrors Contig_blob / Contig_blob_chunk but keyed by MAG_id.
-        conn.execute(
-            "CREATE TABLE MAG_contig_blob (
-                MAG_id      INTEGER NOT NULL REFERENCES MAG(MAG_id),
-                Feature_id  SMALLINT NOT NULL,
-                Zoom_data   BLOB NOT NULL,
-                PRIMARY KEY (MAG_id, Feature_id)
-            )",
-            [],
-        )
-        .context("Failed to create MAG_contig_blob table")?;
-
         // Inter-contig BLAST hits. Stored canonically with Contig_id_1 <= Contig_id_2
         // to halve storage and guarantee idempotent re-insertion. Consumers that
         // need both directions should query `Contig_blast_hits_symmetric`.
@@ -2129,11 +2033,11 @@ fn create_core_tables(conn: &Connection, has_bam: bool, is_mag_mode: bool, has_a
             Coverage INTEGER NOT NULL,
             Tau INTEGER NOT NULL,
             NumberPeaks INTEGER NOT NULL,
-            Passed_PoissonTest TEXT NOT NULL,
+            Passed_PoissonTest BOOLEAN NOT NULL,
             Expected_SPC INTEGER NOT NULL,
             Pvalue TEXT NOT NULL,
             Adjusted_pvalue TEXT NOT NULL,
-            Passed_ClippingTest TEXT NOT NULL,
+            Passed_ClippingTest BOOLEAN NOT NULL,
             Clippings INTEGER NOT NULL,
             Clipping_excess INTEGER NOT NULL,
             Expected_clippings INTEGER NOT NULL
@@ -2171,21 +2075,7 @@ fn create_core_tables(conn: &Connection, has_bam: bool, is_mag_mode: bool, has_a
     )
     .context("Failed to create Feature_blob_chunk table")?;
 
-    // MAG-scale sample-feature blobs — mirror Feature_blob / Feature_blob_chunk
-    // but keyed by MAG_id. Only created in MAG mode.
     if is_mag_mode {
-        conn.execute(
-            "CREATE TABLE MAG_blob (
-                MAG_id     INTEGER NOT NULL REFERENCES MAG(MAG_id),
-                Sample_id  INTEGER NOT NULL REFERENCES Sample(Sample_id),
-                Feature_id SMALLINT NOT NULL,
-                Zoom_data  BLOB NOT NULL,
-                PRIMARY KEY (MAG_id, Sample_id, Feature_id)
-            )",
-            [],
-        )
-        .context("Failed to create MAG_blob table")?;
-
         // MAG-level coverage metrics recomputed from raw per-position coverage
         // during MAG-by-MAG processing. Written directly by the writer thread.
         conn.execute(
@@ -3325,14 +3215,14 @@ fn create_views(conn: &Connection, has_bam: bool, is_mag_mode: bool, _has_annota
              COALESCE(
                  (SELECT STRING_AGG(CAST(pt.Center AS VARCHAR), ',' ORDER BY pt.Center)
                   FROM Phage_termini pt
-                  WHERE pt.Packaging_id = m.Packaging_id AND pt.Status = 'start' AND pt.Passed_PoissonTest = 'yes' AND pt.Passed_ClippingTest = 'yes'),
+                  WHERE pt.Packaging_id = m.Packaging_id AND pt.Status = 'start' AND pt.Passed_PoissonTest = true AND pt.Passed_ClippingTest = true),
                  ''
              ) AS Left_termini,
              m.Median_left_termini_clippings,
              COALESCE(
                  (SELECT STRING_AGG(CAST(pt.Center AS VARCHAR), ',' ORDER BY pt.Center)
                   FROM Phage_termini pt
-                  WHERE pt.Packaging_id = m.Packaging_id AND pt.Status = 'end' AND pt.Passed_PoissonTest = 'yes' AND pt.Passed_ClippingTest = 'yes'),
+                  WHERE pt.Packaging_id = m.Packaging_id AND pt.Status = 'end' AND pt.Passed_PoissonTest = true AND pt.Passed_ClippingTest = true),
                  ''
              ) AS Right_termini,
              m.Median_right_termini_clippings,
@@ -3342,7 +3232,7 @@ fn create_views(conn: &Connection, has_bam: bool, is_mag_mode: bool, _has_annota
              COALESCE(
                  (SELECT COUNT(*)
                   FROM Phage_termini pt
-                  WHERE pt.Packaging_id = m.Packaging_id AND pt.Passed_PoissonTest = 'yes' AND pt.Passed_ClippingTest = 'yes'),
+                  WHERE pt.Packaging_id = m.Packaging_id AND pt.Passed_PoissonTest = true AND pt.Passed_ClippingTest = true),
                  0
              ) AS Total_peaks,
              m.Repeat_length,

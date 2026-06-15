@@ -123,27 +123,17 @@ def _feature_id_for(conn, feature_name):
     return int(row[0]) if row else None
 
 
-def get_mag_feature_zoom(cur, mag_id, sample_id, feature_name):
-    """Zoom blob bytes for one (MAG, Sample, Feature), or None."""
-    fid = _feature_id_for(cur, feature_name)
-    if fid is None:
-        return None
-    try:
-        row = cur.execute(
-            "SELECT Zoom_data FROM MAG_blob "
-            "WHERE MAG_id = ? AND Sample_id = ? AND Feature_id = ?",
-            [mag_id, sample_id, fid],
-        ).fetchone()
-    except duckdb.Error:
-        return None
-    return bytes(row[0]) if row else None
-
 
 def get_mag_members(conn, mag_id):
     """Return [(contig_id, contig_length, offset)] for a MAG, ordered by offset."""
+    return [(cid, clen, off) for cid, _name, clen, off in get_mag_members_full(conn, mag_id)]
+
+
+def get_mag_members_full(conn, mag_id):
+    """Return [(contig_id, contig_name, contig_length, offset)] for a MAG, ordered by offset."""
     try:
         rows = conn.execute(
-            "SELECT mca.Contig_id, c.Contig_length, mca.Offset_in_MAG "
+            "SELECT mca.Contig_id, c.Contig_name, c.Contig_length, mca.Offset_in_MAG "
             "FROM MAG_contigs_association mca "
             "JOIN Contig c ON c.Contig_id = mca.Contig_id "
             "WHERE mca.MAG_id = ? ORDER BY mca.Offset_in_MAG",
@@ -151,7 +141,7 @@ def get_mag_members(conn, mag_id):
         ).fetchall()
     except duckdb.Error:
         return []
-    return [(int(cid), int(clen), int(off)) for cid, clen, off in rows]
+    return [(int(cid), name, int(clen), int(off)) for cid, name, clen, off in rows]
 
 
 def _validate_column(conn, table, column):
@@ -217,21 +207,6 @@ def get_mag_contigs_sorted(conn, mag_id, source_table, metric, ascending, sample
         offset += int(clen)
     return result
 
-
-def get_mag_contig_zoom(cur, mag_id, feature_name):
-    """Zoom blob bytes for one (MAG, Feature) in MAG_contig_blob, or None."""
-    fid = _feature_id_for(cur, feature_name)
-    if fid is None:
-        return None
-    try:
-        row = cur.execute(
-            "SELECT Zoom_data FROM MAG_contig_blob "
-            "WHERE MAG_id = ? AND Feature_id = ?",
-            [mag_id, fid],
-        ).fetchone()
-    except duckdb.Error:
-        return None
-    return bytes(row[0]) if row else None
 
 
 
@@ -839,7 +814,7 @@ def remove_sample(db_path, sample_name):
         'Phage_mechanisms', 'Coverage', 'Misassembly', 'Microdiversity',
         'Side_misassembly', 'Topology',
         'Feature_blob', 'Feature_blob_chunk',
-        'MAG_blob', 'MAG_coverage',
+        'MAG_coverage',
     ]:
         _delete_from(conn, table, 'Sample_id', sample_id)
 
@@ -935,10 +910,8 @@ def remove_mag(db_path, mag_name):
         return
     mag_id = row[0]
 
-    # Delete MAG-level blob data
+    # Delete MAG-level data
     for table in [
-        'MAG_blob',
-        'MAG_contig_blob',
         'MAG_coverage',
     ]:
         _delete_from(conn, table, 'MAG_id', mag_id)

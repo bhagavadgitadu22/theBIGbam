@@ -1,4 +1,16 @@
-# Filtering logic
+# Summary metrics
+
+Summary metrics consists of the contig/MAG metadata, the sample metadata and the summary metrics computed per contig-sample pair and MAG-sample pair from the per-position information inferred from read-mappings. 
+
+Those metrics are used to:
+
+- Filter contig-sample pairs and MAG-sample pairs available for plotting
+
+- Order contigs when plotting MAGs in the MAG view
+
+- Order samples when plotting many samples together in the ALL SAMPLES view
+
+## Filtering section
 
 The Filtering section lets you build complex queries to narrow down which contig/sample pairs are displayed in your plots.
 
@@ -28,9 +40,9 @@ For example, the example above is equivalent to the condition:
 
 In the Contigs section, the tool proposes contigs that are long enough and harbor at least one ABC transporter. Contigs with an aligned fraction exceeding 50% are also included. The MAGs containing these contigs are reported, together with the samples in which these MAGs are present.
 
-# Contig/MAG filters
+## Contig/MAG filters
 
-## Contig
+### Contig
 
 Those metrics are available only if a Genbank file was provided (or at least an assembly file for some of them).
 
@@ -46,11 +58,11 @@ Those metrics are available only if a Genbank file was provided (or at least an 
 
 In MAG databases, the same metrics are available in the **MAG category** with 2 additional metrics for the:
 
-## Annotations
+### Annotations
 
 All qualifiers extracted from the annotation files during the calculate operation can be used to identify subsets with contigs of interest. In the example above, we mapped a collection of MAGs from multiple river metagenomes and generated a database from the resulting alignments. We were specifically interested in antimicrobial resistance genes (ARGs) present in these metagenomes. These genes were identified using hmmscan and the Resfams HMM models. The resulting annotations were then merged into the Bakta-generated GenBank files as described in [Use case 3](USAGE.md#use-case-3-large-dataset-3000-mags-192-samples). Once incorporated into the database, these annotations can be used in the Filtering section to select only contigs harboring ARGs associated with specific resistance mechanisms, as illustrated in the example above.
 
-# Sample filters
+## Sample filters
 
 | Metric                 | Definition                                                                                        |
 | ---------------------- | ------------------------------------------------------------------------------------------------- |
@@ -61,9 +73,9 @@ All qualifiers extracted from the annotation files during the calculate operatio
 
 Additional columns might be available depending on the information you added per sample using *thebigbam add-sample-metadata* command.
 
-# Contig/sample pairs filters
+## Contig/sample pairs filters
 
-## Coverage
+### Coverage
 
 | Metric                                 | Definition                                                                                                                                                                                                                                                                                                                                 |
 | -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
@@ -80,7 +92,7 @@ Additional columns might be available depending on the information you added per
 
 The **MAG coverage category** contains the same metrics but averaged over an entire MAG.
 
-## Misassembly
+### Misassembly
 
 The [Misalignment module](FEATURES.md#misalignment-module) flags positions where mapped reads diverge substantially from the reference. Discrepancies supported by more than 50% of locally aligned reads can reflect misassemblies when they occur in the sample from which the contig was assembled. Those metrics count the abundance of discrepancies with **>= 50% prevalence**.
 
@@ -105,7 +117,7 @@ The **MAG misassembly category** contains the same metrics but averaged over an 
 
 - In **rare cases**, this effect can also occur for long reads even when the `--circular` option is used. For example, in bacteriophages, single long reads may contain multiple full viral genomes due to concatemers. In such cases, only the portion of the read corresponding to one contig length (or up to twice the contig length when mapping with theBIGbam and the `--circular` option) is mapped, and the remaining sequence is clipped. If many concatemer-derived long reads are present, collapse metrics may detect this clipped signal, leading to artificially high estimates of missing sequence.
 
-## Microdiversity
+### Microdiversity
 
 Same logic as the Misassembly metrics but with a **>= 10% prevalence** threshold, capturing lower-frequency variants. These positions may reflect subpopulations missing a segment of the contig (reads with deletions) or carrying an extra segment (reads with insertions, clippings).
 
@@ -120,7 +132,7 @@ In addition to Mismatches/Deletions/Insertions/Clippings per 100 kbp, you have:
 
 The **MAG microdiversity category** contains the same metrics but averaged over an entire MAG.
 
-## Side misassembly
+### Side misassembly
 
 Evaluates completeness at contig extremities based on significant clipping events (>= 50% prevalence) where the median clipped length extends beyond the contig boundary.
 
@@ -137,7 +149,7 @@ Evaluates completeness at contig extremities based on significant clipping event
 | Contig end misjoint mates            | Number of read pairs where one mate maps to the contig end and the other maps to a different contig (paired-read only)            |
 | Normalized contig end misjoint mates | Contig end misjoint mates normalized by coverage mean (paired-read only)                                                          |
 
-## Topology
+### Topology
 
 Evaluates the circularity of contigs. The first 3 metrics are available for mappings performed with `thebigbam mapping-per-sample --circular` mode. The last 3 metrics are available for paired-reads only.
 
@@ -152,7 +164,7 @@ Evaluates the circularity of contigs. The first 3 metrics are available for mapp
 
 An approximate estimate of the first 3 metrics could be calculated without the `thebigbam mapping-per-sample --circular` mode, using supplementary alignments spanning both contig ends and, for paired-end short reads, non-inward read pairs with reasonable insert sizes mapping to both contig ends. However, this approach does not provide an exact estimation of circularity compared to circular mapping with the `--circular` option. For this reason, we do not provide those estimates.
 
-## Termini
+### Termini
 
 Phage packaging mechanism detection based on terminus analysis. In sequencing libraries prepared by random fragmentation of DNA, read starts accumulate at natural genome termini because these positions are overrepresented compared to randomly generated fragment ends. This enrichment allows the precise identification of contig termini. In the particular case of bacteriophages, the number, orientation, and relative positions of detected termini can be used to infer the phage DNA packaging mechanism. The [classification protocol](PHAGE_PACKAGING.md) mostly follows the rules implemented by the [PhageTerm software](https://www.nature.com/articles/s41598-017-07910-5).
 

@@ -32,7 +32,7 @@ use crate::gc_content::{compute_gc_content_and_skew, GCParams};
 use crate::features::{CdsIndex, FeatureArrays, ModuleFlags, compute_codon_changes_from_summaries};
 use crate::parser::{parse_annotations, compute_annotation_sequences};
 use crate::types::{
-    ContigInfo, FeatureAnnotation, PackagingData, PresenceData, SequencingType
+    ContigInfo, FeatureAnnotation, PackagingData, PresenceData, SequencingType, get_value_scale
 };
 
 use crate::processing_phage_packaging::{
@@ -95,12 +95,11 @@ struct MagContigJob {
     offset_in_mag: u32,
 }
 
-/// Result of processing one MAG group (all member contigs + MAG-level blobs).
+/// Result of processing one MAG group (all member contigs + MAG-level stats).
 struct MagGroupResult {
     mag_name: String,
     mag_id: i64,
     contig_blobs: Vec<(String, i64, crate::blob::EncodedBlob)>,
-    mag_blobs: Vec<(String, crate::blob::EncodedBlob)>,
     mag_cov_stats: crate::mag_blob::MagCoverageStats,
     presences: Vec<PresenceData>,
     packaging: Vec<PackagingData>,
@@ -189,7 +188,6 @@ pub struct SampleTimings {
     // Single-threaded phases inside process_sample (wall-clock).
     pub header_read: std::time::Duration,
     pub total_read_count: std::time::Duration,
-    pub build_lookups: std::time::Duration,
     pub filter_tids: std::time::Duration,
     pub par_iter_wall: std::time::Duration,
     pub merge_results: std::time::Duration,
@@ -204,8 +202,6 @@ pub struct SampleTimings {
     pub stream_records_ns: u64,
     pub stream_process_read_ns: u64,
     pub stream_finalize_ns: u64,
-    // MAG blob encoding inside par_iter (nanoseconds, summed across threads).
-    pub mag_encoding_ns: u64,
     // Filled by the sample-level caller, not process_sample itself.
     pub db_write: std::time::Duration,
     pub insert_sample_ns: u64,
@@ -223,7 +219,6 @@ struct TimingAccum {
     stream_records_ns: AtomicU64,
     stream_process_read_ns: AtomicU64,
     stream_finalize_ns: AtomicU64,
-    mag_encoding_ns: AtomicU64,
 }
 
 impl TimingAccum {
@@ -236,7 +231,6 @@ impl TimingAccum {
             stream_records_ns: AtomicU64::new(0),
             stream_process_read_ns: AtomicU64::new(0),
             stream_finalize_ns: AtomicU64::new(0),
-            mag_encoding_ns: AtomicU64::new(0),
         }
     }
 }
@@ -258,8 +252,6 @@ struct PreSampleTimings {
     repeat_rss_mb: f64,
     write_mags_secs: f64,
     write_mags_rss_mb: f64,
-    mag_contig_blob_secs: f64,
-    mag_contig_blob_rss_mb: f64,
     cds_build_secs: f64,
     cds_build_rss_mb: f64,
 }
@@ -317,7 +309,6 @@ fn check_missing_md_tags(bam: &mut IndexedReader) -> bool {
 /// 2. If no tag found, assume linear
 fn detect_sample_circularity(
     bam: &IndexedReader,
-    _contigs: &[ContigInfo],
     sample_name: &str,
 ) -> Result<bool> {
     let header = bam.header();
@@ -353,9 +344,6 @@ fn detect_sample_circularity(
 fn validate_inputs(
     bam_files: &[PathBuf],
     modules: &[String],
-    _genbank_path: &Path,
-    _assembly_path: &Path,
-    _extend_db: &Path,
 ) -> Result<()> {
     let flags = ModuleFlags::from_modules(modules);
     let needs_md = flags.needs_md();
@@ -438,32 +426,9 @@ fn validate_inputs(
     Ok(())
 }
 
-/// Quick scan of @CO headers only (no logging). Used for BAM-only contig extraction
-/// before the full detection runs.
-fn quick_co_header_scan(bam_files: &[PathBuf]) -> Result<HashMap<PathBuf, bool>> {
-    let mut result = HashMap::new();
-    for bam_path in bam_files {
-        let bam = IndexedReader::from_path(bam_path)
-            .with_context(|| format!("Failed to open BAM: {}", bam_path.display()))?;
-        let header_text = String::from_utf8_lossy(bam.header().as_bytes());
-        let mut circular = false;
-        for line in header_text.lines() {
-            if let Some(rest) = line.strip_prefix("@CO\t") {
-                if let Some(val) = rest.strip_prefix("theBIGbam:circular=") {
-                    circular = val.trim() == "true";
-                    break;
-                }
-            }
-        }
-        result.insert(bam_path.clone(), circular);
-    }
-    Ok(result)
-}
-
 /// Detect circularity for all samples upfront. Returns a map of BAM path → is_circular.
 fn detect_all_sample_circularities(
     bam_files: &[PathBuf],
-    contigs: &[ContigInfo],
 ) -> Result<HashMap<PathBuf, bool>> {
     eprintln!("\n### Auto-detecting circularity per sample...");
     let mut result = HashMap::new();
@@ -477,7 +442,7 @@ fn detect_all_sample_circularities(
         let bam = IndexedReader::from_path(bam_path)
             .with_context(|| format!("Failed to open BAM for circularity detection: {}", bam_path.display()))?;
 
-        let is_circular = detect_sample_circularity(&bam, contigs, &sample_name)?;
+        let is_circular = detect_sample_circularity(&bam, &sample_name)?;
         result.insert(bam_path.clone(), is_circular);
     }
     Ok(result)
@@ -537,7 +502,7 @@ fn write_contigs_fasta(contigs: &[&ContigInfo]) -> Result<tempfile::NamedTempFil
 
 /// Per-contig BLAST self-alignment for intra-contig repeat detection.
 /// Each contig is BLASTed against itself independently, parallelized with rayon.
-fn run_autoblast(contigs: &[ContigInfo], _threads: usize) -> Result<Vec<RepeatsData>> {
+fn run_autoblast(contigs: &[ContigInfo]) -> Result<Vec<RepeatsData>> {
     let contigs_with_seq: Vec<&ContigInfo> = contigs.iter().filter(|c| c.sequence.is_some()).collect();
     if contigs_with_seq.is_empty() {
         return Ok(Vec::new());
@@ -849,25 +814,11 @@ fn compute_area_median_clippings(
     }
 }
 
-/// Intermediate sparse feature data produced by [`add_features_from_arrays`].
-/// When `sparse_output` is `Some`, these are collected alongside the per-contig
-/// blobs so the caller can accumulate them into MAG-wide arrays without
-/// decode→re-encode.
-pub(crate) struct SparseFeatureData {
-    pub feature_name: &'static str,
-    pub positions: Vec<u32>,
-    pub values: Vec<i32>,
-    pub metadata: Option<Vec<crate::blob::EventMeta>>,
-    pub flags: crate::blob::MetadataFlags,
-}
 
 /// Encode features from FeatureArrays into BLOB format and compute metrics.
 /// Returns a tuple of:
 /// - Optional packaging data for phagetermini module (includes all termini with filtering metadata)
 /// - Optional metric structs (misassembly, microdiversity, side_misassembly, topology)
-///
-/// When `sparse_output` is `Some`, intermediate filtered sparse data is also
-/// pushed there (positions are contig-local; the caller shifts by MAG offset).
 fn add_features_from_arrays(
     arrays: &mut FeatureArrays,
     contig_name: &str,
@@ -880,7 +831,6 @@ fn add_features_from_arrays(
     repeats: &[RepeatsData],
     cds_index: Option<&CdsIndex>,
     blob_output: &mut Vec<(String, i64, crate::blob::EncodedBlob)>,
-    mut sparse_output: Option<&mut Vec<SparseFeatureData>>,
 ) -> (Option<PackagingData>, Option<(MisassemblyData, MicrodiversityData, SideMisassemblyData, TopologyData)>) {
     use crate::blob::{encode_dense_blob, smooth_dense_values, encode_sparse_blob, EventMeta, MetadataFlags,
                        codon_category_to_id, codon_to_id, aa_to_id};
@@ -933,6 +883,9 @@ fn add_features_from_arrays(
     // Coverage (always compress self-referentially)
     let primary_reads_f64: Vec<f64> = arrays.primary_reads.iter().map(|&x| x as f64).collect();
     let cid = contig_id;
+    let clen = contig_length as u32;
+    let bar_threshold = config.bar_ratio * 0.01;
+    let min_occ = config.min_occurrences;
     if flags.coverage {
         // MAPQ - average mapping quality per position (needed for blob encoding below)
         let mapq_f64: Vec<f64> = arrays.sum_mapq.iter()
@@ -941,8 +894,6 @@ fn add_features_from_arrays(
             .collect();
 
         // === BLOB encoding for dense coverage features ===
-        let clen = contig_length as u32;
-
         // primary_reads: raw i32
         let mut pr_i32: Vec<i32> = arrays.primary_reads.iter().map(|&x| x as i32).collect();
         smooth_dense_values(&mut pr_i32, config.variation_percentage);
@@ -976,53 +927,48 @@ fn add_features_from_arrays(
         blob_output.push(("mapq".into(), cid, encode_dense_blob(&mapq_i32, get_value_scale("mapq"), clen)));
     }
 
-    // Assemblycheck features
+    // Clipping statistics (shared between assemblycheck run-length encoding and sparse blob encoding)
+    let left_clip_counts: Vec<f64> = arrays.left_clipping_lengths.iter().map(|v| v.len() as f64).collect();
+    let left_clip_means: Vec<f64> = arrays.left_clipping_lengths.iter().map(|v| {
+        if v.is_empty() { 0.0 } else { v.iter().map(|&x| x as f64).sum::<f64>() / v.len() as f64 }
+    }).collect();
+    let left_clip_medians: Vec<f64> = arrays.left_clipping_lengths.iter().map(|v| {
+        if v.is_empty() { 0.0 } else { let mut s = v.clone(); s.sort_unstable(); s[s.len()/2] as f64 }
+    }).collect();
+    let left_clip_stds: Vec<f64> = arrays.left_clipping_lengths.iter().map(|v| {
+        if v.len() <= 1 { 0.0 } else {
+            let mean = v.iter().map(|&x| x as f64).sum::<f64>() / v.len() as f64;
+            let var = v.iter().map(|&x| { let d = x as f64 - mean; d*d }).sum::<f64>() / v.len() as f64;
+            var.sqrt()
+        }
+    }).collect();
+    let right_clip_counts: Vec<f64> = arrays.right_clipping_lengths.iter().map(|v| v.len() as f64).collect();
+    let right_clip_means: Vec<f64> = arrays.right_clipping_lengths.iter().map(|v| {
+        if v.is_empty() { 0.0 } else { v.iter().map(|&x| x as f64).sum::<f64>() / v.len() as f64 }
+    }).collect();
+    let right_clip_medians: Vec<f64> = arrays.right_clipping_lengths.iter().map(|v| {
+        if v.is_empty() { 0.0 } else { let mut s = v.clone(); s.sort_unstable(); s[s.len()/2] as f64 }
+    }).collect();
+    let right_clip_stds: Vec<f64> = arrays.right_clipping_lengths.iter().map(|v| {
+        if v.len() <= 1 { 0.0 } else {
+            let mean = v.iter().map(|&x| x as f64).sum::<f64>() / v.len() as f64;
+            let var = v.iter().map(|&x| { let d = x as f64 - mean; d*d }).sum::<f64>() / v.len() as f64;
+            var.sqrt()
+        }
+    }).collect();
+
     let mut left_clip_runs: Vec<Run> = Vec::new();
     let mut right_clip_runs: Vec<Run> = Vec::new();
     if flags.mapping_metrics || flags.phagetermini {
-        // Clippings and insertions with statistics
-        let left_clip_counts: Vec<f64> = arrays.left_clipping_lengths.iter().map(|v| v.len() as f64).collect();
-        let left_clip_means: Vec<f64> = arrays.left_clipping_lengths.iter().map(|v| {
-            if v.is_empty() { 0.0 } else { v.iter().map(|&x| x as f64).sum::<f64>() / v.len() as f64 }
-        }).collect();
-        let left_clip_medians: Vec<f64> = arrays.left_clipping_lengths.iter().map(|v| {
-            if v.is_empty() { 0.0 } else { let mut s = v.clone(); s.sort_unstable(); s[s.len()/2] as f64 }
-        }).collect();
-        let left_clip_stds: Vec<f64> = arrays.left_clipping_lengths.iter().map(|v| {
-            if v.len() <= 1 { 0.0 } else {
-                let mean = v.iter().map(|&x| x as f64).sum::<f64>() / v.len() as f64;
-                let var = v.iter().map(|&x| { let d = x as f64 - mean; d*d }).sum::<f64>() / v.len() as f64;
-                var.sqrt()
-            }
-        }).collect();
         left_clip_runs = add_compressed_feature_with_stats(&left_clip_counts, &left_clip_means, &left_clip_medians, &left_clip_stds,
             Some(&primary_reads_f64), "left_clippings", config);
-
-        let right_clip_counts: Vec<f64> = arrays.right_clipping_lengths.iter().map(|v| v.len() as f64).collect();
-        let right_clip_means: Vec<f64> = arrays.right_clipping_lengths.iter().map(|v| {
-            if v.is_empty() { 0.0 } else { v.iter().map(|&x| x as f64).sum::<f64>() / v.len() as f64 }
-        }).collect();
-        let right_clip_medians: Vec<f64> = arrays.right_clipping_lengths.iter().map(|v| {
-            if v.is_empty() { 0.0 } else { let mut s = v.clone(); s.sort_unstable(); s[s.len()/2] as f64 }
-        }).collect();
-        let right_clip_stds: Vec<f64> = arrays.right_clipping_lengths.iter().map(|v| {
-            if v.len() <= 1 { 0.0 } else {
-                let mean = v.iter().map(|&x| x as f64).sum::<f64>() / v.len() as f64;
-                let var = v.iter().map(|&x| { let d = x as f64 - mean; d*d }).sum::<f64>() / v.len() as f64;
-                var.sqrt()
-            }
-        }).collect();
         right_clip_runs = add_compressed_feature_with_stats(&right_clip_counts, &right_clip_means, &right_clip_medians, &right_clip_stds,
             Some(&primary_reads_f64), "right_clippings", config);
     }
             
-    // Shared constants for sparse feature encoding (used by mapping_metrics + rna modules)
-    let clen = contig_length as u32;
-    let bar_threshold = config.bar_ratio * 0.01;
-    let min_occ = config.min_occurrences;
     let sparse_scale = get_value_scale("mismatches").multiplier();
 
-    let filter_sparse = |counts: &[f64], coverage: &[f64]| -> (Vec<u32>, Vec<i32>) {
+    let filter_sparse = |counts: &[f64], coverage: &[f64], scale: f64| -> (Vec<u32>, Vec<i32>) {
         let mut positions = Vec::new();
         let mut values = Vec::new();
         let n = counts.len().min(coverage.len());
@@ -1031,7 +977,7 @@ fn add_features_from_arrays(
             let cov = coverage[i];
             if val >= cov * bar_threshold && val >= min_occ as f64 {
                 positions.push(i as u32);
-                values.push((val / cov * sparse_scale).round() as i32);
+                values.push((val / cov * scale).round() as i32);
             }
         }
         (positions, values)
@@ -1056,21 +1002,20 @@ fn add_features_from_arrays(
         }).collect();
 
         // --- Compute dominant bases/sequences (used by blob encoding below) ---
-        let threshold = config.bar_ratio * 0.01; // Convert percentage to fraction
-        let dominant_mismatches = arrays.compute_dominant_mismatch_bases(&arrays.primary_reads, threshold);
-        let dominant_insertions = FeatureArrays::compute_dominant_sequences(&arrays.insertion_sequences, &arrays.primary_reads, threshold);
-        let dominant_left_clips = FeatureArrays::compute_dominant_sequences(&arrays.left_clip_sequences, &arrays.primary_reads, threshold);
-        let dominant_right_clips = FeatureArrays::compute_dominant_sequences(&arrays.right_clip_sequences, &arrays.primary_reads, threshold);
+        let dominant_mismatches = arrays.compute_dominant_mismatch_bases(&arrays.primary_reads, bar_threshold);
+        let dominant_insertions = FeatureArrays::compute_dominant_sequences(&arrays.insertion_sequences, &arrays.primary_reads, bar_threshold);
+        let dominant_left_clips = FeatureArrays::compute_dominant_sequences(&arrays.left_clip_sequences, &arrays.primary_reads, bar_threshold);
+        let dominant_right_clips = FeatureArrays::compute_dominant_sequences(&arrays.right_clip_sequences, &arrays.primary_reads, bar_threshold);
 
         // Compute codon changes from position-level mismatch summaries
         let dominant_codons = compute_codon_changes_from_summaries(
             &arrays.mismatch_base_counts, &arrays.primary_reads,
-            cds_index, contig_length, threshold,
+            cds_index, contig_length, bar_threshold,
         );
 
         // mismatches (with sequence + codons)
         {
-            let (pos, vals) = filter_sparse(&mismatches_f64, &primary_reads_f64);
+            let (pos, vals) = filter_sparse(&mismatches_f64, &primary_reads_f64, sparse_scale);
             let meta: Vec<EventMeta> = pos.iter().map(|&p| {
                 let idx = p as usize;
                 let mut em = EventMeta::default();
@@ -1092,26 +1037,22 @@ fn add_features_from_arrays(
             debug_assert_eq!(get_encoding("mismatches"), Encoding::Sparse);
             blob_output.push(("mismatches".into(), cid,
                 encode_sparse_blob(&pos, &vals, Some(&meta), flags, get_value_scale("mismatches"), clen)));
-            if let Some(ref mut so) = sparse_output {
-                so.push(SparseFeatureData { feature_name: "mismatches", positions: pos, values: vals, metadata: Some(meta), flags });
-            }
+
         }
 
         // deletions (value only)
         {
-            let (pos, vals) = filter_sparse(&deletions_f64, &primary_reads_f64);
+            let (pos, vals) = filter_sparse(&deletions_f64, &primary_reads_f64, sparse_scale);
             let flags = MetadataFlags { sparse: true, ..Default::default() };
             debug_assert_eq!(get_encoding("deletions"), Encoding::Sparse);
             blob_output.push(("deletions".into(), cid,
                 encode_sparse_blob(&pos, &vals, None, flags, get_value_scale("deletions"), clen)));
-            if let Some(ref mut so) = sparse_output {
-                so.push(SparseFeatureData { feature_name: "deletions", positions: pos, values: vals, metadata: None, flags });
-            }
+
         }
 
         // insertions (with stats + sequence)
         {
-            let (pos, vals) = filter_sparse(&insertion_counts, &primary_reads_f64);
+            let (pos, vals) = filter_sparse(&insertion_counts, &primary_reads_f64, sparse_scale);
             let meta: Vec<EventMeta> = pos.iter().map(|&p| {
                 let idx = p as usize;
                 let mut em = EventMeta {
@@ -1130,34 +1071,18 @@ fn add_features_from_arrays(
             debug_assert_eq!(get_encoding("insertions"), Encoding::Sparse);
             blob_output.push(("insertions".into(), cid,
                 encode_sparse_blob(&pos, &vals, Some(&meta), flags, get_value_scale("insertions"), clen)));
-            if let Some(ref mut so) = sparse_output {
-                so.push(SparseFeatureData { feature_name: "insertions", positions: pos, values: vals, metadata: Some(meta), flags });
-            }
+
         }
 
-        // left_clippings (with stats + sequence)
+        // left_clippings (with stats + sequence) — reuses clip stats computed above
         {
-            let lc_counts: Vec<f64> = arrays.left_clipping_lengths.iter().map(|v| v.len() as f64).collect();
-            let lc_means: Vec<f64> = arrays.left_clipping_lengths.iter().map(|v| {
-                if v.is_empty() { 0.0 } else { v.iter().map(|&x| x as f64).sum::<f64>() / v.len() as f64 }
-            }).collect();
-            let lc_medians: Vec<f64> = arrays.left_clipping_lengths.iter().map(|v| {
-                if v.is_empty() { 0.0 } else { let mut s = v.clone(); s.sort_unstable(); s[s.len()/2] as f64 }
-            }).collect();
-            let lc_stds: Vec<f64> = arrays.left_clipping_lengths.iter().map(|v| {
-                if v.len() <= 1 { 0.0 } else {
-                    let mean = v.iter().map(|&x| x as f64).sum::<f64>() / v.len() as f64;
-                    let var = v.iter().map(|&x| { let d = x as f64 - mean; d*d }).sum::<f64>() / v.len() as f64;
-                    var.sqrt()
-                }
-            }).collect();
-            let (pos, vals) = filter_sparse(&lc_counts, &primary_reads_f64);
+            let (pos, vals) = filter_sparse(&left_clip_counts, &primary_reads_f64, sparse_scale);
             let meta: Vec<EventMeta> = pos.iter().map(|&p| {
                 let idx = p as usize;
                 let mut em = EventMeta {
-                    mean: Some((lc_means.get(idx).copied().unwrap_or(0.0) * METADATA_STATS_SCALE).round() as i32),
-                    median: Some((lc_medians.get(idx).copied().unwrap_or(0.0) * METADATA_STATS_SCALE).round() as i32),
-                    std: Some((lc_stds.get(idx).copied().unwrap_or(0.0) * METADATA_STATS_SCALE).round() as i32),
+                    mean: Some((left_clip_means.get(idx).copied().unwrap_or(0.0) * METADATA_STATS_SCALE).round() as i32),
+                    median: Some((left_clip_medians.get(idx).copied().unwrap_or(0.0) * METADATA_STATS_SCALE).round() as i32),
+                    std: Some((left_clip_stds.get(idx).copied().unwrap_or(0.0) * METADATA_STATS_SCALE).round() as i32),
                     ..Default::default()
                 };
                 if let Some((seq_str, pct)) = dominant_left_clips.get(&idx) {
@@ -1170,34 +1095,17 @@ fn add_features_from_arrays(
             debug_assert_eq!(get_encoding("left_clippings"), Encoding::Sparse);
             blob_output.push(("left_clippings".into(), cid,
                 encode_sparse_blob(&pos, &vals, Some(&meta), flags, get_value_scale("left_clippings"), clen)));
-            if let Some(ref mut so) = sparse_output {
-                so.push(SparseFeatureData { feature_name: "left_clippings", positions: pos, values: vals, metadata: Some(meta), flags });
-            }
         }
 
-        // right_clippings (with stats + sequence)
+        // right_clippings (with stats + sequence) — reuses clip stats computed above
         {
-            let rc_counts: Vec<f64> = arrays.right_clipping_lengths.iter().map(|v| v.len() as f64).collect();
-            let rc_means: Vec<f64> = arrays.right_clipping_lengths.iter().map(|v| {
-                if v.is_empty() { 0.0 } else { v.iter().map(|&x| x as f64).sum::<f64>() / v.len() as f64 }
-            }).collect();
-            let rc_medians: Vec<f64> = arrays.right_clipping_lengths.iter().map(|v| {
-                if v.is_empty() { 0.0 } else { let mut s = v.clone(); s.sort_unstable(); s[s.len()/2] as f64 }
-            }).collect();
-            let rc_stds: Vec<f64> = arrays.right_clipping_lengths.iter().map(|v| {
-                if v.len() <= 1 { 0.0 } else {
-                    let mean = v.iter().map(|&x| x as f64).sum::<f64>() / v.len() as f64;
-                    let var = v.iter().map(|&x| { let d = x as f64 - mean; d*d }).sum::<f64>() / v.len() as f64;
-                    var.sqrt()
-                }
-            }).collect();
-            let (pos, vals) = filter_sparse(&rc_counts, &primary_reads_f64);
+            let (pos, vals) = filter_sparse(&right_clip_counts, &primary_reads_f64, sparse_scale);
             let meta: Vec<EventMeta> = pos.iter().map(|&p| {
                 let idx = p as usize;
                 let mut em = EventMeta {
-                    mean: Some((rc_means.get(idx).copied().unwrap_or(0.0) * METADATA_STATS_SCALE).round() as i32),
-                    median: Some((rc_medians.get(idx).copied().unwrap_or(0.0) * METADATA_STATS_SCALE).round() as i32),
-                    std: Some((rc_stds.get(idx).copied().unwrap_or(0.0) * METADATA_STATS_SCALE).round() as i32),
+                    mean: Some((right_clip_means.get(idx).copied().unwrap_or(0.0) * METADATA_STATS_SCALE).round() as i32),
+                    median: Some((right_clip_medians.get(idx).copied().unwrap_or(0.0) * METADATA_STATS_SCALE).round() as i32),
+                    std: Some((right_clip_stds.get(idx).copied().unwrap_or(0.0) * METADATA_STATS_SCALE).round() as i32),
                     ..Default::default()
                 };
                 if let Some((seq_str, pct)) = dominant_right_clips.get(&idx) {
@@ -1210,9 +1118,6 @@ fn add_features_from_arrays(
             debug_assert_eq!(get_encoding("right_clippings"), Encoding::Sparse);
             blob_output.push(("right_clippings".into(), cid,
                 encode_sparse_blob(&pos, &vals, Some(&meta), flags, get_value_scale("right_clippings"), clen)));
-            if let Some(ref mut so) = sparse_output {
-                so.push(SparseFeatureData { feature_name: "right_clippings", positions: pos, values: vals, metadata: Some(meta), flags });
-            }
         }
     }
 
@@ -1233,9 +1138,7 @@ fn add_features_from_arrays(
         debug_assert_eq!(get_encoding("splicings"), Encoding::Sparse);
         blob_output.push(("splicings".into(), cid,
             encode_sparse_blob(&spl_pos, &spl_vals, None, flags, get_value_scale("splicings"), clen)));
-        if let Some(ref mut so) = sparse_output {
-            so.push(SparseFeatureData { feature_name: "splicings", positions: spl_pos, values: spl_vals, metadata: None, flags });
-        }
+
     }
 
     // Paired-reads module
@@ -1253,50 +1156,24 @@ fn add_features_from_arrays(
             .collect();
 
         // === BLOB encoding for paired-reads features ===
-        let clen = contig_length as u32;
-        let bar_threshold = config.bar_ratio * 0.01;
-        let min_occ = config.min_occurrences;
-
         let sparse_scale_pr = get_value_scale("non_inward_pairs").multiplier();
-        let filter_sparse_pr = |counts: &[f64], coverage: &[f64]| -> (Vec<u32>, Vec<i32>) {
-            let mut positions = Vec::new();
-            let mut vals = Vec::new();
-            let n = counts.len().min(coverage.len());
-            for i in 0..n {
-                let val = counts[i];
-                let cov = coverage[i];
-                if val >= cov * bar_threshold && val >= min_occ as f64 {
-                    positions.push(i as u32);
-                    vals.push((val / cov * sparse_scale_pr).round() as i32);
-                }
-            }
-            (positions, vals)
-        };
 
-        let (pos, vals) = filter_sparse_pr(&non_inward_f64, &primary_reads_f64);
+        let (pos, vals) = filter_sparse(&non_inward_f64, &primary_reads_f64, sparse_scale_pr);
         let sp_flags = MetadataFlags { sparse: true, ..Default::default() };
         debug_assert_eq!(get_encoding("non_inward_pairs"), Encoding::Sparse);
         blob_output.push(("non_inward_pairs".into(), cid,
             encode_sparse_blob(&pos, &vals, None, sp_flags, get_value_scale("non_inward_pairs"), clen)));
-        if let Some(ref mut so) = sparse_output {
-            so.push(SparseFeatureData { feature_name: "non_inward_pairs", positions: pos, values: vals, metadata: None, flags: sp_flags });
-        }
 
-        let (pos, vals) = filter_sparse_pr(&mate_unmapped_f64, &primary_reads_f64);
+        let (pos, vals) = filter_sparse(&mate_unmapped_f64, &primary_reads_f64, sparse_scale_pr);
         debug_assert_eq!(get_encoding("mate_not_mapped"), Encoding::Sparse);
         blob_output.push(("mate_not_mapped".into(), cid,
             encode_sparse_blob(&pos, &vals, None, sp_flags, get_value_scale("mate_not_mapped"), clen)));
-        if let Some(ref mut so) = sparse_output {
-            so.push(SparseFeatureData { feature_name: "mate_not_mapped", positions: pos, values: vals, metadata: None, flags: sp_flags });
-        }
 
-        let (pos, vals) = filter_sparse_pr(&mate_other_contig_f64, &primary_reads_f64);
+        let (pos, vals) = filter_sparse(&mate_other_contig_f64, &primary_reads_f64, sparse_scale_pr);
         debug_assert_eq!(get_encoding("mate_on_another_contig"), Encoding::Sparse);
         blob_output.push(("mate_on_another_contig".into(), cid,
             encode_sparse_blob(&pos, &vals, None, sp_flags, get_value_scale("mate_on_another_contig"), clen)));
-        if let Some(ref mut so) = sparse_output {
-            so.push(SparseFeatureData { feature_name: "mate_on_another_contig", positions: pos, values: vals, metadata: None, flags: sp_flags });
-        }
+
 
         // insert_sizes: dense curve
         let is_scale = get_value_scale("insert_sizes").multiplier();
@@ -1316,7 +1193,6 @@ fn add_features_from_arrays(
             .collect();
 
         // === BLOB encoding for long-reads features ===
-        let clen = contig_length as u32;
         let rl_scale = get_value_scale("read_lengths").multiplier();
         let mut rl_i32: Vec<i32> = values.iter().map(|&x| (x * rl_scale).round() as i32).collect();
         smooth_dense_values(&mut rl_i32, config.variation_percentage);
@@ -1337,16 +1213,11 @@ fn add_features_from_arrays(
         }).collect();
 
         // Compute dominant clip sequences (used by blob encoding below)
-        let threshold = config.bar_ratio * 0.01;
-        let dominant_start_clips = FeatureArrays::compute_dominant_sequences(&arrays.start_clip_sequences, &arrays.coverage_reduced, threshold);
-        let dominant_end_clips = FeatureArrays::compute_dominant_sequences(&arrays.end_clip_sequences, &arrays.coverage_reduced, threshold);
+        let dominant_start_clips = FeatureArrays::compute_dominant_sequences(&arrays.start_clip_sequences, &arrays.coverage_reduced, bar_threshold);
+        let dominant_end_clips = FeatureArrays::compute_dominant_sequences(&arrays.end_clip_sequences, &arrays.coverage_reduced, bar_threshold);
 
         // === BLOB encoding for phagetermini features ===
         {
-            let clen = contig_length as u32;
-            let bar_threshold = config.bar_ratio * 0.01;
-            let min_occ = config.min_occurrences;
-
             // coverage_reduced: dense curve
             let mut cr_i32: Vec<i32> = arrays.coverage_reduced.iter().map(|&x| x as i32).collect();
             smooth_dense_values(&mut cr_i32, config.variation_percentage);
@@ -1382,9 +1253,7 @@ fn add_features_from_arrays(
             debug_assert_eq!(get_encoding("reads_starts"), Encoding::Sparse);
             blob_output.push(("reads_starts".into(), cid,
                 encode_sparse_blob(&rs_pos, &rs_vals, Some(&rs_meta), pt_flags, get_value_scale("reads_starts"), clen)));
-            if let Some(ref mut so) = sparse_output {
-                so.push(SparseFeatureData { feature_name: "reads_starts", positions: rs_pos, values: rs_vals, metadata: Some(rs_meta), flags: pt_flags });
-            }
+
 
             // reads_ends: sparse with median + sequence
             let re_scale = get_value_scale("reads_ends").multiplier();
@@ -1413,9 +1282,7 @@ fn add_features_from_arrays(
             debug_assert_eq!(get_encoding("reads_ends"), Encoding::Sparse);
             blob_output.push(("reads_ends".into(), cid,
                 encode_sparse_blob(&re_pos, &re_vals, Some(&re_meta), pt_flags, get_value_scale("reads_ends"), clen)));
-            if let Some(ref mut so) = sparse_output {
-                so.push(SparseFeatureData { feature_name: "reads_ends", positions: re_pos, values: re_vals, metadata: Some(re_meta), flags: pt_flags });
-            }
+
         }
 
         // === STEP 2: Calculate aligned fraction and global metrics ===
@@ -1555,8 +1422,7 @@ fn process_mag_group(
     cds_indexes: &HashMap<i64, CdsIndex>,
     accum_ref: Option<&TimingAccum>,
 ) -> Option<MagGroupResult> {
-    use crate::blob::{encode_dense_blob, smooth_dense_values, EncodedBlob};
-    use crate::types::get_value_scale;
+    use crate::blob::EncodedBlob;
 
     let mag_len = group.mag_length as usize;
     if mag_len == 0 || group.members.is_empty() { return None; }
@@ -1604,7 +1470,6 @@ fn process_mag_group(
     let mut all_topology = Vec::new();
     let mut mapped_reads: u64 = 0;
     let mut contig_lengths_ordered: Vec<u32> = Vec::new();
-    let mut sparse_accum: Vec<SparseFeatureData> = Vec::new();
 
     for member in &group.members {
         let off = member.offset_in_mag as usize;
@@ -1709,22 +1574,12 @@ fn process_mag_group(
         });
         mapped_reads += primary_count;
 
-        // Encode per-contig blobs and collect sparse intermediate data
         let ts = accum_ref.map(|_| std::time::Instant::now());
         let mut blob_output: Vec<(String, i64, EncodedBlob)> = Vec::new();
-        let sparse_start = sparse_accum.len();
         let (pkg, metrics) = add_features_from_arrays(
             &mut arrays, &member.ref_name, member.contig_id, config, is_circular, seq_type, flags,
             primary_count, repeats, cds_index, &mut blob_output,
-            Some(&mut sparse_accum),
         );
-        // Shift sparse positions from contig-local to MAG coordinates
-        let mag_offset = member.offset_in_mag;
-        for sd in &mut sparse_accum[sparse_start..] {
-            for p in &mut sd.positions {
-                *p += mag_offset;
-            }
-        }
         contig_blobs.extend(blob_output);
         if let Some(p) = pkg { all_packaging.push(p); }
         if let Some((mis, micro, side, topo)) = metrics {
@@ -1742,139 +1597,16 @@ fn process_mag_group(
         return None;
     }
 
-    // --- Encode dense MAG blobs from accumulators ---
-    // Apply smoothing per-contig slice to match current behavior
-    fn smooth_per_contig(values: &mut [i32], members: &[MagContigJob], variation_pct: f64) {
-        let mut off = 0usize;
-        for m in members {
-            let end = (off + m.ref_length).min(values.len());
-            smooth_dense_values(&mut values[off..end], variation_pct);
-            off = end;
-        }
-    }
-
-    let ts_mag_enc = accum_ref.map(|_| std::time::Instant::now());
-
-    let vp = config.variation_percentage;
-    let mut mag_blobs: Vec<(String, EncodedBlob)> = Vec::new();
-
-    if flags.coverage {
-        smooth_per_contig(&mut accum.primary_reads, &group.members, vp);
-        mag_blobs.push(("primary_reads".into(), encode_dense_blob(&accum.primary_reads, get_value_scale("primary_reads"), group.mag_length)));
-        smooth_per_contig(&mut accum.primary_reads_plus_only, &group.members, vp);
-        mag_blobs.push(("primary_reads_plus_only".into(), encode_dense_blob(&accum.primary_reads_plus_only, get_value_scale("primary_reads_plus_only"), group.mag_length)));
-        smooth_per_contig(&mut accum.primary_reads_minus_only, &group.members, vp);
-        mag_blobs.push(("primary_reads_minus_only".into(), encode_dense_blob(&accum.primary_reads_minus_only, get_value_scale("primary_reads_minus_only"), group.mag_length)));
-        smooth_per_contig(&mut accum.secondary_reads, &group.members, vp);
-        mag_blobs.push(("secondary_reads".into(), encode_dense_blob(&accum.secondary_reads, get_value_scale("secondary_reads"), group.mag_length)));
-        smooth_per_contig(&mut accum.supplementary_reads, &group.members, vp);
-        mag_blobs.push(("supplementary_reads".into(), encode_dense_blob(&accum.supplementary_reads, get_value_scale("supplementary_reads"), group.mag_length)));
-        smooth_per_contig(&mut accum.mapq, &group.members, vp);
-        mag_blobs.push(("mapq".into(), encode_dense_blob(&accum.mapq, get_value_scale("mapq"), group.mag_length)));
-    }
-    if flags.phagetermini {
-        smooth_per_contig(&mut accum.coverage_reduced, &group.members, vp);
-        mag_blobs.push(("coverage_reduced".into(), encode_dense_blob(&accum.coverage_reduced, get_value_scale("coverage_reduced"), group.mag_length)));
-    }
-
-    // --- Encode insert_sizes / read_lengths from raw accumulators ---
-    if flags.paired_read_metrics {
-        let is_scale = get_value_scale("insert_sizes").multiplier();
-        let mut is_i32: Vec<i32> = accum.sum_insert_sizes.iter().zip(&accum.count_insert_sizes)
-            .map(|(&s, &c)| if c > 0 { (s as f64 / c as f64 * is_scale).round() as i32 } else { 0 })
-            .collect();
-        smooth_per_contig(&mut is_i32, &group.members, vp);
-        let mut encoded = encode_dense_blob(&is_i32, get_value_scale("insert_sizes"), group.mag_length);
-        encoded.chunks = Vec::new();
-        mag_blobs.push(("insert_sizes".into(), encoded));
-    }
-    if flags.long_read_metrics && seq_type.is_long() {
-        let rl_scale = get_value_scale("read_lengths").multiplier();
-        let mut rl_i32: Vec<i32> = accum.sum_read_lengths.iter().zip(&accum.count_read_lengths)
-            .map(|(&s, &c)| if c > 0 { (s as f64 / c as f64 * rl_scale).round() as i32 } else { 0 })
-            .collect();
-        smooth_per_contig(&mut rl_i32, &group.members, vp);
-        let mut encoded = encode_dense_blob(&rl_i32, get_value_scale("read_lengths"), group.mag_length);
-        encoded.chunks = Vec::new();
-        mag_blobs.push(("read_lengths".into(), encoded));
-    }
-
-    // --- Encode sparse MAG blobs from accumulated intermediate data ---
-    {
-        use crate::blob::{encode_sparse_blob, MetadataFlags, EventMeta};
-
-        struct SparseAccumEntry {
-            positions: Vec<u32>,
-            values: Vec<i32>,
-            metadata: Vec<EventMeta>,
-            flags: MetadataFlags,
-        }
-
-        let mut by_feature: HashMap<&str, SparseAccumEntry> = HashMap::new();
-        for sd in sparse_accum {
-            let entry = by_feature.entry(sd.feature_name).or_insert_with(|| SparseAccumEntry {
-                positions: Vec::new(),
-                values: Vec::new(),
-                metadata: Vec::new(),
-                flags: MetadataFlags { sparse: true, ..Default::default() },
-            });
-            entry.flags.has_stats    |= sd.flags.has_stats;
-            entry.flags.has_sequence |= sd.flags.has_sequence;
-            entry.flags.has_codons   |= sd.flags.has_codons;
-            entry.flags.has_partner  |= sd.flags.has_partner;
-            let meta = sd.metadata.unwrap_or_default();
-            for (i, p) in sd.positions.into_iter().enumerate() {
-                entry.positions.push(p);
-                entry.values.push(sd.values[i]);
-                entry.metadata.push(meta.get(i).cloned().unwrap_or_default());
-            }
-        }
-
-        for (feature_name, mut entry) in by_feature {
-            if entry.positions.is_empty() { continue; }
-            // Sort by position for encode_sparse_blob
-            let mut order: Vec<usize> = (0..entry.positions.len()).collect();
-            order.sort_unstable_by_key(|&i| entry.positions[i]);
-            entry.positions = order.iter().map(|&i| entry.positions[i]).collect();
-            entry.values = order.iter().map(|&i| entry.values[i]).collect();
-            entry.metadata = order.iter().map(|&i| entry.metadata[i].clone()).collect();
-
-            let scale = get_value_scale(feature_name);
-            let has_any_meta = entry.flags.has_stats || entry.flags.has_sequence
-                || entry.flags.has_codons || entry.flags.has_partner;
-            let meta_ref = if has_any_meta {
-                Some(entry.metadata.as_slice())
-            } else {
-                None
-            };
-            let mut encoded = encode_sparse_blob(
-                &entry.positions, &entry.values, meta_ref,
-                entry.flags, scale, group.mag_length,
-            );
-            encoded.chunks = Vec::new();
-            mag_blobs.push((feature_name.to_string(), encoded));
-        }
-    }
-
     // --- MAG coverage stats from raw primary_reads accumulator ---
-    // Use the pre-smoothing values for stats. We already smoothed accum.primary_reads
-    // above, so rebuild from presences read_count for the total.
     let total_reads_in_mag: u64 = presences.iter().map(|p| p.read_count).sum();
-    // Recompute from the smoothed primary_reads (matches current behavior where
-    // stats are computed from decoded blob values which are post-smoothing).
     let mag_cov_stats = crate::mag_blob::compute_mag_coverage_stats_from_raw(
         &accum.primary_reads, group.mag_length, &contig_lengths_ordered, total_reads_in_mag,
     );
-
-    if let (Some(a), Some(t)) = (accum_ref, ts_mag_enc) {
-        a.mag_encoding_ns.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
-    }
 
     Some(MagGroupResult {
         mag_name: group.mag_name.clone(),
         mag_id: group.mag_id,
         contig_blobs,
-        mag_blobs,
         mag_cov_stats,
         presences,
         packaging: all_packaging,
@@ -1904,19 +1636,16 @@ pub struct SampleProcessResult {
     pub mapped_reads: u64,
     pub is_circular: bool,
     pub timings: Option<SampleTimings>,
-    /// MAG-level blobs, ready to write. Empty in contig mode.
-    /// Vec of (mag_name, mag_id, feature_blobs, coverage_stats).
-    pub mag_results: Vec<(String, i64, Vec<(String, crate::blob::EncodedBlob)>, crate::mag_blob::MagCoverageStats)>,
+    /// MAG-level coverage stats, ready to write. Empty in contig mode.
+    pub mag_results: Vec<(String, i64, crate::mag_blob::MagCoverageStats)>,
 }
 
 pub fn process_sample(
     bam_path: &Path,
-    _contigs: &[ContigInfo],
     flags: ModuleFlags,
     config: &ProcessConfig,
     is_circular: bool,
     repeats: &[RepeatsData],
-    _annotations: &[FeatureAnnotation],
     contig_by_name: &HashMap<&str, usize>,
     cds_indexes: &HashMap<i64, CdsIndex>,
     mag_member_lookup: Option<&MagMemberLookup>,
@@ -2074,7 +1803,7 @@ pub fn process_sample(
             all_side.extend(r.side_misassembly);
             all_topo.extend(r.topology);
             mapped += r.mapped_reads;
-            mag_res.push((r.mag_name, r.mag_id, r.mag_blobs, r.mag_cov_stats));
+            mag_res.push((r.mag_name, r.mag_id, r.mag_cov_stats));
         }
 
         if let (Some(s), Some(t)) = (st.as_mut(), t0) {
@@ -2148,7 +1877,7 @@ pub fn process_sample(
 
                     let ts = accum_ref.map(|_| std::time::Instant::now());
                     let mut feature_blobs: Vec<(String, i64, crate::blob::EncodedBlob)> = Vec::new();
-                    let (packaging_info, metrics_info) = add_features_from_arrays(&mut arrays, ref_name, contig_id, config, is_circular, seq_type, flags, primary_count, repeats, cds_index, &mut feature_blobs, None);
+                    let (packaging_info, metrics_info) = add_features_from_arrays(&mut arrays, ref_name, contig_id, config, is_circular, seq_type, flags, primary_count, repeats, cds_index, &mut feature_blobs);
                     let coverage_median = arrays.coverage_median() as f32;
                     let coverage_trimmed_mean = arrays.coverage_trimmed_mean(0.05) as f32;
 
@@ -2257,7 +1986,6 @@ pub fn process_sample(
             s.stream_records_ns = a.stream_records_ns.load(Ordering::Relaxed);
             s.stream_process_read_ns = a.stream_process_read_ns.load(Ordering::Relaxed);
             s.stream_finalize_ns = a.stream_finalize_ns.load(Ordering::Relaxed);
-            s.mag_encoding_ns = a.mag_encoding_ns.load(Ordering::Relaxed);
         }
     }
 
@@ -2281,7 +2009,7 @@ pub fn process_sample(
 
 /// Extract contig information from BAM file headers.
 /// Deduplicates contigs across all BAM files.
-fn extract_contigs_from_bams(bam_files: &[PathBuf], _circularity_map: &HashMap<PathBuf, bool>) -> Result<Vec<ContigInfo>> {
+fn extract_contigs_from_bams(bam_files: &[PathBuf]) -> Result<Vec<ContigInfo>> {
     let mut contig_map: HashMap<String, usize> = HashMap::new();
 
     // Scan all BAM files to collect unique contigs
@@ -2349,7 +2077,7 @@ pub fn run_all_samples(
 
     // 1. Strict upfront validation — fail early with actionable errors
     if !bam_files.is_empty() {
-        validate_inputs(bam_files, modules, genbank_path, assembly_path, extend_db)?;
+        validate_inputs(bam_files, modules)?;
     }
 
     // Open timing log as early as possible so all phases are captured
@@ -2369,14 +2097,6 @@ pub fn run_all_samples(
     let has_genbank = !genbank_path.as_os_str().is_empty();
     let is_extending = !extend_db.as_os_str().is_empty();
 
-    // For BAM-only mode, do a quiet @CO-only scan for contig extraction (no log messages).
-    // The full detection with logging happens once at step 5 below.
-    let preliminary_map = if !bam_files.is_empty() && !has_genbank {
-        quick_co_header_scan(bam_files)?
-    } else {
-        HashMap::new()
-    };
-
     // In MAG mode, per-MAG membership (mag_name → member contig names) is collected during parsing.
     let mut mag_contig_map: Vec<(String, Vec<String>)> = Vec::new();
 
@@ -2394,10 +2114,8 @@ pub fn run_all_samples(
                 let (mag_contigs, mag_anns, mag_quals) = parse_annotations(gb)?;
                 // Remap parser-local contig_ids to their global position in all_contigs.
                 let base_global = all_contigs.len() as i64;
-                for (local_idx, c) in mag_contigs.iter().enumerate() {
+                for c in &mag_contigs {
                     member_names.push(c.name.clone());
-                    // Annotations/qualifiers reference parser-local ids 1..=N; shift by base_global.
-                    let _ = local_idx;
                 }
                 for mut ann in mag_anns {
                     ann.contig_id += base_global;
@@ -2482,7 +2200,7 @@ pub fn run_all_samples(
         (all_contigs, all_annotations, all_quals)
     } else if !has_genbank {
         eprintln!("No GenBank file provided - extracting contigs from BAM headers");
-        let contigs = extract_contigs_from_bams(bam_files, &preliminary_map)?;
+        let contigs = extract_contigs_from_bams(bam_files)?;
         eprintln!("Found {} contigs from BAM files", contigs.len());
         (contigs, Vec::new(), Vec::new())
     } else if has_genbank && genbank_path.is_dir() {
@@ -2889,7 +2607,7 @@ pub fn run_all_samples(
     // 5. Auto-detect circularity per sample (now with contigs available for length comparison)
     let t_circ = if config.enable_timing { Some(std::time::Instant::now()) } else { None };
     let circularity_map = if !bam_files.is_empty() {
-        detect_all_sample_circularities(bam_files, &contigs)?
+        detect_all_sample_circularities(bam_files)?
     } else {
         HashMap::new()
     };
@@ -2910,7 +2628,6 @@ pub fn run_all_samples(
     let n_contigs_with_seq = blast_contigs.iter().filter(|c| c.sequence.is_some()).count();
 
     let t_autoblast = if config.enable_timing { Some(std::time::Instant::now()) } else { None };
-    let mut mag_contig_sparse_raw: Vec<crate::mag_blob::ContigSparseRaw> = Vec::new();
     let repeats = if config.blast && has_sequences {
         if config.view_mode == ViewMode::Mag {
             let blast_names: HashSet<&str> = blast_contigs.iter().map(|c| c.name.as_str()).collect();
@@ -2929,13 +2646,12 @@ pub fn run_all_samples(
             db_writer.compute_duplication_percentages(&reps)?;
             if inter_count > 0 {
                 let t_hit_features = std::time::Instant::now();
-                let hit_raw = db_writer.write_mag_hit_features()?;
-                mag_contig_sparse_raw.extend(hit_raw);
+                db_writer.write_mag_hit_features()?;
                 eprintln!("  Per-position hit features: {:.1}s", t_hit_features.elapsed().as_secs_f64());
             }
             reps
         } else {
-            let reps = run_autoblast(blast_contigs, config.threads)?;
+            let reps = run_autoblast(blast_contigs)?;
             db_writer.write_repeats(&reps)?;
             db_writer.compute_duplication_percentages(&reps)?;
             reps
@@ -2975,7 +2691,6 @@ pub fn run_all_samples(
     let mut gc_compute_ns: u64 = 0;
     let mut gc_write_blob_ns: u64 = 0;
     let mut gc_update_stats_ns: u64 = 0;
-    let mut all_gc_data: Vec<GCContentData> = Vec::new();
     const GC_BATCH: usize = 10_000;
     for batch_start in (0..n_gc_contigs).step_by(GC_BATCH) {
         let batch_end = (batch_start + GC_BATCH).min(n_gc_contigs);
@@ -3013,7 +2728,7 @@ pub fn run_all_samples(
             db_writer.update_contig_gc_stats(&gc_data)?;
             gc_update_stats_ns += t2.elapsed().as_nanos() as u64;
 
-            all_gc_data.extend(gc_data);
+
         }
     }
     let gc_secs: [f64; 4] = [
@@ -3037,8 +2752,7 @@ pub fn run_all_samples(
     let new_contig_ids: Vec<i64> = new_contigs_for_blast.iter()
         .filter_map(|c| db_writer.get_contig_id(&c.name))
         .collect();
-    let repeat_raw = db_writer.convert_repeat_blobs(&new_contig_ids)?;
-    mag_contig_sparse_raw.extend(repeat_raw);
+    db_writer.convert_repeat_blobs(&new_contig_ids)?;
     let repeat_blob_secs = t_repeat_blob.map(|t| t.elapsed().as_secs_f64()).unwrap_or(0.0);
     let repeat_rss_mb = if config.enable_timing { get_rss_mb() } else { 0.0 };
     if let Some(ref mut f) = timing_file {
@@ -3058,22 +2772,9 @@ pub fn run_all_samples(
     }
     let write_mags_secs = t_write_mags.map(|t| t.elapsed().as_secs_f64()).unwrap_or(0.0);
     let write_mags_rss_mb = if config.enable_timing { get_rss_mb() } else { 0.0 };
-
-    // Build MAG contig blobs directly from raw GC / repeat / hit data.
-    let mag_contig_blob_secs = if config.view_mode == ViewMode::Mag && !mag_contig_map.is_empty() {
-        let t = std::time::Instant::now();
-        crate::mag_blob::build_mag_contig_blobs_from_raw(&db_writer, &all_gc_data, mag_contig_sparse_raw)?;
-        let secs = t.elapsed().as_secs_f64();
-        if config.enable_timing {
-            eprintln!("MAG contig-blob aggregation: {:.3} s", secs);
-        }
-        secs
-    } else { 0.0 };
-    let mag_contig_blob_rss_mb = if config.enable_timing { get_rss_mb() } else { 0.0 };
     if let Some(ref mut f) = timing_file {
         use std::io::Write;
         let _ = writeln!(f, "  Write MAGs           : {:>10.3} s  [RSS: {:.0} MB]", write_mags_secs, write_mags_rss_mb);
-        let _ = writeln!(f, "  MAG contig blobs     : {:>10.3} s  [RSS: {:.0} MB]", mag_contig_blob_secs, mag_contig_blob_rss_mb);
         let _ = f.flush();
     }
 
@@ -3130,8 +2831,6 @@ pub fn run_all_samples(
         repeat_rss_mb,
         write_mags_secs,
         write_mags_rss_mb,
-        mag_contig_blob_secs,
-        mag_contig_blob_rss_mb,
         cds_build_secs: 0.0, // filled in process_samples_parallel/sequential
         cds_build_rss_mb: 0.0,
     };
@@ -3158,7 +2857,7 @@ fn filter_failing_mags(
 
     let stats_by_name: HashMap<&str, &crate::mag_blob::MagCoverageStats> = mag_results
         .iter()
-        .map(|(name, _, _, stats)| (name.as_str(), stats))
+        .map(|(name, _, stats)| (name.as_str(), stats))
         .collect();
 
     let presence_names: HashSet<&str> = presences.iter().map(|p| p.contig_name.as_str()).collect();
@@ -3191,7 +2890,7 @@ fn filter_failing_mags(
     (drop_set, n_dropped)
 }
 
-type MagResultVec = Vec<(String, i64, Vec<(String, crate::blob::EncodedBlob)>, crate::mag_blob::MagCoverageStats)>;
+type MagResultVec = Vec<(String, i64, crate::mag_blob::MagCoverageStats)>;
 
 /// Apply a contig drop set to all per-sample data vectors, removing entries
 /// whose contig_name is in `drop`. Also filters `mag_results` by resolving
@@ -3233,7 +2932,7 @@ fn apply_mag_filter(
         side_misassembly.into_iter().filter(|p| !drop.contains(&p.contig_name)).collect(),
         topology.into_iter().filter(|p| !drop.contains(&p.contig_name)).collect(),
         feature_blobs.into_iter().filter(|(_, cid, _)| !drop_ids.contains(cid)).collect(),
-        mag_results.into_iter().filter(|(name, _, _, _)| !dropped_mag_names.contains(name.as_str())).collect(),
+        mag_results.into_iter().filter(|(name, _, _)| !dropped_mag_names.contains(name.as_str())).collect(),
     )
 }
 
@@ -3246,10 +2945,7 @@ fn write_mag_results(
     if mag_results.is_empty() { return 0; }
     let mag_t = std::time::Instant::now();
     if let Ok(conn) = db_writer.lock_conn() {
-        for (mag_name, mag_id, blobs, stats) in mag_results {
-            if let Err(e) = db_writer.write_mag_blobs(&conn, *mag_id, sample_id, blobs) {
-                eprintln!("\n### ERROR writing MAG blobs for {} MAG {}: {:?}", sample_name, mag_name, e);
-            }
+        for (mag_name, mag_id, stats) in mag_results {
             if let Err(e) = db_writer.write_mag_coverage(&conn, *mag_id, sample_id, stats) {
                 eprintln!("\n### ERROR writing MAG coverage for {} MAG {}: {:?}", sample_name, mag_name, e);
             }
@@ -3274,8 +2970,8 @@ struct SampleResult {
     side_misassembly: Vec<SideMisassemblyData>,
     topology: Vec<TopologyData>,
     timings: Option<SampleTimings>,
-    /// MAG-level blobs ready to write. Empty in contig mode.
-    mag_results: Vec<(String, i64, Vec<(String, crate::blob::EncodedBlob)>, crate::mag_blob::MagCoverageStats)>,
+    /// MAG-level coverage stats ready to write. Empty in contig mode.
+    mag_results: MagResultVec,
 }
 
 fn process_samples_parallel(
@@ -3559,7 +3255,7 @@ fn process_samples_parallel(
         let sample_start = std::time::Instant::now();
 
         let sample_circular = circularity_map.get(bam_path).copied().unwrap_or(false);
-        match process_sample(bam_path, contigs, flags, config, sample_circular, repeats, annotations, &contig_by_name, &cds_indexes, mag_member_lookup_ref) {
+        match process_sample(bam_path, flags, config, sample_circular, repeats, &contig_by_name, &cds_indexes, mag_member_lookup_ref) {
             Ok(mut r) => {
                 let sample_time = sample_start.elapsed().as_secs_f64();
                 if let Some(ref mut t) = r.timings {
@@ -3740,7 +3436,7 @@ fn process_samples_sequential(
         let sample_start = std::time::Instant::now();
 
         let sample_circular = circularity_map.get(bam_path).copied().unwrap_or(false);
-        match process_sample(bam_path, contigs, flags, config, sample_circular, repeats, annotations, &contig_by_name, &cds_indexes, mag_member_lookup.as_ref()) {
+        match process_sample(bam_path, flags, config, sample_circular, repeats, &contig_by_name, &cds_indexes, mag_member_lookup.as_ref()) {
             Ok(mut r) => {
                 let process_elapsed = sample_start.elapsed();
                 processing_time_total += process_elapsed;
@@ -3995,7 +3691,6 @@ fn write_sample_timing(f: &mut fs::File, t: &SampleTimings, threads: usize) -> R
     writeln!(f, "  ---- Wall-clock phases ----")?;
     writeln!(f, "  Header read          : {:>10.3} s", t.header_read.as_secs_f64())?;
     writeln!(f, "  Total read count     : {:>10.3} s", t.total_read_count.as_secs_f64())?;
-    writeln!(f, "  Build lookups        : {:>10.3} s", t.build_lookups.as_secs_f64())?;
     writeln!(f, "  Filter tids (pre-par): {:>10.3} s", t.filter_tids.as_secs_f64())?;
     writeln!(f, "  Par-iter wall        : {:>10.3} s", t.par_iter_wall.as_secs_f64())?;
     writeln!(f, "  Merge contig results : {:>10.3} s", t.merge_results.as_secs_f64())?;
@@ -4009,9 +3704,8 @@ fn write_sample_timing(f: &mut fs::File, t: &SampleTimings, threads: usize) -> R
     writeln!(f, "    . process_read     : {:>10.3} s", ns_to_s(t.stream_process_read_ns))?;
     writeln!(f, "    . finalize+cov     : {:>10.3} s", ns_to_s(t.stream_finalize_ns))?;
     writeln!(f, "  Feature calculation  : {:>10.3} s", ns_to_s(t.feature_calc_ns))?;
-    writeln!(f, "  MAG blob encoding    : {:>10.3} s", ns_to_s(t.mag_encoding_ns))?;
     let sub_sum_ns = t.bam_open_ns
-                   + t.streaming_ns + t.feature_calc_ns + t.mag_encoding_ns;
+                   + t.streaming_ns + t.feature_calc_ns;
     writeln!(f, "  (sum of above)       : {:>10.3} s  ({}x threads -> wall ~ {:.1} s)",
              ns_to_s(sub_sum_ns), threads, ns_to_s(sub_sum_ns) / threads as f64)?;
     writeln!(f, "  ---- DB write sub-phases ----")?;
@@ -4046,7 +3740,6 @@ fn finish_timing_log(
     writeln!(f, "    update stats       : {:>10.3} s", pt.gc_secs[3])?;
     writeln!(f, "  Repeat blob conversion: {:>9.3} s  [RSS: {:.0} MB]", pt.repeat_blob_secs, pt.repeat_rss_mb)?;
     writeln!(f, "  Write MAGs           : {:>10.3} s  [RSS: {:.0} MB]", pt.write_mags_secs, pt.write_mags_rss_mb)?;
-    writeln!(f, "  MAG contig blobs     : {:>10.3} s  [RSS: {:.0} MB]", pt.mag_contig_blob_secs, pt.mag_contig_blob_rss_mb)?;
     writeln!(f, "  CDS index build      : {:>10.3} s  [RSS: {:.0} MB]", pt.cds_build_secs, pt.cds_build_rss_mb)?;
     writeln!(f, "  ---- Per-sample phases ----")?;
     let sum_dur = |g: fn(&SampleTimings) -> std::time::Duration| -> f64 {
@@ -4057,7 +3750,6 @@ fn finish_timing_log(
     };
     writeln!(f, "  Header read          : {:>10.3} s", sum_dur(|t| t.header_read))?;
     writeln!(f, "  Total read count     : {:>10.3} s", sum_dur(|t| t.total_read_count))?;
-    writeln!(f, "  Build lookups        : {:>10.3} s", sum_dur(|t| t.build_lookups))?;
     writeln!(f, "  Filter tids (pre-par): {:>10.3} s", sum_dur(|t| t.filter_tids))?;
     writeln!(f, "  Par-iter wall        : {:>10.3} s", sum_dur(|t| t.par_iter_wall))?;
     writeln!(f, "  Merge contig results : {:>10.3} s", sum_dur(|t| t.merge_results))?;
@@ -4072,7 +3764,6 @@ fn finish_timing_log(
     writeln!(f, "    . process_read     : {:>10.3} s", sum_ns(|t| t.stream_process_read_ns))?;
     writeln!(f, "    . finalize+cov     : {:>10.3} s", sum_ns(|t| t.stream_finalize_ns))?;
     writeln!(f, "  Feature calculation  : {:>10.3} s", sum_ns(|t| t.feature_calc_ns))?;
-    writeln!(f, "  MAG blob encoding    : {:>10.3} s", sum_ns(|t| t.mag_encoding_ns))?;
     writeln!(f, "  ---- DB write sub-phase sums ----")?;
     writeln!(f, "  Insert sample        : {:>10.3} s", sum_ns(|t| t.insert_sample_ns))?;
     writeln!(f, "  Write contig data    : {:>10.3} s", sum_ns(|t| t.write_contig_data_ns))?;
@@ -4083,7 +3774,7 @@ fn finish_timing_log(
     writeln!(f)?;
     let pre_sample_timed = pt.parse_secs + pt.db_create_secs + pt.circ_secs
         + pt.autoblast_secs + pt.gc_secs[0] + pt.repeat_blob_secs
-        + pt.write_mags_secs + pt.mag_contig_blob_secs;
+        + pt.write_mags_secs;
     let sample_phase_wall = total_wall.as_secs_f64();
     let total_timed = pre_sample_timed + sample_phase_wall;
     let real_wall_secs = run_start.elapsed().as_secs_f64();

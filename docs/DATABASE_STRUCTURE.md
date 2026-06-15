@@ -27,8 +27,6 @@ Tables are grouped by what they describe. Not all tables are present in every da
 | **Feature_blob_chunk** *(BAM)* | `(Contig_id, Sample_id, Feature_id, Chunk_idx)` | Base-resolution data in 65,536 bp chunks per mapping feature                    |
 | **Contig_blob**                | `(Contig_id, Feature_id)`                       | Zoom-level summary BLOB per contig-level feature (GC content, GC skew, repeats) |
 | **Contig_blob_chunk**          | `(Contig_id, Feature_id, Chunk_idx)`            | Base-resolution chunks for contig-level features                                |
-| **MAG_blob** *(MAG)*           | `(MAG_id, Sample_id, Feature_id)`               | Zoom-level summary BLOB for MAG-scale mapping features                          |
-| **MAG_contig_blob** *(MAG)*    | `(MAG_id, Feature_id)`                          | Zoom-level summary BLOB for MAG-scale contig features                           |
 
 ### Per-contig-per-sample metrics
 
@@ -114,7 +112,7 @@ Sparse features differ from dense features in that values are present only at a 
 
 ### Decoding the BLOB data
 
-When visualising a range of positions from a contig and clicking APPLY, BLOB data must be decoded to fetch and return the values associated to the positions requested. For huge contigs, to avoid decoding the entire length, dense feature BLOBs are split into **65,536 bp chunks** (`Feature_blob_chunk` table). Each chunk is independently compressed. When the user zooms into a genomic window, Python computes which chunk index(es) cover that window and fetches only those rows from Feature_blob_chunk, avoiding the cost of decoding the entire contig's data. Sparse BLOBs are small enough (only non-zero positions) to be stored and fetched whole — they are not chunked.
+When visualising a range of positions from a contig and clicking APPLY, BLOB data must be decoded to fetch and return the values associated to the positions requested. For huge contigs, to avoid decoding the entire length, dense feature BLOBs are split into **65,536 bp chunks** (`Feature_blob_chunk` table). Each chunk is independently compressed. When the user zooms into a genomic window, Python computes which chunk index(es) cover that window and fetches only those rows from Feature_blob_chunk, avoiding the cost of decoding the entire contig's data. Sparse BLOBs are small enough (only non-zero positions) to be stored and fetched whole, they are not chunked.
 
 ### Zoom levels
 
@@ -124,11 +122,9 @@ With `thebigbam serve`, zoom BLOBs are used instead of per-position data when th
 
 Conversely, `thebigbam inspect` always returns base-resolution data, never zoom summaries.
 
-### MAG BLOBs
+### BLOB stitching into MAGs
 
-In MAG mode, per-contig BLOBs are still written as usual. In addition, MAG-wide zoom-only BLOBs are built by concatenating per-contig data (shifted by each contig's Offset_in_MAG). MAG_blob stores one zoom BLOB per MAG per sample per mapping feature. MAG_contig_blob stores one zoom BLOB per MAG per contig-level feature (GC, repeats). 
-
-No MAG-level base-resolution chunks are stored, in order to avoid redundant data duplication. For zoomed-in views, the viewer retrieves data directly from the per-contig chunk tables and uses coordinate offsets to map MAG-level positions back to contig coordinates.
+In MAG mode, per-contig BLOBs are written as usual. MAG-scale visualization is assembled at display time by stitching per-contig zoom BLOBs together (shifting coordinates by each contig's offset). This approach supports contig reordering without recomputation.
 
 ---
 

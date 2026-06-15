@@ -1,4 +1,5 @@
 import argparse
+import io
 import os
 import time
 import duckdb
@@ -6,16 +7,29 @@ import traceback
 
 import panel as pn
 
+from bokeh.events import Tap
+from bokeh.io import curdoc
 from bokeh.layouts import column, row
-from bokeh.models import Div, InlineStyleSheet, Tooltip
+from bokeh.models import ColumnDataSource, CustomJSTickFormatter, Div, HoverTool, InlineStyleSheet, Range1d, Span, TapTool, Tooltip
+from bokeh.models.callbacks import CustomJS
 from bokeh.models.widgets import CheckboxGroup, HelpButton, Button, RadioButtonGroup, CheckboxButtonGroup, Select, TextInput, Spinner, MultiChoice, ColorPicker
+from bokeh.plotting import figure as bk_figure
 
 # Import the plotting function from the repo
 from .plotting_data_per_sample import generate_bokeh_plot_per_sample, generate_bokeh_plot_mag_view, DEFAULT_GENEMAP_WINDOW, DEFAULT_SEQUENCE_WINDOW, _DEFAULT_MAX_BASE_RESOLUTION
 from .plotting_data_all_samples import generate_bokeh_plot_all_samples
-from ..database.database_getters import get_filtering_metadata, resolve_distinct_values, resolve_histogram_bins, resolve_value_counts, resolve_column_null_stats, ANNOTATION_EXCLUDED_COLUMNS, is_mag_mode, get_mag_contig_map
+from ..database.database_getters import get_filtering_metadata, resolve_distinct_values, resolve_histogram_bins, resolve_value_counts, resolve_column_null_stats, is_mag_mode, get_mag_contig_map
 from .searchable_select import SearchableSelect
 from .perusing_data import _FILTER_ENCODE, _make_filter_encode
+
+_STATIC_DIR = os.path.join(os.path.dirname(__file__), "..", "static")
+_CSS_CACHE = {}
+
+def _get_cached_stylesheet(filename):
+    if filename not in _CSS_CACHE:
+        with open(os.path.join(_STATIC_DIR, filename)) as f:
+            _CSS_CACHE[filename] = f.read()
+    return InlineStyleSheet(css=_CSS_CACHE[filename])
 
 def _get_rss_mb():
     try:
@@ -34,7 +48,6 @@ def _get_rss_mb():
 
 def _estimate_grid_data_size(grid):
     import sys
-    from bokeh.models import ColumnDataSource
     total_bytes = 0
     n_sources = 0
     for ref in grid.references():
@@ -255,6 +268,9 @@ def preload_db_data(db_path, enable_timing=False):
         _step = time.perf_counter() - _t
         print(f"[timing] Preload: subplot→varnames: {_step:.3f}s{_TIMING.tag(_step)}", flush=True)
 
+    cur.execute("SELECT Variable_name, Encoding FROM Variable WHERE Variable_name IS NOT NULL AND Encoding IS NOT NULL")
+    encoding_by_feature = {name: enc for name, enc in cur.fetchall()}
+
     conn.close()
 
     if enable_timing:
@@ -286,6 +302,7 @@ def preload_db_data(db_path, enable_timing=False):
         'custom_contig_subplots': custom_contig_subplots,
         'filtering_metadata': filtering_metadata,
         'subplot_to_varnames': subplot_to_varnames,
+        'encoding_by_feature': encoding_by_feature,
     }
 
 
@@ -694,6 +711,8 @@ def create_layout(db_path, preloaded, enable_timing=False):
 
     def update_widget_completions(widget, completions):
         """Update widget completions. Clear value if not in completions."""
+        if widget.options == completions:
+            return
         widget.options = completions
         if widget.value and widget.value not in completions:
             widget.value = ""
@@ -816,25 +835,46 @@ def create_layout(db_path, preloaded, enable_timing=False):
                 if any(c in allowed_contigs for c in mag_to_contigs[m])
             ]
         update_widget_completions(widgets['mag_select'], completions)
+        refresh_sort_sample_options()
+
+    def refresh_sort_sample_options():
+        if not widgets['has_mags']:
+            return
+        sel_mag = widgets['mag_select'].value
+        if sel_mag and sel_mag in widgets['mag_to_sample_ids']:
+            allowed_sids = widgets['mag_to_sample_ids'][sel_mag]
+            completions = [s for s in orig_samples if widgets['sample_name_to_id'].get(s) in allowed_sids]
+        else:
+            completions = list(orig_samples)
+        filtered_pairs = get_filtering_filtered_pairs()
+        if filtered_pairs is not None:
+            allowed_samples = {pair[1] for pair in filtered_pairs}
+            completions = [s for s in completions if s in allowed_samples]
+        update_widget_completions(mag_params_sort_sample_select, completions)
+
+    _title_fingerprint = {'last': None}
 
     def update_section_titles():
         """Update Filtering, Contigs, Samples, and MAGs section titles with current counts."""
-        filtered_contigs = set(widgets['contig_select'].options) - {""}
-        filtered_samples = set(widgets['sample_select'].options) - {""}
+        opts_c = widgets['contig_select'].options
+        opts_s = widgets['sample_select'].options
+        val_c = widgets['contig_select'].value
+        val_s = widgets['sample_select'].value
+        opts_m = widgets['mag_select'].options if widgets['has_mags'] else ()
+        fp = (len(opts_c), val_c, len(opts_s), val_s, len(opts_m))
+        if fp == _title_fingerprint['last']:
+            return
+        _title_fingerprint['last'] = fp
 
-        # If a contig is selected, only count pairs for that contig
-        selected_contig = widgets['contig_select'].value
-        if selected_contig:
-            filtered_contigs = {selected_contig}
+        filtered_contigs = set(opts_c) - {""}
+        filtered_samples = set(opts_s) - {""}
 
-        # If a sample is selected, only count pairs for that sample
-        selected_sample = widgets['sample_select'].value
-        if selected_sample:
-            filtered_samples = {selected_sample}
+        if val_c:
+            filtered_contigs = {val_c}
+        if val_s:
+            filtered_samples = {val_s}
 
-        # Count presences (valid contig/sample pairs within filtered sets)
         _c2id = widgets['contig_name_to_id']
-        _s_id2n = widgets['sample_id_to_name']
         _filtered_sids = {widgets['sample_name_to_id'][s] for s in filtered_samples if s in widgets['sample_name_to_id']}
         presences_count = sum(
             1 for contig in filtered_contigs
@@ -845,12 +885,20 @@ def create_layout(db_path, preloaded, enable_timing=False):
         contigs_count = len(filtered_contigs)
         samples_count = len(filtered_samples)
 
-        filtering_title.text = f"<span style='font-size: 1.2em;'><b>Filtering</b></span> ({presences_count} contig/sample pairs)"
-        contig_title.text = f"<span style='font-size: 1.2em;'><b>Contigs</b></span> ({contigs_count} available)"
-        sample_title.text = f"<span style='font-size: 1.2em;'><b>Samples</b></span> ({samples_count} available)"
+        new_filtering = f"<span style='font-size: 1.2em;'><b>Filtering</b></span> ({presences_count} contig/sample pairs)"
+        new_contig = f"<span style='font-size: 1.2em;'><b>Contigs</b></span> ({contigs_count} available)"
+        new_sample = f"<span style='font-size: 1.2em;'><b>Samples</b></span> ({samples_count} available)"
+        if filtering_title.text != new_filtering:
+            filtering_title.text = new_filtering
+        if contig_title.text != new_contig:
+            contig_title.text = new_contig
+        if sample_title.text != new_sample:
+            sample_title.text = new_sample
         if widgets['has_mags']:
-            mags_count = len(set(widgets['mag_select'].options) - {""})
-            mag_title.text = f"<span style='font-size: 1.2em;'><b>MAGs</b></span> ({mags_count} available)"
+            mags_count = len(set(opts_m) - {""})
+            new_mag = f"<span style='font-size: 1.2em;'><b>MAGs</b></span> ({mags_count} available)"
+            if mag_title.text != new_mag:
+                mag_title.text = new_mag
 
     ## Views function
     # Enforce single-variable selection when in "All samples" view
@@ -882,7 +930,7 @@ def create_layout(db_path, preloaded, enable_timing=False):
                 sel_index = new[-1]
 
             # Enforce single selection across all modules in Variables section
-            from bokeh.io import curdoc
+
             doc = curdoc()
             doc.hold('combine')
             global_toggle_lock['locked'] = True
@@ -907,7 +955,7 @@ def create_layout(db_path, preloaded, enable_timing=False):
             t_view = time.perf_counter()
         is_all = (new == 1)  # True means All samples
 
-        from bokeh.io import curdoc
+
         doc = curdoc()
         doc.hold('combine')
         global_toggle_lock['locked'] = True
@@ -920,6 +968,7 @@ def create_layout(db_path, preloaded, enable_timing=False):
             mag_params_sort_sample_row.visible = (
                 is_all and mag_params_category_select.value != "Contig"
             )
+            refresh_sort_sample_options()
 
             # Refresh options while still locked (suppresses cascading callbacks)
             # Don't invalidate filtering cache - filtering is shared between views and hasn't changed
@@ -942,19 +991,16 @@ def create_layout(db_path, preloaded, enable_timing=False):
     ## Apply button function
     def apply_clicked():
         main_placeholder.loading = True
-        from bokeh.io import curdoc
+
         curdoc().add_next_tick_callback(_do_apply)
 
     def _do_apply():
-        import gc
-        from bokeh.io import curdoc
         doc = curdoc()
         doc.hold('combine')
         t_apply_start = None
         try:
             current_plot_state['shared_xrange'] = None
             main_placeholder.objects = []
-            gc.collect()
 
             if enable_timing:
                 _TIMING.start_phase("APPLY")
@@ -1119,6 +1165,12 @@ def create_layout(db_path, preloaded, enable_timing=False):
                     else:
                         _sort_sample_name = sample
 
+                # Read sample order parameters
+                _sample_sort_cat = sample_order_category_select.value
+                _sample_sort_metric = sample_order_metric_select.value
+                _sample_sort_ascending = (sample_order_direction.active == 0)
+                _sample_sort_source = _sample_sort_category_sources.get(_sample_sort_cat)
+
                 print(f"[start_bokeh_server] MAG view: mag={active_mag}, is_all={is_all}, sample={sample}, "
                       f"sort={_sort_cat}/{_sort_metric}/{'asc' if _sort_ascending else 'desc'}, features={mag_requested_features}", flush=True)
                 if enable_timing:
@@ -1163,6 +1215,9 @@ def create_layout(db_path, preloaded, enable_timing=False):
                     enable_timing=enable_timing,
                     sort_source=_sort_source, sort_metric=_sort_metric,
                     sort_ascending=_sort_ascending, sort_sample_name=_sort_sample_name,
+                    encoding_by_feature=_encoding_by_feature,
+                    sample_order_source=_sample_sort_source, sample_order_metric=_sample_sort_metric,
+                    sample_order_ascending=_sample_sort_ascending,
                 )
                 if enable_timing:
                     _step = time.perf_counter() - t_plot
@@ -1305,22 +1360,15 @@ def create_layout(db_path, preloaded, enable_timing=False):
                 if not selected_var and not genome_features:
                     raise ValueError("When in 'All samples' view you must select at least one variable to plot.")
 
-                # Compute filtered samples (same logic as refresh_sample_options)
-                # Start with samples that have the selected contig
-                filtered_samples = [s for s in orig_samples if widgets['sample_name_to_id'].get(s) in widgets['cid_to_sids'].get(widgets['contig_name_to_id'].get(contig), set())]
-                # Apply Filtering2 query builder conditions
-                filtering_pairs = get_filtering_filtered_pairs()
-                if filtering_pairs is not None:
-                    allowed_samples = {pair[1] for pair in filtering_pairs}
-                    filtered_samples = [s for s in filtered_samples if s in allowed_samples]
+                filtered_samples = _get_filtered_samples_for_contig(contig)
 
-                # Get selected ordering column (map UI label "Sample name" to DB column "Sample_name")
-                order_by = "Sample_name" if sample_order_select.value == "Sample name" else sample_order_select.value
+                _sample_sort_cat = sample_order_category_select.value
+                _sample_sort_metric = sample_order_metric_select.value
+                _sample_sort_ascending = (sample_order_direction.active == 0)
+                _sample_sort_source = _sample_sort_category_sources.get(_sample_sort_cat)
 
                 print(f"[start_bokeh_server] Generating plot for all samples with variable={selected_var}, contig={contig}, genome_features={genome_features}, filtered_samples={len(filtered_samples)}", flush=True)
-                # Pass plot_genemap to plotting function if supported, else filter genome_features
                 if not plot_genemap and genome_features:
-                    # Remove "Gene map" from genome_features if present
                     genome_features = [f for f in genome_features if f != "Gene map"]
                 if enable_timing:
                     t_plot = time.perf_counter()
@@ -1329,12 +1377,15 @@ def create_layout(db_path, preloaded, enable_timing=False):
                     genome_features=genome_features if genome_features else None, allowed_samples=set(filtered_samples),
                     feature_types=selected_feature_types, plot_isoforms=plot_isoforms, plot_sequence=plot_sequence,
                     plot_translated_sequence=plot_translated_sequence, same_y_scale=same_y_scale, subplot_size=subplot_size, genemap_size=genemap_size,
-                    sequence_size=sequence_size, translated_sequence_size=translated_sequence_size, order_by_column=order_by, max_base_resolution=max_binning,
+                    sequence_size=sequence_size, translated_sequence_size=translated_sequence_size,
+                    order_by_column=_sample_sort_metric, order_by_source=_sample_sort_source, order_ascending=_sample_sort_ascending,
+                    max_base_resolution=max_binning,
                     max_genemap_window=max_genemap_window, min_relative_value=min_coverage_freq,
                     feature_label_key=feature_label_key,
                     custom_colors=custom_colors if custom_colors else None,
                     max_samples=int(max_samples_input.value),
                     enable_timing=enable_timing,
+                    encoding_by_feature=_encoding_by_feature,
                 )
                 if enable_timing:
                     _step = time.perf_counter() - t_plot
@@ -1359,7 +1410,6 @@ def create_layout(db_path, preloaded, enable_timing=False):
                 if not plot_genemap and requested_features:
                     requested_features = [f for f in requested_features if f != "Gene map"]
                 # MAG view is handled by the early path above; MAG track is never shown in Contig view.
-                active_mag = None
                 if enable_timing:
                     t_plot = time.perf_counter()
                 grid = generate_bokeh_plot_per_sample(
@@ -1368,13 +1418,14 @@ def create_layout(db_path, preloaded, enable_timing=False):
                     plot_sequence=plot_sequence, plot_translated_sequence=plot_translated_sequence,
                     same_y_scale=False, subplot_size=subplot_size, genemap_size=genemap_size,
                     sequence_size=sequence_size, translated_sequence_size=translated_sequence_size, max_base_resolution=max_binning,
-                    max_genemap_window=int(max_genemap_window_input.value),
+                    max_genemap_window=max_genemap_window,
                     max_sequence_window=int(max_sequence_window_input.value),
                     min_relative_value=min_coverage_freq,
                     feature_label_key=feature_label_key,
                     custom_colors=custom_colors if custom_colors else None,
-                    mag_name=active_mag,
+                    mag_name=None,
                     enable_timing=enable_timing,
+                    encoding_by_feature=_encoding_by_feature,
                 )
                 if enable_timing:
                     _step = time.perf_counter() - t_plot
@@ -1499,11 +1550,7 @@ def create_layout(db_path, preloaded, enable_timing=False):
                 is_all = (views.active == 1)
 
                 if is_all:
-                    filtered_samples = [s for s in orig_samples if widgets['sample_name_to_id'].get(s) in widgets['cid_to_sids'].get(widgets['contig_name_to_id'].get(contig), set())]
-                    filtering_pairs = get_filtering_filtered_pairs()
-                    if filtering_pairs is not None:
-                        allowed_samples = {pair[1] for pair in filtering_pairs}
-                        filtered_samples = [s for s in filtered_samples if s in allowed_samples]
+                    filtered_samples = _get_filtered_samples_for_contig(contig)
 
                     if not filtered_samples:
                         print("[start_bokeh_server] Peruse: No samples match filters", flush=True)
@@ -1531,8 +1578,6 @@ def create_layout(db_path, preloaded, enable_timing=False):
         summary_carrier.text = b64
 
     ## Download functionality using Panel FileDownload widgets
-    import io
-
     # Store references to download widgets (created later, after widgets dict exists)
     download_widgets = {'contig_metrics': None, 'mag_metrics': None, 'data': None}
 
@@ -1549,11 +1594,9 @@ def create_layout(db_path, preloaded, enable_timing=False):
     # Client-side timing relay (--time mode only)
     _timing_state = {}
     if enable_timing:
-        from bokeh.models import TextInput as _TimingTextInput
-        from bokeh.models.callbacks import CustomJS as _TimingCustomJS
-        _timing_ping = _TimingTextInput(value="", visible=False)
-        _timing_ack = _TimingTextInput(value="", visible=False)
-        _timing_ping.js_on_change('value', _TimingCustomJS(args=dict(ack=_timing_ack), code="""
+        _timing_ping = TextInput(value="", visible=False)
+        _timing_ack = TextInput(value="", visible=False)
+        _timing_ping.js_on_change('value', CustomJS(args=dict(ack=_timing_ack), code="""
             try {
                 if (cb_obj.value) {
                     requestAnimationFrame(() => {
@@ -1605,11 +1648,7 @@ def create_layout(db_path, preloaded, enable_timing=False):
         is_all = (views.active == 1)
 
         if is_all:
-            filtered_samples = [s for s in orig_samples if widgets['sample_name_to_id'].get(s) in widgets['cid_to_sids'].get(widgets['contig_name_to_id'].get(contig), set())]
-            filtering_pairs = get_filtering_filtered_pairs()
-            if filtering_pairs is not None:
-                allowed_samples = {pair[1] for pair in filtering_pairs}
-                filtered_samples = [s for s in filtered_samples if s in allowed_samples]
+            filtered_samples = _get_filtered_samples_for_contig(contig)
 
             if not filtered_samples:
                 print("[start_bokeh_server] Download contig metrics: No samples match filters", flush=True)
@@ -1684,35 +1723,18 @@ def create_layout(db_path, preloaded, enable_timing=False):
         print(f"[timing] Session: widget creation: {_step:.3f}s{_TIMING.tag(_step)}", flush=True)
 
     _subplot_to_varnames = preloaded['subplot_to_varnames']
+    _encoding_by_feature = preloaded.get('encoding_by_feature')
 
     if enable_timing:
         t_ui = time.perf_counter()
         t_section = time.perf_counter()
 
-    # Load the CSS and logo
-    static_path = os.path.join(os.path.dirname(__file__), "..", "static")
-    css_path = os.path.join(static_path, "bokeh_styles.css")
-    with open(css_path) as f:
-        css_text = f.read()
-    stylesheet = InlineStyleSheet(css=css_text)
-
-    # Pink buttons css
-    pink_buttons_css_path = os.path.join(static_path, "pink_buttons.css")
-    with open(pink_buttons_css_path) as f:
-        pink_buttons_css_text = f.read()
-    pink_buttons_stylesheet = InlineStyleSheet(css=pink_buttons_css_text)
+    # Load cached CSS stylesheets
+    stylesheet = _get_cached_stylesheet("bokeh_styles.css")
+    pink_buttons_stylesheet = _get_cached_stylesheet("pink_buttons.css")
     widgets['view_radio'].stylesheets = [pink_buttons_stylesheet]
-
-    # Separate stylesheet for toggle buttons (minimal styling)
-    toggle_css_path = os.path.join(static_path, "toggle_styles.css")
-    with open(toggle_css_path) as f:
-        toggle_css_text = f.read()
-    toggle_stylesheet = InlineStyleSheet(css=toggle_css_text)
-
-    grey_buttons_css_path = os.path.join(static_path, "grey_buttons.css")
-    with open(grey_buttons_css_path) as f:
-        grey_buttons_css_text = f.read()
-    grey_buttons_stylesheet = InlineStyleSheet(css=grey_buttons_css_text)
+    toggle_stylesheet = _get_cached_stylesheet("toggle_styles.css")
+    grey_buttons_stylesheet = _get_cached_stylesheet("grey_buttons.css")
 
     # Create main elements
     ## Views section
@@ -1753,12 +1775,6 @@ def create_layout(db_path, preloaded, enable_timing=False):
 
     filtering_metadata = preloaded['filtering_metadata']
 
-    # Get Sample table columns for ordering dropdown (exclude ID and name columns)
-    sample_order_columns = ["Sample name"]  # Default option
-    if 'Sample' in filtering_metadata:
-        sample_columns = list(filtering_metadata['Sample']['columns'].keys())
-        sample_order_columns.extend(sample_columns)
-
     # Store all OR sections in a list for dynamic management
     or_sections = []
     # Store inter-section AND/OR Select widgets
@@ -1773,7 +1789,7 @@ def create_layout(db_path, preloaded, enable_timing=False):
 
     def refresh_on_filter_change():
         """Refresh contig and sample options when Filtering2 values change."""
-        from bokeh.io import curdoc
+
         doc = curdoc()
         doc.hold('combine')
         _filtering_cache['valid'] = False
@@ -1791,9 +1807,6 @@ def create_layout(db_path, preloaded, enable_timing=False):
     def build_numeric_histogram(row_data, category, col_name, spinner, log_mode=False, log_y=False):
         """Build a histogram with draggable threshold bar for a numeric column."""
         import numpy as np
-        from bokeh.plotting import figure as bk_figure
-        from bokeh.models import Span, ColumnDataSource, Range1d
-        from bokeh.models.callbacks import CustomJS
 
         col_info = filtering_metadata.get(category, {}).get("columns", {}).get(col_name, {})
         if col_info.get("type") != "numeric" or col_info.get("is_bool"):
@@ -1864,13 +1877,11 @@ def create_layout(db_path, preloaded, enable_timing=False):
         fig.xaxis.minor_tick_line_color = None
         fig.xaxis.major_label_text_font_size = "7pt"
         if log_mode:
-            from bokeh.models import CustomJSTickFormatter
             fig.xaxis.formatter = CustomJSTickFormatter(code="return (Math.pow(10, tick)).toPrecision(3);")
         fig.yaxis.visible = False
         fig.xgrid.grid_line_color = None
         fig.ygrid.grid_line_color = None
 
-        from bokeh.models import HoverTool
         fig.add_tools(HoverTool(tooltips=[("Min", "@min_val"), ("Max", "@max_val"), ("%", "@pct")], mode="vline"))
 
         if log_mode and spinner.value and spinner.value > 0:
@@ -1884,9 +1895,7 @@ def create_layout(db_path, preloaded, enable_timing=False):
         fig.add_layout(threshold_span)
 
         is_log = [1] if log_mode else [0]
-        from bokeh.events import Tap
-        from bokeh.models import TapTool as _TapTool
-        fig.add_tools(_TapTool())
+        fig.add_tools(TapTool())
         click_js = CustomJS(args=dict(span=threshold_span, spinner=spinner, source=hist_source, is_log=is_log), code="""
             const x = cb_obj.x;
             if (x === undefined || isNaN(x)) return;
@@ -1912,7 +1921,7 @@ def create_layout(db_path, preloaded, enable_timing=False):
         hist_pane = pn.pane.Bokeh(fig, sizing_mode="stretch_width", margin=(0, 0, 0, 0))
 
         def _rebuild_histogram(new_log_x, new_log_y):
-            from bokeh.io import curdoc
+
             hist_container = row_data["hist_container"]
             hist_container.loading = True
             row_data['loading_gen'] += 1
@@ -1973,9 +1982,6 @@ def create_layout(db_path, preloaded, enable_timing=False):
 
     def build_text_treemap(row_data, category, col_name, input_ref, hist_container):
         """Build a 1D treemap showing value distribution for a text column."""
-        from bokeh.plotting import figure as bk_figure
-        from bokeh.models import ColumnDataSource, Range1d, HoverTool
-        from bokeh.models.callbacks import CustomJS
         from bokeh.palettes import Category20_20
 
         value_counts = resolve_value_counts(db_path, filtering_metadata, category, col_name, enable_timing=enable_timing)
@@ -2035,8 +2041,7 @@ def create_layout(db_path, preloaded, enable_timing=False):
         fig.xgrid.grid_line_color = None
         fig.ygrid.grid_line_color = None
 
-        from bokeh.models import TapTool as _TapTool
-        fig.add_tools(HoverTool(tooltips=[("Value", "@label"), ("%", "@pct")]), _TapTool())
+        fig.add_tools(HoverTool(tooltips=[("Value", "@label"), ("%", "@pct")]), TapTool())
 
         bridge = TextInput(value="", visible=False)
         bridge_pane = pn.pane.Bokeh(bridge, height=0, sizing_mode="fixed", margin=0)
@@ -2054,7 +2059,6 @@ def create_layout(db_path, preloaded, enable_timing=False):
                 }
             }
         """)
-        from bokeh.events import Tap
         fig.js_on_event(Tap, tap_cb)
 
         def on_bridge_change(attr, old, new):
@@ -2162,7 +2166,7 @@ def create_layout(db_path, preloaded, enable_timing=False):
             (no DB call) and clear the inset immediately.  Deferred part:
             resolve distinct values and rebuild the inset via next-tick.
             """
-            from bokeh.io import curdoc
+
             category = category_select.value
             col_info = filtering_metadata.get(category, {}).get('columns', {}).get(col_name, {})
             is_text = col_info.get('type') == 'text'
@@ -2282,7 +2286,7 @@ def create_layout(db_path, preloaded, enable_timing=False):
 
         def update_input_on_operator_change(attr, old, new):
             """Swap input widget between TextInput and SearchableSelect based on operator."""
-            from bokeh.io import curdoc
+
             category = category_select.value
             col_name = subcategory_select.value
             col_info = filtering_metadata.get(category, {}).get('columns', {}).get(col_name, {})
@@ -2380,7 +2384,7 @@ def create_layout(db_path, preloaded, enable_timing=False):
         minus_btn.on_click(remove_row_callback)
 
         def toggle_distribution(event):
-            from bokeh.io import curdoc
+
             if hist_container.objects:
                 row_data['loading_gen'] += 1
                 hist_container.objects = []
@@ -2568,16 +2572,10 @@ def create_layout(db_path, preloaded, enable_timing=False):
     ## Build Sample section
     sample_title = Div(text="<b>Samples</b>")
 
-    above_sample_children = []
-    above_sample_content = column(
-        *above_sample_children,
-        visible=True, sizing_mode="stretch_width"
-    )
-
     def _on_sample_change(event):
         if global_toggle_lock['locked']:
             return
-        from bokeh.io import curdoc
+
         doc = curdoc()
         doc.hold('combine')
         global_toggle_lock['locked'] = True
@@ -2599,6 +2597,16 @@ def create_layout(db_path, preloaded, enable_timing=False):
     orig_contigs = list(widgets['contigs'])
     orig_samples = list(widgets['samples'])
 
+    def _get_filtered_samples_for_contig(contig):
+        cid = widgets['contig_name_to_id'].get(contig)
+        sids = widgets['cid_to_sids'].get(cid, set())
+        result = [s for s in orig_samples if widgets['sample_name_to_id'].get(s) in sids]
+        filtered_pairs = get_filtering_filtered_pairs()
+        if filtered_pairs is not None:
+            allowed = {pair[1] for pair in filtered_pairs}
+            result = [s for s in result if s in allowed]
+        return result
+
     # MAGs section header (visible only in MAG-mode databases)
     mag_title = Div(
         text=f"<span style='font-size: 1.2em;'><b>MAGs</b></span> ({len(widgets['mags'])} available)",
@@ -2617,7 +2625,7 @@ def create_layout(db_path, preloaded, enable_timing=False):
     def on_contig_change(event):
         if global_toggle_lock['locked']:
             return
-        from bokeh.io import curdoc
+
         doc = curdoc()
         doc.hold('combine')
         new = event.new
@@ -2651,7 +2659,7 @@ def create_layout(db_path, preloaded, enable_timing=False):
         def on_mag_change(event):
             if global_toggle_lock['locked']:
                 return
-            from bokeh.io import curdoc
+
             doc = curdoc()
             doc.hold('combine')
             new = event.new
@@ -2659,6 +2667,7 @@ def create_layout(db_path, preloaded, enable_timing=False):
             try:
                 refresh_contig_options_unlocked()
                 refresh_sample_options_unlocked()
+                refresh_sort_sample_options()
                 update_section_titles()
                 if widgets['view_radio'].active == 0 and new:
                     total = sum(
@@ -2678,7 +2687,7 @@ def create_layout(db_path, preloaded, enable_timing=False):
         def on_contig_sync_mag(event):
             if global_toggle_lock['locked']:
                 return
-            from bokeh.io import curdoc
+
             doc = curdoc()
             doc.hold('combine')
             contig_to_mag = widgets['contig_to_mag']
@@ -2708,7 +2717,6 @@ def create_layout(db_path, preloaded, enable_timing=False):
                 selected_contig = widgets['contig_select'].value
                 offsets = widgets['mag_to_contig_offsets'].get(selected_mag, {})
                 if selected_mag and selected_contig and selected_contig in offsets:
-                    # Contig already selected: zoom to its range in MAG space
                     off = offsets[selected_contig]
                     c_len = widgets['contig_lengths'].get(selected_contig, 0)
                     from_position_input.value = str(off + 1)
@@ -2720,11 +2728,15 @@ def create_layout(db_path, preloaded, enable_timing=False):
                     )
                     from_position_input.value = "1"
                     to_position_input.value = str(total)
+                _sample_sort_current_categories[:] = _sample_mag_categories
             else:
                 selected_contig = widgets['contig_select'].value
                 if selected_contig and selected_contig in widgets['contig_lengths']:
                     from_position_input.value = "1"
                     to_position_input.value = str(widgets['contig_lengths'][selected_contig])
+                _sample_sort_current_categories[:] = _sample_contig_categories
+            sample_order_category_select.options = list(_sample_sort_current_categories)
+            sample_order_category_select.value = _sample_sort_current_categories[0] if _sample_sort_current_categories else ""
 
         widgets['view_radio'].on_change('active', on_mag_contig_view_change)
 
@@ -3179,7 +3191,6 @@ def create_layout(db_path, preloaded, enable_timing=False):
     below_contig_children.append(position_row)
 
     # Check if sequence data is available in the database
-    cur = conn.cursor()
     cur.execute("SELECT 1 FROM information_schema.tables WHERE table_name = 'Contig_sequence'")
     has_sequence_data = cur.fetchone() is not None
 
@@ -3190,7 +3201,6 @@ def create_layout(db_path, preloaded, enable_timing=False):
         sequence_row = row(sequence_cbg, sizing_mode="stretch_width")
 
     # Check if translated annotation data is available
-    cur = conn.cursor()
     cur.execute("SELECT 1 FROM information_schema.columns WHERE table_name = 'Contig_annotation' AND column_name = 'Protein_sequence'")
     has_translated_data = cur.fetchone() is not None
 
@@ -3472,11 +3482,17 @@ def create_layout(db_path, preloaded, enable_timing=False):
                             if cat not in _mag_excluded_categories]
     _mag_sort_category_sources = {cat: filtering_metadata[cat]['source'] for cat in _mag_sort_categories}
 
+    def _format_col(c):
+        return (c, c.replace("_", " ").replace("percentage", "(%)"))
+
     def _numeric_columns_for(category):
         cols = filtering_metadata.get(category, {}).get('columns', {})
         return [c for c, info in cols.items() if info.get('type') == 'numeric']
 
-    _initial_metrics = _numeric_columns_for("Contig") if "Contig" in _mag_sort_categories else []
+    def _formatted_numeric_columns_for(category):
+        return [_format_col(c) for c in _numeric_columns_for(category)]
+
+    _initial_metrics = _formatted_numeric_columns_for("Contig") if "Contig" in _mag_sort_categories else []
 
     mag_params_toggle_btn = Button(label="▶", width=20, height=20, button_type="primary", align="center", margin=0, stylesheets=[toggle_stylesheet])
     mag_params_toggle_btn.styles = {'padding': '0px', 'line-height': '20px'}
@@ -3484,45 +3500,44 @@ def create_layout(db_path, preloaded, enable_timing=False):
     mag_params_header = row(mag_params_toggle_btn, mag_params_title, sizing_mode="stretch_width", align="center", margin=(5, 0, 0, 0))
     mag_params_header.visible = bool(widgets['has_mags'])
 
-    mag_params_category_label = Div(text="Category", margin=(5, 5, 5, 0))
+    mag_params_order_label = Div(text="Order contigs by:", margin=(5, 0, 2, 0))
     mag_params_category_select = Select(
         value=_mag_sort_categories[0] if _mag_sort_categories else "",
         options=_mag_sort_categories,
-        sizing_mode="stretch_width", margin=(0, 5, 0, 5),
+        sizing_mode="stretch_width", margin=(0, 2, 0, 0),
     )
-    mag_params_category_row = row(mag_params_category_label, mag_params_category_select, sizing_mode="stretch_width", margin=(5, 0, 5, 0))
-
-    mag_params_metric_label = Div(text="Metric", margin=(5, 5, 5, 0))
+    _initial_metric_values = [v for v, _l in _initial_metrics]
     mag_params_metric_select = Select(
-        value="Contig_length" if "Contig_length" in _initial_metrics else (_initial_metrics[0] if _initial_metrics else ""),
+        value="Contig_length" if "Contig_length" in _initial_metric_values else (_initial_metric_values[0] if _initial_metric_values else ""),
         options=_initial_metrics if _initial_metrics else [""],
-        sizing_mode="stretch_width", margin=(0, 5, 0, 5),
+        sizing_mode="stretch_width", margin=(0, 2, 0, 2),
     )
-    mag_params_metric_row = row(mag_params_metric_label, mag_params_metric_select, sizing_mode="stretch_width", margin=(5, 0, 5, 0))
+    mag_params_direction = RadioButtonGroup(labels=["↑", "↓"], active=1, width=60, margin=(0, 0, 0, 2))
+    mag_params_controls_row = row(
+        mag_params_category_select, mag_params_metric_select, mag_params_direction,
+        sizing_mode="stretch_width", margin=(0, 10, 5, 0),
+    )
 
-    mag_params_direction = RadioButtonGroup(labels=["Ascending", "Descending"], active=1, sizing_mode="stretch_width", margin=(5, 5, 5, 5))
-    mag_params_direction_row = row(mag_params_direction, sizing_mode="stretch_width", margin=(5, 0, 5, 0))
-
-    mag_params_sort_sample_label = Div(text="Sort reference sample", margin=(5, 5, 5, 0))
+    mag_params_sort_sample_label = Div(text="Using values from sample:", margin=(5, 5, 5, 0))
     mag_params_sort_sample_select = Select(
         value=orig_samples[0] if orig_samples else "",
         options=list(orig_samples) if orig_samples else [""],
-        sizing_mode="stretch_width", margin=(0, 5, 0, 5),
+        sizing_mode="stretch_width", margin=(0, 10, 0, 5),
     )
-    mag_params_sort_sample_row = row(mag_params_sort_sample_label, mag_params_sort_sample_select, sizing_mode="stretch_width", margin=(5, 0, 5, 0))
+    mag_params_sort_sample_row = row(mag_params_sort_sample_label, mag_params_sort_sample_select, sizing_mode="stretch_width", margin=(0, 0, 5, 0))
     mag_params_sort_sample_row.visible = False
 
     mag_params_content = pn.Column(
-        mag_params_category_row, mag_params_metric_row,
-        mag_params_direction_row, mag_params_sort_sample_row,
+        mag_params_order_label, mag_params_controls_row,
+        mag_params_sort_sample_row,
         sizing_mode="stretch_width", visible=False,
     )
     mag_params_toggle_btn.on_click(make_toggle_callback(mag_params_toggle_btn, mag_params_content))
 
     def _on_mag_sort_category_change(attr, old, new):
-        metrics = _numeric_columns_for(new)
+        metrics = _formatted_numeric_columns_for(new)
         mag_params_metric_select.options = metrics if metrics else [""]
-        mag_params_metric_select.value = metrics[0] if metrics else ""
+        mag_params_metric_select.value = metrics[0][0] if metrics else ""
         is_sample_dep = (new != "Contig")
         is_all = (views.active == 1)
         mag_params_sort_sample_row.visible = is_sample_dep and is_all
@@ -3540,15 +3555,50 @@ def create_layout(db_path, preloaded, enable_timing=False):
     max_samples_label = Div(text="Max number of samples plotted", margin=(5, 0, 5, 5))
     max_samples_row = row(max_samples_input, max_samples_label, sizing_mode="stretch_width", margin=(5, 0, 5, 0))
     
-    sample_order_label = Div(text="Order samples by", margin=(5, 5, 5, 0))
-    sample_order_select = Select(value="Sample name", options=sample_order_columns, sizing_mode="stretch_width", margin=(0, 5, 0, 5))
-    sample_order_row = row(sample_order_label, sample_order_select, sizing_mode="stretch_width", margin=(5, 0, 5, 0))
+    # Sample ordering: two-row layout matching "Order contigs by:"
+    _sample_contig_categories = ["Sample"] + [cat for cat in filtering_metadata
+                                               if cat in {"Coverage", "Misassembly", "Microdiversity",
+                                                          "Side misassembly", "Topology", "Termini"}]
+    _sample_mag_categories = ["Sample"] + [cat for cat in filtering_metadata
+                                            if cat in {"MAG coverage", "MAG misassembly", "MAG microdiversity"}]
+    _sample_sort_category_sources = {cat: filtering_metadata[cat]['source'] for cat in filtering_metadata}
+    _sample_sort_current_categories = list(_sample_contig_categories)
+
+    def _sample_order_columns_for(category):
+        if category == "Sample":
+            return [_format_col("Sample_name")] + _formatted_numeric_columns_for("Sample")
+        return _formatted_numeric_columns_for(category)
+
+    _initial_sample_metrics = _sample_order_columns_for("Sample")
+    sample_order_label = Div(text="Order samples by:", margin=(5, 0, 2, 0))
+    sample_order_category_select = Select(
+        value=_sample_sort_current_categories[0] if _sample_sort_current_categories else "",
+        options=_sample_sort_current_categories,
+        sizing_mode="stretch_width", margin=(0, 2, 0, 0),
+    )
+    sample_order_metric_select = Select(
+        value="Sample_name",
+        options=_initial_sample_metrics if _initial_sample_metrics else [""],
+        sizing_mode="stretch_width", margin=(0, 2, 0, 2),
+    )
+    sample_order_direction = RadioButtonGroup(labels=["↑", "↓"], active=0, width=60, margin=(0, 0, 0, 2))
+    sample_order_controls_row = row(
+        sample_order_category_select, sample_order_metric_select, sample_order_direction,
+        sizing_mode="stretch_width", margin=(0, 10, 5, 0),
+    )
+
+    def _on_sample_order_category_change(attr, old, new):
+        metrics = _sample_order_columns_for(new)
+        sample_order_metric_select.options = metrics if metrics else [""]
+        sample_order_metric_select.value = metrics[0][0] if metrics else ""
+
+    sample_order_category_select.on_change('value', _on_sample_order_category_change)
 
     same_y_scale_cbg = CheckboxGroup(labels=["Use same y scale for all samples"], active=[], margin=(5, 0, 5, 0))
     same_y_scale_row = row(same_y_scale_cbg, sizing_mode="stretch_width")
 
     sample_params_content = pn.Column(
-        max_samples_row, sample_order_row, same_y_scale_row,
+        max_samples_row, sample_order_label, sample_order_controls_row, same_y_scale_row,
         sizing_mode="stretch_width", visible=False
     )
     sample_params_toggle_btn.on_click(make_toggle_callback(sample_params_toggle_btn, sample_params_content))
@@ -3569,7 +3619,7 @@ def create_layout(db_path, preloaded, enable_timing=False):
 
     ## Create final Apply and Peruse data buttons
     apply_button = Button(label="APPLY", align="center", stylesheets=[stylesheet], css_classes=["apply-btn"], margin=(5, 0, 0, 0))
-    apply_button.on_click(lambda: apply_clicked())
+    apply_button.on_click(apply_clicked)
 
     # Peruse button will be positioned in the plot area, styled to match toolbar
     peruse_button = pn.widgets.Button(
@@ -3582,9 +3632,7 @@ def create_layout(db_path, preloaded, enable_timing=False):
     peruse_button.on_click(lambda event: peruse_clicked())
 
     # Hidden carrier to send summary HTML to client browser via JS
-    from bokeh.models import Div as BokehDiv
-    from bokeh.models.callbacks import CustomJS
-    summary_carrier = BokehDiv(text="", visible=False)
+    summary_carrier = Div(text="", visible=False)
     summary_carrier.js_on_change('text', CustomJS(code="""
         var b64 = cb_obj.text;
         if (!b64) return;
@@ -3730,11 +3778,7 @@ def create_layout(db_path, preloaded, enable_timing=False):
             sample_arg = ""
             if has_samples:
                 if is_all:
-                    filtered_samples = [s for s in orig_samples if widgets['sample_name_to_id'].get(s) in widgets['cid_to_sids'].get(widgets['contig_name_to_id'].get(contig), set())]
-                    filtering_pairs = get_filtering_filtered_pairs()
-                    if filtering_pairs is not None:
-                        allowed = {pair[1] for pair in filtering_pairs}
-                        filtered_samples = [s for s in filtered_samples if s in allowed]
+                    filtered_samples = _get_filtered_samples_for_contig(contig)
                     if filtered_samples:
                         sample_arg = f" --sample {','.join(filtered_samples)}"
                 else:
@@ -3797,7 +3841,7 @@ def create_layout(db_path, preloaded, enable_timing=False):
     # Build controls list conditionally based on whether samples exist
     # When no samples: hide views toggle, samples section, and variables section
     sample_section = pn.Column(
-        separator_samples, sample_title, above_sample_content, widgets['sample_select'],
+        separator_samples, sample_title, widgets['sample_select'],
         sizing_mode="stretch_width", margin=0,
     )
     if widgets['has_samples']:

@@ -84,43 +84,6 @@ def run_inspect(args):
     else:
         sys.stdout.buffer.write(b"contig\tsample\tfeature\tposition_start\tposition_end\tvalue\n")
 
-    # When using --mag with --zoom, query MAG-level zoom blobs directly.
-    # They are pre-computed in MAG-global coordinates — no per-contig offset needed.
-    if args.mag and zoom_bin_size is not None:
-        from thebigbam.database.database_getters import (
-            get_mag_id, get_mag_feature_zoom, get_mag_contig_zoom,
-        )
-        for mag_name in mags:
-            mag_id = get_mag_id(conn, mag_name)
-            if mag_id is None:
-                print(f"# ERROR: MAG '{mag_name}' not found, skipping.", file=sys.stderr, flush=True)
-                continue
-            for feature_name in features:
-                if is_contig_blob_feature(feature_name):
-                    zoom_blob = get_mag_contig_zoom(conn, mag_id, feature_name)
-                    if zoom_blob is None:
-                        continue
-                    _print_zoom_rows(conn, zoom_blob, zoom_bin_size, "-", "", feature_name,
-                                     region_start, region_end, mag_name=mag_name)
-                else:
-                    if not samples:
-                        print(f"# ERROR: '{feature_name}' is sample-level — --sample required, skipping.", file=sys.stderr, flush=True)
-                        continue
-                    for sample_name in samples:
-                        s_row = conn.execute(
-                            "SELECT Sample_id FROM Sample WHERE Sample_name = ?", [sample_name]
-                        ).fetchone()
-                        if s_row is None:
-                            print(f"# ERROR: Sample '{sample_name}' not found, skipping.", file=sys.stderr, flush=True)
-                            continue
-                        zoom_blob = get_mag_feature_zoom(conn, mag_id, s_row[0], feature_name)
-                        if zoom_blob is None:
-                            continue
-                        _print_zoom_rows(conn, zoom_blob, zoom_bin_size, "-", sample_name, feature_name,
-                                         region_start, region_end, mag_name=mag_name)
-        conn.close()
-        return 0
-
     for contig_name in contigs:
         row = conn.execute(
             "SELECT Contig_id, Contig_length FROM Contig WHERE Contig_name = ?", [contig_name]

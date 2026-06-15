@@ -251,6 +251,8 @@ These metrics combine the per-position values into average values like the cover
 
 Metrics belong to several categories: 
 
+- **Contig/MAG** metadata
+- **Sample** metadata
 - **Presence detection** (also available for MAGs)
 - **Misassembly** (also available for MAGs)
 - **Microdiversity** (also available for MAGs)
@@ -258,7 +260,7 @@ Metrics belong to several categories:
 - **Topology**
 - **Phage termini**
 
-A description of all metrics is available in [the filters section](docs/FILTERS.md).
+A description of all metrics is available in [the metrics section](docs/METRICSmd).
 
 ## Parallelisation
 
@@ -308,7 +310,7 @@ You are initially in the **One Sample** mode, which allows exploration of all co
 
 - **Variables**: Select the features to plot. You can either use the checkboxes to select all features from a module or click individual features within a module
 
-- **Plotting parameters**: You can customize several aesthetic aspects of the plots (e.g. the heights of the genomic feature tracks and mapping-derived plots)
+- **Plotting parameters**: You can customize several aesthetic aspects of the plots (e.g. heights of the genomic feature tracks and mapping-derived plots)
 
 Finally, click **Apply** to visualize the requested features for the selected contig and sample. Alternatively, click **Peruse Data** to display tables containing the metrics and feature values.
 
@@ -316,13 +318,17 @@ Finally, click **Apply** to visualize the requested features for the selected co
 
 **All Samples** mode enables comparison of a specific feature across multiple samples. Compared to the **One Sample** mode, the **Samples** section is omitted, and only a single feature can be selected in the **Variables** section (e.g. mismatches on the figure above).
 
+The order of plots (one plot per sample) can be customized in the **Plotting parameters** section under **Sample parameters**. Samples can be sorted by any sample-level metric.
+
 #### MAG view
 
 For a database computed with `--view mag`, a **MAGs** section is added to the visualization. Users can select a MAG of interest and then choose a contig from this MAG in the **Contigs** section.
 
 The MAG and contig filters in the Filtering panel affect the list of MAGs displayed in the **MAGs** section. Only MAGs containing at least one contig passing the contig filters are included in the MAG list. Only contigs belonging to a MAG passing the MAG filters are included in the contig list.
 
-Plots can be generated in the standard contig-based view or in **MAG view**, which displays an entire MAG at once. In **MAG view**, contigs are ordered from longest to shortest, and an additional MAG track is shown above the plots to indicate which contigs are currently being visualized. See [Use case 3](docs/USAGE.md#use-case-3-large-dataset-3000-mags-192-samples) for an example.
+Plots can be generated in the standard contig-based view or in **MAG view**, which displays an entire MAG at once. In **MAG view**, an additional MAG track is shown above the plots to indicate which contigs are currently being visualized. See [Use case 3](docs/USAGE.md#use-case-3-large-dataset-3000-mags-192-samples) for an example. 
+
+By default, contigs are ordered from longest to shortest. This ordering can be changed by selecting any contig-level metric in the **MAG parameters** section under **Plotting parameters**.
 
 #### Plotting
 
@@ -519,7 +525,7 @@ TO-DO
 
 - [What features can theBIGbam compute?](docs/FEATURES.md)
 
-- [What summary metrics can theBIGbam compute per contig/MAG/sample?](docs/FILTERS.md)
+- [What summary metrics can theBIGbam compute per contig/MAG/sample?](docs/METRICS.md)
 
 - [How is the phage packaging assignment done? (TECHNICAL)](docs/PHAGE_PACKAGING.md)
 

@@ -24,7 +24,7 @@ COMPRESSION_METADATA_KEYS = [
 MAPPING_TABLES = {
     "Sample", "Coverage", "Feature_blob", "Feature_blob_chunk",
     "Phage_mechanisms", "Phage_termini", "Misassembly", "Microdiversity",
-    "Side_misassembly", "Topology", "MAG_blob", "MAG_coverage",
+    "Side_misassembly", "Topology", "MAG_coverage",
 }
 
 
