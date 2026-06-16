@@ -1,6 +1,7 @@
 import argparse
 import io
 import os
+import threading
 import time
 import duckdb
 import traceback
@@ -86,6 +87,15 @@ class _TimingPhase:
         self._phase_timed = 0.0
 
 _TIMING = None
+_current_op: str = "idle"
+
+def _start_rss_watchdog(interval: int = 5) -> None:
+    def _loop():
+        while True:
+            time.sleep(interval)
+            print(f"[rss] watchdog: {_get_rss_mb():.0f} MB  op={_current_op}", flush=True)
+    t = threading.Thread(target=_loop, daemon=True, name="rss-watchdog")
+    t.start()
 
 def preload_db_data(db_path, enable_timing=False):
     """Run all expensive DB queries once at startup. Returns a dict of pure data."""
@@ -165,37 +175,18 @@ def preload_db_data(db_path, enable_timing=False):
 
     if enable_timing:
         _t = time.perf_counter()
-        print(f"[timing] Preload: coverage presence mapping (querying)...{_TIMING.tag(0)}", flush=True)
-    sid_to_cids = {}
-    cid_to_sids = {}
-    if has_sample_table:
-        cur.execute("SELECT Contig_id, Sample_id FROM Coverage")
-        while True:
-            batch = cur.fetchmany(100_000)
-            if not batch:
-                break
-            for cid, sid in batch:
-                if sid not in sid_to_cids:
-                    sid_to_cids[sid] = set()
-                sid_to_cids[sid].add(cid)
-                if cid not in cid_to_sids:
-                    cid_to_sids[cid] = set()
-                cid_to_sids[cid].add(sid)
-    if enable_timing:
-        n_pairs = sum(len(v) for v in sid_to_cids.values())
-        _step = time.perf_counter() - _t
-        print(f"[timing] Preload: coverage presence mapping ({n_pairs} pairs): {_step:.3f}s{_TIMING.tag(_step)}", flush=True)
-
-    if enable_timing:
-        _t = time.perf_counter()
     mag_to_sample_ids = {}
-    for _mag_name, _mag_contigs in mag_to_contigs.items():
-        _s = set()
-        for _c in _mag_contigs:
-            _cid = contig_name_to_id.get(_c)
-            if _cid is not None:
-                _s |= cid_to_sids.get(_cid, set())
-        mag_to_sample_ids[_mag_name] = _s
+    if has_sample_table and mag_to_contigs:
+        cur.execute("""
+            SELECT DISTINCT mg.MAG_name, p.Sample_id
+            FROM MAG mg
+            JOIN MAG_contigs_association mca ON mca.MAG_id = mg.MAG_id
+            JOIN Coverage p ON p.Contig_id = mca.Contig_id
+        """)
+        for mag_name, sid in cur.fetchall():
+            if mag_name not in mag_to_sample_ids:
+                mag_to_sample_ids[mag_name] = set()
+            mag_to_sample_ids[mag_name].add(sid)
     if enable_timing:
         _step = time.perf_counter() - _t
         print(f"[timing] Preload: MAG→samples mapping: {_step:.3f}s{_TIMING.tag(_step)}", flush=True)
@@ -293,8 +284,6 @@ def preload_db_data(db_path, enable_timing=False):
         'mag_to_contig_offsets': mag_to_contig_offsets,
         'samples': samples,
         'has_samples': has_samples,
-        'sid_to_cids': sid_to_cids,
-        'cid_to_sids': cid_to_sids,
         'mag_to_sample_ids': mag_to_sample_ids,
         'module_names': module_names,
         'module_variables': module_variables,
@@ -374,8 +363,6 @@ def build_controls(preloaded):
         'contig_select': contig_select,
         'mag_select': mag_select,
         'view_radio': view_radio,
-        'sid_to_cids': preloaded['sid_to_cids'],
-        'cid_to_sids': preloaded['cid_to_sids'],
         'contig_name_to_id': preloaded['contig_name_to_id'],
         'contig_id_to_name': preloaded['contig_id_to_name'],
         'sample_name_to_id': preloaded['sample_name_to_id'],
@@ -402,7 +389,10 @@ def build_controls(preloaded):
 
 def create_layout(db_path, preloaded, enable_timing=False):
     """Create and return the application layout for Panel serve."""
+    global _current_op
+    _current_op = "session_init"
     if enable_timing:
+        print(f"[timing] RSS at session init start: {_get_rss_mb():.0f} MB", flush=True)
         _TIMING.start_phase("Session init")
 
     ### Event functions
@@ -420,6 +410,7 @@ def create_layout(db_path, preloaded, enable_timing=False):
     annotation_inputs = {}
 
     _filtering_cache = {'result': None, 'valid': False}
+    _contig_to_mag = {}  # populated after widgets is built (see below)
 
     def get_filtering_filtered_pairs():
         """Apply Filtering query rows to get allowed contig/sample pairs.
@@ -456,6 +447,10 @@ def create_layout(db_path, preloaded, enable_timing=False):
             _filtering_cache['valid'] = True
             return None
 
+        global _current_op
+        _current_op = "filtering_pairs"
+        if enable_timing:
+            print(f"[timing] RSS at filtering query start: {_get_rss_mb():.0f} MB", flush=True)
         cur = conn.cursor()
 
         # Source table mapping from filtering_metadata
@@ -479,10 +474,10 @@ def create_layout(db_path, preloaded, enable_timing=False):
         mag_categories = {'MAG', 'MAG coverage', 'MAG misassembly', 'MAG microdiversity'}
 
         def get_pairs_for_condition(category, column_name, operator, value):
-            """Query database for contig/sample pairs matching a single condition."""
+            """Build SQL returning (Contig_id, Sample_id) pairs for a single filter condition."""
             source = source_table_map.get(category)
             if not source:
-                return set()
+                return None
 
             # Translate "has"/"has not" to SQL LIKE/NOT LIKE
             if operator == "has":
@@ -500,10 +495,9 @@ def create_layout(db_path, preloaded, enable_timing=False):
             has_samples = widgets['has_samples']
 
             if col_source == 'Contig_annotation':
-                # Pivoted column from the Contig_annotation view — join via Contig_annotation_core
                 if has_samples:
                     query = f'''
-                        SELECT DISTINCT c.Contig_name, s.Sample_name
+                        SELECT DISTINCT c.Contig_id, s.Sample_id
                         FROM Contig_annotation ca
                         JOIN Contig c ON ca.Contig_id = c.Contig_id
                         LEFT JOIN Coverage p ON c.Contig_id = p.Contig_id
@@ -512,17 +506,16 @@ def create_layout(db_path, preloaded, enable_timing=False):
                     '''
                 else:
                     query = f'''
-                        SELECT DISTINCT c.Contig_name, NULL
+                        SELECT DISTINCT c.Contig_id, NULL
                         FROM Contig_annotation ca
                         JOIN Contig c ON ca.Contig_id = c.Contig_id
                         WHERE ca."{column_name}" {operator} ?
                     '''
             elif col_source == 'Annotation_qualifier':
-                # KV-lookup — filter by Key + Value against Annotation_qualifier
                 params = [qualifier_key, value]
                 if has_samples:
                     query = f'''
-                        SELECT DISTINCT c.Contig_name, s.Sample_name
+                        SELECT DISTINCT c.Contig_id, s.Sample_id
                         FROM Annotation_qualifier aq
                         JOIN Contig_annotation_core cac ON aq.Annotation_id = cac.Annotation_id
                         JOIN Contig c ON cac.Contig_id = c.Contig_id
@@ -532,18 +525,17 @@ def create_layout(db_path, preloaded, enable_timing=False):
                     '''
                 else:
                     query = f'''
-                        SELECT DISTINCT c.Contig_name, NULL
+                        SELECT DISTINCT c.Contig_id, NULL
                         FROM Annotation_qualifier aq
                         JOIN Contig_annotation_core cac ON aq.Annotation_id = cac.Annotation_id
                         JOIN Contig c ON cac.Contig_id = c.Contig_id
                         WHERE aq."Key" = ? AND aq."Value" {operator} ?
                     '''
             elif col_source == 'Contig_qualifier':
-                # KV-lookup — filter by Key + Value against Contig_qualifier (contig-level)
                 params = [qualifier_key, value]
                 if has_samples:
                     query = f'''
-                        SELECT DISTINCT c.Contig_name, s.Sample_name
+                        SELECT DISTINCT c.Contig_id, s.Sample_id
                         FROM Contig_qualifier cq
                         JOIN Contig c ON cq.Contig_id = c.Contig_id
                         LEFT JOIN Coverage p ON c.Contig_id = p.Contig_id
@@ -552,41 +544,37 @@ def create_layout(db_path, preloaded, enable_timing=False):
                     '''
                 else:
                     query = f'''
-                        SELECT DISTINCT c.Contig_name, NULL
+                        SELECT DISTINCT c.Contig_id, NULL
                         FROM Contig_qualifier cq
                         JOIN Contig c ON cq.Contig_id = c.Contig_id
                         WHERE cq."Key" = ? AND cq."Value" {operator} ?
                     '''
             elif category == 'Contig' and has_samples:
-                # Contig table has no Sample_name, left-join to preserve contigs with 0 samples
                 query = f'''
-                    SELECT DISTINCT c.Contig_name, s.Sample_name
+                    SELECT DISTINCT c.Contig_id, s.Sample_id
                     FROM Contig c
                     LEFT JOIN Coverage p ON c.Contig_id = p.Contig_id
                     LEFT JOIN Sample s ON p.Sample_id = s.Sample_id
                     WHERE c."{column_name}" {operator} ?
                 '''
             elif category == 'Contig':
-                # Contig table - no samples available
                 query = f'''
-                    SELECT DISTINCT c.Contig_name, NULL
+                    SELECT DISTINCT c.Contig_id, NULL
                     FROM Contig c
                     WHERE c."{column_name}" {operator} ?
                 '''
             elif category == 'Sample':
-                # Sample table has no Contig_name, left-join to preserve samples with 0 contigs
                 query = f'''
-                    SELECT DISTINCT c.Contig_name, s.Sample_name
+                    SELECT DISTINCT c.Contig_id, s.Sample_id
                     FROM Sample s
                     LEFT JOIN Coverage p ON s.Sample_id = p.Sample_id
                     LEFT JOIN Contig c ON p.Contig_id = c.Contig_id
                     WHERE s."{column_name}" {operator} ?
                 '''
             elif category == 'MAG':
-                # MAG table — expand to all member contigs × samples present on them
                 if has_samples:
                     query = f'''
-                        SELECT DISTINCT c.Contig_name, s.Sample_name
+                        SELECT DISTINCT c.Contig_id, s.Sample_id
                         FROM MAG mg
                         JOIN MAG_contigs_association mca ON mca.MAG_id = mg.MAG_id
                         JOIN Contig c ON c.Contig_id = mca.Contig_id
@@ -596,7 +584,7 @@ def create_layout(db_path, preloaded, enable_timing=False):
                     '''
                 else:
                     query = f'''
-                        SELECT DISTINCT c.Contig_name, NULL
+                        SELECT DISTINCT c.Contig_id, NULL
                         FROM MAG mg
                         JOIN MAG_contigs_association mca ON mca.MAG_id = mg.MAG_id
                         JOIN Contig c ON c.Contig_id = mca.Contig_id
@@ -606,19 +594,22 @@ def create_layout(db_path, preloaded, enable_timing=False):
                 # Explicit_*_per_MAG views — row grain is (MAG_name, Sample_name);
                 # expand to member contigs via MAG_contigs_association.
                 query = f'''
-                    SELECT DISTINCT c.Contig_name, v.Sample_name
+                    SELECT DISTINCT c.Contig_id, s.Sample_id
                     FROM {source} v
+                    JOIN Sample s ON s.Sample_name = v.Sample_name
                     JOIN MAG mg ON mg.MAG_name = v.MAG_name
                     JOIN MAG_contigs_association mca ON mca.MAG_id = mg.MAG_id
                     JOIN Contig c ON c.Contig_id = mca.Contig_id
                     WHERE v."{column_name}" {operator} ?
                 '''
             else:
-                # Tables with both Contig_name and Sample_name (views)
+                # Explicit_* views — have Contig_name/Sample_name, join to get IDs
                 query = f'''
-                    SELECT DISTINCT Contig_name, Sample_name
-                    FROM {source}
-                    WHERE "{column_name}" {operator} ?
+                    SELECT DISTINCT c.Contig_id, s.Sample_id
+                    FROM {source} v
+                    JOIN Contig c ON c.Contig_name = v.Contig_name
+                    JOIN Sample s ON s.Sample_name = v.Sample_name
+                    WHERE v."{column_name}" {operator} ?
                 '''
 
             # Coerce value type to match column type (prevents DuckDB implicit cast errors)
@@ -633,7 +624,7 @@ def create_layout(db_path, preloaded, enable_timing=False):
                 try:
                     value = float(value)
                 except (ValueError, TypeError):
-                    return set()
+                    return None
 
             # Re-encode human-readable value to DB integer scale only for raw
             # tables (Contig, Sample, MAG).  Explicit_* views already store
@@ -645,19 +636,15 @@ def create_layout(db_path, preloaded, enable_timing=False):
             # value is always the last param; refresh it after coercion
             params[-1] = value
 
-            try:
-                cur.execute(query, params)
-                return {(row[0], row[1]) for row in cur.fetchall()}
-            except duckdb.Error as e:
-                print(f"[get_filtering_filtered_pairs] Query error: {e}", flush=True)
-                return set()
+            return (query, params)
 
         def evaluate_section(section_data):
-            """Evaluate all rows in a section using AND/OR logic based on Select widgets."""
+            """Build composed SQL (INTERSECT/UNION) for all rows in a section."""
             if not section_data['rows']:
                 return None
 
-            result_pairs = None
+            result_sql = None
+            result_params = []
 
             for i, row_data in enumerate(section_data['rows']):
                 category = row_data['category_select'].value
@@ -673,41 +660,89 @@ def create_layout(db_path, preloaded, enable_timing=False):
                 if input_ref['is_panel'] and isinstance(value, str) and value.strip() == "":
                     continue
 
-                pairs = get_pairs_for_condition(category, column_name, operator, value)
+                row_result = get_pairs_for_condition(category, column_name, operator, value)
+                if row_result is None:
+                    continue
+                row_sql, row_params = row_result
 
-                if result_pairs is None:
-                    result_pairs = pairs
+                if result_sql is None:
+                    result_sql = row_sql
+                    result_params = list(row_params)
                 else:
-                    # Check the AND/OR select widget for this row
                     and_div = row_data.get('and_div')
                     if and_div is not None and and_div.value == "OR":
-                        result_pairs = result_pairs | pairs  # OR logic
+                        result_sql = f"({result_sql}) UNION ({row_sql})"
                     else:
-                        result_pairs = result_pairs & pairs  # AND logic (default)
+                        result_sql = f"({result_sql}) INTERSECT ({row_sql})"
+                    result_params = result_params + list(row_params)
 
-            return result_pairs
+            return (result_sql, result_params) if result_sql is not None else None
 
-        # Evaluate all sections using AND/OR logic between sections
-        final_pairs = None
+        # Compose sections with INTERSECT/UNION
+        final_sql = None
+        final_params = []
 
         for i, section_data in enumerate(or_sections):
-            section_pairs = evaluate_section(section_data)
-
-            if section_pairs is None:
+            section_result = evaluate_section(section_data)
+            if section_result is None:
                 continue
+            sec_sql, sec_params = section_result
 
-            if final_pairs is None:
-                final_pairs = section_pairs
+            if final_sql is None:
+                final_sql = sec_sql
+                final_params = list(sec_params)
             else:
-                # Check inter-section AND/OR select widget
                 if i - 1 < len(inter_section_selects) and inter_section_selects[i - 1].value == "OR":
-                    final_pairs = final_pairs | section_pairs
+                    final_sql = f"({final_sql}) UNION ({sec_sql})"
                 else:
-                    final_pairs = final_pairs & section_pairs
+                    final_sql = f"({final_sql}) INTERSECT ({sec_sql})"
+                final_params = final_params + list(sec_params)
 
-        _filtering_cache['result'] = final_pairs
+        if final_sql is None:
+            _filtering_cache['result'] = None
+            _filtering_cache['valid'] = True
+            _current_op = "idle"
+            return None
+
+        # Run count queries (CTE avoids re-binding params for the same subquery)
+        try:
+            count_row = cur.execute(
+                f"WITH _f AS ({final_sql})"
+                f" SELECT COUNT(*), COUNT(DISTINCT Contig_id), COUNT(DISTINCT Sample_id) FROM _f",
+                final_params
+            ).fetchone()
+            count_pairs, count_contigs, count_samples = count_row
+            count_mag_pairs = None
+            if widgets['has_mags']:
+                count_mag_pairs = cur.execute(
+                    f"""WITH _f AS ({final_sql})
+                    SELECT COUNT(*) FROM (
+                        SELECT DISTINCT mg.MAG_name, _f.Sample_id
+                        FROM _f
+                        JOIN MAG_contigs_association mca ON mca.Contig_id = _f.Contig_id
+                        JOIN MAG mg ON mg.MAG_id = mca.MAG_id
+                        WHERE _f.Sample_id IS NOT NULL
+                    ) t""",
+                    final_params
+                ).fetchone()[0]
+        except duckdb.Error as e:
+            print(f"[filtering] Count query error: {e}", flush=True)
+            count_pairs = 0
+            count_contigs = 0
+            count_samples = 0
+            count_mag_pairs = 0
+
+        if enable_timing:
+            print(f"[timing] Filter SQL built; count_pairs={count_pairs} contigs={count_contigs} samples={count_samples}", flush=True)
+
+        _filtering_cache['result'] = {'sql': final_sql, 'params': final_params}
+        _filtering_cache['count_pairs'] = count_pairs
+        _filtering_cache['count_contigs'] = count_contigs
+        _filtering_cache['count_samples'] = count_samples
+        _filtering_cache['count_mag_pairs'] = count_mag_pairs
         _filtering_cache['valid'] = True
-        return final_pairs
+        _current_op = "idle"
+        return _filtering_cache['result']
 
     def update_widget_completions(widget, completions):
         """Update widget completions. Clear value if not in completions."""
@@ -728,34 +763,97 @@ def create_layout(db_path, preloaded, enable_timing=False):
                 completions = list(orig_contigs)
 
             # Apply Filtering query builder filters (MAG mode)
-            filtered_pairs = get_filtering_filtered_pairs()
-            if filtered_pairs is not None:
-                if views.active == 0 and widgets['sample_select'].value:
-                    sel_sample = widgets['sample_select'].value
-                    allowed_contigs = {pair[0] for pair in filtered_pairs if pair[1] == sel_sample}
-                else:
-                    allowed_contigs = {pair[0] for pair in filtered_pairs}
-                completions = [c for c in completions if c in allowed_contigs]
+            filtered = get_filtering_filtered_pairs()
+            if filtered is not None:
+                fsql, fparams = filtered['sql'], filtered['params']
+                fc = conn.cursor()
+                try:
+                    if sel_mag and sel_mag in widgets['mag_to_contigs']:
+                        # Scope to the selected MAG's contigs so LIMIT 100 doesn't exclude them
+                        if views.active == 0 and widgets['sample_select'].value:
+                            sel_sid = widgets['sample_name_to_id'].get(widgets['sample_select'].value)
+                            rows = fc.execute(
+                                f"SELECT DISTINCT c.Contig_name FROM ({fsql}) f"
+                                f" JOIN Contig c ON c.Contig_id = f.Contig_id"
+                                f" JOIN MAG_contigs_association mca ON mca.Contig_id = c.Contig_id"
+                                f" JOIN MAG mg ON mg.MAG_id = mca.MAG_id"
+                                f" WHERE mg.MAG_name = ? AND (f.Sample_id = ? OR f.Sample_id IS NULL)"
+                                f" ORDER BY c.Contig_name LIMIT 100",
+                                fparams + [sel_mag, sel_sid]
+                            ).fetchall()
+                        else:
+                            rows = fc.execute(
+                                f"SELECT DISTINCT c.Contig_name FROM ({fsql}) f"
+                                f" JOIN Contig c ON c.Contig_id = f.Contig_id"
+                                f" JOIN MAG_contigs_association mca ON mca.Contig_id = c.Contig_id"
+                                f" JOIN MAG mg ON mg.MAG_id = mca.MAG_id"
+                                f" WHERE mg.MAG_name = ?"
+                                f" ORDER BY c.Contig_name LIMIT 100",
+                                fparams + [sel_mag]
+                            ).fetchall()
+                    elif views.active == 0 and widgets['sample_select'].value:
+                        sel_sid = widgets['sample_name_to_id'].get(widgets['sample_select'].value)
+                        rows = fc.execute(
+                            f"SELECT DISTINCT c.Contig_name FROM ({fsql}) f"
+                            f" JOIN Contig c ON c.Contig_id = f.Contig_id"
+                            f" WHERE f.Sample_id = ? OR f.Sample_id IS NULL"
+                            f" ORDER BY c.Contig_name LIMIT 100",
+                            fparams + [sel_sid]
+                        ).fetchall()
+                    else:
+                        rows = fc.execute(
+                            f"SELECT DISTINCT c.Contig_name FROM ({fsql}) f"
+                            f" JOIN Contig c ON c.Contig_id = f.Contig_id"
+                            f" ORDER BY c.Contig_name LIMIT 100",
+                            fparams
+                        ).fetchall()
+                    filter_allowed = {row[0] for row in rows}
+                    completions = [c for c in completions if c in filter_allowed]
+                except duckdb.Error as e:
+                    print(f"[filtering] Contig autocomplete query error: {e}", flush=True)
         else:
             # Contig mode: filter contigs by selected sample (ONE SAMPLE view).
             if views.active == 0 and widgets['sample_select'].value:
-                sel_sample = widgets['sample_select'].value
-                sel_sid = widgets['sample_name_to_id'].get(sel_sample)
-                allowed_cids = widgets['sid_to_cids'].get(sel_sid, set()) if sel_sid is not None else set()
-                _c2id = widgets['contig_name_to_id']
-                completions = [c for c in orig_contigs if _c2id.get(c) in allowed_cids]
+                sel_sid = widgets['sample_name_to_id'].get(widgets['sample_select'].value)
+                if sel_sid is not None:
+                    rows = conn.cursor().execute(
+                        "SELECT DISTINCT c.Contig_name FROM Coverage p"
+                        " JOIN Contig c ON c.Contig_id = p.Contig_id"
+                        " WHERE p.Sample_id = ? ORDER BY c.Contig_name LIMIT 100",
+                        [sel_sid]
+                    ).fetchall()
+                    completions = [row[0] for row in rows]
+                else:
+                    completions = []
             else:
                 completions = list(orig_contigs)
 
             # Apply Filtering query builder filters (contig mode)
-            filtered_pairs = get_filtering_filtered_pairs()
-            if filtered_pairs is not None:
-                if views.active == 0 and widgets['sample_select'].value:
-                    sel_sample = widgets['sample_select'].value
-                    allowed_contigs = {pair[0] for pair in filtered_pairs if pair[1] == sel_sample}
-                else:
-                    allowed_contigs = {pair[0] for pair in filtered_pairs}
-                completions = [c for c in completions if c in allowed_contigs]
+            filtered = get_filtering_filtered_pairs()
+            if filtered is not None:
+                fsql, fparams = filtered['sql'], filtered['params']
+                fc = conn.cursor()
+                try:
+                    if views.active == 0 and widgets['sample_select'].value:
+                        sel_sid = widgets['sample_name_to_id'].get(widgets['sample_select'].value)
+                        rows = fc.execute(
+                            f"SELECT DISTINCT c.Contig_name FROM ({fsql}) f"
+                            f" JOIN Contig c ON c.Contig_id = f.Contig_id"
+                            f" WHERE f.Sample_id = ? OR f.Sample_id IS NULL"
+                            f" ORDER BY c.Contig_name LIMIT 100",
+                            fparams + [sel_sid]
+                        ).fetchall()
+                    else:
+                        rows = fc.execute(
+                            f"SELECT DISTINCT c.Contig_name FROM ({fsql}) f"
+                            f" JOIN Contig c ON c.Contig_id = f.Contig_id"
+                            f" ORDER BY c.Contig_name LIMIT 100",
+                            fparams
+                        ).fetchall()
+                    filter_allowed = {row[0] for row in rows}
+                    completions = [c for c in completions if c in filter_allowed]
+                except duckdb.Error as e:
+                    print(f"[filtering] Contig autocomplete query error: {e}", flush=True)
 
         update_widget_completions(widgets['contig_select'], completions)
 
@@ -772,34 +870,84 @@ def create_layout(db_path, preloaded, enable_timing=False):
                 completions = list(orig_samples)
 
             # Apply Filtering query builder filters (MAG mode)
-            filtered_pairs = get_filtering_filtered_pairs()
-            if filtered_pairs is not None:
-                if views.active == 0 and widgets['contig_select'].value:
-                    sel_contig = widgets['contig_select'].value
-                    allowed_samples = {pair[1] for pair in filtered_pairs if pair[0] == sel_contig}
-                else:
-                    allowed_samples = {pair[1] for pair in filtered_pairs}
-                completions = [s for s in completions if s in allowed_samples]
+            filtered = get_filtering_filtered_pairs()
+            if filtered is not None:
+                fsql, fparams = filtered['sql'], filtered['params']
+                fc = conn.cursor()
+                try:
+                    if views.active == 0 and widgets['contig_select'].value:
+                        sel_cid = widgets['contig_name_to_id'].get(widgets['contig_select'].value)
+                        rows = fc.execute(
+                            f"SELECT DISTINCT s.Sample_name FROM ({fsql}) f"
+                            f" JOIN Sample s ON s.Sample_id = f.Sample_id"
+                            f" WHERE f.Contig_id = ?"
+                            f" ORDER BY s.Sample_name LIMIT 100",
+                            fparams + [sel_cid]
+                        ).fetchall()
+                    elif sel_mag and sel_mag in widgets['mag_to_sample_ids']:
+                        rows = fc.execute(
+                            f"SELECT DISTINCT s.Sample_name FROM ({fsql}) f"
+                            f" JOIN Sample s ON s.Sample_id = f.Sample_id"
+                            f" JOIN MAG_contigs_association mca ON mca.Contig_id = f.Contig_id"
+                            f" JOIN MAG mg ON mg.MAG_id = mca.MAG_id"
+                            f" WHERE mg.MAG_name = ?"
+                            f" ORDER BY s.Sample_name LIMIT 100",
+                            fparams + [sel_mag]
+                        ).fetchall()
+                    else:
+                        rows = fc.execute(
+                            f"SELECT DISTINCT s.Sample_name FROM ({fsql}) f"
+                            f" JOIN Sample s ON s.Sample_id = f.Sample_id"
+                            f" ORDER BY s.Sample_name LIMIT 100",
+                            fparams
+                        ).fetchall()
+                    filter_allowed = {row[0] for row in rows}
+                    completions = [s for s in completions if s in filter_allowed]
+                except duckdb.Error as e:
+                    print(f"[filtering] Sample autocomplete query error: {e}", flush=True)
         else:
             # Contig mode: filter samples by selected contig (ONE SAMPLE view).
             if views.active == 0 and widgets['contig_select'].value:
-                sel_contig = widgets['contig_select'].value
-                sel_cid = widgets['contig_name_to_id'].get(sel_contig)
-                allowed_sids = widgets['cid_to_sids'].get(sel_cid, set()) if sel_cid is not None else set()
-                _s2id = widgets['sample_name_to_id']
-                completions = [s for s in orig_samples if _s2id.get(s) in allowed_sids]
+                sel_cid = widgets['contig_name_to_id'].get(widgets['contig_select'].value)
+                if sel_cid is not None:
+                    rows = conn.cursor().execute(
+                        "SELECT DISTINCT s.Sample_name FROM Coverage p"
+                        " JOIN Sample s ON s.Sample_id = p.Sample_id"
+                        " WHERE p.Contig_id = ? ORDER BY s.Sample_name",
+                        [sel_cid]
+                    ).fetchall()
+                    completions = [row[0] for row in rows]
+                else:
+                    completions = []
             else:
                 completions = list(orig_samples)
 
             # Apply Filtering query builder filters (contig mode)
-            filtered_pairs = get_filtering_filtered_pairs()
-            if filtered_pairs is not None:
-                if views.active == 0 and widgets['contig_select'].value:
-                    sel_contig = widgets['contig_select'].value
-                    allowed_samples = {pair[1] for pair in filtered_pairs if pair[0] == sel_contig}
-                else:
-                    allowed_samples = {pair[1] for pair in filtered_pairs}
-                completions = [s for s in completions if s in allowed_samples]
+            filtered = get_filtering_filtered_pairs()
+            if filtered is not None:
+                fsql, fparams = filtered['sql'], filtered['params']
+                fc = conn.cursor()
+                try:
+                    if views.active == 0 and widgets['contig_select'].value:
+                        sel_cid = widgets['contig_name_to_id'].get(widgets['contig_select'].value)
+                        rows = fc.execute(
+                            f"SELECT DISTINCT s.Sample_name FROM ({fsql}) f"
+                            f" JOIN Sample s ON s.Sample_id = f.Sample_id"
+                            f" WHERE f.Contig_id = ?"
+                            f" ORDER BY s.Sample_name LIMIT 100",
+                            fparams + [sel_cid]
+                        ).fetchall()
+                    else:
+                        rows = fc.execute(
+                            f"SELECT DISTINCT s.Sample_name FROM ({fsql}) f"
+                            f" JOIN Sample s ON s.Sample_id = f.Sample_id"
+                            f" ORDER BY s.Sample_name LIMIT 100",
+                            fparams
+                        ).fetchall()
+                    filter_allowed = {row[0] for row in rows}
+                    completions = [s for s in completions if s in filter_allowed]
+                except duckdb.Error as e:
+                    print(f"[filtering] Sample autocomplete query error: {e}", flush=True)
         update_widget_completions(widgets['sample_select'], completions)
 
     def refresh_mag_options_unlocked():
@@ -813,27 +961,50 @@ def create_layout(db_path, preloaded, enable_timing=False):
         sel_sample = widgets['sample_select'].value
         if views.active == 0 and sel_sample:
             sel_sid = widgets['sample_name_to_id'].get(sel_sample)
-            valid_cids = widgets['sid_to_cids'].get(sel_sid, set()) if sel_sid is not None else set()
-            _c2id = widgets['contig_name_to_id']
-            completions = [
-                m for m in sorted(mag_to_contigs.keys())
-                if any(_c2id.get(c) in valid_cids for c in mag_to_contigs[m])
-            ]
+            if sel_sid is not None:
+                rows = conn.cursor().execute(
+                    "SELECT DISTINCT mg.MAG_name"
+                    " FROM MAG mg"
+                    " JOIN MAG_contigs_association mca ON mca.MAG_id = mg.MAG_id"
+                    " JOIN Coverage p ON p.Contig_id = mca.Contig_id"
+                    " WHERE p.Sample_id = ? ORDER BY mg.MAG_name",
+                    [sel_sid]
+                ).fetchall()
+                completions = [row[0] for row in rows]
+            else:
+                completions = []
         else:
             completions = sorted(mag_to_contigs.keys())
 
         # Apply Filtering query builder filters: keep a MAG only if at least
         # one of its member contigs survives the filter.
-        filtered_pairs = get_filtering_filtered_pairs()
-        if filtered_pairs is not None:
-            if views.active == 0 and sel_sample:
-                allowed_contigs = {pair[0] for pair in filtered_pairs if pair[1] == sel_sample}
-            else:
-                allowed_contigs = {pair[0] for pair in filtered_pairs}
-            completions = [
-                m for m in completions
-                if any(c in allowed_contigs for c in mag_to_contigs[m])
-            ]
+        filtered = get_filtering_filtered_pairs()
+        if filtered is not None:
+            fsql, fparams = filtered['sql'], filtered['params']
+            fc = conn.cursor()
+            try:
+                if views.active == 0 and sel_sample:
+                    sel_sid = widgets['sample_name_to_id'].get(sel_sample)
+                    rows = fc.execute(
+                        f"SELECT DISTINCT mg.MAG_name FROM ({fsql}) f"
+                        f" JOIN MAG_contigs_association mca ON mca.Contig_id = f.Contig_id"
+                        f" JOIN MAG mg ON mg.MAG_id = mca.MAG_id"
+                        f" WHERE f.Sample_id = ? OR f.Sample_id IS NULL"
+                        f" ORDER BY mg.MAG_name",
+                        fparams + [sel_sid]
+                    ).fetchall()
+                else:
+                    rows = fc.execute(
+                        f"SELECT DISTINCT mg.MAG_name FROM ({fsql}) f"
+                        f" JOIN MAG_contigs_association mca ON mca.Contig_id = f.Contig_id"
+                        f" JOIN MAG mg ON mg.MAG_id = mca.MAG_id"
+                        f" ORDER BY mg.MAG_name",
+                        fparams
+                    ).fetchall()
+                filter_allowed = {row[0] for row in rows}
+                completions = [m for m in completions if m in filter_allowed]
+            except duckdb.Error as e:
+                print(f"[filtering] MAG autocomplete query error: {e}", flush=True)
         update_widget_completions(widgets['mag_select'], completions)
         refresh_sort_sample_options()
 
@@ -846,10 +1017,32 @@ def create_layout(db_path, preloaded, enable_timing=False):
             completions = [s for s in orig_samples if widgets['sample_name_to_id'].get(s) in allowed_sids]
         else:
             completions = list(orig_samples)
-        filtered_pairs = get_filtering_filtered_pairs()
-        if filtered_pairs is not None:
-            allowed_samples = {pair[1] for pair in filtered_pairs}
-            completions = [s for s in completions if s in allowed_samples]
+        filtered = get_filtering_filtered_pairs()
+        if filtered is not None:
+            fsql, fparams = filtered['sql'], filtered['params']
+            fc = conn.cursor()
+            try:
+                if sel_mag and sel_mag in widgets['mag_to_sample_ids']:
+                    rows = fc.execute(
+                        f"SELECT DISTINCT s.Sample_name FROM ({fsql}) f"
+                        f" JOIN Sample s ON s.Sample_id = f.Sample_id"
+                        f" JOIN MAG_contigs_association mca ON mca.Contig_id = f.Contig_id"
+                        f" JOIN MAG mg ON mg.MAG_id = mca.MAG_id"
+                        f" WHERE mg.MAG_name = ?"
+                        f" ORDER BY s.Sample_name LIMIT 100",
+                        fparams + [sel_mag]
+                    ).fetchall()
+                else:
+                    rows = fc.execute(
+                        f"SELECT DISTINCT s.Sample_name FROM ({fsql}) f"
+                        f" JOIN Sample s ON s.Sample_id = f.Sample_id"
+                        f" ORDER BY s.Sample_name LIMIT 100",
+                        fparams
+                    ).fetchall()
+                filter_allowed = {row[0] for row in rows}
+                completions = [s for s in completions if s in filter_allowed]
+            except duckdb.Error as e:
+                print(f"[filtering] Sort sample autocomplete query error: {e}", flush=True)
         update_widget_completions(mag_params_sort_sample_select, completions)
 
     _title_fingerprint = {'last': None}
@@ -861,7 +1054,8 @@ def create_layout(db_path, preloaded, enable_timing=False):
         val_c = widgets['contig_select'].value
         val_s = widgets['sample_select'].value
         opts_m = widgets['mag_select'].options if widgets['has_mags'] else ()
-        fp = (len(opts_c), val_c, len(opts_s), val_s, len(opts_m))
+        val_m = widgets['mag_select'].value if widgets['has_mags'] else None
+        fp = (len(opts_c), val_c, len(opts_s), val_s, len(opts_m), val_m)
         if fp == _title_fingerprint['last']:
             return
         _title_fingerprint['last'] = fp
@@ -874,18 +1068,84 @@ def create_layout(db_path, preloaded, enable_timing=False):
         if val_s:
             filtered_samples = {val_s}
 
-        _c2id = widgets['contig_name_to_id']
-        _filtered_sids = {widgets['sample_name_to_id'][s] for s in filtered_samples if s in widgets['sample_name_to_id']}
-        presences_count = sum(
-            1 for contig in filtered_contigs
-            for sid in widgets['cid_to_sids'].get(_c2id.get(contig), set())
-            if sid in _filtered_sids
-        )
+        # Use cached counts from filter SQL when filter is active; otherwise count from preloaded maps
+        cache = _filtering_cache
+        if cache['valid'] and cache['result'] is not None:
+            presences_count = cache.get('count_pairs', 0)
+            mag_pairs_count = cache.get('count_mag_pairs', 0)
+            fsql_t, fparams_t = cache['result']['sql'], cache['result']['params']
+            if val_c:
+                contigs_count = 1
+            elif val_m:
+                contigs_count = conn.cursor().execute(
+                    f"WITH _f AS ({fsql_t})"
+                    f" SELECT COUNT(DISTINCT _f.Contig_id)"
+                    f" FROM _f"
+                    f" JOIN MAG_contigs_association mca ON mca.Contig_id = _f.Contig_id"
+                    f" JOIN MAG mg ON mg.MAG_id = mca.MAG_id"
+                    f" WHERE mg.MAG_name = ?",
+                    fparams_t + [val_m]
+                ).fetchone()[0]
+            else:
+                contigs_count = cache.get('count_contigs', 0)
+            if val_s:
+                samples_count = 1
+            elif val_m:
+                samples_count = conn.cursor().execute(
+                    f"WITH _f AS ({fsql_t})"
+                    f" SELECT COUNT(DISTINCT _f.Sample_id)"
+                    f" FROM _f"
+                    f" JOIN MAG_contigs_association mca ON mca.Contig_id = _f.Contig_id"
+                    f" JOIN MAG mg ON mg.MAG_id = mca.MAG_id"
+                    f" WHERE mg.MAG_name = ?",
+                    fparams_t + [val_m]
+                ).fetchone()[0]
+            else:
+                samples_count = cache.get('count_samples', 0)
+        else:
+            # No active filter — use autocomplete list lengths (full list, no LIMIT applied)
+            contigs_count = len(filtered_contigs)
+            samples_count = len(filtered_samples)
+            # Count coverage presences directly from Coverage table
+            _cc = conn.cursor()
+            sel_cid = widgets['contig_name_to_id'].get(val_c) if val_c else None
+            sel_sid = widgets['sample_name_to_id'].get(val_s) if val_s else None
+            if sel_cid is not None and sel_sid is not None:
+                presences_count = _cc.execute(
+                    "SELECT COUNT(*) FROM Coverage WHERE Contig_id = ? AND Sample_id = ?",
+                    [sel_cid, sel_sid]
+                ).fetchone()[0]
+            elif sel_cid is not None:
+                presences_count = _cc.execute(
+                    "SELECT COUNT(*) FROM Coverage WHERE Contig_id = ?", [sel_cid]
+                ).fetchone()[0]
+            elif sel_sid is not None:
+                presences_count = _cc.execute(
+                    "SELECT COUNT(*) FROM Coverage WHERE Sample_id = ?", [sel_sid]
+                ).fetchone()[0]
+            else:
+                presences_count = _cc.execute("SELECT COUNT(*) FROM Coverage").fetchone()[0]
+            if widgets['has_mags']:
+                # Use preloaded mag_to_sample_ids (small: ~2837 MAGs × samples)
+                sel_mid = val_m if val_m else None
+                if sel_mid and sel_sid is not None:
+                    mag_pairs_count = 1 if sel_sid in widgets['mag_to_sample_ids'].get(sel_mid, set()) else 0
+                elif sel_mid:
+                    mag_pairs_count = len(widgets['mag_to_sample_ids'].get(sel_mid, set()))
+                elif sel_sid is not None:
+                    mag_pairs_count = sum(
+                        1 for sids in widgets['mag_to_sample_ids'].values() if sel_sid in sids
+                    )
+                else:
+                    mag_pairs_count = sum(len(sids) for sids in widgets['mag_to_sample_ids'].values())
 
-        contigs_count = len(filtered_contigs)
-        samples_count = len(filtered_samples)
-
-        new_filtering = f"<span style='font-size: 1.2em;'><b>Filtering</b></span> ({presences_count} contig/sample pairs)"
+        if widgets['has_mags']:
+            new_filtering = (
+                f"<span style='font-size: 1.2em;'><b>Filtering</b></span> "
+                f"({presences_count} contig/sample pairs, {mag_pairs_count} MAG/sample pairs)"
+            )
+        else:
+            new_filtering = f"<span style='font-size: 1.2em;'><b>Filtering</b></span> ({presences_count} contig/sample pairs)"
         new_contig = f"<span style='font-size: 1.2em;'><b>Contigs</b></span> ({contigs_count} available)"
         new_sample = f"<span style='font-size: 1.2em;'><b>Samples</b></span> ({samples_count} available)"
         if filtering_title.text != new_filtering:
@@ -950,6 +1210,8 @@ def create_layout(db_path, preloaded, enable_timing=False):
 
     # Views (One sample / All samples) callback: show/hide sample-related controls
     def on_view_change(attr, old, new):
+        global _current_op
+        _current_op = "view_change"
         if enable_timing:
             _TIMING.start_phase("View change")
             t_view = time.perf_counter()
@@ -999,6 +1261,8 @@ def create_layout(db_path, preloaded, enable_timing=False):
         doc.hold('combine')
         t_apply_start = None
         try:
+            global _current_op
+            _current_op = "apply/param_parse"
             current_plot_state['shared_xrange'] = None
             main_placeholder.objects = []
 
@@ -1052,6 +1316,35 @@ def create_layout(db_path, preloaded, enable_timing=False):
                     'qualifier_key': key, 'value': val, 'color': color,
                     'match_mode': mode,
                 })
+
+            mag_track_colors = []
+            for row_data in mag_track_color_rows:
+                key = row_data['qualifier_select'].value
+                if not key:
+                    continue
+                operator = row_data['operator_select'].value
+                mode = OP_TO_MODE.get(operator, 'exact')
+                if mode == 'random':
+                    continue
+                widget = row_data['input_ref']['widget']
+                raw_val = widget.value
+                color = row_data['color_picker'].color
+                if raw_val is None or raw_val == "" or not color:
+                    continue
+                val = float(raw_val) if isinstance(raw_val, (int, float)) else raw_val
+                mag_track_colors.append({
+                    'qualifier_key': key, 'value': val, 'color': color,
+                    'match_mode': mode,
+                })
+
+            if (apply_annotation_rules_cbg is not None
+                    and 0 in apply_annotation_rules_cbg.active
+                    and custom_colors):
+                mag_track_colors = list(mag_track_colors) + [
+                    r for r in custom_colors if r.get('match_mode') != 'random'
+                ]
+
+            max_track_dots = int(mag_track_max_dots_input.value)
 
             # Select the correct widget set based on current view
             active_variables_widgets = widgets['variables_widgets_all'] if is_all else widgets['variables_widgets_one']
@@ -1129,16 +1422,27 @@ def create_layout(db_path, preloaded, enable_timing=False):
                     if not mag_requested_features:
                         raise ValueError("In 'All samples' view you must select at least one variable.")
                     # Compute filtered samples for this MAG (union across all its contigs)
-                    mag_contigs = widgets['mag_to_contigs'].get(active_mag, [])
-                    _c2id = widgets['contig_name_to_id']
-                    _mag_cids = {_c2id[c] for c in mag_contigs if c in _c2id}
                     _s2id = widgets['sample_name_to_id']
-                    filtered_samples = [s for s in orig_samples
-                                        if any(_s2id.get(s) in widgets['cid_to_sids'].get(cid, set()) for cid in _mag_cids)]
-                    filtering_pairs = get_filtering_filtered_pairs()
-                    if filtering_pairs is not None:
-                        allowed_s = {pair[1] for pair in filtering_pairs}
-                        filtered_samples = [s for s in filtered_samples if s in allowed_s]
+                    allowed_sids = widgets['mag_to_sample_ids'].get(active_mag, set())
+                    filtered_samples = [s for s in orig_samples if _s2id.get(s) in allowed_sids]
+                    filtering = get_filtering_filtered_pairs()
+                    if filtering is not None:
+                        fsql, fparams = filtering['sql'], filtering['params']
+                        fc = conn.cursor()
+                        try:
+                            rows = fc.execute(
+                                f"SELECT DISTINCT s.Sample_name FROM ({fsql}) f"
+                                f" JOIN Sample s ON s.Sample_id = f.Sample_id"
+                                f" JOIN MAG_contigs_association mca ON mca.Contig_id = f.Contig_id"
+                                f" JOIN MAG mg ON mg.MAG_id = mca.MAG_id"
+                                f" WHERE mg.MAG_name = ?"
+                                f" ORDER BY s.Sample_name LIMIT 100",
+                                fparams + [active_mag]
+                            ).fetchall()
+                            allowed_s = {row[0] for row in rows}
+                            filtered_samples = [s for s in filtered_samples if s in allowed_s]
+                        except duckdb.Error as e:
+                            print(f"[filtering] MAG sample query error: {e}", flush=True)
                     mag_allowed_samples = set(filtered_samples)
                 else:
                     # ONE SAMPLE mode: collect all selected features (same logic as the One-sample Contig path below)
@@ -1191,9 +1495,11 @@ def create_layout(db_path, preloaded, enable_timing=False):
                     mag_prev_xstart = current_plot_state['shared_xrange'].start
                     mag_prev_xend = current_plot_state['shared_xrange'].end
 
+                _current_op = "apply/generate_plot_mag"
                 if enable_timing:
+                    print(f"[timing] RSS before generate_bokeh_plot_mag_view: {_get_rss_mb():.0f} MB", flush=True)
                     t_plot = time.perf_counter()
-                grid = generate_bokeh_plot_mag_view(
+                grid, mag_meta = generate_bokeh_plot_mag_view(
                     conn, mag_requested_features, active_mag, sample,
                     xstart=xstart, xend=xend,
                     genbank_path=genbank_path if plot_genemap else None,
@@ -1209,6 +1515,8 @@ def create_layout(db_path, preloaded, enable_timing=False):
                     min_relative_value=min_coverage_freq,
                     feature_label_key=feature_label_key,
                     custom_colors=custom_colors if custom_colors else None,
+                    mag_track_colors=mag_track_colors if mag_track_colors else None,
+                    max_track_dots=max_track_dots,
                     is_all=is_all,
                     allowed_samples=mag_allowed_samples,
                     max_samples=int(max_samples_input.value),
@@ -1245,7 +1553,14 @@ def create_layout(db_path, preloaded, enable_timing=False):
                     new_xrange.on_change('start', _sync_from_mag)
                     new_xrange.on_change('end', _sync_to_mag)
 
+                _dots_shown = mag_meta.get('dots_shown', 0)
+                _dots_total = mag_meta.get('dots_total', 0)
+                if _dots_total > _dots_shown > 0:
+                    _dots_html = f"<i style='color:#555;font-size:0.85em;margin-left:10px'>{_dots_shown:,}/{_dots_total:,} dots only could be plotted on the MAG track</i>"
+                else:
+                    _dots_html = ""
                 toolbar_row = pn.Row(
+                    pn.pane.HTML(_dots_html, align="center", margin=(0, 5, 0, 0)),
                     pn.Spacer(sizing_mode="stretch_width"),
                     peruse_button, download_mag_metrics_button, download_data_button,
                     margin=(0, 0, 5, 0)
@@ -1254,6 +1569,7 @@ def create_layout(db_path, preloaded, enable_timing=False):
                 download_mag_metrics_button.visible = bool(has_samples)
                 download_data_button.visible = True
                 command_hint_pane.visible = False
+                _current_op = "apply/panel_update_mag"
                 if enable_timing:
                     print(f"[timing] RSS after plot generation: {_get_rss_mb():.0f} MB", flush=True)
                     n_contigs = len(widgets['mag_to_contigs'].get(active_mag, []))
@@ -1370,7 +1686,9 @@ def create_layout(db_path, preloaded, enable_timing=False):
                 print(f"[start_bokeh_server] Generating plot for all samples with variable={selected_var}, contig={contig}, genome_features={genome_features}, filtered_samples={len(filtered_samples)}", flush=True)
                 if not plot_genemap and genome_features:
                     genome_features = [f for f in genome_features if f != "Gene map"]
+                _current_op = "apply/generate_plot_all_samples"
                 if enable_timing:
+                    print(f"[timing] RSS before generate_bokeh_plot_all_samples: {_get_rss_mb():.0f} MB", flush=True)
                     t_plot = time.perf_counter()
                 grid = generate_bokeh_plot_all_samples(
                     conn, selected_var, contig, xstart=xstart, xend=xend, genbank_path=genbank_path,
@@ -1476,6 +1794,7 @@ def create_layout(db_path, preloaded, enable_timing=False):
             command_hint_pane.visible = False
 
             # Display the plot
+            _current_op = "apply/panel_update"
             if enable_timing:
                 print(f"[timing] RSS after plot generation: {_get_rss_mb():.0f} MB", flush=True)
                 view_label = "all samples" if is_all else f"one sample ({sample})"
@@ -1502,6 +1821,7 @@ def create_layout(db_path, preloaded, enable_timing=False):
             print(f"[start_bokeh_server] Exception: {tb}", flush=True)
             main_placeholder.objects = [pn.pane.HTML(f"<pre>Error building plot:\n{tb}</pre>")]
         finally:
+            _current_op = "idle"
             if enable_timing:
                 print(f"[timing] Memory (current RSS) at APPLY end: {_get_rss_mb():.0f} MB", flush=True)
                 _TIMING.summary("APPLY")
@@ -1718,6 +2038,10 @@ def create_layout(db_path, preloaded, enable_timing=False):
         t_init = time.perf_counter()
     conn = duckdb.connect(db_path, read_only=True)
     widgets = build_controls(preloaded)
+    if widgets['has_mags']:
+        for _mag, _ctgs in widgets['mag_to_contigs'].items():
+            for _c in _ctgs:
+                _contig_to_mag[_c] = _mag
     if enable_timing:
         _step = time.perf_counter() - t_init
         print(f"[timing] Session: widget creation: {_step:.3f}s{_TIMING.tag(_step)}", flush=True)
@@ -1789,7 +2113,10 @@ def create_layout(db_path, preloaded, enable_timing=False):
 
     def refresh_on_filter_change():
         """Refresh contig and sample options when Filtering2 values change."""
-
+        global _current_op
+        _current_op = "filter_change"
+        if enable_timing:
+            print(f"[timing] RSS at filter_change start: {_get_rss_mb():.0f} MB", flush=True)
         doc = curdoc()
         doc.hold('combine')
         _filtering_cache['valid'] = False
@@ -2142,7 +2469,7 @@ def create_layout(db_path, preloaded, enable_timing=False):
         else:
             _enc_scale = _FILTER_ENCODE.get(initial_column)
             _step = 1.0 / _enc_scale if _enc_scale else 1
-            initial_input = Spinner(value=0, step=_step, placeholder="Value...", width=90, margin=(0, 2, 0, 0))
+            initial_input = Spinner(value=None, step=_step, placeholder="Value...", width=90, margin=(0, 2, 0, 0))
             input_container.objects = [initial_input]
             # Add callback for Bokeh Spinner (also syncs histogram threshold)
             def _on_initial_spinner(attr, old, new):
@@ -2200,7 +2527,7 @@ def create_layout(db_path, preloaded, enable_timing=False):
             else:
                 _enc_scale = _FILTER_ENCODE.get(col_name)
                 _step = 1.0 / _enc_scale if _enc_scale else 1
-                new_input = Spinner(value=0, step=_step, placeholder="Value...", width=90, margin=(0, 2, 0, 0))
+                new_input = Spinner(value=None, step=_step, placeholder="Value...", width=90, margin=(0, 2, 0, 0))
                 input_container.objects = [new_input]
                 current_input_ref['widget'] = new_input
                 current_input_ref['is_panel'] = False
@@ -2271,14 +2598,22 @@ def create_layout(db_path, preloaded, enable_timing=False):
             curdoc().add_next_tick_callback(_deferred_update)
 
         def update_subcategories(attr, old, new):
-            """Update column options when category changes."""
-            columns = list(filtering_metadata.get(new, {}).get('columns', {}).keys())
-            if not columns:
-                columns = ["No columns"]
-            subcategory_select.options = [(c, c.replace("_", " ").replace("percentage", "(%)")) for c in columns]
-            subcategory_select.value = columns[0]
-            # Update input widget for new column
-            update_input_widget(columns[0])
+            """Update column options when category changes.
+
+            Uses the startup-time _columns_by_category cache — no filtering_metadata
+            re-derivation on every change.  Clamps the selected value to the first
+            valid column so stale/invalid selections are never left behind.
+            """
+            raw_columns = _columns_raw_by_category.get(new, [])
+            columns = raw_columns if raw_columns else ["No columns"]
+            new_options = _columns_by_category.get(new) or [(c, c) for c in columns]
+            if subcategory_select.options != new_options:
+                subcategory_select.options = new_options
+            # Clamp: reset to first column when current value is not valid for new category.
+            if subcategory_select.value not in set(columns):
+                subcategory_select.value = columns[0]
+            # Update input widget for the (possibly new) selected column.
+            update_input_widget(subcategory_select.value)
 
         def update_input_on_column_change(attr, old, new):
             """Update input widget when column changes."""
@@ -2599,12 +2934,31 @@ def create_layout(db_path, preloaded, enable_timing=False):
 
     def _get_filtered_samples_for_contig(contig):
         cid = widgets['contig_name_to_id'].get(contig)
-        sids = widgets['cid_to_sids'].get(cid, set())
-        result = [s for s in orig_samples if widgets['sample_name_to_id'].get(s) in sids]
-        filtered_pairs = get_filtering_filtered_pairs()
-        if filtered_pairs is not None:
-            allowed = {pair[1] for pair in filtered_pairs}
-            result = [s for s in result if s in allowed]
+        if cid is not None:
+            rows = conn.cursor().execute(
+                "SELECT DISTINCT s.Sample_name FROM Coverage p"
+                " JOIN Sample s ON s.Sample_id = p.Sample_id"
+                " WHERE p.Contig_id = ? ORDER BY s.Sample_name",
+                [cid]
+            ).fetchall()
+            result = [row[0] for row in rows]
+        else:
+            result = []
+        filtering = get_filtering_filtered_pairs()
+        if filtering is not None:
+            fsql, fparams = filtering['sql'], filtering['params']
+            fc = conn.cursor()
+            try:
+                rows = fc.execute(
+                    f"SELECT DISTINCT s.Sample_name FROM ({fsql}) f"
+                    f" JOIN Sample s ON s.Sample_id = f.Sample_id"
+                    f" ORDER BY s.Sample_name LIMIT 100",
+                    fparams
+                ).fetchall()
+                allowed = {row[0] for row in rows}
+                result = [s for s in result if s in allowed]
+            except duckdb.Error as e:
+                print(f"[filtering] Sample query error: {e}", flush=True)
         return result
 
     # MAGs section header (visible only in MAG-mode databases)
@@ -2934,8 +3288,12 @@ def create_layout(db_path, preloaded, enable_timing=False):
                        sizing_mode="stretch_width",
                        margin=(0, 2, 0, 0)), False
 
-    def create_color_row():
+    def create_color_row(target_rows=None, rebuild_fn=None):
         """Create a single custom color row with qualifier / operator / value / color / remove widgets.
+
+        target_rows / rebuild_fn: the list and rebuild function to use for the
+        remove button. Default to custom_color_rows / rebuild_color_rows so
+        existing callers that omit these args continue to work.
 
         Mirrors create_query_row(): text columns get SearchableSelect (or
         TextInput under has/has not), numeric columns get Spinner. Both types
@@ -3057,10 +3415,13 @@ def create_layout(db_path, preloaded, enable_timing=False):
 
         operator_select.on_change('value', on_operator_change)
 
+        _target = target_rows if target_rows is not None else custom_color_rows
+        _rebuild = rebuild_fn if rebuild_fn is not None else rebuild_color_rows
+
         def remove_row_callback(event):
-            if row_data in custom_color_rows:
-                custom_color_rows.remove(row_data)
-                rebuild_color_rows()
+            if row_data in _target:
+                _target.remove(row_data)
+                _rebuild()
 
         minus_btn.on_click(remove_row_callback)
         return row_data
@@ -3076,6 +3437,32 @@ def create_layout(db_path, preloaded, enable_timing=False):
         rebuild_color_rows()
 
     add_color_btn.on_click(add_color_callback)
+
+    # --- MAG track coloring rules (same widget pattern, separate list) ---
+    mag_track_color_rows = []
+    add_mag_track_btn = pn.widgets.Button(
+        name="+ Add coloring rule",
+        margin=(2, 0, 2, 0),
+        button_type="success",
+        stylesheets=[stylesheet]
+    )
+    mag_track_color_column = pn.Column(
+        add_mag_track_btn, sizing_mode="stretch_width",
+        styles={'border-left': '3px solid #00b17c', 'padding-left': '10px', 'margin-left': '5px',
+                'max-height': '300px', 'overflow-y': 'auto'}
+    )
+
+    def rebuild_mag_track_color_rows():
+        children = [rd['row_widget'] for rd in mag_track_color_rows]
+        children.append(add_mag_track_btn)
+        mag_track_color_column.objects = children
+
+    def add_mag_track_color_callback(event):
+        new_row = create_color_row(mag_track_color_rows, rebuild_mag_track_color_rows)
+        mag_track_color_rows.append(new_row)
+        rebuild_mag_track_color_rows()
+
+    add_mag_track_btn.on_click(add_mag_track_color_callback)
 
     # Template selection callback - populates color rows from template rules
     if template_select is not None:
@@ -3273,6 +3660,32 @@ def create_layout(db_path, preloaded, enable_timing=False):
             customise_toggle_btn.on_click(
                 make_toggle_callback(customise_toggle_btn, customise_content))
 
+        # --- MAG track coloring section (only in MAG databases with annotation columns) ---
+        mag_track_section_header = None
+        mag_track_section_content = None
+        apply_annotation_rules_cbg = None
+        if widgets['has_mags'] and color_qualifier_options:
+            mag_track_toggle_btn = Button(label="▶", width=20, height=20,
+                                          button_type="primary", align="center",
+                                          margin=0, stylesheets=[toggle_stylesheet])
+            mag_track_toggle_btn.styles = {'padding': '0px', 'line-height': '20px'}
+            mag_track_title = Div(text="Customise MAG track", align="center")
+            mag_track_section_header = row(mag_track_toggle_btn, mag_track_title,
+                                           sizing_mode="stretch_width", align="center")
+            apply_annotation_rules_cbg = CheckboxGroup(
+                labels=["Apply genomic annotations coloring rules"],
+                active=[],
+                margin=(4, 0, 4, 0),
+            )
+            mag_track_section_content = pn.Column(
+                Div(text="Color annotations on MAG track with:"),
+                mag_track_color_column,
+                apply_annotation_rules_cbg,
+                visible=False, sizing_mode="stretch_width", margin=(0, 0, 5, 0)
+            )
+            mag_track_toggle_btn.on_click(
+                make_toggle_callback(mag_track_toggle_btn, mag_track_section_content))
+
         # --- Subsection 3: "Other genomic features to plot" (collapsible) ---
         other_features_toggle_btn = Button(label="▶", width=20, height=20,
                                            button_type="primary", align="center",
@@ -3341,6 +3754,9 @@ def create_layout(db_path, preloaded, enable_timing=False):
 
         # Assemble the full genome section from the independent collapsibles.
         genome_section_children = [annotations_header, annotations_content]
+        if mag_track_section_header is not None:
+            genome_section_children.append(mag_track_section_header)
+            genome_section_children.append(mag_track_section_content)
         if customise_header is not None:
             genome_section_children.append(customise_header)
             if customise_content is not None:
@@ -3482,17 +3898,46 @@ def create_layout(db_path, preloaded, enable_timing=False):
                             if cat not in _mag_excluded_categories]
     _mag_sort_category_sources = {cat: filtering_metadata[cat]['source'] for cat in _mag_sort_categories}
 
-    def _format_col(c):
+    def _format_col(c: str) -> tuple[str, str]:
         return (c, c.replace("_", " ").replace("percentage", "(%)"))
 
-    def _numeric_columns_for(category):
+    def _numeric_columns_for(category: str) -> list[str]:
         cols = filtering_metadata.get(category, {}).get('columns', {})
         return [c for c, info in cols.items() if info.get('type') == 'numeric']
 
-    def _formatted_numeric_columns_for(category):
+    def _formatted_numeric_columns_for(category: str) -> list[tuple[str, str]]:
         return [_format_col(c) for c in _numeric_columns_for(category)]
 
-    _initial_metrics = _formatted_numeric_columns_for("Contig") if "Contig" in _mag_sort_categories else []
+    # Pre-compute per-category column and metric lists once at startup.
+    # All three caches are derived from filtering_metadata (already in RAM) and
+    # never touch the DB again.  Callbacks do O(1) dict lookups instead of
+    # re-deriving on every category-selector change.
+
+    # Full column list per category (numeric + text) used by Filtering rows.
+    # Values are (col_name, display_label) tuples; raw names in _columns_raw_by_category.
+    _columns_raw_by_category: dict[str, list[str]] = {
+        cat: list(meta.get('columns', {}).keys())
+        for cat, meta in filtering_metadata.items()
+    }
+    _columns_by_category: dict[str, list[tuple[str, str]]] = {
+        cat: [_format_col(c) for c in cols]
+        for cat, cols in _columns_raw_by_category.items()
+    }
+
+    # Numeric-only columns per category used by MAG parameters and Sample parameters.
+    _metrics_by_category: dict[str, list[tuple[str, str]]] = {
+        cat: _formatted_numeric_columns_for(cat)
+        for cat in filtering_metadata
+    }
+    # Sample-order variant: "Sample" category prepends Sample_name as a sort key.
+    _sample_metrics_by_category: dict[str, list[tuple[str, str]]] = {
+        cat: ([_format_col("Sample_name")] + _metrics_by_category.get(cat, []))
+              if cat == "Sample"
+              else _metrics_by_category.get(cat, [])
+        for cat in filtering_metadata
+    }
+
+    _initial_metrics = _metrics_by_category.get("Contig", []) if "Contig" in _mag_sort_categories else []
 
     mag_params_toggle_btn = Button(label="▶", width=20, height=20, button_type="primary", align="center", margin=0, stylesheets=[toggle_stylesheet])
     mag_params_toggle_btn.styles = {'padding': '0px', 'line-height': '20px'}
@@ -3527,17 +3972,29 @@ def create_layout(db_path, preloaded, enable_timing=False):
     mag_params_sort_sample_row = row(mag_params_sort_sample_label, mag_params_sort_sample_select, sizing_mode="stretch_width", margin=(0, 0, 5, 0))
     mag_params_sort_sample_row.visible = False
 
+    mag_track_max_dots_label = Div(text="Maximum number of points on MAG track:", margin=(5, 5, 2, 0))
+    mag_track_max_dots_input = Spinner(value=1000, low=1, step=100, width=100, margin=(0, 10, 0, 5))
+    mag_track_max_dots_row = row(mag_track_max_dots_label, mag_track_max_dots_input,
+                                  sizing_mode="stretch_width", margin=(0, 0, 5, 0))
+
     mag_params_content = pn.Column(
         mag_params_order_label, mag_params_controls_row,
         mag_params_sort_sample_row,
+        mag_track_max_dots_row,
         sizing_mode="stretch_width", visible=False,
     )
     mag_params_toggle_btn.on_click(make_toggle_callback(mag_params_toggle_btn, mag_params_content))
 
     def _on_mag_sort_category_change(attr, old, new):
-        metrics = _formatted_numeric_columns_for(new)
-        mag_params_metric_select.options = metrics if metrics else [""]
-        mag_params_metric_select.value = metrics[0][0] if metrics else ""
+        # Cache lookup — O(1), no re-derivation from filtering_metadata.
+        metrics = _metrics_by_category.get(new, [])
+        new_options = metrics if metrics else [""]
+        if mag_params_metric_select.options != new_options:
+            mag_params_metric_select.options = new_options
+        # Clamp the selected value to the first valid option for the new category.
+        valid_values = {v for v, _l in metrics} if metrics else set()
+        if mag_params_metric_select.value not in valid_values:
+            mag_params_metric_select.value = metrics[0][0] if metrics else ""
         is_sample_dep = (new != "Contig")
         is_all = (views.active == 1)
         mag_params_sort_sample_row.visible = is_sample_dep and is_all
@@ -3564,10 +4021,9 @@ def create_layout(db_path, preloaded, enable_timing=False):
     _sample_sort_category_sources = {cat: filtering_metadata[cat]['source'] for cat in filtering_metadata}
     _sample_sort_current_categories = list(_sample_contig_categories)
 
-    def _sample_order_columns_for(category):
-        if category == "Sample":
-            return [_format_col("Sample_name")] + _formatted_numeric_columns_for("Sample")
-        return _formatted_numeric_columns_for(category)
+    def _sample_order_columns_for(category: str) -> list[tuple[str, str]]:
+        # Cache lookup — reads from _sample_metrics_by_category built at startup.
+        return _sample_metrics_by_category.get(category, [])
 
     _initial_sample_metrics = _sample_order_columns_for("Sample")
     sample_order_label = Div(text="Order samples by:", margin=(5, 0, 2, 0))
@@ -3588,9 +4044,15 @@ def create_layout(db_path, preloaded, enable_timing=False):
     )
 
     def _on_sample_order_category_change(attr, old, new):
+        # Cache lookup — O(1), no re-derivation from filtering_metadata.
         metrics = _sample_order_columns_for(new)
-        sample_order_metric_select.options = metrics if metrics else [""]
-        sample_order_metric_select.value = metrics[0][0] if metrics else ""
+        new_options = metrics if metrics else [""]
+        if sample_order_metric_select.options != new_options:
+            sample_order_metric_select.options = new_options
+        # Clamp the selected value to the first valid option for the new category.
+        valid_values = {v for v, _l in metrics} if metrics else set()
+        if sample_order_metric_select.value not in valid_values:
+            sample_order_metric_select.value = metrics[0][0] if metrics else ""
 
     sample_order_category_select.on_change('value', _on_sample_order_category_change)
 
@@ -3900,6 +4362,7 @@ def add_serve_args(parser):
 def run_serve(args):
     global _TIMING
     _TIMING = _TimingPhase()
+    _start_rss_watchdog()
     # Print database metadata if available
     import duckdb as _duckdb
     _conn = _duckdb.connect(args.db, read_only=True)

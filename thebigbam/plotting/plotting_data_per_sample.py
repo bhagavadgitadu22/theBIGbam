@@ -5,7 +5,7 @@ import numpy as np
 from Bio.Seq import Seq
 from Bio.SeqRecord import SeqRecord
 from Bio.SeqFeature import SeqFeature, FeatureLocation
-from bokeh.models import Range1d, ColumnDataSource, HoverTool, WheelZoomTool, BoxZoomTool, NumeralTickFormatter, TapTool
+from bokeh.models import Range1d, ColumnDataSource, HoverTool, WheelZoomTool, BoxZoomTool, NumeralTickFormatter, TapTool, Label
 from bokeh.layouts import gridplot
 from bokeh.palettes import Viridis256
 from bokeh.plotting import figure
@@ -15,7 +15,76 @@ from dna_features_viewer import BiopythonTranslator
 _NULL_STRINGS = {'', 'none', 'null', 'nan'}
 
 
-def make_bokeh_mag_track(conn, mag_name, height=30, shared_xrange=None, members=None):
+_CORE_ANNOTATION_COLUMNS = {'Start', 'End', 'Strand', 'Type', 'Main_isoform'}
+_MODE_TO_SQL_OP = {'exact': '=', 'not_equal': '!=', 'lt': '<', 'gt': '>'}
+
+
+def compute_mag_track_dots(conn, mag_members, mag_track_colors, max_dots=1000):
+    """Return (xs, colors) lists for colored annotation dots on the MAG track.
+
+    Each entry in mag_track_colors is a dict with keys: qualifier_key, match_mode,
+    value, color. First matching rule per annotation wins.
+    """
+    if not mag_track_colors or not mag_members:
+        return [], []
+
+    contig_ids = [cid for cid, _clen, _off in mag_members]
+    cid_to_offset = {cid: off for cid, _clen, off in mag_members}
+    ph = ','.join('?' * len(contig_ids))
+
+    rows = conn.cursor().execute(
+        f'SELECT Annotation_id, Contig_id, "Start", "End" FROM Contig_annotation_core'
+        f" WHERE Contig_id IN ({ph})", contig_ids
+    ).fetchall()
+    aid_to_pos = {row[0]: (row[1], row[2], row[3]) for row in rows}
+
+    colored_aids = {}
+    for rule in mag_track_colors:
+        key = rule['qualifier_key']
+        mode = rule.get('match_mode', 'exact')
+        color = rule.get('color', '#ff0000')
+        value = rule.get('value')
+        if mode in ('has', 'has_not'):
+            op = 'LIKE' if mode == 'has' else 'NOT LIKE'
+            sql_val = f'%{value}%'
+        else:
+            op = _MODE_TO_SQL_OP.get(mode, '=')
+            sql_val = value
+        try:
+            if key in _CORE_ANNOTATION_COLUMNS:
+                matching = conn.cursor().execute(
+                    f'SELECT Annotation_id FROM Contig_annotation_core'
+                    f' WHERE "{key}" {op} ? AND Contig_id IN ({ph})',
+                    [sql_val] + contig_ids
+                ).fetchall()
+            else:
+                matching = conn.cursor().execute(
+                    f'SELECT a.Annotation_id FROM Contig_annotation_core a'
+                    f' JOIN Annotation_qualifier aq ON aq.Annotation_id = a.Annotation_id'
+                    f' WHERE aq.Key = ? AND aq.Value {op} ? AND a.Contig_id IN ({ph})',
+                    [key, sql_val] + contig_ids
+                ).fetchall()
+        except Exception as e:
+            print(f"[mag_track] Rule query error (key={key}): {e}", flush=True)
+            continue
+        for (aid,) in matching:
+            if aid not in colored_aids:
+                colored_aids[aid] = color
+
+    xs, colors = [], []
+    for aid, col in colored_aids.items():
+        if aid in aid_to_pos:
+            cid, start, end = aid_to_pos[aid]
+            xs.append(cid_to_offset.get(cid, 0) + (start + end) / 2)
+            colors.append(col)
+    total_count = len(xs)
+    if max_dots is not None and total_count > max_dots:
+        xs = xs[:max_dots]
+        colors = colors[:max_dots]
+    return xs, colors, total_count
+
+
+def make_bokeh_mag_track(conn, mag_name, height=30, shared_xrange=None, members=None, track_dots=None):
     """Build a MAG overview track: horizontal grey line spanning the MAG with
     black vertical tick marks at each contig boundary.
 
@@ -74,6 +143,15 @@ def make_bokeh_mag_track(conn, mag_name, height=30, shared_xrange=None, members=
     for x in boundaries:
         if vis_start <= x <= vis_end:
             fig.line([x, x], [-0.8, 0.8], color="black", line_width=3)
+
+    # Annotation dots (from Customise MAG track rules)
+    if track_dots:
+        dot_xs = [x for x in track_dots['xs'] if vis_start <= x <= vis_end]
+        dot_colors = [c for x, c in zip(track_dots['xs'], track_dots['colors'])
+                      if vis_start <= x <= vis_end]
+        if dot_xs:
+            fig.circle(x=dot_xs, y=[0] * len(dot_xs), color=dot_colors,
+                       size=8, alpha=0.85, line_color='white', line_width=0.5)
 
     # Hover segments: only those overlapping the visible window
     visible_segments = [
@@ -2604,7 +2682,7 @@ def make_bokeh_genemap_mag(conn, mag_id, mag_name, mag_length, subplot_size,
     return annotation_fig
 
 
-def generate_bokeh_plot_mag_view(conn, list_features, mag_name, sample_name, xstart=None, xend=None, subplot_size=100, genbank_path=None, feature_types=None, plot_isoforms=True, plot_sequence=False, plot_translated_sequence=False, same_y_scale=False, genemap_size=None, sequence_size=None, translated_sequence_size=None, max_base_resolution=None, max_genemap_window=None, max_sequence_window=None, min_relative_value=0.0, feature_label_key=None, custom_colors=None, is_all=False, allowed_samples=None, max_samples=None, enable_timing=False, sort_source=None, sort_metric=None, sort_ascending=True, sort_sample_name=None, encoding_by_feature=None, sample_order_source=None, sample_order_metric=None, sample_order_ascending=True):
+def generate_bokeh_plot_mag_view(conn, list_features, mag_name, sample_name, xstart=None, xend=None, subplot_size=100, genbank_path=None, feature_types=None, plot_isoforms=True, plot_sequence=False, plot_translated_sequence=False, same_y_scale=False, genemap_size=None, sequence_size=None, translated_sequence_size=None, max_base_resolution=None, max_genemap_window=None, max_sequence_window=None, min_relative_value=0.0, feature_label_key=None, custom_colors=None, mag_track_colors=None, max_track_dots=1000, is_all=False, allowed_samples=None, max_samples=None, enable_timing=False, sort_source=None, sort_metric=None, sort_ascending=True, sort_sample_name=None, encoding_by_feature=None, sample_order_source=None, sample_order_metric=None, sample_order_ascending=True):
     """Generate a concatenated Bokeh plot for a MAG with configurable contig ordering."""
     from ..database.database_getters import get_mag_id, get_mag_members_full
 
@@ -2635,8 +2713,20 @@ def generate_bokeh_plot_mag_view(conn, list_features, mag_name, sample_name, xst
 
     # --- MAG track at top (same height as nucleotide sequence track) ---
     _seq_height = sequence_size if sequence_size is not None else subplot_size // 2
+    track_dots = None
+    if mag_track_colors:
+        try:
+            dot_xs, dot_colors, dot_total = compute_mag_track_dots(
+                conn, mag_members, mag_track_colors, max_dots=max_track_dots
+            )
+            if dot_xs:
+                track_dots = {'xs': dot_xs, 'colors': dot_colors, 'total': dot_total}
+        except Exception as e:
+            print(f"[mag_track] Dot computation error: {e}", flush=True)
     try:
-        mag_fig = make_bokeh_mag_track(conn, mag_name, height=_seq_height, shared_xrange=shared_xrange, members=members)
+        mag_fig = make_bokeh_mag_track(conn, mag_name, height=_seq_height,
+                                        shared_xrange=shared_xrange, members=members,
+                                        track_dots=track_dots)
     except Exception as e:
         print(f"Error building MAG track for '{mag_name}': {e}", flush=True)
         mag_fig = None
@@ -2751,6 +2841,7 @@ def generate_bokeh_plot_mag_view(conn, list_features, mag_name, sample_name, xst
         if max_samples is not None and len(all_rows) > max_samples:
             print(f"Plotting {max_samples}/{len(all_rows)} samples (limited by 'Max number of samples plotted')", flush=True)
             all_rows = all_rows[:max_samples]
+        feature_subplot_info = []  # [(feature, subplot, max_y)] used for same_y_scale post-processing
         for feature in sample_features:
             for sid, sname in all_rows:
                 try:
@@ -2767,8 +2858,25 @@ def generate_bokeh_plot_mag_view(conn, list_features, mag_name, sample_name, xst
                     subplot = make_bokeh_subplot(combined_dicts, subplot_size, shared_xrange, show_tooltips=True)
                     if subplot is not None:
                         subplots.append(subplot)
+                        if same_y_scale:
+                            max_y = max(
+                                (y for d in combined_dicts for y in d.get("y", []) if y is not None),
+                                default=0
+                            )
+                            feature_subplot_info.append((feature, subplot, max_y))
                 except Exception as e:
                     print(f"Error processing feature '{feature}' for sample '{sname}' in MAG: {e}", flush=True)
+
+        if same_y_scale and feature_subplot_info:
+            from collections import defaultdict
+            feature_groups = defaultdict(list)
+            for fname, sp, my in feature_subplot_info:
+                feature_groups[fname].append((sp, my))
+            for fname, items in feature_groups.items():
+                global_max = max(my for _, my in items)
+                if global_max > 0:
+                    for sp, _ in items:
+                        sp.y_range = Range1d(0, global_max)
     elif sample_id is not None and sample_features:
         for feature in sample_features:
             try:
@@ -2800,4 +2908,8 @@ def generate_bokeh_plot_mag_view(conn, list_features, mag_name, sample_name, xst
     grid = gridplot([[p] for p in all_plots], merge_tools=True, sizing_mode='stretch_width')
     if enable_timing:
         print(f"[timing]   gridplot ({len(all_plots)} figures): {time.perf_counter() - t_grid:.3f}s", flush=True)
-    return grid
+    mag_meta = {
+        'dots_shown': len(track_dots['xs']) if track_dots else 0,
+        'dots_total': track_dots.get('total', 0) if track_dots else 0,
+    }
+    return grid, mag_meta
