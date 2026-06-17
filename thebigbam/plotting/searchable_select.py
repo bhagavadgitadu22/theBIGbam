@@ -16,6 +16,7 @@ class SearchableSelect(JSComponent):
         .ts-wrapper { width: 100%; }
         .ts-wrapper .ts-control { border: 1px solid #ccc; border-radius: 4px; padding: 4px 8px; min-height: 31px; font-size: 14px; }
         .ts-dropdown { margin-top: 0 !important; }
+        .ts-dropdown .ts-dropdown-content { max-height: 350px; }
         """
     ]
 

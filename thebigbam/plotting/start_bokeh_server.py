@@ -1012,7 +1012,7 @@ def create_layout(db_path, preloaded, enable_timing=False):
         if not widgets['has_mags']:
             return
         sel_mag = widgets['mag_select'].value
-        if sel_mag and sel_mag in widgets['mag_to_sample_ids']:
+        if views.active == 0 and sel_mag and sel_mag in widgets['mag_to_sample_ids']:
             allowed_sids = widgets['mag_to_sample_ids'][sel_mag]
             completions = [s for s in orig_samples if widgets['sample_name_to_id'].get(s) in allowed_sids]
         else:
@@ -1022,7 +1022,7 @@ def create_layout(db_path, preloaded, enable_timing=False):
             fsql, fparams = filtered['sql'], filtered['params']
             fc = conn.cursor()
             try:
-                if sel_mag and sel_mag in widgets['mag_to_sample_ids']:
+                if views.active == 0 and sel_mag and sel_mag in widgets['mag_to_sample_ids']:
                     rows = fc.execute(
                         f"SELECT DISTINCT s.Sample_name FROM ({fsql}) f"
                         f" JOIN Sample s ON s.Sample_id = f.Sample_id"
@@ -3963,19 +3963,18 @@ def create_layout(db_path, preloaded, enable_timing=False):
         sizing_mode="stretch_width", margin=(0, 10, 5, 0),
     )
 
-    mag_params_sort_sample_label = Div(text="Using values from sample:", margin=(5, 5, 5, 0))
+    mag_params_sort_sample_label = Div(text="Using values from sample:", margin=(5, 2, 5, 5))
     mag_params_sort_sample_select = Select(
         value=orig_samples[0] if orig_samples else "",
         options=list(orig_samples) if orig_samples else [""],
-        sizing_mode="stretch_width", margin=(0, 10, 0, 5),
+        sizing_mode="stretch_width",
     )
-    mag_params_sort_sample_row = row(mag_params_sort_sample_label, mag_params_sort_sample_select, sizing_mode="stretch_width", margin=(0, 0, 5, 0))
+    mag_params_sort_sample_row = row(mag_params_sort_sample_label, mag_params_sort_sample_select, sizing_mode="stretch_width", margin=(0, 10, 0, 0))
     mag_params_sort_sample_row.visible = False
 
-    mag_track_max_dots_label = Div(text="Maximum number of points on MAG track:", margin=(5, 5, 2, 0))
-    mag_track_max_dots_input = Spinner(value=1000, low=1, step=100, width=100, margin=(0, 10, 0, 5))
-    mag_track_max_dots_row = row(mag_track_max_dots_label, mag_track_max_dots_input,
-                                  sizing_mode="stretch_width", margin=(0, 0, 5, 0))
+    mag_track_max_dots_input = Spinner(value=1000, low=1, step=100, width=100, margin=(0, 2, 0, 0))
+    mag_track_max_dots_label = Div(text="Maximum number of points on MAG track", margin=(5, 0, 5, 5))
+    mag_track_max_dots_row = row(mag_track_max_dots_input, mag_track_max_dots_label, sizing_mode="stretch_width")
 
     mag_params_content = pn.Column(
         mag_params_order_label, mag_params_controls_row,
