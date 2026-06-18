@@ -9,19 +9,23 @@ from thebigbam.utils.read_mapping import _resolve_assembly, _inject_bam_headers
 
 def _has_md_tags(input_path: str, threads: int) -> bool:
     """Check whether the first aligned reads in the file carry MD tags."""
-    result = subprocess.run(
+    proc = subprocess.Popen(
         ["samtools", "view", "-F", "260", "-@", str(threads), str(input_path)],
-        capture_output=True, text=True, timeout=30,
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
     )
-    for i, line in enumerate(result.stdout.splitlines()):
-        if i >= 10:
-            break
-        fields = line.split("\t")
-        if len(fields) > 11:
-            for field in fields[11:]:
-                if field.startswith("MD:Z:"):
-                    return True
-    return False
+    try:
+        for i, line in enumerate(proc.stdout):
+            if i >= 10:
+                break
+            fields = line.split("\t")
+            if len(fields) > 11:
+                for field in fields[11:]:
+                    if field.startswith("MD:Z:"):
+                        return True
+        return False
+    finally:
+        proc.kill()
+        proc.wait()
 
 
 def add_format_mapping_args(parser):
