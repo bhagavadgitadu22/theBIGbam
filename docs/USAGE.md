@@ -1,6 +1,6 @@
 # Applying theBIGbam to real projects?
 
-## Use case 1: medium dataset, 1 contig, 252 samples
+## Use case 1: medium dataset, 1 contig, 252 saples
 
 The temporal dataset comes from a microbial evolution experiment in which *Escherichia coli* K-12 was grown on an agar megaplate with increasing concentrations of trimethoprim [(Baym et al. 2016)](https://www.science.org/doi/10.1126/science.aag0822).
 

@@ -316,7 +316,7 @@ You are initially in the **One Sample** mode, which allows exploration of all co
 
 - **Variables**: Select the features to plot. You can either use the checkboxes to select all features from a module or click individual features within a module
 
-- **Plotting parameters**: You can customize several aesthetic aspects of the plots (e.g. heights of the genomic feature tracks and mapping-derived plots)
+- **Plotting parameters**: You can customize several aesthetic aspects of the plots: [adaptive resolution parameters](docs/README.md#adaptive-resolution-rendering), heights of the genomic feature tracks and mapping-derived plots, MAG and sample parameters to order the MAG contigs and sample plots
 
 Finally, click **Apply** to visualize the requested features for the selected contig and sample. Alternatively, click **Peruse Data** to display tables containing the metrics and feature values.
 
@@ -332,7 +332,9 @@ For a database computed with `--view mag`, a **MAGs** section is added to the vi
 
 The MAG and contig filters in the Filtering panel affect the list of MAGs displayed in the **MAGs** section. Only MAGs containing at least one contig passing the contig filters are included in the MAG list. Only contigs belonging to a MAG passing the MAG filters are included in the contig list.
 
-Plots can be generated in the standard contig-based view or in **MAG view**, which displays an entire MAG at once. In **MAG view**, an additional MAG track is shown above the plots to indicate which contigs are currently being visualized. See [Use case 3](docs/USAGE.md#use-case-3-large-dataset-3000-mags-192-samples) for an example. 
+Plots can be generated in the standard contig-based view or in **MAG view**, which displays an entire MAG at once. In **MAG view**, an additional MAG track is shown above the plots to indicate which contigs are currently being visualized (see [Use case 3](docs/USAGE.md#use-case-3-large-dataset-3000-mags-192-samples) for an example). Points can be added to the MAG track to mark the positions of specific genomic features, allowing them to remain visible even when the view is too zoomed out to display the gene map. For example, a coloring rule can be defined to display red points at the locations of defense proteins within the MAG, as shown below:
+
+![image](https://raw.githubusercontent.com/bhagavadgitadu22/theBIGbam/master/docs/images/MAG_TRACK.png)
 
 By default, contigs are ordered from longest to shortest. This ordering can be changed by selecting any contig-level metric in the **MAG parameters** section under **Plotting parameters**.
 
