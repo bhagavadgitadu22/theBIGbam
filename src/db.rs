@@ -34,7 +34,7 @@ const BLOB_CHECKPOINT_BYTES: u64 = 256 * 1024 * 1024;
 fn configure_for_bulk_writes(conn: &Connection) {
     let _ = conn.execute_batch("SET threads TO 1");
     let _ = conn.execute_batch("SET preserve_insertion_order=false");
-    let _ = conn.execute_batch("SET wal_autocheckpoint='1GB'");
+    let _ = conn.execute_batch("SET wal_autocheckpoint='256MB'");
     let _ = conn.execute_batch(&format!("SET memory_limit='{}GB'", DUCKDB_MEMORY_LIMIT_GB));
 }
 
@@ -105,7 +105,7 @@ impl DbWriter {
 
     pub fn checkpoint(&self) -> Result<()> {
         let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
-        conn.execute("CHECKPOINT", [])
+        conn.execute("FORCE CHECKPOINT", [])
             .context("Failed to checkpoint database")?;
         Ok(())
     }
@@ -411,7 +411,7 @@ impl DbWriter {
         self.write_topology(&conn, sample_id, topology)?;
 
         // Flush non-blob WAL data before the heavy blob writes
-        conn.execute("CHECKPOINT", []).ok();
+        conn.execute("FORCE CHECKPOINT", []).ok();
 
         // Insert feature BLOBs (compressed format)
         self.write_feature_blobs(&conn, sample_id, feature_blobs)?;
@@ -673,7 +673,7 @@ impl DbWriter {
                     chunk_appender.flush().context("Failed to flush Feature_blob_chunk appender")?;
                     drop(appender);
                     drop(chunk_appender);
-                    conn.execute("CHECKPOINT", [])
+                    conn.execute("FORCE CHECKPOINT", [])
                         .context("Failed to checkpoint during blob writes")?;
                     accumulated_bytes = 0;
                     appender = conn.appender("Feature_blob")
@@ -928,7 +928,7 @@ impl DbWriter {
                     chunk_appender.flush().context("Failed to flush Contig_blob_chunk appender")?;
                     drop(appender);
                     drop(chunk_appender);
-                    conn.execute("CHECKPOINT", [])
+                    conn.execute("FORCE CHECKPOINT", [])
                         .context("Failed to checkpoint during gc_content writes")?;
                     accumulated_bytes = 0;
                     appender = conn.appender("Contig_blob")
@@ -1006,7 +1006,7 @@ impl DbWriter {
                     chunk_appender.flush().context("Failed to flush Contig_blob_chunk appender")?;
                     drop(appender);
                     drop(chunk_appender);
-                    conn.execute("CHECKPOINT", [])
+                    conn.execute("FORCE CHECKPOINT", [])
                         .context("Failed to checkpoint during gc_skew writes")?;
                     accumulated_bytes = 0;
                     appender = conn.appender("Contig_blob")
@@ -1790,7 +1790,7 @@ impl DbWriter {
         };
 
         let t = std::time::Instant::now();
-        conn.execute("CHECKPOINT", [])
+        conn.execute("FORCE CHECKPOINT", [])
             .context("Failed to checkpoint database")?;
         let checkpoint_secs = t.elapsed().as_secs_f64();
 

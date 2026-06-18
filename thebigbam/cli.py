@@ -3,8 +3,8 @@ import sys
 
 # Import command modules so we can share arg definitions and run functions
 from thebigbam.utils import (
-    read_mapping, add_sample_metadata, add_contig_metadata, add_mag_metadata,
-    add_contig_annotations,
+    read_mapping, format_mapping, add_sample_metadata, add_contig_metadata,
+    add_mag_metadata, add_contig_annotations,
 )
 from thebigbam.database import add_variable, calculating_data, database_getters, export_data, inspect_blob, purge_data
 from thebigbam.plotting import start_bokeh_server
@@ -26,6 +26,7 @@ ANALYSIS_SCRIPTS = {
 
 SCRIPTS = {
     'mapping-per-sample': 'Map reads for a single sample',
+    'format-mapping': 'Reformat an existing mapping file (sort, filter, index)',
     'calculate': "Run feature calculations over alignment files",
     'serve': "Start interactive Bokeh server",
 
@@ -65,6 +66,9 @@ def build_argparser():
     # main commands
     sp = sub.add_parser('mapping-per-sample', help=SCRIPTS['mapping-per-sample'])
     read_mapping.add_mapping_per_sample_args(sp)
+
+    sp = sub.add_parser('format-mapping', help=SCRIPTS['format-mapping'])
+    format_mapping.add_format_mapping_args(sp)
 
     sp = sub.add_parser('calculate', help=SCRIPTS['calculate'])
     calculating_data.add_calculate_args(sp)
@@ -177,6 +181,13 @@ def main(argv=None):
             return read_mapping.run_mapping_per_sample(args)
         except Exception as e:
             print(f"Error running mapping-per-sample: {e}", flush=True)
+            return 2
+
+    if args.cmd == 'format-mapping':
+        try:
+            return format_mapping.run_format_mapping(args)
+        except Exception as e:
+            print(f"Error running format-mapping: {e}", flush=True)
             return 2
 
     if args.cmd == 'calculate':

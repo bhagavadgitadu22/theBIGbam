@@ -3257,8 +3257,7 @@ def create_layout(db_path, preloaded, enable_timing=False):
     )
     custom_color_column = pn.Column(
         add_color_btn, sizing_mode="stretch_width",
-        styles={'border-left': '3px solid #00b17c', 'padding-left': '10px', 'margin-left': '5px',
-                'max-height': '300px', 'overflow-y': 'auto'}
+        styles={'border-left': '3px solid #00b17c', 'padding-left': '10px', 'margin-left': '5px'}
     )
 
     TEXT_OPS = ["=", "!=", "has", "has not", "Use random colors"]
@@ -3448,8 +3447,7 @@ def create_layout(db_path, preloaded, enable_timing=False):
     )
     mag_track_color_column = pn.Column(
         add_mag_track_btn, sizing_mode="stretch_width",
-        styles={'border-left': '3px solid #00b17c', 'padding-left': '10px', 'margin-left': '5px',
-                'max-height': '300px', 'overflow-y': 'auto'}
+        styles={'border-left': '3px solid #00b17c', 'padding-left': '10px', 'margin-left': '5px'}
     )
 
     def rebuild_mag_track_color_rows():
@@ -3960,21 +3958,22 @@ def create_layout(db_path, preloaded, enable_timing=False):
     mag_params_direction = RadioButtonGroup(labels=["↑", "↓"], active=1, width=60, margin=(0, 0, 0, 2))
     mag_params_controls_row = row(
         mag_params_category_select, mag_params_metric_select, mag_params_direction,
-        sizing_mode="stretch_width", margin=(0, 10, 5, 0),
+        sizing_mode="stretch_width", margin=(0, 10, 0, 0),
     )
 
-    mag_params_sort_sample_label = Div(text="Using values from sample:", margin=(5, 2, 5, 5))
+    mag_params_sort_sample_label = Div(text="Using values from sample", margin=(5, 5, 5, 5))
     mag_params_sort_sample_select = Select(
         value=orig_samples[0] if orig_samples else "",
-        options=list(orig_samples) if orig_samples else [""],
+        options=list(orig_samples) if orig_samples else ["",],
         sizing_mode="stretch_width",
+        margin=(0, 0, 0, 0)
     )
-    mag_params_sort_sample_row = row(mag_params_sort_sample_label, mag_params_sort_sample_select, sizing_mode="stretch_width", margin=(0, 10, 0, 0))
+    mag_params_sort_sample_row = row(mag_params_sort_sample_label, mag_params_sort_sample_select, sizing_mode="stretch_width", margin=(5, 10, 0, 0))
     mag_params_sort_sample_row.visible = False
 
     mag_track_max_dots_input = Spinner(value=1000, low=1, step=100, width=100, margin=(0, 2, 0, 0))
     mag_track_max_dots_label = Div(text="Maximum number of points on MAG track", margin=(5, 0, 5, 5))
-    mag_track_max_dots_row = row(mag_track_max_dots_input, mag_track_max_dots_label, sizing_mode="stretch_width")
+    mag_track_max_dots_row = row(mag_track_max_dots_input, mag_track_max_dots_label, sizing_mode="stretch_width", margin=(5, 10, 0, 0))
 
     mag_params_content = pn.Column(
         mag_params_order_label, mag_params_controls_row,
@@ -4009,7 +4008,7 @@ def create_layout(db_path, preloaded, enable_timing=False):
 
     max_samples_input = Spinner(value=20, low=1, high=500, step=5, width=100, margin=(0, 2, 0, 0))
     max_samples_label = Div(text="Max number of samples plotted", margin=(5, 0, 5, 5))
-    max_samples_row = row(max_samples_input, max_samples_label, sizing_mode="stretch_width", margin=(5, 0, 5, 0))
+    max_samples_row = row(max_samples_input, max_samples_label, sizing_mode="stretch_width", margin=(5, 0, 0, 0))
     
     # Sample ordering: two-row layout matching "Order contigs by:"
     _sample_contig_categories = ["Sample"] + [cat for cat in filtering_metadata

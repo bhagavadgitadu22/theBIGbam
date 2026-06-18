@@ -172,7 +172,7 @@ By default, `thebigbam calculate` is run independently per contig. When using `-
 
 `theBIGbam calculate` **will use all the alignments provided: if you want to filter your mappings you should do it beforehand**. You can use the dedicated options if mapping in theBIGbam (see the [Mapping](README.md#mapping) section), or you can do it with any tool you like (samtools, `coverm filter`).
 
-Your mapping files need to be **sorted BAM files with MD tags**. If you have mapping files but not in the right format, SAMtools is your friend! 
+Your mapping files need to be **sorted BAM files with MD tags**. If you have mapping files but not in the right format, you can format them using `thebigbam format-mapping` utility or SAMtools:
 
 ```bash
 # to convert a SAM/BAM file in a sorted BAM file
@@ -184,6 +184,12 @@ samtools index example.sorted.bam
 # to add MD tags to your BAM file 
 # you also need the fasta file used during the mapping step
 samtools calmd -b example.sorted.bam ref.fasta > example.sorted.md.bam
+```
+
+Is equivalent to:
+
+```shell
+thebigbam format-mapping -i example.sam -a ref.fasta -o example.sorted.md.bam
 ```
 
 Alternatively, you can produce your alignment files directly in theBIGbam as specified in the [Mapping](#mapping) section.
