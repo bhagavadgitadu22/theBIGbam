@@ -28,6 +28,32 @@ def _has_md_tags(input_path: str, threads: int) -> bool:
         proc.wait()
 
 
+def _is_coordinate_sorted(input_path: str, threads: int) -> bool:
+    """Check @HD SO:coordinate in the BAM header."""
+    result = subprocess.run(
+        ["samtools", "view", "-H", "-@", str(threads), str(input_path)],
+        capture_output=True, text=True, check=True,
+    )
+    for line in result.stdout.splitlines():
+        if line.startswith("@HD") and "SO:coordinate" in line:
+            return True
+    return False
+
+
+def _count_from_idxstats(bam_path: str, threads: int) -> int:
+    """Count mapped+unmapped reads from the index (no data pass)."""
+    result = subprocess.run(
+        ["samtools", "idxstats", "-@", str(threads), str(bam_path)],
+        capture_output=True, text=True, check=True,
+    )
+    total = 0
+    for line in result.stdout.splitlines():
+        parts = line.split("\t")
+        if len(parts) >= 4:
+            total += int(parts[2]) + int(parts[3])
+    return total
+
+
 def add_format_mapping_args(parser):
     parser.add_argument('-i', '--input', required=True, dest='input_file',
         help='Input mapping file (SAM, BAM, or CRAM)')
@@ -70,85 +96,97 @@ def run_format_mapping(args) -> int:
     if args.assembly:
         assembly_path, assembly_tmp = _resolve_assembly(args.assembly)
 
-    sorted_bam = Path(tempfile.mkstemp(prefix=output_path.stem + "_sorted_", suffix=".bam")[1])
-    temp_files = [sorted_bam]
+    # Probe input (header + 10 reads only, instant)
+    is_sorted = _is_coordinate_sorted(str(input_path), threads)
+    has_md = _has_md_tags(str(input_path), threads)
+    needs_sort = not is_sorted
+    needs_calmd = not has_md and assembly_path is not None
 
+    if not has_md and assembly_path is None:
+        print("WARNING: No MD tags detected and no --assembly provided. "
+              "The output BAM may not work with all thebigbam calculate modules. "
+              "Provide -a/--assembly to generate MD tags with samtools calmd.", flush=True)
+
+    if is_sorted:
+        print("Input is coordinate-sorted — skipping sort.", flush=True)
+    else:
+        print("Input is not coordinate-sorted — will sort.", flush=True)
+
+    # Build filter expression
+    min_id = args.min_read_percent_identity
+    min_al = args.min_read_aligned_percent
+    identity_expr = f"(qlen-[NM])*100/qlen>={min_id}" if min_id > 0.0 else ""
+    aligned_expr = f"(qlen-sclen)*100/qlen>={min_al}" if min_al > 0.0 else ""
+    combined_expr = " && ".join(e for e in [identity_expr, aligned_expr] if e)
+
+    # Build single-pass pipeline: view [| sort] [| calmd] → output
+    view_cmd = ["samtools", "view", "-@", str(threads), "-bS"]
+    if not args.keep_unmapped:
+        view_cmd.extend(["-F", "4"])
+    if combined_expr:
+        view_cmd.extend(["-e", combined_expr])
+    view_cmd.append(str(input_path))
+
+    temp_files = []
     try:
-        # Step 1: convert to sorted BAM
-        view_cmd = ["samtools", "view", "-@", str(threads), "-bS"]
-        if not args.keep_unmapped:
-            view_cmd.extend(["-F", "4"])
-        view_cmd.append(str(input_path))
-        sort_cmd = ["samtools", "sort", "-@", str(threads), "-o", str(sorted_bam), "-"]
+        procs = []
 
-        print("COMMAND_VIEW:", " ".join(view_cmd), flush=True)
-        print("COMMAND_SORT:", " ".join(sort_cmd), flush=True)
+        if not needs_sort and not needs_calmd:
+            # Fast path: view → output directly
+            view_cmd[-1:-1] = ["-o", str(output_path)]
+            print("COMMAND:", " ".join(view_cmd), flush=True)
+            subprocess.run(view_cmd, check=True)
 
-        p1 = subprocess.Popen(view_cmd, stdout=subprocess.PIPE)
-        subprocess.run(sort_cmd, stdin=p1.stdout, check=True)
-        p1.stdout.close()
-        p1.wait()
-
-        # Step 2: apply read quality filters
-        min_id = args.min_read_percent_identity
-        min_al = args.min_read_aligned_percent
-        identity_expr = f"(qlen-[NM])*100/qlen>={min_id}" if min_id > 0.0 else ""
-        aligned_expr = f"(qlen-sclen)*100/qlen>={min_al}" if min_al > 0.0 else ""
-        combined_expr = " && ".join(e for e in [identity_expr, aligned_expr] if e)
-
-        if combined_expr:
-            total_before = int(subprocess.run(
-                ["samtools", "view", "-@", str(threads), "-c", str(sorted_bam)],
-                capture_output=True, text=True, check=True,
-            ).stdout.strip())
-
-            filtered_bam = Path(tempfile.mkstemp(prefix=output_path.stem + "_filtered_", suffix=".bam")[1])
-            temp_files.append(filtered_bam)
-            filter_cmd = [
-                "samtools", "view", "-@", str(threads), "-b",
-                "-e", combined_expr, "-o", str(filtered_bam), str(sorted_bam),
-            ]
-            print("COMMAND_FILTER:", " ".join(filter_cmd), flush=True)
-            subprocess.run(filter_cmd, check=True)
-
-            total_after = int(subprocess.run(
-                ["samtools", "view", "-@", str(threads), "-c", str(filtered_bam)],
-                capture_output=True, text=True, check=True,
-            ).stdout.strip())
-
-            excluded = total_before - total_after
-            filters_used = []
-            if identity_expr:
-                filters_used.append(f"--min-read-percent-identity {min_id}%")
-            if aligned_expr:
-                filters_used.append(f"--min-read-aligned-percent {min_al}%")
-            print(f"Read filtering ({' + '.join(filters_used)}): "
-                  f"{excluded}/{total_before} reads excluded ({total_after} remaining)", flush=True)
-
-            shutil.move(str(filtered_bam), str(sorted_bam))
-
-        # Step 3: MD tag handling
-        has_md = _has_md_tags(str(sorted_bam), threads)
-
-        if has_md:
-            print("MD tags detected in input — skipping calmd.", flush=True)
-            shutil.move(str(sorted_bam), str(output_path))
-        elif assembly_path is not None:
-            print("No MD tags detected — running samtools calmd.", flush=True)
-            calmd_cmd = ["samtools", "calmd", "-@", str(threads), "-b", str(sorted_bam), str(assembly_path)]
+        elif not needs_sort and needs_calmd:
+            # Sorted but no MD: view | calmd → output
+            calmd_cmd = ["samtools", "calmd", "-@", str(threads), "-b", "-", str(assembly_path)]
+            print("COMMAND_VIEW:", " ".join(view_cmd), flush=True)
             print("COMMAND_CALMD:", " ".join(calmd_cmd), flush=True)
+            p1 = subprocess.Popen(view_cmd, stdout=subprocess.PIPE)
+            procs.append(p1)
             with output_path.open("wb") as outfh:
-                subprocess.run(calmd_cmd, stdout=outfh, stderr=subprocess.DEVNULL, check=True)
-        else:
-            print("WARNING: No MD tags detected and no --assembly provided. "
-                  "The output BAM may not work with all thebigbam calculate modules. "
-                  "Provide -a/--assembly to generate MD tags with samtools calmd.", flush=True)
-            shutil.move(str(sorted_bam), str(output_path))
+                subprocess.run(calmd_cmd, stdin=p1.stdout, stdout=outfh,
+                               stderr=subprocess.DEVNULL, check=True)
+            p1.stdout.close()
+            p1.wait()
 
-        # Step 4: index
+        elif needs_sort and not needs_calmd:
+            # Unsorted: view | sort → output
+            sort_cmd = ["samtools", "sort", "-@", str(threads), "-o", str(output_path), "-"]
+            print("COMMAND_VIEW:", " ".join(view_cmd), flush=True)
+            print("COMMAND_SORT:", " ".join(sort_cmd), flush=True)
+            p1 = subprocess.Popen(view_cmd, stdout=subprocess.PIPE)
+            procs.append(p1)
+            subprocess.run(sort_cmd, stdin=p1.stdout, check=True)
+            p1.stdout.close()
+            p1.wait()
+
+        else:
+            # Unsorted + no MD: view | sort | calmd → output
+            sort_cmd = ["samtools", "sort", "-@", str(threads), "-"]
+            calmd_cmd = ["samtools", "calmd", "-@", str(threads), "-b", "-", str(assembly_path)]
+            print("COMMAND_VIEW:", " ".join(view_cmd), flush=True)
+            print("COMMAND_SORT:", " ".join(sort_cmd), flush=True)
+            print("COMMAND_CALMD:", " ".join(calmd_cmd), flush=True)
+            p1 = subprocess.Popen(view_cmd, stdout=subprocess.PIPE)
+            p2 = subprocess.Popen(sort_cmd, stdin=p1.stdout, stdout=subprocess.PIPE)
+            procs.extend([p1, p2])
+            p1.stdout.close()
+            with output_path.open("wb") as outfh:
+                subprocess.run(calmd_cmd, stdin=p2.stdout, stdout=outfh,
+                               stderr=subprocess.DEVNULL, check=True)
+            p2.stdout.close()
+            for p in procs:
+                p.wait()
+
+        # Index
         subprocess.run(["samtools", "index", "-@", str(threads), str(output_path)], check=True)
 
-        # Step 5: inject @PG and @CO headers
+        # Report output stats from index (no data pass)
+        total_output = _count_from_idxstats(str(output_path), threads)
+        print(f"Output: {total_output:,} reads in {output_path}", flush=True)
+
+        # Inject @PG and @CO headers
         cmd_parts = ["-i", str(input_path), "-o", str(output_path)]
         if args.assembly:
             cmd_parts.extend(["-a", str(args.assembly)])
@@ -161,7 +199,7 @@ def run_format_mapping(args) -> int:
         command_line = "thebigbam format-mapping " + " ".join(cmd_parts)
         _inject_bam_headers(output_path, circular=False, threads=threads, command_line=command_line)
 
-        # Step 6: re-index after header rewrite
+        # Re-index after header rewrite
         subprocess.run(["samtools", "index", "-@", str(threads), str(output_path)], check=True)
 
         print(f"Done. Output: {output_path} (+{output_path}.bai)", flush=True)
