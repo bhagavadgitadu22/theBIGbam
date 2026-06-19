@@ -29,12 +29,10 @@ use crate::types::{feature_name_to_id, ContigInfo, FeatureAnnotation, PackagingD
 
 const DUCKDB_MEMORY_LIMIT_GB: u64 = 4;
 
-const BLOB_CHECKPOINT_BYTES: u64 = 256 * 1024 * 1024;
-
 fn configure_for_bulk_writes(conn: &Connection) {
     let _ = conn.execute_batch("SET threads TO 1");
     let _ = conn.execute_batch("SET preserve_insertion_order=false");
-    let _ = conn.execute_batch("SET wal_autocheckpoint='256MB'");
+    let _ = conn.execute_batch("SET wal_autocheckpoint='1GB'");
     let _ = conn.execute_batch(&format!("SET memory_limit='{}GB'", DUCKDB_MEMORY_LIMIT_GB));
 }
 
@@ -651,41 +649,39 @@ impl DbWriter {
             .context("Failed to create Feature_blob appender")?;
         let mut chunk_appender = conn.appender("Feature_blob_chunk")
             .context("Failed to create Feature_blob_chunk appender")?;
-        let mut accumulated_bytes: u64 = 0;
 
         for (feature_name, contig_id, encoded) in blobs {
             if encoded.zoom.is_empty() {
                 continue;
             }
             if let Some(fid) = feature_name_to_id(feature_name) {
-                accumulated_bytes += encoded.zoom.len() as u64;
                 appender.append_row(params![contig_id, sample_id, fid as i32, encoded.zoom.as_slice()])?;
-
                 for (chunk_idx, chunk_data) in encoded.chunks.iter().enumerate() {
-                    accumulated_bytes += chunk_data.len() as u64;
                     chunk_appender.append_row(params![
                         contig_id, sample_id, fid as i32, chunk_idx as i16, chunk_data.as_slice()
                     ])?;
                 }
 
-                if accumulated_bytes >= BLOB_CHECKPOINT_BYTES {
-                    appender.flush().context("Failed to flush Feature_blob appender")?;
-                    chunk_appender.flush().context("Failed to flush Feature_blob_chunk appender")?;
+                // Flush after each blob to unpin buffer pages immediately
+                if appender.flush().is_err() || chunk_appender.flush().is_err() {
                     drop(appender);
                     drop(chunk_appender);
-                    conn.execute("FORCE CHECKPOINT", [])
-                        .context("Failed to checkpoint during blob writes")?;
-                    accumulated_bytes = 0;
+                    conn.execute("FORCE CHECKPOINT", []).ok();
                     appender = conn.appender("Feature_blob")
                         .context("Failed to recreate Feature_blob appender")?;
                     chunk_appender = conn.appender("Feature_blob_chunk")
                         .context("Failed to recreate Feature_blob_chunk appender")?;
+                    appender.append_row(params![contig_id, sample_id, fid as i32, encoded.zoom.as_slice()])?;
+                    for (chunk_idx, chunk_data) in encoded.chunks.iter().enumerate() {
+                        chunk_appender.append_row(params![
+                            contig_id, sample_id, fid as i32, chunk_idx as i16, chunk_data.as_slice()
+                        ])?;
+                    }
+                    appender.flush().context("Failed to flush Feature_blob after OOM retry")?;
+                    chunk_appender.flush().context("Failed to flush Feature_blob_chunk after OOM retry")?;
                 }
             }
         }
-
-        appender.flush().context("Failed to flush Feature_blob appender")?;
-        chunk_appender.flush().context("Failed to flush Feature_blob_chunk appender")?;
         Ok(())
     }
 
@@ -883,7 +879,6 @@ impl DbWriter {
             .context("Failed to create Contig_blob appender")?;
         let mut chunk_appender = conn.appender("Contig_blob_chunk")
             .context("Failed to create Contig_blob_chunk appender")?;
-        let mut accumulated_bytes: u64 = 0;
 
         let gc_content_feature_id = feature_name_to_id("gc_content")
             .ok_or_else(|| anyhow::anyhow!("Missing VARIABLES entry: gc_content"))?;
@@ -910,37 +905,38 @@ impl DbWriter {
                     gc_window_size,
                 );
 
-                accumulated_bytes += encoded.zoom.len() as u64;
                 appender.append_row(params![
                     contig_id,
                     gc_content_feature_id,
                     encoded.zoom
                 ])?;
                 for (chunk_idx, chunk_data) in encoded.chunks.iter().enumerate() {
-                    accumulated_bytes += chunk_data.len() as u64;
                     chunk_appender.append_row(params![
                         contig_id, gc_content_feature_id, chunk_idx as i16, chunk_data.as_slice()
                     ])?;
                 }
 
-                if accumulated_bytes >= BLOB_CHECKPOINT_BYTES {
-                    appender.flush().context("Failed to flush Contig_blob appender")?;
-                    chunk_appender.flush().context("Failed to flush Contig_blob_chunk appender")?;
+                if appender.flush().is_err() || chunk_appender.flush().is_err() {
                     drop(appender);
                     drop(chunk_appender);
-                    conn.execute("FORCE CHECKPOINT", [])
-                        .context("Failed to checkpoint during gc_content writes")?;
-                    accumulated_bytes = 0;
+                    conn.execute("FORCE CHECKPOINT", []).ok();
                     appender = conn.appender("Contig_blob")
                         .context("Failed to recreate Contig_blob appender")?;
                     chunk_appender = conn.appender("Contig_blob_chunk")
                         .context("Failed to recreate Contig_blob_chunk appender")?;
+                    appender.append_row(params![
+                        contig_id, gc_content_feature_id, encoded.zoom
+                    ])?;
+                    for (chunk_idx, chunk_data) in encoded.chunks.iter().enumerate() {
+                        chunk_appender.append_row(params![
+                            contig_id, gc_content_feature_id, chunk_idx as i16, chunk_data.as_slice()
+                        ])?;
+                    }
+                    appender.flush().context("Failed to flush Contig_blob after OOM retry")?;
+                    chunk_appender.flush().context("Failed to flush Contig_blob_chunk after OOM retry")?;
                 }
             }
         }
-
-        appender.flush().context("Failed to flush Contig_blob appender")?;
-        chunk_appender.flush().context("Failed to flush Contig_blob_chunk appender")?;
 
         Ok(())
     }
@@ -960,7 +956,6 @@ impl DbWriter {
             .context("Failed to create Contig_blob appender")?;
         let mut chunk_appender = conn.appender("Contig_blob_chunk")
             .context("Failed to create Contig_blob_chunk appender")?;
-        let mut accumulated_bytes: u64 = 0;
 
         let gc_skew_feature_id = feature_name_to_id("gc_skew")
             .ok_or_else(|| anyhow::anyhow!("Missing VARIABLES entry: gc_skew"))?;
@@ -988,37 +983,38 @@ impl DbWriter {
                     gc_skew_window_size,
                 );
 
-                accumulated_bytes += encoded.zoom.len() as u64;
                 appender.append_row(params![
                     contig_id,
                     gc_skew_feature_id,
                     encoded.zoom
                 ])?;
                 for (chunk_idx, chunk_data) in encoded.chunks.iter().enumerate() {
-                    accumulated_bytes += chunk_data.len() as u64;
                     chunk_appender.append_row(params![
                         contig_id, gc_skew_feature_id, chunk_idx as i16, chunk_data.as_slice()
                     ])?;
                 }
 
-                if accumulated_bytes >= BLOB_CHECKPOINT_BYTES {
-                    appender.flush().context("Failed to flush Contig_blob appender")?;
-                    chunk_appender.flush().context("Failed to flush Contig_blob_chunk appender")?;
+                if appender.flush().is_err() || chunk_appender.flush().is_err() {
                     drop(appender);
                     drop(chunk_appender);
-                    conn.execute("FORCE CHECKPOINT", [])
-                        .context("Failed to checkpoint during gc_skew writes")?;
-                    accumulated_bytes = 0;
+                    conn.execute("FORCE CHECKPOINT", []).ok();
                     appender = conn.appender("Contig_blob")
                         .context("Failed to recreate Contig_blob appender")?;
                     chunk_appender = conn.appender("Contig_blob_chunk")
                         .context("Failed to recreate Contig_blob_chunk appender")?;
+                    appender.append_row(params![
+                        contig_id, gc_skew_feature_id, encoded.zoom
+                    ])?;
+                    for (chunk_idx, chunk_data) in encoded.chunks.iter().enumerate() {
+                        chunk_appender.append_row(params![
+                            contig_id, gc_skew_feature_id, chunk_idx as i16, chunk_data.as_slice()
+                        ])?;
+                    }
+                    appender.flush().context("Failed to flush Contig_blob after OOM retry")?;
+                    chunk_appender.flush().context("Failed to flush Contig_blob_chunk after OOM retry")?;
                 }
             }
         }
-
-        appender.flush().context("Failed to flush Contig_blob appender")?;
-        chunk_appender.flush().context("Failed to flush Contig_blob_chunk appender")?;
 
         Ok(())
     }
