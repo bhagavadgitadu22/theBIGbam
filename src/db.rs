@@ -27,13 +27,10 @@ use crate::gc_content::{GCSkewStats, GCStats, DEFAULT_GC_CONTENT_WINDOW_SIZE, DE
 use crate::types::{feature_name_to_id, ContigInfo, FeatureAnnotation, PackagingData, PresenceData, VARIABLES};
 // Re-export new metric data structs (defined below in this file)
 
-const DUCKDB_MEMORY_LIMIT_GB: u64 = 4;
-
 fn configure_for_bulk_writes(conn: &Connection) {
     let _ = conn.execute_batch("SET threads TO 1");
     let _ = conn.execute_batch("SET preserve_insertion_order=false");
     let _ = conn.execute_batch("SET wal_autocheckpoint='1GB'");
-    let _ = conn.execute_batch(&format!("SET memory_limit='{}GB'", DUCKDB_MEMORY_LIMIT_GB));
 }
 
 fn build_contig_length_cache(conn: &Connection) -> HashMap<i64, i32> {
@@ -661,27 +658,11 @@ impl DbWriter {
                         contig_id, sample_id, fid as i32, chunk_idx as i16, chunk_data.as_slice()
                     ])?;
                 }
-
-                // Flush after each blob to unpin buffer pages immediately
-                if appender.flush().is_err() || chunk_appender.flush().is_err() {
-                    drop(appender);
-                    drop(chunk_appender);
-                    conn.execute("FORCE CHECKPOINT", []).ok();
-                    appender = conn.appender("Feature_blob")
-                        .context("Failed to recreate Feature_blob appender")?;
-                    chunk_appender = conn.appender("Feature_blob_chunk")
-                        .context("Failed to recreate Feature_blob_chunk appender")?;
-                    appender.append_row(params![contig_id, sample_id, fid as i32, encoded.zoom.as_slice()])?;
-                    for (chunk_idx, chunk_data) in encoded.chunks.iter().enumerate() {
-                        chunk_appender.append_row(params![
-                            contig_id, sample_id, fid as i32, chunk_idx as i16, chunk_data.as_slice()
-                        ])?;
-                    }
-                    appender.flush().context("Failed to flush Feature_blob after OOM retry")?;
-                    chunk_appender.flush().context("Failed to flush Feature_blob_chunk after OOM retry")?;
-                }
             }
         }
+
+        appender.flush().context("Failed to flush Feature_blob appender")?;
+        chunk_appender.flush().context("Failed to flush Feature_blob_chunk appender")?;
         Ok(())
     }
 
@@ -915,28 +896,11 @@ impl DbWriter {
                         contig_id, gc_content_feature_id, chunk_idx as i16, chunk_data.as_slice()
                     ])?;
                 }
-
-                if appender.flush().is_err() || chunk_appender.flush().is_err() {
-                    drop(appender);
-                    drop(chunk_appender);
-                    conn.execute("FORCE CHECKPOINT", []).ok();
-                    appender = conn.appender("Contig_blob")
-                        .context("Failed to recreate Contig_blob appender")?;
-                    chunk_appender = conn.appender("Contig_blob_chunk")
-                        .context("Failed to recreate Contig_blob_chunk appender")?;
-                    appender.append_row(params![
-                        contig_id, gc_content_feature_id, encoded.zoom
-                    ])?;
-                    for (chunk_idx, chunk_data) in encoded.chunks.iter().enumerate() {
-                        chunk_appender.append_row(params![
-                            contig_id, gc_content_feature_id, chunk_idx as i16, chunk_data.as_slice()
-                        ])?;
-                    }
-                    appender.flush().context("Failed to flush Contig_blob after OOM retry")?;
-                    chunk_appender.flush().context("Failed to flush Contig_blob_chunk after OOM retry")?;
-                }
             }
         }
+
+        appender.flush().context("Failed to flush Contig_blob appender")?;
+        chunk_appender.flush().context("Failed to flush Contig_blob_chunk appender")?;
 
         Ok(())
     }
@@ -993,28 +957,11 @@ impl DbWriter {
                         contig_id, gc_skew_feature_id, chunk_idx as i16, chunk_data.as_slice()
                     ])?;
                 }
-
-                if appender.flush().is_err() || chunk_appender.flush().is_err() {
-                    drop(appender);
-                    drop(chunk_appender);
-                    conn.execute("FORCE CHECKPOINT", []).ok();
-                    appender = conn.appender("Contig_blob")
-                        .context("Failed to recreate Contig_blob appender")?;
-                    chunk_appender = conn.appender("Contig_blob_chunk")
-                        .context("Failed to recreate Contig_blob_chunk appender")?;
-                    appender.append_row(params![
-                        contig_id, gc_skew_feature_id, encoded.zoom
-                    ])?;
-                    for (chunk_idx, chunk_data) in encoded.chunks.iter().enumerate() {
-                        chunk_appender.append_row(params![
-                            contig_id, gc_skew_feature_id, chunk_idx as i16, chunk_data.as_slice()
-                        ])?;
-                    }
-                    appender.flush().context("Failed to flush Contig_blob after OOM retry")?;
-                    chunk_appender.flush().context("Failed to flush Contig_blob_chunk after OOM retry")?;
-                }
             }
         }
+
+        appender.flush().context("Failed to flush Contig_blob appender")?;
+        chunk_appender.flush().context("Failed to flush Contig_blob_chunk appender")?;
 
         Ok(())
     }
