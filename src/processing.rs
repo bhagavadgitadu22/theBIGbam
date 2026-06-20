@@ -2747,6 +2747,19 @@ pub fn run_all_samples(
         let _ = f.flush();
     }
 
+    {
+        let rss_before = get_rss_mb();
+        let t_ckpt = std::time::Instant::now();
+        if let Err(e) = db_writer.checkpoint() {
+            eprintln!("WARNING: checkpoint after GC failed: {}", e);
+        }
+        if config.enable_timing {
+            let rss_after = get_rss_mb();
+            eprintln!("  checkpoint (post-GC): {:.3}s  [RSS: {:.0} → {:.0} MB]",
+                t_ckpt.elapsed().as_secs_f64(), rss_before, rss_after);
+        }
+    }
+
     // Convert repeat detections into per-contig blobs (only for new contigs).
     let t_repeat_blob = if config.enable_timing { Some(std::time::Instant::now()) } else { None };
     let new_contig_ids: Vec<i64> = new_contigs_for_blast.iter()
@@ -2759,6 +2772,19 @@ pub fn run_all_samples(
         use std::io::Write;
         let _ = writeln!(f, "  Repeat blob conversion: {:>9.3} s  [RSS: {:.0} MB]", repeat_blob_secs, repeat_rss_mb);
         let _ = f.flush();
+    }
+
+    {
+        let rss_before = get_rss_mb();
+        let t_ckpt = std::time::Instant::now();
+        if let Err(e) = db_writer.checkpoint() {
+            eprintln!("WARNING: checkpoint after repeat blobs failed: {}", e);
+        }
+        if config.enable_timing {
+            let rss_after = get_rss_mb();
+            eprintln!("  checkpoint (post-repeats): {:.3}s  [RSS: {:.0} → {:.0} MB]",
+                t_ckpt.elapsed().as_secs_f64(), rss_before, rss_after);
+        }
     }
 
     // Write MAG rows after per-contig GC/duplication stats are finalized.
@@ -2834,6 +2860,7 @@ pub fn run_all_samples(
         cds_build_secs: 0.0, // filled in process_samples_parallel/sequential
         cds_build_rss_mb: 0.0,
     };
+    for c in &mut contigs { c.sequence = None; }
     let result = process_samples_parallel(&bam_files, &contigs, flags, config, &circularity_map, db_writer, &repeats, &annotations, output_db, timing_file, pre_timings, &mag_contig_map, t_run_start)?;
 
     print_summary(&result, output_db);
@@ -3214,12 +3241,15 @@ fn process_samples_parallel(
 
             // Flush DuckDB WAL to disk to bound memory — without this,
             // all appended BLOB data stays resident until finalize().
+            let rss_before = get_rss_mb();
             let t_ckpt = std::time::Instant::now();
             if let Err(e) = db_writer.checkpoint() {
                 eprintln!("WARNING: checkpoint failed after {}: {}", result.sample_name, e);
             }
             if enable_timing_writer {
-                eprintln!("  checkpoint: {:.3}s", t_ckpt.elapsed().as_secs_f64());
+                let rss_after = get_rss_mb();
+                eprintln!("  checkpoint: {:.3}s  [RSS: {:.0} → {:.0} MB]",
+                    t_ckpt.elapsed().as_secs_f64(), rss_before, rss_after);
             }
         }
 
@@ -3527,12 +3557,15 @@ fn process_samples_sequential(
 
                 // Flush DuckDB WAL to disk to bound memory — without this,
                 // all appended BLOB data stays resident until finalize().
+                let rss_before = get_rss_mb();
                 let t_ckpt = std::time::Instant::now();
                 if let Err(e) = db_writer.checkpoint() {
                     eprintln!("WARNING: checkpoint failed after {}: {}", r.sample_name, e);
                 }
                 if config.enable_timing {
-                    eprintln!("  checkpoint: {:.3}s", t_ckpt.elapsed().as_secs_f64());
+                    let rss_after = get_rss_mb();
+                    eprintln!("  checkpoint: {:.3}s  [RSS: {:.0} → {:.0} MB]",
+                        t_ckpt.elapsed().as_secs_f64(), rss_before, rss_after);
                 }
 
                 let total_sample_time = sample_start.elapsed().as_secs_f64();

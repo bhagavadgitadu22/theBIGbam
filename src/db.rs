@@ -27,10 +27,41 @@ use crate::gc_content::{GCSkewStats, GCStats, DEFAULT_GC_CONTENT_WINDOW_SIZE, DE
 use crate::types::{feature_name_to_id, ContigInfo, FeatureAnnotation, PackagingData, PresenceData, VARIABLES};
 // Re-export new metric data structs (defined below in this file)
 
+fn detect_available_memory_gb() -> u64 {
+    // cgroups v2 (SLURM, Docker, systemd)
+    if let Ok(s) = std::fs::read_to_string("/sys/fs/cgroup/memory.max") {
+        if let Ok(bytes) = s.trim().parse::<u64>() {
+            return bytes / (1024 * 1024 * 1024);
+        }
+    }
+    // cgroups v1
+    if let Ok(s) = std::fs::read_to_string("/sys/fs/cgroup/memory/memory.limit_in_bytes") {
+        let bytes = s.trim().parse::<u64>().unwrap_or(0);
+        if bytes > 0 && bytes < u64::MAX / 2 {
+            return bytes / (1024 * 1024 * 1024);
+        }
+    }
+    // fallback: /proc/meminfo
+    if let Ok(s) = std::fs::read_to_string("/proc/meminfo") {
+        for line in s.lines() {
+            if line.starts_with("MemTotal:") {
+                if let Some(kb_str) = line.split_whitespace().nth(1) {
+                    if let Ok(kb) = kb_str.parse::<u64>() {
+                        return kb / (1024 * 1024);
+                    }
+                }
+            }
+        }
+    }
+    16
+}
+
 fn configure_for_bulk_writes(conn: &Connection) {
     let _ = conn.execute_batch("SET threads TO 1");
     let _ = conn.execute_batch("SET preserve_insertion_order=false");
     let _ = conn.execute_batch("SET wal_autocheckpoint='1GB'");
+    let mem_gb = (detect_available_memory_gb() * 3 / 4).max(4);
+    let _ = conn.execute_batch(&format!("SET memory_limit='{}GB'", mem_gb));
 }
 
 fn build_contig_length_cache(conn: &Connection) -> HashMap<i64, i32> {
