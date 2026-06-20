@@ -3132,6 +3132,10 @@ fn process_samples_parallel(
     if let Some(ref mut f) = timing_file {
         use std::io::Write;
         let _ = writeln!(f, "  CDS index build      : {:>10.3} s  [RSS: {:.0} MB]", pre_timings.cds_build_secs, pre_timings.cds_build_rss_mb);
+        let total_pre = pre_timings.parse_secs + pre_timings.db_create_secs + pre_timings.circ_secs
+            + pre_timings.autoblast_secs + pre_timings.gc_secs[0] + pre_timings.repeat_blob_secs
+            + pre_timings.write_mags_secs + pre_timings.cds_build_secs;
+        let _ = writeln!(f, "  TOTAL pre-sample     : {:>10.3} s  [RSS: {:.0} MB]", total_pre, get_rss_mb());
         let _ = writeln!(f);
         let _ = f.flush();
     }
@@ -3458,6 +3462,10 @@ fn process_samples_sequential(
     if let Some(ref mut f) = timing_file {
         use std::io::Write;
         let _ = writeln!(f, "  CDS index build      : {:>10.3} s  [RSS: {:.0} MB]", pre_timings.cds_build_secs, pre_timings.cds_build_rss_mb);
+        let total_pre = pre_timings.parse_secs + pre_timings.db_create_secs + pre_timings.circ_secs
+            + pre_timings.autoblast_secs + pre_timings.gc_secs[0] + pre_timings.repeat_blob_secs
+            + pre_timings.write_mags_secs + pre_timings.cds_build_secs;
+        let _ = writeln!(f, "  TOTAL pre-sample     : {:>10.3} s  [RSS: {:.0} MB]", total_pre, get_rss_mb());
         let _ = writeln!(f);
         let _ = f.flush();
     }
@@ -3706,6 +3714,9 @@ fn open_timing_log(output_db: &Path, threads: usize, n_samples: usize) -> Result
     writeln!(f, "Threads      : {}", threads)?;
     writeln!(f, "Samples      : {}", n_samples)?;
     writeln!(f, "Memory       : RSS tracked via /proc/self/status")?;
+    let detected_gb = crate::db::detect_available_memory_gb();
+    let duckdb_gb = (detected_gb * 3 / 4).max(4);
+    writeln!(f, "DuckDB limit : {} GB (75% of {} GB detected)", duckdb_gb, detected_gb)?;
     writeln!(f, "=============================================================\n")?;
     let _ = f.flush();
 

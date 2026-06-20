@@ -27,7 +27,7 @@ use crate::gc_content::{GCSkewStats, GCStats, DEFAULT_GC_CONTENT_WINDOW_SIZE, DE
 use crate::types::{feature_name_to_id, ContigInfo, FeatureAnnotation, PackagingData, PresenceData, VARIABLES};
 // Re-export new metric data structs (defined below in this file)
 
-fn detect_available_memory_gb() -> u64 {
+pub(crate) fn detect_available_memory_gb() -> u64 {
     // cgroups v2 (SLURM, Docker, systemd)
     if let Ok(s) = std::fs::read_to_string("/sys/fs/cgroup/memory.max") {
         if let Ok(bytes) = s.trim().parse::<u64>() {
