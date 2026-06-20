@@ -3714,9 +3714,9 @@ fn open_timing_log(output_db: &Path, threads: usize, n_samples: usize) -> Result
     writeln!(f, "Threads      : {}", threads)?;
     writeln!(f, "Samples      : {}", n_samples)?;
     writeln!(f, "Memory       : RSS tracked via /proc/self/status")?;
-    let detected_gb = crate::db::detect_available_memory_gb();
+    let (detected_gb, mem_source) = crate::db::detect_available_memory_gb();
     let duckdb_gb = (detected_gb * 3 / 4).max(4);
-    writeln!(f, "DuckDB limit : {} GB (75% of {} GB detected)", duckdb_gb, detected_gb)?;
+    writeln!(f, "DuckDB limit : {} GB (75% of {} GB from {})", duckdb_gb, detected_gb, mem_source)?;
     writeln!(f, "=============================================================\n")?;
     let _ = f.flush();
 

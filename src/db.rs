@@ -27,40 +27,116 @@ use crate::gc_content::{GCSkewStats, GCStats, DEFAULT_GC_CONTENT_WINDOW_SIZE, DE
 use crate::types::{feature_name_to_id, ContigInfo, FeatureAnnotation, PackagingData, PresenceData, VARIABLES};
 // Re-export new metric data structs (defined below in this file)
 
-pub(crate) fn detect_available_memory_gb() -> u64 {
-    // cgroups v2 (SLURM, Docker, systemd)
-    if let Ok(s) = std::fs::read_to_string("/sys/fs/cgroup/memory.max") {
-        if let Ok(bytes) = s.trim().parse::<u64>() {
-            return bytes / (1024 * 1024 * 1024);
+pub(crate) fn detect_available_memory_gb() -> (u64, &'static str) {
+    // 1. SLURM environment variables (most reliable for SLURM jobs)
+    if let Ok(val) = std::env::var("SLURM_MEM_PER_NODE") {
+        if let Ok(mb) = val.trim().parse::<u64>() {
+            if mb > 0 {
+                return (mb / 1024, "SLURM_MEM_PER_NODE");
+            }
         }
     }
-    // cgroups v1
-    if let Ok(s) = std::fs::read_to_string("/sys/fs/cgroup/memory/memory.limit_in_bytes") {
-        let bytes = s.trim().parse::<u64>().unwrap_or(0);
-        if bytes > 0 && bytes < u64::MAX / 2 {
-            return bytes / (1024 * 1024 * 1024);
+    if let (Ok(per_cpu), Ok(cpus)) = (
+        std::env::var("SLURM_MEM_PER_CPU"),
+        std::env::var("SLURM_JOB_CPUS_PER_NODE"),
+    ) {
+        if let (Ok(mb), Ok(n)) = (per_cpu.trim().parse::<u64>(), cpus.trim().parse::<u64>()) {
+            if mb > 0 && n > 0 {
+                return (mb * n / 1024, "SLURM_MEM_PER_CPU");
+            }
         }
     }
-    // fallback: /proc/meminfo
+
+    // 2. Process-aware cgroups — read /proc/self/cgroup to find our actual cgroup path
+    if let Ok(cgroup_info) = std::fs::read_to_string("/proc/self/cgroup") {
+        // cgroups v2: line like "0::/<path>"
+        for line in cgroup_info.lines() {
+            if line.starts_with("0::/") {
+                let path = line.trim_start_matches("0::");
+                if let Some(gb) = read_cgroupv2_limit(path) {
+                    return (gb, "cgroup-v2");
+                }
+            }
+        }
+        // cgroups v1: line like "N:memory:/<path>"
+        for line in cgroup_info.lines() {
+            let parts: Vec<&str> = line.splitn(3, ':').collect();
+            if parts.len() == 3 && parts[1].split(',').any(|c| c == "memory") {
+                let path = parts[2];
+                if let Some(gb) = read_cgroupv1_limit(path) {
+                    return (gb, "cgroup-v1");
+                }
+            }
+        }
+    }
+
+    // 3. /proc/meminfo (bare metal, no cgroup)
     if let Ok(s) = std::fs::read_to_string("/proc/meminfo") {
         for line in s.lines() {
             if line.starts_with("MemTotal:") {
                 if let Some(kb_str) = line.split_whitespace().nth(1) {
                     if let Ok(kb) = kb_str.parse::<u64>() {
-                        return kb / (1024 * 1024);
+                        return (kb / (1024 * 1024), "procmeminfo");
                     }
                 }
             }
         }
     }
-    16
+
+    (16, "default")
+}
+
+fn read_cgroupv2_limit(cgroup_path: &str) -> Option<u64> {
+    let mut dir = format!("/sys/fs/cgroup{}", cgroup_path);
+    loop {
+        let file = format!("{}/memory.max", dir);
+        if let Ok(s) = std::fs::read_to_string(&file) {
+            let val = s.trim();
+            if val != "max" {
+                if let Ok(bytes) = val.parse::<u64>() {
+                    return Some(bytes / (1024 * 1024 * 1024));
+                }
+            }
+        }
+        if dir == "/sys/fs/cgroup" {
+            break;
+        }
+        dir = match dir.rsplit_once('/') {
+            Some((parent, _)) if !parent.is_empty() => parent.to_string(),
+            _ => break,
+        };
+    }
+    None
+}
+
+fn read_cgroupv1_limit(cgroup_path: &str) -> Option<u64> {
+    let mut dir = format!("/sys/fs/cgroup/memory{}", cgroup_path);
+    loop {
+        let file = format!("{}/memory.limit_in_bytes", dir);
+        if let Ok(s) = std::fs::read_to_string(&file) {
+            let bytes = s.trim().parse::<u64>().unwrap_or(0);
+            if bytes > 0 && bytes < u64::MAX / 2 {
+                return Some(bytes / (1024 * 1024 * 1024));
+            }
+        }
+        if dir == "/sys/fs/cgroup/memory" {
+            break;
+        }
+        dir = match dir.rsplit_once('/') {
+            Some((parent, _)) if !parent.is_empty() => parent.to_string(),
+            _ => break,
+        };
+    }
+    None
 }
 
 fn configure_for_bulk_writes(conn: &Connection) {
     let _ = conn.execute_batch("SET threads TO 1");
     let _ = conn.execute_batch("SET preserve_insertion_order=false");
     let _ = conn.execute_batch("SET wal_autocheckpoint='1GB'");
-    let mem_gb = (detect_available_memory_gb() * 3 / 4).max(4);
+    let (detected_gb, source) = detect_available_memory_gb();
+    let mem_gb = (detected_gb * 3 / 4).max(4);
+    eprintln!("DuckDB memory_limit: {} GB (75% of {} GB from {})", mem_gb, detected_gb, source);
     let _ = conn.execute_batch(&format!("SET memory_limit='{}GB'", mem_gb));
 }
 
