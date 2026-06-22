@@ -145,14 +145,7 @@ def preload_db_data(db_path, enable_timing=False):
         _step = time.perf_counter() - _t
         print(f"[timing] Preload: contigs query ({len(contigs)} contigs): {_step:.3f}s{_TIMING.tag(_step)}", flush=True)
 
-    mag_to_contig_offsets = {}
-    for _mag_name, _contigs in mag_to_contigs.items():
-        off = 0
-        d = {}
-        for c in _contigs:
-            d[c] = off
-            off += contig_lengths.get(c, 0)
-        mag_to_contig_offsets[_mag_name] = d
+    mag_to_contig_offsets = {}  # populated lazily per MAG on first access
 
     if enable_timing:
         _t = time.perf_counter()
@@ -177,12 +170,22 @@ def preload_db_data(db_path, enable_timing=False):
         _t = time.perf_counter()
     mag_to_sample_ids = {}
     if has_sample_table and mag_to_contigs:
-        cur.execute("""
-            SELECT DISTINCT mg.MAG_name, p.Sample_id
-            FROM MAG mg
-            JOIN MAG_contigs_association mca ON mca.MAG_id = mg.MAG_id
-            JOIN Coverage p ON p.Contig_id = mca.Contig_id
-        """)
+        _has_mag_coverage = cur.execute(
+            "SELECT 1 FROM information_schema.tables WHERE table_name = 'MAG_coverage'"
+        ).fetchone() is not None
+        if _has_mag_coverage:
+            cur.execute("""
+                SELECT mg.MAG_name, mc.Sample_id
+                FROM MAG mg
+                JOIN MAG_coverage mc ON mc.MAG_id = mg.MAG_id
+            """)
+        else:
+            cur.execute("""
+                SELECT DISTINCT mg.MAG_name, p.Sample_id
+                FROM MAG mg
+                JOIN MAG_contigs_association mca ON mca.MAG_id = mg.MAG_id
+                JOIN Coverage p ON p.Contig_id = mca.Contig_id
+            """)
         for mag_name, sid in cur.fetchall():
             if mag_name not in mag_to_sample_ids:
                 mag_to_sample_ids[mag_name] = set()
@@ -1480,6 +1483,21 @@ def create_layout(db_path, preloaded, enable_timing=False):
                 _sample_sort_ascending = (sample_order_direction.active == 0)
                 _sample_sort_source = _sample_sort_category_sources.get(_sample_sort_cat)
 
+                # If from/to track a selected contig's cached position, pass it as
+                # focus_contig so generate_bokeh_plot_mag_view can derive the new
+                # position from the already-computed sorted members list — no extra
+                # DB query needed.
+                _sel_contig = widgets['contig_select'].value
+                focus_contig = None
+                if _sel_contig and active_mag:
+                    _cached_off = widgets['mag_to_contig_offsets'].get(active_mag, {})
+                    if _sel_contig in _cached_off:
+                        _old_off = _cached_off[_sel_contig]
+                        _sel_clen = widgets['contig_lengths'].get(_sel_contig, 0)
+                        if xstart == _old_off + 1 and xend == _old_off + _sel_clen:
+                            focus_contig = _sel_contig
+                            # mag_window stays correct: contig length is unchanged by reordering
+
                 print(f"[start_bokeh_server] MAG view: mag={active_mag}, is_all={is_all}, sample={sample}, "
                       f"sort={_sort_cat}/{_sort_metric}/{'asc' if _sort_ascending else 'desc'}, features={mag_requested_features}", flush=True)
                 if enable_timing:
@@ -1531,6 +1549,7 @@ def create_layout(db_path, preloaded, enable_timing=False):
                     encoding_by_feature=_encoding_by_feature,
                     sample_order_source=_sample_sort_source, sample_order_metric=_sample_sort_metric,
                     sample_order_ascending=_sample_sort_ascending,
+                    focus_contig=focus_contig,
                 )
                 if enable_timing:
                     _step = time.perf_counter() - t_plot
@@ -1549,6 +1568,11 @@ def create_layout(db_path, preloaded, enable_timing=False):
                 current_plot_state['shared_xrange'] = new_xrange
                 current_plot_state['data_xstart'] = xstart
                 current_plot_state['data_xend'] = xend
+
+                actual_offsets = mag_meta.get('contig_offsets')
+                if actual_offsets is not None:
+                    widgets['mag_to_contig_offsets'][active_mag] = actual_offsets
+                    _sync_from_to_for_selected_contig()
 
                 if new_xrange is not None:
                     def _sync_from_mag(attr, old, new_val):
@@ -2982,6 +3006,29 @@ def create_layout(db_path, preloaded, enable_timing=False):
     contig_title = Div(text="<b>Contigs</b>", align="center")
     contig_header = row(contig_title, sizing_mode="stretch_width", align="center", margin=(0, 0, 0, 0))
 
+    def _sync_from_to_for_selected_contig():
+        """Update from/to inputs to the selected contig's position when in MAG view."""
+        if not widgets['has_mags'] or widgets['view_radio'].active != 0:
+            return
+        selected_mag = widgets['mag_select'].value
+        selected_contig = widgets['contig_select'].value
+        if not selected_mag or not selected_contig:
+            return
+        if selected_mag not in widgets['mag_to_contig_offsets']:
+            contigs = widgets['mag_to_contigs'].get(selected_mag, [])
+            off = 0
+            d = {}
+            for c in contigs:
+                d[c] = off
+                off += widgets['contig_lengths'].get(c, 0)
+            widgets['mag_to_contig_offsets'][selected_mag] = d
+        offsets = widgets['mag_to_contig_offsets'].get(selected_mag, {})
+        if selected_contig in offsets:
+            off = offsets[selected_contig]
+            c_len = widgets['contig_lengths'].get(selected_contig, 0)
+            from_position_input.value = str(off + 1)
+            to_position_input.value = str(off + c_len)
+
     def on_contig_change(event):
         if global_toggle_lock['locked']:
             return
@@ -2995,13 +3042,7 @@ def create_layout(db_path, preloaded, enable_timing=False):
                 refresh_sample_options_unlocked()
             update_section_titles()
             if widgets['has_mags'] and widgets['view_radio'].active == 0:
-                selected_mag = widgets['mag_select'].value
-                offsets = widgets['mag_to_contig_offsets'].get(selected_mag, {})
-                if new and selected_mag and new in offsets:
-                    off = offsets[new]
-                    c_len = widgets['contig_lengths'].get(new, 0)
-                    from_position_input.value = str(off + 1)
-                    to_position_input.value = str(off + c_len)
+                _sync_from_to_for_selected_contig()
             elif new and new in widgets['contig_lengths']:
                 from_position_input.value = "1"
                 to_position_input.value = str(widgets['contig_lengths'][new])
@@ -3075,19 +3116,17 @@ def create_layout(db_path, preloaded, enable_timing=False):
             if is_mag_view:
                 selected_mag = widgets['mag_select'].value
                 selected_contig = widgets['contig_select'].value
-                offsets = widgets['mag_to_contig_offsets'].get(selected_mag, {})
-                if selected_mag and selected_contig and selected_contig in offsets:
-                    off = offsets[selected_contig]
-                    c_len = widgets['contig_lengths'].get(selected_contig, 0)
-                    from_position_input.value = str(off + 1)
-                    to_position_input.value = str(off + c_len)
-                elif selected_mag:
-                    total = sum(
-                        widgets['contig_lengths'].get(c, 0)
-                        for c in widgets['mag_to_contigs'].get(selected_mag, [])
-                    )
-                    from_position_input.value = "1"
-                    to_position_input.value = str(total)
+                _sync_from_to_for_selected_contig()
+                if not (selected_contig and selected_contig in
+                        widgets['mag_to_contig_offsets'].get(selected_mag, {})):
+                    # No contig selected — fall back to full MAG extent
+                    if selected_mag:
+                        total = sum(
+                            widgets['contig_lengths'].get(c, 0)
+                            for c in widgets['mag_to_contigs'].get(selected_mag, [])
+                        )
+                        from_position_input.value = "1"
+                        to_position_input.value = str(total)
                 _sample_sort_current_categories[:] = _sample_mag_categories
             else:
                 selected_contig = widgets['contig_select'].value
@@ -3940,8 +3979,15 @@ def create_layout(db_path, preloaded, enable_timing=False):
               else _metrics_by_category.get(cat, [])
         for cat in filtering_metadata
     }
+    # MAG-sort variant: "Contig" category exposes all columns (numeric + text + qualifiers).
+    _mag_metrics_by_category: dict[str, list[tuple[str, str]]] = {
+        cat: _columns_by_category.get(cat, [])
+              if cat == "Contig"
+              else _metrics_by_category.get(cat, [])
+        for cat in filtering_metadata
+    }
 
-    _initial_metrics = _metrics_by_category.get("Contig", []) if "Contig" in _mag_sort_categories else []
+    _initial_metrics = _mag_metrics_by_category.get("Contig", []) if "Contig" in _mag_sort_categories else []
 
     mag_params_toggle_btn = Button(label="▶", width=20, height=20, button_type="primary", align="center", margin=0, stylesheets=[toggle_stylesheet])
     mag_params_toggle_btn.styles = {'padding': '0px', 'line-height': '20px'}
@@ -3991,7 +4037,7 @@ def create_layout(db_path, preloaded, enable_timing=False):
 
     def _on_mag_sort_category_change(attr, old, new):
         # Cache lookup — O(1), no re-derivation from filtering_metadata.
-        metrics = _metrics_by_category.get(new, [])
+        metrics = _mag_metrics_by_category.get(new, [])
         new_options = metrics if metrics else [""]
         if mag_params_metric_select.options != new_options:
             mag_params_metric_select.options = new_options

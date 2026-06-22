@@ -185,7 +185,7 @@ def _is_nullish(val):
 def _hash_color(s):
     """Deterministic hex color — same input always yields the same hue."""
     h = int(hashlib.md5(str(s).encode()).hexdigest()[:8], 16)
-    hue = (h % 360) / 360.0
+    hue = h / 0xFFFFFFFF
     r, g, b = colorsys.hls_to_rgb(hue, 0.55, 0.65)
     return f'#{int(r*255):02x}{int(g*255):02x}{int(b*255):02x}'
 
@@ -2340,19 +2340,19 @@ def _stitch_contig_zoom_blobs(cur, mag_id, members, sample_id, variable_name,
             continue
         zb = blob_map.get(cid)
         if zb is None:
-            all_bin_starts.append(np.array([offset], dtype=np.int64))
-            all_bin_ends.append(np.array([offset + clen - 1], dtype=np.int64))
-            all_means.append(np.array([0.0], dtype=np.float64))
+            all_bin_starts.append(np.array([offset, offset + clen - 1], dtype=np.int64))
+            all_bin_ends.append(np.array([offset, offset + clen - 1], dtype=np.int64))
+            all_means.append(np.array([0.0, 0.0], dtype=np.float64))
             if all_maxes:
-                all_maxes.append(np.array([0.0], dtype=np.float64))
+                all_maxes.append(np.array([0.0, 0.0], dtype=np.float64))
             continue
         decoded = decode_zoom_standalone(zb, target_bin_size, scale_divisor, zoom_bin_sizes)
         if decoded is None:
-            all_bin_starts.append(np.array([offset], dtype=np.int64))
-            all_bin_ends.append(np.array([offset + clen - 1], dtype=np.int64))
-            all_means.append(np.array([0.0], dtype=np.float64))
+            all_bin_starts.append(np.array([offset, offset + clen - 1], dtype=np.int64))
+            all_bin_ends.append(np.array([offset, offset + clen - 1], dtype=np.int64))
+            all_means.append(np.array([0.0, 0.0], dtype=np.float64))
             if all_maxes:
-                all_maxes.append(np.array([0.0], dtype=np.float64))
+                all_maxes.append(np.array([0.0, 0.0], dtype=np.float64))
             continue
 
         if is_sparse is None:
@@ -2696,7 +2696,7 @@ def make_bokeh_genemap_mag(conn, mag_id, mag_name, mag_length, subplot_size,
     return annotation_fig
 
 
-def generate_bokeh_plot_mag_view(conn, list_features, mag_name, sample_name, xstart=None, xend=None, subplot_size=100, genbank_path=None, feature_types=None, plot_isoforms=True, plot_sequence=False, plot_translated_sequence=False, same_y_scale=False, genemap_size=None, sequence_size=None, translated_sequence_size=None, max_base_resolution=None, max_genemap_window=None, max_sequence_window=None, min_relative_value=0.0, feature_label_key=None, custom_colors=None, mag_track_colors=None, max_track_dots=1000, is_all=False, allowed_samples=None, max_samples=None, enable_timing=False, sort_source=None, sort_metric=None, sort_ascending=True, sort_sample_name=None, encoding_by_feature=None, sample_order_source=None, sample_order_metric=None, sample_order_ascending=True):
+def generate_bokeh_plot_mag_view(conn, list_features, mag_name, sample_name, xstart=None, xend=None, subplot_size=100, genbank_path=None, feature_types=None, plot_isoforms=True, plot_sequence=False, plot_translated_sequence=False, same_y_scale=False, genemap_size=None, sequence_size=None, translated_sequence_size=None, max_base_resolution=None, max_genemap_window=None, max_sequence_window=None, min_relative_value=0.0, feature_label_key=None, custom_colors=None, mag_track_colors=None, max_track_dots=1000, is_all=False, allowed_samples=None, max_samples=None, enable_timing=False, sort_source=None, sort_metric=None, sort_ascending=True, sort_sample_name=None, encoding_by_feature=None, sample_order_source=None, sample_order_metric=None, sample_order_ascending=True, focus_contig=None):
     """Generate a concatenated Bokeh plot for a MAG with configurable contig ordering."""
     from ..database.database_getters import get_mag_id, get_mag_members_full
 
@@ -2716,6 +2716,13 @@ def generate_bokeh_plot_mag_view(conn, list_features, mag_name, sample_name, xst
 
     if not members:
         raise ValueError(f"MAG not found or empty: {mag_name}")
+
+    if focus_contig is not None:
+        _foc_off = {name: off for name, _cl, off in members}
+        if focus_contig in _foc_off:
+            _foc_clen = next(cl for name, cl, _ in members if name == focus_contig)
+            xstart = _foc_off[focus_contig] + 1
+            xend   = _foc_off[focus_contig] + _foc_clen
 
     total_len = sum(length for _n, length, _o in members)
     print(f"MAG {mag_name}: {len(members)} contigs, {total_len} bp total", flush=True)
@@ -2922,8 +2929,10 @@ def generate_bokeh_plot_mag_view(conn, list_features, mag_name, sample_name, xst
     grid = gridplot([[p] for p in all_plots], merge_tools=True, sizing_mode='stretch_width')
     if enable_timing:
         print(f"[timing]   gridplot ({len(all_plots)} figures): {time.perf_counter() - t_grid:.3f}s", flush=True)
+    actual_contig_offsets = {name: off for name, _clen, off in members}
     mag_meta = {
         'dots_shown': len(track_dots['xs']) if track_dots else 0,
         'dots_total': track_dots.get('total', 0) if track_dots else 0,
+        'contig_offsets': actual_contig_offsets,
     }
     return grid, mag_meta

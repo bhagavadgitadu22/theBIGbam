@@ -1,6 +1,7 @@
 import argparse
 import csv
 import os
+import shutil
 import sys
 import urllib.parse
 from pathlib import Path
@@ -392,9 +393,11 @@ def run_add_contig_annotations(args):
     total_multi_match_rows = 0
     total_multi_match_features = 0
     total_qualifiers_added = {col: 0 for col in value_cols}
+    total_files_copied = 0
+    pending_copies = []  # input paths of unmodified dir-input files (strings only)
 
     def _handle_result(annot_path, fmt, data, stats):
-        nonlocal total_features, total_features_modified
+        nonlocal total_features, total_features_modified, total_files_copied
         nonlocal total_multi_match_rows, total_multi_match_features
 
         total_features += stats["total_features"]
@@ -415,11 +418,25 @@ def run_add_contig_annotations(args):
             print(f"  {Path(annot_path).name}: modified {stats['features_modified']} features, "
                   f"added {sum(stats['qualifiers_added'].values())} qualifiers", flush=True)
         else:
-            print(f"  {Path(annot_path).name}: no modifications, skipped", flush=True)
+            if is_dir_input:
+                pending_copies.append(annot_path)
+                print(f"  {Path(annot_path).name}: no modifications, deferred", flush=True)
+            else:
+                print(f"  {Path(annot_path).name}: no modifications, not written", flush=True)
 
     for af in annot_files:
         fmt, data, stats = _process_one_file(af, csv_lookup, match_by_cols, value_cols, args.force)
         _handle_result(af, fmt, data, stats)
+
+    if pending_copies:
+        if total_features_modified == 0:
+            print("\nError: no modifications made in any file; output not written.", flush=True)
+            return 1
+        for src in pending_copies:
+            dst = output_path / Path(src).name
+            shutil.copy2(src, dst)
+            total_files_copied += 1
+            print(f"  {Path(src).name}: no modifications, copied", flush=True)
 
     unmatched_keys = set(csv_lookup.keys()) - all_matched_keys
     for key in unmatched_keys:
@@ -429,6 +446,8 @@ def run_add_contig_annotations(args):
 
     print(f"\nSummary:", flush=True)
     print(f"  Features annotated: {total_features_modified} / {total_features} total features", flush=True)
+    if total_files_copied > 0:
+        print(f"  Files copied unchanged: {total_files_copied}", flush=True)
     if total_multi_match_rows > 0:
         print(f"  Rows with multiple matches: {total_multi_match_rows} "
               f"(affected {total_multi_match_features} features)", flush=True)

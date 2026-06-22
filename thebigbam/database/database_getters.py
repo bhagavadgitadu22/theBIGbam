@@ -177,10 +177,10 @@ def _sorted_members_query(conn, mag_id, source_table, metric, ascending, sample_
             f'SELECT mca.Contig_id, c.Contig_name, c.Contig_length '
             f'FROM MAG_contigs_association mca '
             f'JOIN Contig c ON c.Contig_id = mca.Contig_id '
-            f'JOIN {source_table} sv ON sv.Contig_name = c.Contig_name '
+            f'LEFT JOIN {source_table} sv ON sv.Contig_name = c.Contig_name '
             f'  AND sv.Sample_name = ? '
             f'WHERE mca.MAG_id = ? '
-            f'ORDER BY sv."{metric}" {direction}',
+            f'ORDER BY COALESCE(sv."{metric}", 0) {direction}',
             [sample_name, mag_id],
         ).fetchall()
     return rows
@@ -1190,4 +1190,52 @@ def resolve_column_null_stats(
 
     col_info["null_stats"] = result
     return result
+
+
+# Indexes needed by the Python serve/analysis/inspect code.
+# The Rust pipeline creates the core tables; these supplement with the
+# access patterns that appear in Python queries.
+_SERVE_INDEXES = [
+    # Feature_blob: every per-contig+sample feature lookup (serve, analysis, inspect)
+    ("idx_feature_blob",       "Feature_blob",       "(Contig_id, Sample_id, Feature_id)"),
+    # Feature_blob_chunk: base-resolution chunk queries (small window rendering)
+    ("idx_feature_blob_chunk", "Feature_blob_chunk", "(Contig_id, Sample_id, Feature_id, Chunk_idx)"),
+    # Coverage sort in MAG view: LEFT JOIN on string columns for contig ordering
+    ("idx_coverage_sort",      "Coverage",           "(Sample_name, Contig_name)"),
+    # Contig-level blob lookups (GC content, GC skew, repeats, etc.)
+    ("idx_contig_blob",        "Contig_blob",        "(Contig_id, Feature_id)"),
+    ("idx_contig_blob_chunk",  "Contig_blob_chunk",  "(Contig_id, Feature_id, Chunk_idx)"),
+    # Gene map rendering and CDS analysis
+    ("idx_annot_core",         "Contig_annotation_core", "(Contig_id, \"Type\")"),
+    # MAG membership joins (every MAG-mode path)
+    ("idx_mag_contigs_mag",    "MAG_contigs_association", "(MAG_id)"),
+    ("idx_mag_contigs_contig", "MAG_contigs_association", "(Contig_id)"),
+    # Coverage by integer ID (sample list for contig, MAG list for sample)
+    ("idx_coverage_ids",       "Coverage",           "(Contig_id, Sample_id)"),
+]
+
+
+def add_serve_indexes(db_path, enable_timing=False):
+    """Add ART indexes that speed up Python serve/analysis/inspect queries.
+
+    Safe to call on existing databases — uses CREATE INDEX IF NOT EXISTS.
+    Only creates indexes on tables that actually exist.
+    """
+    import time as _time
+    import duckdb
+    conn = duckdb.connect(db_path)
+    try:
+        for idx_name, table_name, columns in _SERVE_INDEXES:
+            if not _table_exists(conn, table_name):
+                continue
+            _t = _time.perf_counter() if enable_timing else None
+            conn.execute(
+                f"CREATE INDEX IF NOT EXISTS {idx_name} ON {table_name} {columns}"
+            )
+            if enable_timing:
+                print(f"[index] {idx_name} on {table_name}: {_time.perf_counter() - _t:.1f}s", flush=True)
+        conn.close()
+    except Exception as exc:
+        conn.close()
+        raise exc
 

@@ -28,6 +28,7 @@ SCRIPTS = {
     'mapping-per-sample': 'Map reads for a single sample',
     'format-mapping': 'Reformat an existing mapping file (sort, filter, index)',
     'calculate': "Run feature calculations over alignment files",
+    'add-indexes': "Add query indexes to an existing database (for databases built before index support)",
     'serve': "Start interactive Bokeh server",
 
     'export': 'Export a metric as contig x sample matrix (TSV)',
@@ -72,6 +73,10 @@ def build_argparser():
 
     sp = sub.add_parser('calculate', help=SCRIPTS['calculate'])
     calculating_data.add_calculate_args(sp)
+
+    sp = sub.add_parser('add-indexes', help=SCRIPTS['add-indexes'])
+    sp.add_argument('-d', '--db', required=True, help='Path to DuckDB database')
+    sp.add_argument('--time', action='store_true', help='Print timing for each index')
 
     sp = sub.add_parser('serve', help=SCRIPTS['serve'])
     start_bokeh_server.add_serve_args(sp)
@@ -192,6 +197,15 @@ def main(argv=None):
 
     if args.cmd == 'calculate':
         return calculating_data.run_calculate_args(args)
+
+    if args.cmd == 'add-indexes':
+        try:
+            database_getters.add_serve_indexes(args.db, enable_timing=args.time)
+            print("Done.", flush=True)
+            return 0
+        except Exception as e:
+            print(f"Error adding indexes: {e}", flush=True)
+            return 2
 
     if args.cmd == 'serve':
         return start_bokeh_server.run_serve(args)

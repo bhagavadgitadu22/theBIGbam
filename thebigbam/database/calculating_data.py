@@ -420,6 +420,7 @@ def run_calculate_args(args):
     validate_unique_contig_names(genbank_files, assembly_files, existing_contig_names)
 
     print("\nCalculating values for all requested features from mapping files...", flush=True)
+    _enable_timing = getattr(args, 'time', False)
     calculating_all_features_parallel(
         requested_modules, bam_files, output_db, min_aligned_fraction, min_coverage_depth, coverage_percentage,
         n_sample_cores=n_cores,
@@ -427,12 +428,16 @@ def run_calculate_args(args):
         assembly_path=assembly_path,
         extend_db=output_db if is_extending else None,
         min_occurrences=args.min_occurrences,
-        enable_timing=getattr(args, 'time', False),
+        enable_timing=_enable_timing,
         view=view,
         mag_manifest=mag_manifest,
         variation_percentage=args.variation_percentage,
         blast=blast_enabled if is_extending else getattr(args, 'blast', False),
     )
+
+    print("\nBuilding query indexes...", flush=True)
+    from .database_getters import add_serve_indexes
+    add_serve_indexes(output_db, enable_timing=_enable_timing)
 
 
 def main():
