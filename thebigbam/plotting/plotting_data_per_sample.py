@@ -2282,6 +2282,10 @@ def _assemble_mag_chunks_from_contigs(cur, mag_id, sample_id, variable_name,
             chunk_rows = _get_feature_chunks(cur, cid, sample_id, variable_name, local_start, local_end)
 
         if not chunk_rows:
+            all_decoded.append({
+                "x": np.array([offset, offset + clen - 1], dtype=np.uint32),
+                "y": np.array([0.0, 0.0], dtype=np.float64),
+            })
             continue
 
         if sparse:
@@ -2336,9 +2340,19 @@ def _stitch_contig_zoom_blobs(cur, mag_id, members, sample_id, variable_name,
             continue
         zb = blob_map.get(cid)
         if zb is None:
+            all_bin_starts.append(np.array([offset], dtype=np.int64))
+            all_bin_ends.append(np.array([offset + clen - 1], dtype=np.int64))
+            all_means.append(np.array([0.0], dtype=np.float64))
+            if all_maxes:
+                all_maxes.append(np.array([0.0], dtype=np.float64))
             continue
         decoded = decode_zoom_standalone(zb, target_bin_size, scale_divisor, zoom_bin_sizes)
         if decoded is None:
+            all_bin_starts.append(np.array([offset], dtype=np.int64))
+            all_bin_ends.append(np.array([offset + clen - 1], dtype=np.int64))
+            all_means.append(np.array([0.0], dtype=np.float64))
+            if all_maxes:
+                all_maxes.append(np.array([0.0], dtype=np.float64))
             continue
 
         if is_sparse is None:

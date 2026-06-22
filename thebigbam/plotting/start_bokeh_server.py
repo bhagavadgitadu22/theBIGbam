@@ -262,6 +262,13 @@ def preload_db_data(db_path, enable_timing=False):
     cur.execute("SELECT Variable_name, Encoding FROM Variable WHERE Variable_name IS NOT NULL AND Encoding IS NOT NULL")
     encoding_by_feature = {name: enc for name, enc in cur.fetchall()}
 
+    if enable_timing:
+        _t = time.perf_counter()
+    total_coverage_count = cur.execute("SELECT COUNT(*) FROM Coverage").fetchone()[0]
+    if enable_timing:
+        _step = time.perf_counter() - _t
+        print(f"[timing] Preload: total coverage count ({total_coverage_count}): {_step:.3f}s{_TIMING.tag(_step)}", flush=True)
+
     conn.close()
 
     if enable_timing:
@@ -292,6 +299,7 @@ def preload_db_data(db_path, enable_timing=False):
         'filtering_metadata': filtering_metadata,
         'subplot_to_varnames': subplot_to_varnames,
         'encoding_by_feature': encoding_by_feature,
+        'total_coverage_count': total_coverage_count,
     }
 
 
@@ -1106,25 +1114,7 @@ def create_layout(db_path, preloaded, enable_timing=False):
             # No active filter — use autocomplete list lengths (full list, no LIMIT applied)
             contigs_count = len(filtered_contigs)
             samples_count = len(filtered_samples)
-            # Count coverage presences directly from Coverage table
-            _cc = conn.cursor()
-            sel_cid = widgets['contig_name_to_id'].get(val_c) if val_c else None
-            sel_sid = widgets['sample_name_to_id'].get(val_s) if val_s else None
-            if sel_cid is not None and sel_sid is not None:
-                presences_count = _cc.execute(
-                    "SELECT COUNT(*) FROM Coverage WHERE Contig_id = ? AND Sample_id = ?",
-                    [sel_cid, sel_sid]
-                ).fetchone()[0]
-            elif sel_cid is not None:
-                presences_count = _cc.execute(
-                    "SELECT COUNT(*) FROM Coverage WHERE Contig_id = ?", [sel_cid]
-                ).fetchone()[0]
-            elif sel_sid is not None:
-                presences_count = _cc.execute(
-                    "SELECT COUNT(*) FROM Coverage WHERE Sample_id = ?", [sel_sid]
-                ).fetchone()[0]
-            else:
-                presences_count = _cc.execute("SELECT COUNT(*) FROM Coverage").fetchone()[0]
+            presences_count = _total_coverage_count
             if widgets['has_mags']:
                 # Use preloaded mag_to_sample_ids (small: ~2837 MAGs × samples)
                 sel_mid = val_m if val_m else None
@@ -2048,6 +2038,7 @@ def create_layout(db_path, preloaded, enable_timing=False):
 
     _subplot_to_varnames = preloaded['subplot_to_varnames']
     _encoding_by_feature = preloaded.get('encoding_by_feature')
+    _total_coverage_count = preloaded.get('total_coverage_count', 0)
 
     if enable_timing:
         t_ui = time.perf_counter()
@@ -3131,7 +3122,7 @@ def create_layout(db_path, preloaded, enable_timing=False):
         # Build header with checkbox (module_widget has module name as label)
         if help_tooltip is not None:
             help_btn = HelpButton(tooltip=help_tooltip, width=20, height=20, align="center", button_type="light", stylesheets=[toggle_stylesheet])
-            hdr = row(toggle_btn, module_widget, help_btn, sizing_mode="stretch_width", align="center")
+            hdr = row(toggle_btn, module_widget, help_btn, sizing_mode="stretch_width", align="center", styles={'overflow': 'hidden'})
         else:
             hdr = row(toggle_btn, module_widget, sizing_mode="stretch_width", align="center")
 
@@ -3175,7 +3166,7 @@ def create_layout(db_path, preloaded, enable_timing=False):
             help_text = help_tooltip.content
             tooltip_all = Tooltip(content=help_text, position="right")
             help_btn = HelpButton(tooltip=tooltip_all, width=20, height=20, align="center", button_type="light", stylesheets=[toggle_stylesheet])
-            hdr = row(toggle_btn, module_title_div, help_btn, sizing_mode="stretch_width", align="center")
+            hdr = row(toggle_btn, module_title_div, help_btn, sizing_mode="stretch_width", align="center", styles={'overflow': 'hidden'})
         else:
             hdr = row(toggle_btn, module_title_div, sizing_mode="stretch_width", align="center")
 
@@ -3701,7 +3692,7 @@ def create_layout(db_path, preloaded, enable_timing=False):
                                   align="center", button_type="light",
                                   stylesheets=[toggle_stylesheet])
             other_features_header = row(other_features_toggle_btn, genome_master_cbg, help_btn,
-                                        sizing_mode="stretch_width", align="center")
+                                        sizing_mode="stretch_width", align="center", styles={'overflow': 'hidden'})
         else:
             other_features_header = row(other_features_toggle_btn, genome_master_cbg,
                                         sizing_mode="stretch_width", align="center")

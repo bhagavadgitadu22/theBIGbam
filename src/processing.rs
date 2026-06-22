@@ -2748,15 +2748,21 @@ pub fn run_all_samples(
     }
 
     {
-        let rss_before = get_rss_mb();
+        let rss_before = if config.enable_timing { get_rss_mb() } else { 0.0 };
         let t_ckpt = std::time::Instant::now();
         if let Err(e) = db_writer.checkpoint() {
             eprintln!("WARNING: checkpoint after GC failed: {}", e);
         }
         if config.enable_timing {
             let rss_after = get_rss_mb();
+            let ckpt_secs = t_ckpt.elapsed().as_secs_f64();
             eprintln!("  checkpoint (post-GC): {:.3}s  [RSS: {:.0} → {:.0} MB]",
-                t_ckpt.elapsed().as_secs_f64(), rss_before, rss_after);
+                ckpt_secs, rss_before, rss_after);
+            if let Some(ref mut f) = timing_file {
+                use std::io::Write;
+                let _ = writeln!(f, "  checkpoint (post-GC) : {:>10.3} s  [RSS: {:.0} → {:.0} MB]",
+                    ckpt_secs, rss_before, rss_after);
+            }
         }
     }
 
@@ -2775,15 +2781,21 @@ pub fn run_all_samples(
     }
 
     {
-        let rss_before = get_rss_mb();
+        let rss_before = if config.enable_timing { get_rss_mb() } else { 0.0 };
         let t_ckpt = std::time::Instant::now();
         if let Err(e) = db_writer.checkpoint() {
             eprintln!("WARNING: checkpoint after repeat blobs failed: {}", e);
         }
         if config.enable_timing {
             let rss_after = get_rss_mb();
+            let ckpt_secs = t_ckpt.elapsed().as_secs_f64();
             eprintln!("  checkpoint (post-repeats): {:.3}s  [RSS: {:.0} → {:.0} MB]",
-                t_ckpt.elapsed().as_secs_f64(), rss_before, rss_after);
+                ckpt_secs, rss_before, rss_after);
+            if let Some(ref mut f) = timing_file {
+                use std::io::Write;
+                let _ = writeln!(f, "  checkpoint (post-rep): {:>10.3} s  [RSS: {:.0} → {:.0} MB]",
+                    ckpt_secs, rss_before, rss_after);
+            }
         }
     }
 
@@ -3245,15 +3257,21 @@ fn process_samples_parallel(
 
             // Flush DuckDB WAL to disk to bound memory — without this,
             // all appended BLOB data stays resident until finalize().
-            let rss_before = get_rss_mb();
+            let rss_before = if enable_timing_writer { get_rss_mb() } else { 0.0 };
             let t_ckpt = std::time::Instant::now();
             if let Err(e) = db_writer.checkpoint() {
                 eprintln!("WARNING: checkpoint failed after {}: {}", result.sample_name, e);
             }
             if enable_timing_writer {
                 let rss_after = get_rss_mb();
+                let ckpt_secs = t_ckpt.elapsed().as_secs_f64();
                 eprintln!("  checkpoint: {:.3}s  [RSS: {:.0} → {:.0} MB]",
-                    t_ckpt.elapsed().as_secs_f64(), rss_before, rss_after);
+                    ckpt_secs, rss_before, rss_after);
+                if let Some(ref mut f) = timing_file {
+                    use std::io::Write;
+                    let _ = writeln!(f, "  checkpoint           : {:>10.3} s  [RSS: {:.0} → {:.0} MB]",
+                        ckpt_secs, rss_before, rss_after);
+                }
             }
         }
 
@@ -3565,15 +3583,21 @@ fn process_samples_sequential(
 
                 // Flush DuckDB WAL to disk to bound memory — without this,
                 // all appended BLOB data stays resident until finalize().
-                let rss_before = get_rss_mb();
+                let rss_before = if config.enable_timing { get_rss_mb() } else { 0.0 };
                 let t_ckpt = std::time::Instant::now();
                 if let Err(e) = db_writer.checkpoint() {
                     eprintln!("WARNING: checkpoint failed after {}: {}", r.sample_name, e);
                 }
                 if config.enable_timing {
                     let rss_after = get_rss_mb();
+                    let ckpt_secs = t_ckpt.elapsed().as_secs_f64();
                     eprintln!("  checkpoint: {:.3}s  [RSS: {:.0} → {:.0} MB]",
-                        t_ckpt.elapsed().as_secs_f64(), rss_before, rss_after);
+                        ckpt_secs, rss_before, rss_after);
+                    if let Some(ref mut f) = timing_file {
+                        use std::io::Write;
+                        let _ = writeln!(f, "  checkpoint           : {:>10.3} s  [RSS: {:.0} → {:.0} MB]",
+                            ckpt_secs, rss_before, rss_after);
+                    }
                 }
 
                 let total_sample_time = sample_start.elapsed().as_secs_f64();
@@ -3674,24 +3698,32 @@ fn get_rss_mb() -> f64 {
     { 0.0 }
 }
 
-fn get_peak_rss_mb() -> f64 {
+fn get_rss_and_peak_mb() -> (f64, f64) {
     #[cfg(target_os = "linux")]
     {
+        let mut rss = 0.0;
+        let mut hwm = 0.0;
         if let Ok(status) = std::fs::read_to_string("/proc/self/status") {
             for line in status.lines() {
-                if line.starts_with("VmHWM:") {
+                if line.starts_with("VmRSS:") {
                     if let Some(kb_str) = line.split_whitespace().nth(1) {
                         if let Ok(kb) = kb_str.parse::<u64>() {
-                            return kb as f64 / 1024.0;
+                            rss = kb as f64 / 1024.0;
+                        }
+                    }
+                } else if line.starts_with("VmHWM:") {
+                    if let Some(kb_str) = line.split_whitespace().nth(1) {
+                        if let Ok(kb) = kb_str.parse::<u64>() {
+                            hwm = kb as f64 / 1024.0;
                         }
                     }
                 }
             }
         }
-        0.0
+        (rss, hwm)
     }
     #[cfg(not(target_os = "linux"))]
-    { 0.0 }
+    { (0.0, 0.0) }
 }
 
 fn timing_log_path(output_db: &Path) -> PathBuf {
@@ -3813,8 +3845,9 @@ fn finish_timing_log(
     writeln!(f, "  Write contig data    : {:>10.3} s", sum_ns(|t| t.write_contig_data_ns))?;
     writeln!(f, "  Write MAG data       : {:>10.3} s", sum_ns(|t| t.mag_write_ns))?;
     writeln!(f, "  ---- Memory ----")?;
-    writeln!(f, "  Peak RSS (VmHWM)     : {:>10.0} MB", get_peak_rss_mb())?;
-    writeln!(f, "  Current RSS          : {:>10.0} MB", get_rss_mb())?;
+    let (current_rss, peak_rss) = get_rss_and_peak_mb();
+    writeln!(f, "  Peak RSS (VmHWM)     : {:>10.0} MB", peak_rss)?;
+    writeln!(f, "  Current RSS          : {:>10.0} MB", current_rss)?;
     writeln!(f)?;
     let pre_sample_timed = pt.parse_secs + pt.db_create_secs + pt.circ_secs
         + pt.autoblast_secs + pt.gc_secs[0] + pt.repeat_blob_secs

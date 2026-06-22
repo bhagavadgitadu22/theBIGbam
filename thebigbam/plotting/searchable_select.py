@@ -23,6 +23,48 @@ class SearchableSelect(JSComponent):
     _esm = """
     import TomSelect from "https://cdn.jsdelivr.net/npm/tom-select@2.4.1/+esm";
 
+    /** Copy text to the system clipboard (best-effort). */
+    function copyToClipboard(text) {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(text).catch(() => {});
+        } else {
+            // Fallback for older browsers / non-HTTPS contexts
+            const ta = document.createElement('textarea');
+            ta.value = text;
+            ta.style.position = 'fixed';
+            ta.style.opacity = '0';
+            document.body.appendChild(ta);
+            ta.focus();
+            ta.select();
+            try { document.execCommand('copy'); } catch (_) {}
+            document.body.removeChild(ta);
+        }
+    }
+
+    function showCopiedTooltip(anchorEl) {
+        const rect = anchorEl.getBoundingClientRect();
+        const tip = document.createElement('div');
+        tip.textContent = 'Copied';
+        Object.assign(tip.style, {
+            position: 'fixed',
+            left: (rect.left + rect.width / 2) + 'px',
+            top: (rect.top - 28) + 'px',
+            transform: 'translateX(-50%)',
+            background: '#333',
+            color: '#fff',
+            padding: '3px 8px',
+            borderRadius: '4px',
+            fontSize: '12px',
+            pointerEvents: 'none',
+            zIndex: '9999',
+            opacity: '1',
+            transition: 'opacity 0.4s ease',
+        });
+        document.body.appendChild(tip);
+        setTimeout(() => { tip.style.opacity = '0'; }, 700);
+        setTimeout(() => { if (tip.parentNode) tip.parentNode.removeChild(tip); }, 1100);
+    }
+
     export function render({ model }) {
         const container = document.createElement('div');
         container.style.width = '100%';
@@ -45,6 +87,27 @@ class SearchableSelect(JSComponent):
             options: allOptions,
             items: model.value ? [model.value] : [],
             onChange: (val) => { model.value = val; }
+        });
+
+        let lastClickTime = 0;
+        container.addEventListener('mousedown', (event) => {
+            if (event.button !== 0) return;
+            const control = container.querySelector('.ts-control');
+            if (!control || !control.contains(event.target)) return;
+            const now = Date.now();
+            if (now - lastClickTime < 400) {
+                event.preventDefault();
+                event.stopImmediatePropagation();
+                const val = model.value;
+                if (val) {
+                    copyToClipboard(val);
+                    if (ts.isOpen) ts.close();
+                    showCopiedTooltip(control);
+                }
+                lastClickTime = 0;
+                return;
+            }
+            lastClickTime = now;
         });
 
         model.on('options', () => {
