@@ -1117,6 +1117,7 @@ def create_layout(db_path, preloaded, enable_timing=False):
             presences_count = _total_coverage_count
             if widgets['has_mags']:
                 # Use preloaded mag_to_sample_ids (small: ~2837 MAGs × samples)
+                sel_sid = widgets['sample_name_to_id'].get(val_s) if val_s else None
                 sel_mid = val_m if val_m else None
                 if sel_mid and sel_sid is not None:
                     mag_pairs_count = 1 if sel_sid in widgets['mag_to_sample_ids'].get(sel_mid, set()) else 0
@@ -1131,13 +1132,24 @@ def create_layout(db_path, preloaded, enable_timing=False):
 
         if widgets['has_mags']:
             new_filtering = (
-                f"<span style='font-size: 1.2em;'><b>Filtering</b></span> "
-                f"({presences_count} contig/sample pairs, {mag_pairs_count} MAG/sample pairs)"
+                f"<span style='font-size: 1.2em;'><b>Filtering</b></span>"
+                f"<br><span style='font-size: 0.85em;'>"
+                f"{presences_count} contig/sample pairs, {mag_pairs_count} MAG/sample pairs</span>"
             )
         else:
-            new_filtering = f"<span style='font-size: 1.2em;'><b>Filtering</b></span> ({presences_count} contig/sample pairs)"
-        new_contig = f"<span style='font-size: 1.2em;'><b>Contigs</b></span> ({contigs_count} available)"
-        new_sample = f"<span style='font-size: 1.2em;'><b>Samples</b></span> ({samples_count} available)"
+            new_filtering = (
+                f"<span style='font-size: 1.2em;'><b>Filtering</b></span>"
+                f"<br><span style='font-size: 0.85em;'>"
+                f"{presences_count} contig/sample pairs</span>"
+            )
+        new_contig = (
+            f"<span style='font-size: 1.2em;'><b>Contigs</b></span> "
+            f"<span style='font-size: 0.85em;'>{contigs_count} available</span>"
+        )
+        new_sample = (
+            f"<span style='font-size: 1.2em;'><b>Samples</b></span> "
+            f"<span style='font-size: 0.85em;'>{samples_count} available</span>"
+        )
         if filtering_title.text != new_filtering:
             filtering_title.text = new_filtering
         if contig_title.text != new_contig:
@@ -1146,7 +1158,10 @@ def create_layout(db_path, preloaded, enable_timing=False):
             sample_title.text = new_sample
         if widgets['has_mags']:
             mags_count = len(set(opts_m) - {""})
-            new_mag = f"<span style='font-size: 1.2em;'><b>MAGs</b></span> ({mags_count} available)"
+            new_mag = (
+                f"<span style='font-size: 1.2em;'><b>MAGs</b></span> "
+                f"<span style='font-size: 0.85em;'>{mags_count} available</span>"
+            )
             if mag_title.text != new_mag:
                 mag_title.text = new_mag
 
