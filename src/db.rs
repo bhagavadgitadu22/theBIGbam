@@ -1373,6 +1373,7 @@ impl DbWriter {
     pub fn update_contig_gc_stats(&self, gc_data: &[GCContentData]) -> Result<()> {
         let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
 
+        let s_gc  = crate::types::get_column_scale("Contig", "GC_mean") as f32;
         let s_sd = crate::types::get_column_scale("Contig", "GC_sd") as f32;
         let s_amp = crate::types::get_column_scale("Contig", "GC_skew_amplitude") as f32;
         let s_pos = crate::types::get_column_scale("Contig", "Positive_GC_skew_windows_percentage") as f32;
@@ -1388,7 +1389,7 @@ impl DbWriter {
         for data in gc_data {
             app.append_row(params![
                 &data.contig_name,
-                data.stats.average.round() as i32,
+                (data.stats.average * s_gc).round() as i32,
                 (data.stats.sd * s_sd).round() as i32,
                 (data.skew_stats.amplitude * s_amp).round() as i32,
                 (data.skew_stats.percent_positive * s_pos).round() as i32,
@@ -1994,8 +1995,7 @@ fn create_core_tables(conn: &Connection, has_bam: bool, is_mag_mode: bool, has_a
     if is_mag_mode {
         // MAG bin table. Metric columns reuse the same integer encoding as the
         // Contig table so Python decoders can share the scale constants
-        // (Duplication_percentage ×10; GC_mean integer 0-100;
-        // GC_sd / GC_skew_amplitude ×100; Positive_GC_skew_windows_percentage ×10).
+        // (all metric columns ×10_000; see COLUMN_SCALES in types.rs).
         conn.execute(
             "CREATE TABLE MAG (
                 MAG_id INTEGER PRIMARY KEY,
@@ -2575,10 +2575,10 @@ fn insert_contigs(conn: &Connection, contigs: &[ContigInfo], is_mag_mode: bool) 
                 &contig.name,
                 contig.length as i64,
                 null_int,  // Duplication_percentage - set later from autoblast
-                null_int,  // GC_mean - set later from GC content computation (stored as int 0-100)
-                null_int,  // GC_sd - set later from GC content computation (stored as int, ×100)
-                null_int,  // GC_skew_amplitude - set later from GC skew computation (stored as int, ×100)
-                null_int,  // Positive_GC_skew_windows_percentage - set later from GC skew computation (stored as int 0-100)
+                null_int,  // GC_mean - set later from GC content computation (×10_000)
+                null_int,  // GC_sd - set later from GC content computation (×10_000)
+                null_int,  // GC_skew_amplitude - set later from GC skew computation (×10_000)
+                null_int,  // Positive_GC_skew_windows_percentage - set later from GC skew computation (×10_000)
             ])
             .with_context(|| format!("Failed to append contig: {}", contig.name))?;
         } else {
@@ -2587,10 +2587,10 @@ fn insert_contigs(conn: &Connection, contigs: &[ContigInfo], is_mag_mode: bool) 
                 &contig.name,
                 contig.length as i64,
                 null_int,  // Duplication_percentage - set later from autoblast
-                null_int,  // GC_mean - set later from GC content computation (stored as int 0-100)
-                null_int,  // GC_sd - set later from GC content computation (stored as int, ×100)
-                null_int,  // GC_skew_amplitude - set later from GC skew computation (stored as int, ×100)
-                null_int,  // Positive_GC_skew_windows_percentage - set later from GC skew computation (stored as int 0-100)
+                null_int,  // GC_mean - set later from GC content computation (×10_000)
+                null_int,  // GC_sd - set later from GC content computation (×10_000)
+                null_int,  // GC_skew_amplitude - set later from GC skew computation (×10_000)
+                null_int,  // Positive_GC_skew_windows_percentage - set later from GC skew computation (×10_000)
                 null_int,  // Number_of_samples - set later
             ])
             .with_context(|| format!("Failed to append contig: {}", contig.name))?;

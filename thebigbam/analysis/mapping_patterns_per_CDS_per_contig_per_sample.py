@@ -445,8 +445,8 @@ def run(args):
     _cov_scales = {r[0]: float(r[1]) for r in conn.execute(
         "SELECT Column_name, Scale FROM Column_scales WHERE Feature_name = 'Coverage'"
     ).fetchall()}
-    _s_af = _cov_scales.get("Aligned_fraction_percentage", 10.0)
-    _s_tm = _cov_scales.get("Coverage_trimmed_mean", 10.0)
+    _s_af = _cov_scales["Aligned_fraction_percentage"]
+    _s_tm = _cov_scales["Coverage_trimmed_mean"]
 
     from thebigbam.database.database_getters import is_mag_mode
     mag_mode = is_mag_mode(conn)
