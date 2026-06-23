@@ -119,6 +119,20 @@ def build_mag_summary_data(conn, mag_name, sample_names):
 
     cur = conn.cursor()
 
+    # Resolve text names to integer IDs for efficient view queries
+    mag_row = cur.execute("SELECT MAG_id FROM MAG WHERE MAG_name = ?", [mag_name]).fetchone()
+    if not mag_row:
+        return []
+    mag_id = mag_row[0]
+
+    placeholders = ','.join(['?'] * len(sample_names))
+    sid_rows = cur.execute(
+        f"SELECT Sample_name, Sample_id FROM Sample WHERE Sample_name IN ({placeholders})",
+        list(sample_names),
+    ).fetchall()
+    name_to_sid = {r[0]: r[1] for r in sid_rows}
+    sample_ids = [name_to_sid[n] for n in sample_names if n in name_to_sid]
+
     # Check which views exist
     view_col_map = [
         ('Explicit_coverage_per_MAG', coverage_cols),
@@ -133,7 +147,6 @@ def build_mag_summary_data(conn, mag_name, sample_names):
 
     n = len(sample_names)
     sample_idx = {name: i for i, name in enumerate(sample_names)}
-    placeholders = ','.join(['?'] * n)
 
     # Microdiversity SQL columns differ from dict keys (prefixed with Micro_)
     microdiversity_sql_map = {
@@ -156,8 +169,8 @@ def build_mag_summary_data(conn, mag_name, sample_names):
                 cols_str = ", ".join(col_dict.keys())
             cur.execute(
                 f"SELECT Sample_name, {cols_str} FROM {view_name} "
-                f"WHERE MAG_name = ? AND Sample_name IN ({placeholders})",
-                [mag_name] + list(sample_names),
+                f"WHERE MAG_id = ? AND Sample_id IN ({','.join(['?'] * len(sample_ids))})",
+                [mag_id] + sample_ids,
             )
             for row in cur.fetchall():
                 sample_name, *values = row
@@ -475,8 +488,21 @@ def build_summary_data(conn, contig_name, sample_names):
     if not sample_names:
         return data
 
-    # Check if any sample is paired-read
+    # Resolve text names to integer IDs for efficient view queries
+    contig_row = cur.execute("SELECT Contig_id FROM Contig WHERE Contig_name = ?", [contig_name]).fetchone()
+    if not contig_row:
+        return data
+    contig_id = contig_row[0]
+
     placeholders = ','.join(['?'] * len(sample_names))
+    sid_rows = cur.execute(
+        f"SELECT Sample_name, Sample_id FROM Sample WHERE Sample_name IN ({placeholders})",
+        list(sample_names),
+    ).fetchall()
+    name_to_sid = {r[0]: r[1] for r in sid_rows}
+    sample_ids = [name_to_sid[n] for n in sample_names if n in name_to_sid]
+
+    # Check if any sample is paired-read
     cur.execute(
         f"SELECT COUNT(*) FROM Sample WHERE Sample_name IN ({placeholders}) AND Sequencing_type = 'paired-short'",
         list(sample_names)
@@ -502,7 +528,7 @@ def build_summary_data(conn, contig_name, sample_names):
         "Micro_Clippings_per_100kbp": "Clippings_per_100kbp",
     }
 
-    # Helper to query a view and fill data
+    # Helper to query a view and fill data (filters on integer IDs for PK pushdown)
     def query_view(view_name, col_dict, sql_col_map=None):
         try:
             if sql_col_map:
@@ -512,9 +538,9 @@ def build_summary_data(conn, contig_name, sample_names):
             query = f"""
                 SELECT Sample_name, {cols_str}
                 FROM {view_name}
-                WHERE Contig_name = ? AND Sample_name IN ({','.join(['?'] * len(sample_names))})
+                WHERE Contig_id = ? AND Sample_id IN ({','.join(['?'] * len(sample_ids))})
             """
-            cur.execute(query, [contig_name] + list(sample_names))
+            cur.execute(query, [contig_id] + sample_ids)
             for row in cur.fetchall():
                 sample_name, *values = row
                 idx = sample_idx.get(sample_name)
@@ -523,7 +549,7 @@ def build_summary_data(conn, contig_name, sample_names):
                 for value_col, cell in zip(col_dict.keys(), values):
                     data[value_col][idx] = cell
         except Exception:
-            pass  # View might not exist or have no data
+            pass
 
     query_view("Explicit_coverage", coverage_cols)
     query_view("Explicit_misassembly", misassembly_cols)

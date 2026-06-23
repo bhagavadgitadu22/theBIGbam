@@ -1196,20 +1196,12 @@ def resolve_column_null_stats(
 # The Rust pipeline creates the core tables; these supplement with the
 # access patterns that appear in Python queries.
 _SERVE_INDEXES = [
-    # Feature_blob: every per-contig+sample feature lookup (serve, analysis, inspect)
-    ("idx_feature_blob",       "Feature_blob",       "(Contig_id, Sample_id, Feature_id)"),
-    # Feature_blob_chunk: base-resolution chunk queries (small window rendering)
-    ("idx_feature_blob_chunk", "Feature_blob_chunk", "(Contig_id, Sample_id, Feature_id, Chunk_idx)"),
-    # Contig-level blob lookups (GC content, GC skew, repeats, etc.)
-    ("idx_contig_blob",        "Contig_blob",        "(Contig_id, Feature_id)"),
-    ("idx_contig_blob_chunk",  "Contig_blob_chunk",  "(Contig_id, Feature_id, Chunk_idx)"),
-    # Gene map rendering and CDS analysis
-    ("idx_annot_core",         "Contig_annotation_core", "(Contig_id, \"Type\")"),
-    # MAG membership joins (every MAG-mode path)
-    ("idx_mag_contigs_mag",    "MAG_contigs_association", "(MAG_id)"),
-    ("idx_mag_contigs_contig", "MAG_contigs_association", "(Contig_id)"),
-    # Coverage by integer ID (sample list for contig, MAG list for sample)
-    ("idx_coverage_ids",       "Coverage",           "(Contig_id, Sample_id)"),
+    ("idx_annot_core",           "Contig_annotation_core",  '(Contig_id, "Type")'),
+    ("idx_mag_contigs_contig",   "MAG_contigs_association", "(Contig_id)"),
+    ("idx_annot_qualifier_aid",  "Annotation_qualifier",    "(Annotation_id)"),
+    ("idx_annot_qualifier_key",  "Annotation_qualifier",    '("Key")'),
+    ("idx_contig_qualifier_key", "Contig_qualifier",        '("Key")'),
+    ("idx_phage_termini_pkg",    "Phage_termini",           "(Packaging_id)"),
 ]
 
 

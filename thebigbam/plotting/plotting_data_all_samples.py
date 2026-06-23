@@ -71,10 +71,9 @@ def generate_bokeh_plot_all_samples(conn, variable, contig_name, xstart=None, xe
                 sample_ids = ordered_ids
                 sample_names = [id_to_name[sid] for sid in ordered_ids]
             else:
-                sample_name_placeholders = ",".join(["?"] * len(sample_names))
                 cur.execute(
-                    f'SELECT Sample_name FROM "{order_by_source}" WHERE Contig_name = ? AND Sample_name IN ({sample_name_placeholders}) ORDER BY "{order_by_column}" {direction} NULLS LAST',
-                    [contig_name] + list(sample_names)
+                    f'SELECT Sample_name FROM "{order_by_source}" WHERE Contig_id = ? AND Sample_id IN ({sample_id_placeholders}) ORDER BY "{order_by_column}" {direction} NULLS LAST',
+                    [contig_id] + sample_ids
                 )
                 ordered_names = [r[0] for r in cur.fetchall()]
                 missing = [s for s in sample_names if s not in set(ordered_names)]

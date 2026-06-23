@@ -2884,9 +2884,11 @@ pub fn run_all_samples(
         eprintln!();
         eprintln!("Database populated with {} contigs and {} annotations", contigs.len(), annotations.len());
 
-        if create_indexes {
-            db_writer.create_serve_indexes(config.enable_timing)?;
-        }
+        let index_secs = if create_indexes {
+            db_writer.create_serve_indexes()?
+        } else {
+            0.0
+        };
 
         let t_finalize = if config.enable_timing { Some(std::time::Instant::now()) } else { None };
         let ft = db_writer.finalize()?;
@@ -2897,6 +2899,7 @@ pub fn run_all_samples(
                 let _ = writeln!(f, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
                 let _ = writeln!(f, "### Post-sample phases");
                 let _ = writeln!(f);
+                let _ = writeln!(f, "  Build indexes        : {:>10.3} s", index_secs);
                 let _ = writeln!(f, "  DB finalize          : {:>10.3} s", t.elapsed().as_secs_f64());
                 let _ = writeln!(f, "    create_views       : {:>10.3} s", ft.create_views_secs);
                 let _ = writeln!(f, "    cleanup_vars       : {:>10.3} s", ft.cleanup_vars_secs);
@@ -3228,7 +3231,7 @@ fn process_samples_parallel(
     }
 
     // Spawn dedicated writer thread
-    let writer_handle = thread::spawn(move || -> Result<(usize, std::time::Duration, Vec<SampleTimings>, usize, usize, FinalizeTimings, f64, f64, f64)> {
+    let writer_handle = thread::spawn(move || -> Result<(usize, std::time::Duration, Vec<SampleTimings>, usize, usize, FinalizeTimings, f64, f64, f64, f64)> {
         let write_start = std::time::Instant::now();
         let mut written_count = 0usize;
         let mut mag_drops: usize = 0;
@@ -3353,9 +3356,11 @@ fn process_samples_parallel(
         }
 
         // Build query indexes
-        if create_indexes {
-            db_writer.create_serve_indexes(enable_timing_writer)?;
-        }
+        let index_secs = if create_indexes {
+            db_writer.create_serve_indexes()?
+        } else {
+            0.0
+        };
 
         // Finalize database
         let rss_before_finalize = get_rss_mb();
@@ -3365,7 +3370,7 @@ fn process_samples_parallel(
         let rss_after_finalize = get_rss_mb();
         write_pb_clone.finish();
 
-        Ok((written_count, write_start.elapsed(), all_timings, mag_drops, samples_discarded, ft, finalize_secs, rss_before_finalize, rss_after_finalize))
+        Ok((written_count, write_start.elapsed(), all_timings, mag_drops, samples_discarded, ft, index_secs, finalize_secs, rss_before_finalize, rss_after_finalize))
     });
 
     // Process samples in parallel, sending to channel immediately
@@ -3429,7 +3434,7 @@ fn process_samples_parallel(
     let processing_time = start_time.elapsed();
 
     // Wait for writer thread to finish
-    let (written_count, writing_time, all_timings, mag_drops, samples_discarded, ft, finalize_secs, rss_before_finalize, rss_after_finalize) = writer_handle
+    let (written_count, writing_time, all_timings, mag_drops, samples_discarded, ft, index_secs, finalize_secs, rss_before_finalize, rss_after_finalize) = writer_handle
         .join()
         .map_err(|_| anyhow::anyhow!("Writer thread panicked"))??;
 
@@ -3455,7 +3460,7 @@ fn process_samples_parallel(
         let log_path = timing_log_path(output_db);
         match fs::OpenOptions::new().append(true).open(&log_path) {
             Ok(mut f) => {
-                if let Err(e) = finish_timing_log(&mut f, &all_timings, elapsed, &pre_timings, run_start, &ft, finalize_secs, rss_before_finalize, rss_after_finalize) {
+                if let Err(e) = finish_timing_log(&mut f, &all_timings, elapsed, &pre_timings, run_start, &ft, index_secs, finalize_secs, rss_before_finalize, rss_after_finalize) {
                     eprintln!("Warning: failed to write timing totals: {}", e);
                 }
             }
@@ -3713,9 +3718,11 @@ fn process_samples_sequential(
     }
 
     // Build query indexes
-    if create_indexes {
-        db_writer.create_serve_indexes(config.enable_timing)?;
-    }
+    let index_secs = if create_indexes {
+        db_writer.create_serve_indexes()?
+    } else {
+        0.0
+    };
 
     // Finalize database
     let rss_before_finalize = get_rss_mb();
@@ -3731,7 +3738,7 @@ fn process_samples_sequential(
     // Append grand totals to the timing log
     if config.enable_timing && !all_timings.is_empty() {
         if let Some(ref mut f) = timing_file {
-            if let Err(e) = finish_timing_log(f, &all_timings, start_time.elapsed(), &pre_timings, run_start, &ft, finalize_secs, rss_before_finalize, rss_after_finalize) {
+            if let Err(e) = finish_timing_log(f, &all_timings, start_time.elapsed(), &pre_timings, run_start, &ft, index_secs, finalize_secs, rss_before_finalize, rss_after_finalize) {
                 eprintln!("Warning: failed to write timing totals: {}", e);
             }
         }
@@ -3875,6 +3882,7 @@ fn finish_timing_log(
     pt: &PreSampleTimings,
     run_start: std::time::Instant,
     ft: &FinalizeTimings,
+    index_secs: f64,
     finalize_secs: f64,
     rss_before_finalize: f64,
     rss_after_finalize: f64,
@@ -3925,6 +3933,7 @@ fn finish_timing_log(
     writeln!(f, "  Write MAG data       : {:>10.3} s", sum_ns(|t| t.mag_write_ns))?;
     writeln!(f, "  ---- Post-sample phases ----")?;
     writeln!(f, "  RSS before finalize  : {:>10.0} MB", rss_before_finalize)?;
+    writeln!(f, "  Build indexes        : {:>10.3} s", index_secs)?;
     writeln!(f, "  DB finalize          : {:>10.3} s", finalize_secs)?;
     writeln!(f, "    create_views       : {:>10.3} s", ft.create_views_secs)?;
     writeln!(f, "    cleanup_vars       : {:>10.3} s", ft.cleanup_vars_secs)?;

@@ -804,16 +804,19 @@ def decode_zoom_standalone(zoom_blob_bytes, target_bin_size, scale_divisor, zoom
 # Feature ID Mapping (read from DB Variable table)
 # ============================================================================
 
+_FEATURE_ID_CACHE: dict[str, int] = {}
+
 def feature_name_to_id(name, conn):
     """Look up Feature_id from the Variable table (1-based).
 
     Uses the DB as source of truth so Python never goes out of sync
-    with the Rust VARIABLES array.
+    with the Rust VARIABLES array.  Results are cached module-wide
+    since the Variable table is immutable during serve.
     """
-    row = conn.execute(
-        "SELECT Variable_id FROM Variable WHERE Variable_name = ?", [name]
-    ).fetchone()
-    return row[0] if row else None
+    if not _FEATURE_ID_CACHE:
+        for row in conn.execute("SELECT Variable_name, Variable_id FROM Variable").fetchall():
+            _FEATURE_ID_CACHE[row[0]] = row[1]
+    return _FEATURE_ID_CACHE.get(name)
 
 
 def is_contig_blob_feature(name):

@@ -1868,16 +1868,14 @@ impl DbWriter {
         self.contig_name_to_id.keys().cloned().collect()
     }
 
-    pub fn create_serve_indexes(&self, enable_timing: bool) -> Result<f64> {
+    pub fn create_serve_indexes(&self) -> Result<f64> {
         const SERVE_INDEXES: &[(&str, &str, &str)] = &[
-            ("idx_feature_blob",       "Feature_blob",              "(Contig_id, Sample_id, Feature_id)"),
-            ("idx_feature_blob_chunk", "Feature_blob_chunk",        "(Contig_id, Sample_id, Feature_id, Chunk_idx)"),
-            ("idx_contig_blob",        "Contig_blob",               "(Contig_id, Feature_id)"),
-            ("idx_contig_blob_chunk",  "Contig_blob_chunk",         "(Contig_id, Feature_id, Chunk_idx)"),
-            ("idx_annot_core",         "Contig_annotation_core",    "(Contig_id, \"Type\")"),
-            ("idx_mag_contigs_mag",    "MAG_contigs_association",   "(MAG_id)"),
-            ("idx_mag_contigs_contig", "MAG_contigs_association",   "(Contig_id)"),
-            ("idx_coverage_ids",       "Coverage",                  "(Contig_id, Sample_id)"),
+            ("idx_annot_core",           "Contig_annotation_core",  "(Contig_id, \"Type\")"),
+            ("idx_mag_contigs_contig",   "MAG_contigs_association", "(Contig_id)"),
+            ("idx_annot_qualifier_aid",  "Annotation_qualifier",    "(Annotation_id)"),
+            ("idx_annot_qualifier_key",  "Annotation_qualifier",    "(\"Key\")"),
+            ("idx_contig_qualifier_key", "Contig_qualifier",        "(\"Key\")"),
+            ("idx_phage_termini_pkg",    "Phage_termini",           "(Packaging_id)"),
         ];
 
         eprintln!();
@@ -1894,7 +1892,10 @@ impl DbWriter {
                 params![table_name],
                 |row| row.get(0),
             ).unwrap_or(false);
-            if !exists { continue; }
+            if !exists {
+                eprintln!("[index] {} on {} (skipped, table absent)", idx_name, table_name);
+                continue;
+            }
 
             let t = std::time::Instant::now();
             conn.execute(
@@ -1902,11 +1903,10 @@ impl DbWriter {
                 [],
             ).with_context(|| format!("Failed to create index {} on {}", idx_name, table_name))?;
 
-            if enable_timing {
-                eprintln!("[index] {} on {}: {:.1}s", idx_name, table_name, t.elapsed().as_secs_f64());
-            }
+            eprintln!("[index] {} on {}: {:.1}s", idx_name, table_name, t.elapsed().as_secs_f64());
         }
 
+        eprintln!();
         let total_secs = total_start.elapsed().as_secs_f64();
         Ok(total_secs)
     }
@@ -3225,6 +3225,8 @@ fn create_views(conn: &Connection, has_bam: bool, is_mag_mode: bool, _has_annota
              SELECT Sample_id, SUM(RPKM) AS total_rpkm FROM rpkm_base GROUP BY Sample_id
          )
          SELECT
+             p.Contig_id,
+             p.Sample_id,
              c.Contig_name,
              s.Sample_name,
              p.Aligned_fraction_percentage / {s_af:.1} AS Aligned_fraction_percentage,
@@ -3250,6 +3252,8 @@ fn create_views(conn: &Connection, has_bam: bool, is_mag_mode: bool, _has_annota
     conn.execute(
         "CREATE VIEW Explicit_misassembly AS
          SELECT
+             m.Contig_id,
+             m.Sample_id,
              c.Contig_name,
              s.Sample_name,
              CASE WHEN c.Contig_length > 0 THEN m.Mismatches_count * 100000.0 / c.Contig_length ELSE 0 END AS Mismatches_per_100kbp,
@@ -3271,6 +3275,8 @@ fn create_views(conn: &Connection, has_bam: bool, is_mag_mode: bool, _has_annota
     conn.execute(
         "CREATE VIEW Explicit_microdiversity AS
          SELECT
+             md.Contig_id,
+             md.Sample_id,
              c.Contig_name,
              s.Sample_name,
              CASE WHEN c.Contig_length > 0 THEN md.Mismatches_count * 100000.0 / c.Contig_length ELSE 0 END AS Mismatches_per_100kbp,
@@ -3292,6 +3298,8 @@ fn create_views(conn: &Connection, has_bam: bool, is_mag_mode: bool, _has_annota
     conn.execute(
         &format!("CREATE VIEW Explicit_side_misassembly AS
          SELECT
+             sm.Contig_id,
+             sm.Sample_id,
              c.Contig_name,
              s.Sample_name,
              COALESCE(sm.Coverage_first_position, 0) AS Coverage_first_position,
@@ -3316,6 +3324,8 @@ fn create_views(conn: &Connection, has_bam: bool, is_mag_mode: bool, _has_annota
     conn.execute(
         "CREATE VIEW Explicit_topology AS
          SELECT
+             t.Contig_id,
+             t.Sample_id,
              c.Contig_name,
              s.Sample_name,
              t.Circularising_reads AS Circularising_reads,
@@ -3337,6 +3347,8 @@ fn create_views(conn: &Connection, has_bam: bool, is_mag_mode: bool, _has_annota
     conn.execute(
         "CREATE VIEW Explicit_phage_mechanisms AS
          SELECT
+             p.Contig_id,
+             p.Sample_id,
              c.Contig_name,
              s.Sample_name,
              m.Packaging_mechanism,
@@ -3441,6 +3453,8 @@ fn create_views(conn: &Connection, has_bam: bool, is_mag_mode: bool, _has_annota
                  SELECT Sample_id, SUM(RPKM) AS total_rpkm FROM rpkm_base_mag GROUP BY Sample_id
              )
              SELECT
+                 mc.MAG_id,
+                 mc.Sample_id,
                  mg.MAG_name,
                  s.Sample_name,
                  mc.Aligned_fraction_percentage / {s_af:.1}                                                AS Aligned_fraction_percentage,
@@ -3465,22 +3479,24 @@ fn create_views(conn: &Connection, has_bam: bool, is_mag_mode: bool, _has_annota
         conn.execute(
             "CREATE VIEW Explicit_misassembly_per_MAG AS
              SELECT
+                 mg.MAG_id,
+                 s.Sample_id,
                  mg.MAG_name,
                  s.Sample_name,
-                 SUM(m.Mismatches_count) * 100000.0 / NULLIF(SUM(c.Contig_length), 0) AS Mismatches_per_100kbp,      -- recomputed
+                 SUM(m.Mismatches_count) * 100000.0 / NULLIF(SUM(c.Contig_length), 0) AS Mismatches_per_100kbp,
                  SUM(m.Deletions_count)  * 100000.0 / NULLIF(SUM(c.Contig_length), 0) AS Deletions_per_100kbp,
                  SUM(m.Insertions_count) * 100000.0 / NULLIF(SUM(c.Contig_length), 0) AS Insertions_per_100kbp,
                  SUM(m.Clippings_count)  * 100000.0 / NULLIF(SUM(c.Contig_length), 0) AS Clippings_per_100kbp,
-                 SUM(m.Collapse_bp)  AS Collapse_bp,                                                                  -- SUM
+                 SUM(m.Collapse_bp)  AS Collapse_bp,
                  SUM(m.Collapse_bp)  * 100000.0 / NULLIF(SUM(c.Contig_length), 0) AS Collapse_per_100kbp,
-                 SUM(m.Expansion_bp) AS Expansion_bp,                                                                 -- SUM
+                 SUM(m.Expansion_bp) AS Expansion_bp,
                  SUM(m.Expansion_bp) * 100000.0 / NULLIF(SUM(c.Contig_length), 0) AS Expansion_per_100kbp
              FROM Misassembly m
              JOIN Contig c ON m.Contig_id = c.Contig_id
              JOIN Sample s ON m.Sample_id = s.Sample_id
              JOIN MAG_contigs_association mca ON mca.Contig_id = c.Contig_id
              JOIN MAG mg ON mg.MAG_id = mca.MAG_id
-             GROUP BY mg.MAG_name, s.Sample_name",
+             GROUP BY mg.MAG_id, s.Sample_id, mg.MAG_name, s.Sample_name",
             [],
         )
         .context("Failed to create Explicit_misassembly_per_MAG VIEW")?;
@@ -3488,6 +3504,8 @@ fn create_views(conn: &Connection, has_bam: bool, is_mag_mode: bool, _has_annota
         conn.execute(
             "CREATE VIEW Explicit_microdiversity_per_MAG AS
              SELECT
+                 mg.MAG_id,
+                 s.Sample_id,
                  mg.MAG_name,
                  s.Sample_name,
                  SUM(md.Mismatches_count) * 100000.0 / NULLIF(SUM(c.Contig_length), 0) AS Mismatches_per_100kbp,
@@ -3503,7 +3521,7 @@ fn create_views(conn: &Connection, has_bam: bool, is_mag_mode: bool, _has_annota
              JOIN Sample s ON md.Sample_id = s.Sample_id
              JOIN MAG_contigs_association mca ON mca.Contig_id = c.Contig_id
              JOIN MAG mg ON mg.MAG_id = mca.MAG_id
-             GROUP BY mg.MAG_name, s.Sample_name",
+             GROUP BY mg.MAG_id, s.Sample_id, mg.MAG_name, s.Sample_name",
             [],
         )
         .context("Failed to create Explicit_microdiversity_per_MAG VIEW")?;
