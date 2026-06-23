@@ -177,31 +177,31 @@ impl ValueScale {
 }
 
 // Sparse event metadata scales (fixed binary format constants).
-pub const METADATA_STATS_SCALE: f64 = 100.0;
-pub const METADATA_PREVALENCE_SCALE: f64 = 1000.0;
+pub const METADATA_STATS_SCALE: f64 = 10_000.0;
+pub const METADATA_PREVALENCE_SCALE: f64 = 10_000.0;
 
 // SQL INTEGER column scales.
 // real_value * scale = stored_integer.
 // stored_integer / scale = real_value.
 pub const COLUMN_SCALES: &[(&str, &str, i32)] = &[
-    ("Coverage", "Coverage_mean", 10),
-    ("Coverage", "Coverage_median", 10),
-    ("Coverage", "Coverage_trimmed_mean", 10),
+    ("Coverage", "Coverage_mean", 10_000),
+    ("Coverage", "Coverage_median", 10_000),
+    ("Coverage", "Coverage_trimmed_mean", 10_000),
     ("Coverage", "Coverage_coefficient_of_variation", 1_000_000),
     ("Coverage", "Coverage_relative_coverage_roughness", 1_000_000),
-    ("Coverage", "Aligned_fraction_percentage", 10),
-    ("Coverage", "Expected_aligned_fraction", 10),
-    ("Contig", "GC_mean", 1),
-    ("Contig", "GC_sd", 100),
-    ("Contig", "GC_skew_amplitude", 100),
-    ("Contig", "Duplication_percentage", 10),
-    ("Contig", "Positive_GC_skew_windows_percentage", 10),
-    ("Contig_directRepeats", "Pident", 100),
-    ("Contig_invertedRepeats", "Pident", 100),
-    ("Phage_termini", "Tau", 100),
-    ("Phage_termini", "Clipped_ratio", 100),
-    ("Side_misassembly", "Contig_start_collapse_percentage", 10),
-    ("Side_misassembly", "Contig_end_collapse_percentage", 10),
+    ("Coverage", "Aligned_fraction_percentage", 10_000),
+    ("Coverage", "Expected_aligned_fraction", 10_000),
+    ("Contig", "GC_mean", 10_000),
+    ("Contig", "GC_sd", 10_000),
+    ("Contig", "GC_skew_amplitude", 10_000),
+    ("Contig", "Duplication_percentage", 10_000),
+    ("Contig", "Positive_GC_skew_windows_percentage", 10_000),
+    ("Contig_directRepeats", "Pident", 10_000),
+    ("Contig_invertedRepeats", "Pident", 10_000),
+    ("Phage_termini", "Tau", 10_000),
+    ("Phage_termini", "Clipped_ratio", 10_000),
+    ("Side_misassembly", "Contig_start_collapse_percentage", 10_000),
+    ("Side_misassembly", "Contig_end_collapse_percentage", 10_000),
 ];
 
 pub fn get_column_scale(table: &str, column: &str) -> f64 {
