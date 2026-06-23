@@ -27,7 +27,7 @@ use crate::compress::{
     Run,
     add_compressed_feature_with_stats,
 };
-use crate::db::{DbWriter, MisassemblyData, MicrodiversityData, SideMisassemblyData, TopologyData, GCContentData, RepeatsData};
+use crate::db::{DbWriter, FinalizeTimings, MisassemblyData, MicrodiversityData, SideMisassemblyData, TopologyData, GCContentData, RepeatsData};
 use crate::gc_content::{compute_gc_content_and_skew, GCParams};
 use crate::features::{CdsIndex, FeatureArrays, ModuleFlags, compute_codon_changes_from_summaries};
 use crate::parser::{parse_annotations, compute_annotation_sequences};
@@ -431,7 +431,10 @@ fn validate_inputs(
 fn detect_all_sample_circularities(
     bam_files: &[PathBuf],
 ) -> Result<HashMap<PathBuf, bool>> {
-    eprintln!("\n### Auto-detecting circularity per sample...");
+    eprintln!();
+    eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    eprintln!("### Auto-detecting circularity per sample...");
+    eprintln!();
     let mut result = HashMap::new();
     for bam_path in bam_files {
         let sample_name = bam_path
@@ -517,7 +520,9 @@ fn run_autoblast(contigs: &[ContigInfo]) -> Result<Vec<RepeatsData>> {
     }
 
     let total_contigs = contigs_with_seq.len();
-    eprintln!("\n### Running repeat detection (BLAST) on {} contigs...", total_contigs);
+    eprintln!();
+    eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    eprintln!("### Running repeat detection (BLAST) on {} contigs...", total_contigs);
 
     let done = std::sync::atomic::AtomicUsize::new(0);
 
@@ -611,7 +616,9 @@ fn run_mag_interblast(
     let name_to_contig: HashMap<&str, &ContigInfo> =
         contigs.iter().map(|c| (c.name.as_str(), c)).collect();
 
-    eprintln!("\n### Running MAG inter-contig BLAST on {} MAGs...", mag_manifest.len());
+    eprintln!();
+    eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    eprintln!("### Running MAG inter-contig BLAST on {} MAGs...", mag_manifest.len());
 
     let total_repeat_count = std::sync::atomic::AtomicUsize::new(0);
     let total_inter_count = std::sync::atomic::AtomicUsize::new(0);
@@ -2075,8 +2082,9 @@ pub fn run_all_samples(
     output_db: &Path,
     modules: &[String],
     config: &ProcessConfig,
-    _create_indexes: bool, // Ignored - DuckDB uses zone maps instead of indexes
+    create_indexes: bool,
     extend_db: &Path,
+    command_line: &str,
 ) -> Result<ProcessResult> {
     unsafe {
         htslib::hts_set_log_level(htslib::htsLogLevel_HTS_LOG_ERROR);
@@ -2096,7 +2104,7 @@ pub fn run_all_samples(
 
     // Open timing log as early as possible so all phases are captured
     let mut timing_file: Option<fs::File> = if config.enable_timing {
-        match open_timing_log(output_db, config.threads, bam_files.len()) {
+        match open_timing_log(output_db, config.threads, bam_files.len(), command_line) {
             Ok(f) => Some(f),
             Err(e) => { eprintln!("Warning: could not open timing log: {}", e); None }
         }
@@ -2105,7 +2113,10 @@ pub fn run_all_samples(
     };
 
     // 2. Parse annotations (GenBank/GFF3) or extract contigs from BAMs
-    eprintln!("\n### Parsing input files...");
+    eprintln!();
+    eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    eprintln!("### Parsing input files...");
+    eprintln!();
     let t_parse = if config.enable_timing { Some(std::time::Instant::now()) } else { None };
 
     let has_genbank = !genbank_path.as_os_str().is_empty();
@@ -2287,10 +2298,14 @@ pub fn run_all_samples(
     //    Skipped in MAG mode — sequences are already merged per-MAG above.
     if config.view_mode != ViewMode::Mag && !assembly_path.as_os_str().is_empty() {
         if assembly_path.is_file() {
-            eprintln!("\n### Merging sequences from assembly FASTA...");
+            eprintln!();
+            eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+            eprintln!("### Merging sequences from assembly FASTA...");
             merge_sequences_from_fasta(&mut contigs, assembly_path)?;
         } else if assembly_path.is_dir() {
-            eprintln!("\n### Merging sequences from assembly FASTA directory...");
+            eprintln!();
+            eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+            eprintln!("### Merging sequences from assembly FASTA directory...");
             let mut fasta_entries: Vec<_> = std::fs::read_dir(assembly_path)?
                 .filter_map(|e| e.ok())
                 .map(|e| e.path())
@@ -2311,7 +2326,10 @@ pub fn run_all_samples(
     let parse_rss_mb = if config.enable_timing { get_rss_mb() } else { 0.0 };
     if let Some(ref mut f) = timing_file {
         use std::io::Write;
-        let _ = writeln!(f, "=== Pre-sample phases ===");
+        let _ = writeln!(f);
+        let _ = writeln!(f, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+        let _ = writeln!(f, "### Pre-sample phases");
+        let _ = writeln!(f);
         let _ = writeln!(f, "  Annotation+FASTA parse: {:>9.3} s  [RSS: {:.0} MB]", parse_secs, parse_rss_mb);
         let _ = f.flush();
     }
@@ -2694,7 +2712,9 @@ pub fn run_all_samples(
         }
     } else {
         if !config.blast && has_sequences {
-            eprintln!("\n### BLAST repeat detection: skipped (use --blast to enable)");
+            eprintln!();
+            eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+            eprintln!("### BLAST repeat detection: skipped (use --blast to enable)");
         }
         Vec::new()
     };
@@ -2722,7 +2742,9 @@ pub fn run_all_samples(
         .collect();
     let n_gc_contigs = contigs_with_seq.len();
     if n_gc_contigs > 0 {
-        eprintln!("\n### Computing GC content for {} contigs...", n_gc_contigs);
+        eprintln!();
+        eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+        eprintln!("### Computing GC content for {} contigs...", n_gc_contigs);
     }
     let mut gc_compute_ns: u64 = 0;
     let mut gc_write_blob_ns: u64 = 0;
@@ -2838,7 +2860,9 @@ pub fn run_all_samples(
     // Write MAG rows after per-contig GC/duplication stats are finalized.
     let t_write_mags = if config.enable_timing { Some(std::time::Instant::now()) } else { None };
     if config.view_mode == ViewMode::Mag && !mag_contig_map.is_empty() {
-        eprintln!("\n### Writing {} MAGs ({} associations)...",
+        eprintln!();
+        eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+        eprintln!("### Writing {} MAGs ({} associations)...",
             mag_contig_map.len(),
             mag_contig_map.iter().map(|(_, v)| v.len()).sum::<usize>(),
         );
@@ -2854,15 +2878,25 @@ pub fn run_all_samples(
 
     // If no BAM files provided, skip sample processing (genbank-only mode)
     if bam_files.is_empty() {
-        eprintln!("\n### No BAM files provided - skipping sample processing");
+        eprintln!();
+        eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+        eprintln!("### No BAM files provided - skipping sample processing");
+        eprintln!();
         eprintln!("Database populated with {} contigs and {} annotations", contigs.len(), annotations.len());
+
+        if create_indexes {
+            db_writer.create_serve_indexes(config.enable_timing)?;
+        }
 
         let t_finalize = if config.enable_timing { Some(std::time::Instant::now()) } else { None };
         let ft = db_writer.finalize()?;
         if let Some(t) = t_finalize {
             if let Some(ref mut f) = timing_file {
                 use std::io::Write;
-                let _ = writeln!(f, "\n=== Finalize ===");
+                let _ = writeln!(f);
+                let _ = writeln!(f, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+                let _ = writeln!(f, "### Post-sample phases");
+                let _ = writeln!(f);
                 let _ = writeln!(f, "  DB finalize          : {:>10.3} s", t.elapsed().as_secs_f64());
                 let _ = writeln!(f, "    create_views       : {:>10.3} s", ft.create_views_secs);
                 let _ = writeln!(f, "    cleanup_vars       : {:>10.3} s", ft.cleanup_vars_secs);
@@ -2884,8 +2918,11 @@ pub fn run_all_samples(
     }
 
     // 8. Process samples
-    eprintln!("\n### Processing {} samples with {} threads", bam_files.len(), config.threads);
-    eprintln!("Modules: {}\n", modules.join(", "));
+    eprintln!();
+    eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    eprintln!("### Processing {} samples with {} threads", bam_files.len(), config.threads);
+    eprintln!();
+    eprintln!("Modules: {}", modules.join(", "));
 
     let flags = ModuleFlags::from_modules(modules);
     if flags.phagetermini && !config.blast {
@@ -2910,7 +2947,7 @@ pub fn run_all_samples(
         cds_build_rss_mb: 0.0,
     };
     for c in &mut contigs { c.sequence = None; }
-    let result = process_samples_parallel(&bam_files, &contigs, flags, config, &circularity_map, db_writer, &repeats, &annotations, output_db, timing_file, pre_timings, &mag_contig_map, t_run_start)?;
+    let result = process_samples_parallel(&bam_files, &contigs, flags, config, &circularity_map, db_writer, &repeats, &annotations, output_db, timing_file, pre_timings, &mag_contig_map, t_run_start, create_indexes)?;
 
     print_summary(&result, output_db);
 
@@ -3065,6 +3102,7 @@ fn process_samples_parallel(
     mut pre_timings: PreSampleTimings,
     mag_contig_map: &[(String, Vec<String>)],
     run_start: std::time::Instant,
+    create_indexes: bool,
 ) -> Result<ProcessResult> {
     let total = bam_files.len();
     let is_tty = atty::is(Stream::Stderr);
@@ -3076,7 +3114,7 @@ fn process_samples_parallel(
     //   outer sample parallelism causes all samples to progress simultaneously
     //   without any completing. Sequential ensures samples finish one-by-one.
     if config.threads == 1 || contigs.len() >= 500 {
-        return process_samples_sequential(bam_files, contigs, flags, config, circularity_map, db_writer, is_tty, repeats, annotations, output_db, timing_file, pre_timings, mag_contig_map, run_start);
+        return process_samples_sequential(bam_files, contigs, flags, config, circularity_map, db_writer, is_tty, repeats, annotations, output_db, timing_file, pre_timings, mag_contig_map, run_start, create_indexes);
     }
 
     // Adaptive channel size based on memory pressure from contig count
@@ -3186,12 +3224,11 @@ fn process_samples_parallel(
             + pre_timings.autoblast_secs + pre_timings.gc_secs[0] + pre_timings.repeat_blob_secs
             + pre_timings.write_mags_secs + pre_timings.cds_build_secs;
         let _ = writeln!(f, "  TOTAL pre-sample     : {:>10.3} s  [RSS: {:.0} MB]", total_pre, get_rss_mb());
-        let _ = writeln!(f);
         let _ = f.flush();
     }
 
     // Spawn dedicated writer thread
-    let writer_handle = thread::spawn(move || -> Result<(usize, std::time::Duration, Vec<SampleTimings>, usize, usize)> {
+    let writer_handle = thread::spawn(move || -> Result<(usize, std::time::Duration, Vec<SampleTimings>, usize, usize, FinalizeTimings, f64, f64, f64)> {
         let write_start = std::time::Instant::now();
         let mut written_count = 0usize;
         let mut mag_drops: usize = 0;
@@ -3315,6 +3352,11 @@ fn process_samples_parallel(
             }
         }
 
+        // Build query indexes
+        if create_indexes {
+            db_writer.create_serve_indexes(enable_timing_writer)?;
+        }
+
         // Finalize database
         let rss_before_finalize = get_rss_mb();
         let t_finalize = std::time::Instant::now();
@@ -3323,21 +3365,7 @@ fn process_samples_parallel(
         let rss_after_finalize = get_rss_mb();
         write_pb_clone.finish();
 
-        if let Some(ref mut f) = timing_file {
-            use std::io::Write;
-            let _ = writeln!(f, "\n=== Post-sample phases ===");
-            let _ = writeln!(f, "  RSS before finalize  : {:>10.0} MB", rss_before_finalize);
-            let _ = writeln!(f, "  DB finalize          : {:>10.3} s", finalize_secs);
-            let _ = writeln!(f, "    create_views       : {:>10.3} s", ft.create_views_secs);
-            let _ = writeln!(f, "    cleanup_vars       : {:>10.3} s", ft.cleanup_vars_secs);
-            let _ = writeln!(f, "    drop_empty_tables  : {:>10.3} s", ft.drop_empty_secs);
-            let _ = writeln!(f, "    update_counts      : {:>10.3} s", ft.update_counts_secs);
-            let _ = writeln!(f, "    CHECKPOINT         : {:>10.3} s", ft.checkpoint_secs);
-            let _ = writeln!(f, "  RSS after finalize   : {:>10.0} MB", rss_after_finalize);
-            let _ = f.flush();
-        }
-
-        Ok((written_count, write_start.elapsed(), all_timings, mag_drops, samples_discarded))
+        Ok((written_count, write_start.elapsed(), all_timings, mag_drops, samples_discarded, ft, finalize_secs, rss_before_finalize, rss_after_finalize))
     });
 
     // Process samples in parallel, sending to channel immediately
@@ -3401,19 +3429,19 @@ fn process_samples_parallel(
     let processing_time = start_time.elapsed();
 
     // Wait for writer thread to finish
-    let (written_count, writing_time, all_timings, mag_drops, samples_discarded) = writer_handle
+    let (written_count, writing_time, all_timings, mag_drops, samples_discarded, ft, finalize_secs, rss_before_finalize, rss_after_finalize) = writer_handle
         .join()
         .map_err(|_| anyhow::anyhow!("Writer thread panicked"))??;
 
     if samples_discarded > 0 {
-        eprintln!("### Discarded {} samples (all contigs failed thresholds)", samples_discarded);
+        eprintln!("Discarded {} samples (all contigs failed thresholds)", samples_discarded);
     }
     let dropped_contigs = config.contig_drops_counter.load(Ordering::Relaxed);
     if dropped_contigs > 0 {
-        eprintln!("### Discarded {} contigs (failed coverage thresholds)", dropped_contigs);
+        eprintln!("Discarded {} contig/sample pairs (failed coverage thresholds)", dropped_contigs);
     }
     if mag_drops > 0 {
-        eprintln!("### Discarded {} MAGs (failed coverage thresholds)", mag_drops);
+        eprintln!("Discarded {} MAGs (failed coverage thresholds)", mag_drops);
     }
 
     // Clear MultiProgress to avoid duplicate bar display
@@ -3427,7 +3455,7 @@ fn process_samples_parallel(
         let log_path = timing_log_path(output_db);
         match fs::OpenOptions::new().append(true).open(&log_path) {
             Ok(mut f) => {
-                if let Err(e) = finish_timing_log(&mut f, &all_timings, elapsed, &pre_timings, run_start) {
+                if let Err(e) = finish_timing_log(&mut f, &all_timings, elapsed, &pre_timings, run_start, &ft, finalize_secs, rss_before_finalize, rss_after_finalize) {
                     eprintln!("Warning: failed to write timing totals: {}", e);
                 }
             }
@@ -3462,6 +3490,7 @@ fn process_samples_sequential(
     mut pre_timings: PreSampleTimings,
     mag_contig_map: &[(String, Vec<String>)],
     run_start: std::time::Instant,
+    create_indexes: bool,
 ) -> Result<ProcessResult> {
     let total = bam_files.len();
     let start_time = std::time::Instant::now();
@@ -3534,7 +3563,6 @@ fn process_samples_sequential(
             + pre_timings.autoblast_secs + pre_timings.gc_secs[0] + pre_timings.repeat_blob_secs
             + pre_timings.write_mags_secs + pre_timings.cds_build_secs;
         let _ = writeln!(f, "  TOTAL pre-sample     : {:>10.3} s  [RSS: {:.0} MB]", total_pre, get_rss_mb());
-        let _ = writeln!(f);
         let _ = f.flush();
     }
 
@@ -3674,14 +3702,19 @@ fn process_samples_sequential(
     }
 
     if samples_discarded > 0 {
-        eprintln!("### Discarded {} samples (all contigs failed thresholds)", samples_discarded);
+        eprintln!("Discarded {} samples (all contigs failed thresholds)", samples_discarded);
     }
     let dropped_contigs = config.contig_drops_counter.load(Ordering::Relaxed);
     if dropped_contigs > 0 {
-        eprintln!("### Discarded {} contigs (failed coverage thresholds)", dropped_contigs);
+        eprintln!("Discarded {} contig/sample pairs (failed coverage thresholds)", dropped_contigs);
     }
     if mag_drops > 0 {
-        eprintln!("### Discarded {} MAGs (failed coverage thresholds)", mag_drops);
+        eprintln!("Discarded {} MAGs (failed coverage thresholds)", mag_drops);
+    }
+
+    // Build query indexes
+    if create_indexes {
+        db_writer.create_serve_indexes(config.enable_timing)?;
     }
 
     // Finalize database
@@ -3695,24 +3728,10 @@ fn process_samples_sequential(
         eprintln!("Done ({:.2}s)", start_time.elapsed().as_secs_f64());
     }
 
-    if let Some(ref mut f) = timing_file {
-        use std::io::Write;
-        let _ = writeln!(f, "\n=== Post-sample phases ===");
-        let _ = writeln!(f, "  RSS before finalize  : {:>10.0} MB", rss_before_finalize);
-        let _ = writeln!(f, "  DB finalize          : {:>10.3} s", finalize_secs);
-        let _ = writeln!(f, "    create_views       : {:>10.3} s", ft.create_views_secs);
-        let _ = writeln!(f, "    cleanup_vars       : {:>10.3} s", ft.cleanup_vars_secs);
-        let _ = writeln!(f, "    drop_empty_tables  : {:>10.3} s", ft.drop_empty_secs);
-        let _ = writeln!(f, "    update_counts      : {:>10.3} s", ft.update_counts_secs);
-        let _ = writeln!(f, "    CHECKPOINT         : {:>10.3} s", ft.checkpoint_secs);
-        let _ = writeln!(f, "  RSS after finalize   : {:>10.0} MB", rss_after_finalize);
-        let _ = f.flush();
-    }
-
     // Append grand totals to the timing log
     if config.enable_timing && !all_timings.is_empty() {
         if let Some(ref mut f) = timing_file {
-            if let Err(e) = finish_timing_log(f, &all_timings, start_time.elapsed(), &pre_timings, run_start) {
+            if let Err(e) = finish_timing_log(f, &all_timings, start_time.elapsed(), &pre_timings, run_start, &ft, finalize_secs, rss_before_finalize, rss_after_finalize) {
                 eprintln!("Warning: failed to write timing totals: {}", e);
             }
         }
@@ -3788,22 +3807,21 @@ fn timing_log_path(output_db: &Path) -> PathBuf {
 
 /// Open the timing log and write the header. Returns the open file handle
 /// so callers can append per-sample sections as they finish.
-fn open_timing_log(output_db: &Path, threads: usize, n_samples: usize) -> Result<fs::File> {
+fn open_timing_log(output_db: &Path, threads: usize, n_samples: usize, command_line: &str) -> Result<fs::File> {
     use std::io::Write;
     let log_path = timing_log_path(output_db);
     let mut f = fs::File::create(&log_path)
         .with_context(|| format!("Failed to create timing log: {}", log_path.display()))?;
 
-    writeln!(f, "=============================================================")?;
-    writeln!(f, "theBIGbam calculate -- timing report")?;
-    writeln!(f, "Output DB    : {}", output_db.display())?;
-    writeln!(f, "Threads      : {}", threads)?;
-    writeln!(f, "Samples      : {}", n_samples)?;
-    writeln!(f, "Memory       : RSS tracked via /proc/self/status")?;
+    writeln!(f, "Timing log for command: {}", command_line)?;
+    writeln!(f)?;
+    writeln!(f, "  Output DB    : {}", output_db.display())?;
+    writeln!(f, "  Threads      : {}", threads)?;
+    writeln!(f, "  Samples      : {}", n_samples)?;
+    writeln!(f, "  Memory       : RSS tracked via /proc/self/status")?;
     let (detected_gb, mem_source) = crate::db::detect_available_memory_gb();
     let duckdb_gb = (detected_gb * 3 / 4).max(4);
-    writeln!(f, "DuckDB limit : {} GB (75% of {} GB from {})", duckdb_gb, detected_gb, mem_source)?;
-    writeln!(f, "=============================================================\n")?;
+    writeln!(f, "  DuckDB limit : {} GB (75% of {} GB from {})", duckdb_gb, detected_gb, mem_source)?;
     let _ = f.flush();
 
     eprintln!("Timing log: {}", log_path.display());
@@ -3813,7 +3831,10 @@ fn open_timing_log(output_db: &Path, threads: usize, n_samples: usize) -> Result
 /// Append one sample's timing breakdown to an already-open timing log.
 fn write_sample_timing(f: &mut fs::File, t: &SampleTimings, threads: usize) -> Result<()> {
     use std::io::Write;
-    writeln!(f, "Sample: {}  [RSS: {:.0} MB]", t.sample_name, get_rss_mb())?;
+    writeln!(f)?;
+    writeln!(f, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")?;
+    writeln!(f, "### Sample: {}  [RSS: {:.0} MB]", t.sample_name, get_rss_mb())?;
+    writeln!(f)?;
     writeln!(f, "  BAM path             : {}", t.bam_path)?;
     writeln!(f, "  Contigs in BAM       : {}", t.n_contigs_in_bam)?;
     writeln!(f, "  Contigs processed    : {}", t.n_contigs_processed)?;
@@ -3842,7 +3863,6 @@ fn write_sample_timing(f: &mut fs::File, t: &SampleTimings, threads: usize) -> R
     writeln!(f, "  Insert sample        : {:>10.3} s", ns_to_s(t.insert_sample_ns))?;
     writeln!(f, "  Write contig data    : {:>10.3} s", ns_to_s(t.write_contig_data_ns))?;
     writeln!(f, "  Write MAG data       : {:>10.3} s", ns_to_s(t.mag_write_ns))?;
-    writeln!(f)?;
     let _ = f.flush();
     Ok(())
 }
@@ -3854,11 +3874,16 @@ fn finish_timing_log(
     total_wall: std::time::Duration,
     pt: &PreSampleTimings,
     run_start: std::time::Instant,
+    ft: &FinalizeTimings,
+    finalize_secs: f64,
+    rss_before_finalize: f64,
+    rss_after_finalize: f64,
 ) -> Result<()> {
     use std::io::Write;
-    writeln!(f, "=============================================================")?;
-    writeln!(f, "GRAND TOTALS")?;
-    writeln!(f, "=============================================================")?;
+    writeln!(f)?;
+    writeln!(f, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")?;
+    writeln!(f, "### Grand totals")?;
+    writeln!(f)?;
     writeln!(f, "  ---- Pre-sample phases ----")?;
     writeln!(f, "  Annotation+FASTA parse: {:>9.3} s  [RSS: {:.0} MB]", pt.parse_secs, pt.parse_rss_mb)?;
     writeln!(f, "  DB create/open       : {:>10.3} s  [RSS: {:.0} MB]", pt.db_create_secs, pt.db_create_rss_mb)?;
@@ -3898,6 +3923,15 @@ fn finish_timing_log(
     writeln!(f, "  Insert sample        : {:>10.3} s", sum_ns(|t| t.insert_sample_ns))?;
     writeln!(f, "  Write contig data    : {:>10.3} s", sum_ns(|t| t.write_contig_data_ns))?;
     writeln!(f, "  Write MAG data       : {:>10.3} s", sum_ns(|t| t.mag_write_ns))?;
+    writeln!(f, "  ---- Post-sample phases ----")?;
+    writeln!(f, "  RSS before finalize  : {:>10.0} MB", rss_before_finalize)?;
+    writeln!(f, "  DB finalize          : {:>10.3} s", finalize_secs)?;
+    writeln!(f, "    create_views       : {:>10.3} s", ft.create_views_secs)?;
+    writeln!(f, "    cleanup_vars       : {:>10.3} s", ft.cleanup_vars_secs)?;
+    writeln!(f, "    drop_empty_tables  : {:>10.3} s", ft.drop_empty_secs)?;
+    writeln!(f, "    update_counts      : {:>10.3} s", ft.update_counts_secs)?;
+    writeln!(f, "    CHECKPOINT         : {:>10.3} s", ft.checkpoint_secs)?;
+    writeln!(f, "  RSS after finalize   : {:>10.0} MB", rss_after_finalize)?;
     writeln!(f, "  ---- Memory ----")?;
     let (current_rss, peak_rss) = get_rss_and_peak_mb();
     writeln!(f, "  Peak RSS (VmHWM)     : {:>10.0} MB", peak_rss)?;
@@ -3929,6 +3963,9 @@ fn print_summary(result: &ProcessResult, output_db: &Path) {
         eprintln!("  Samples discarded: {} (all contigs failed thresholds)", result.samples_discarded);
     }
     eprintln!("  Total time:        {:.2}s", result.total_time_secs);
+    if let Ok(meta) = std::fs::metadata(output_db) {
+        eprintln!("  Total DB size:     {:.1} MB", meta.len() as f64 / (1024.0 * 1024.0));
+    }
     eprintln!();
     eprintln!("  Output: {:?}", output_db);
 }

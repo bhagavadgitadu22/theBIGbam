@@ -11,7 +11,7 @@ except ImportError:
     _rust = None
 
 
-def calculating_all_features_parallel(list_modules, bam_files, output_db, min_aligned_fraction, min_coverage_depth, coverage_percentage, n_sample_cores=None, sequencing_type=None, genbank_path=None, assembly_path=None, extend_db=None, min_occurrences=2, enable_timing=False, view="contig", mag_manifest=None, variation_percentage=0.0, blast=False):
+def calculating_all_features_parallel(list_modules, bam_files, output_db, min_aligned_fraction, min_coverage_depth, coverage_percentage, n_sample_cores=None, sequencing_type=None, genbank_path=None, assembly_path=None, extend_db=None, min_occurrences=2, enable_timing=False, view="contig", mag_manifest=None, variation_percentage=0.0, blast=False, command_line=""):
     """Process all BAM files in parallel using Rust bindings."""
     if not HAS_RUST:
         sys.exit("ERROR: Rust bindings (thebigbam_rs) are required but not available. Please install them first.")
@@ -44,6 +44,7 @@ def calculating_all_features_parallel(list_modules, bam_files, output_db, min_al
             mag_manifest=list(mag_manifest or []),
             variation_percentage=float(variation_percentage),
             blast=blast,
+            command_line=command_line,
         )
     except Exception as e:
         print(f"ERROR: Rust processing failed: {e}", flush=True)
@@ -262,6 +263,8 @@ MODULE_ALIASES = {
 VALID_MODULES = list(MODULE_ALIASES.keys())
 
 def run_calculate_args(args):
+    print(f"Running command: {' '.join(sys.argv)}", flush=True)
+
     genbank_path = getattr(args, 'genbank', None)
     assembly_path = getattr(args, 'assembly', None)
     is_extending = getattr(args, 'extend', False)
@@ -419,7 +422,6 @@ def run_calculate_args(args):
     # DB in extend mode). Runs in both contig and MAG modes.
     validate_unique_contig_names(genbank_files, assembly_files, existing_contig_names)
 
-    print("\nCalculating values for all requested features from mapping files...", flush=True)
     _enable_timing = getattr(args, 'time', False)
     calculating_all_features_parallel(
         requested_modules, bam_files, output_db, min_aligned_fraction, min_coverage_depth, coverage_percentage,
@@ -433,11 +435,8 @@ def run_calculate_args(args):
         mag_manifest=mag_manifest,
         variation_percentage=args.variation_percentage,
         blast=blast_enabled if is_extending else getattr(args, 'blast', False),
+        command_line=' '.join(sys.argv),
     )
-
-    print("\nBuilding query indexes...", flush=True)
-    from .database_getters import add_serve_indexes
-    add_serve_indexes(output_db, enable_timing=_enable_timing)
 
 
 def main():

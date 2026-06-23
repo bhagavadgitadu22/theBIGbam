@@ -11,7 +11,7 @@
 //!
 //! DuckDB advantages over SQLite:
 //! - Columnar storage with automatic compression
-//! - No need for explicit indexes (uses zone maps)
+//! - Zone maps for column scans; explicit B-tree indexes for point lookups
 //! - Better write performance with batch inserts
 //! - Simpler concurrency model (single writer, multiple readers)
 
@@ -1866,6 +1866,49 @@ impl DbWriter {
     /// Get all contig names currently in the database.
     pub fn contig_names(&self) -> Vec<String> {
         self.contig_name_to_id.keys().cloned().collect()
+    }
+
+    pub fn create_serve_indexes(&self, enable_timing: bool) -> Result<f64> {
+        const SERVE_INDEXES: &[(&str, &str, &str)] = &[
+            ("idx_feature_blob",       "Feature_blob",              "(Contig_id, Sample_id, Feature_id)"),
+            ("idx_feature_blob_chunk", "Feature_blob_chunk",        "(Contig_id, Sample_id, Feature_id, Chunk_idx)"),
+            ("idx_contig_blob",        "Contig_blob",               "(Contig_id, Feature_id)"),
+            ("idx_contig_blob_chunk",  "Contig_blob_chunk",         "(Contig_id, Feature_id, Chunk_idx)"),
+            ("idx_annot_core",         "Contig_annotation_core",    "(Contig_id, \"Type\")"),
+            ("idx_mag_contigs_mag",    "MAG_contigs_association",   "(MAG_id)"),
+            ("idx_mag_contigs_contig", "MAG_contigs_association",   "(Contig_id)"),
+            ("idx_coverage_ids",       "Coverage",                  "(Contig_id, Sample_id)"),
+        ];
+
+        eprintln!();
+        eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+        eprintln!("### Building query indexes...");
+        eprintln!();
+
+        let conn = self.conn.lock().map_err(|e| anyhow::anyhow!("Lock poisoned: {}", e))?;
+        let total_start = std::time::Instant::now();
+
+        for &(idx_name, table_name, columns) in SERVE_INDEXES {
+            let exists: bool = conn.query_row(
+                "SELECT COUNT(*) > 0 FROM information_schema.tables WHERE table_name = ?",
+                params![table_name],
+                |row| row.get(0),
+            ).unwrap_or(false);
+            if !exists { continue; }
+
+            let t = std::time::Instant::now();
+            conn.execute(
+                &format!("CREATE INDEX IF NOT EXISTS {} ON {} {}", idx_name, table_name, columns),
+                [],
+            ).with_context(|| format!("Failed to create index {} on {}", idx_name, table_name))?;
+
+            if enable_timing {
+                eprintln!("[index] {} on {}: {:.1}s", idx_name, table_name, t.elapsed().as_secs_f64());
+            }
+        }
+
+        let total_secs = total_start.elapsed().as_secs_f64();
+        Ok(total_secs)
     }
 }
 

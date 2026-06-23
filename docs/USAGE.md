@@ -30,8 +30,10 @@ samples.csv contains one row per sample, with two columns specifying the paths t
 To provide context to our read mapping, we annotate the bacterial chromosome using [Bakta](https://github.com/oschwengers/bakta):
 
 ```shell
-bakta --db <path_to_bakta_db> --output bakta_Ecoli_K12_U00096.2 --prefix Ecoli_K12_U00096.2 --complete --threads 10 Ecoli_K12_U00096.2.fasta
+bakta --db <path_to_bakta_db> --output bakta_Ecoli_K12_U00096.2 --prefix Ecoli_K12_U00096.2 --complete --threads 10  Ecoli_K12_U00096.2.fasta
 ```
+
+****Warning:** The `--keep-contig-headers` option is essential to prevent Bakta from renaming contigs. The reference names in your annotation files must exactly match those used in the BAM files.
 
 Then we provide the directory containing the alignment files we produced (bams_circular) and the Bakta .gbff file to the calculate command:
 
@@ -131,9 +133,11 @@ Here we start by annotations the MAGs with Bakta:
 mkdir bakta
 for f in $(find finalBins -name "*.fa"); do
     name=$(basename $f | sed 's/.fa//');
-    sbatch -q serial -N 1 -n 1 -c 4 -t 10:00:00 --wrap="bakta --db <path_to_bakta_db> --verbose --output bakta/${name}_bakta --prefix ${name} --meta --threads 4 $f";
+    sbatch -q serial -N 1 -n 1 -c 4 -t 10:00:00 --wrap="bakta --db <path_to_bakta_db> --verbose --output bakta/${name}_bakta --prefix ${name} --meta --threads 4 --keep-contig-headers $f";
 done
 ```
+
+****Warning:** The `--keep-contig-headers` option is essential to prevent Bakta from renaming contigs. The reference names in your annotation files must exactly match those used in the BAM files.
 
 We copy the 3,287 Bakta files in a new directory annotations_on_mags:
 

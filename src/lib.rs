@@ -80,7 +80,7 @@ mod python {
     ///         - "samples_failed": int
     ///         - "total_time": float (seconds)
     #[pyfunction]
-    #[pyo3(signature = (genbank_path, bam_files, output_db, modules, threads, sequencing_type=None, min_aligned_fraction=50.0, min_coverage_depth=0.0, bar_ratio=10.0, create_indexes=true, assembly_path="", extend_db="", min_occurrences=2, enable_timing=false, view="contig", mag_manifest=vec![], variation_percentage=0.0, blast=false))]
+    #[pyo3(signature = (genbank_path, bam_files, output_db, modules, threads, sequencing_type=None, min_aligned_fraction=50.0, min_coverage_depth=0.0, bar_ratio=10.0, create_indexes=true, assembly_path="", extend_db="", min_occurrences=2, enable_timing=false, view="contig", mag_manifest=vec![], variation_percentage=0.0, blast=false, command_line=""))]
     fn process_all_samples<'py>(
         py: Python<'py>,
         genbank_path: &str,
@@ -101,6 +101,7 @@ mod python {
         mag_manifest: Vec<(String, String, String)>,
         variation_percentage: f64,
         blast: bool,
+        command_line: &str,
     ) -> PyResult<Bound<'py, PyDict>> {
         use crate::gc_content::GCParams;
         use crate::processing::{run_all_samples, MagInput, ProcessConfig, ViewMode};
@@ -147,6 +148,7 @@ mod python {
         let bam_paths: Vec<PathBuf> = bam_files.iter().map(|s| PathBuf::from(s)).collect();
 
         // Release the GIL and call the shared processing function
+        let command_line = command_line.to_string();
         let process_result = py.allow_threads(|| {
             run_all_samples(
                 Path::new(genbank_path),
@@ -157,6 +159,7 @@ mod python {
                 &config,
                 create_indexes,
                 Path::new(extend_db),
+                &command_line,
             )
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("{}", e)))
         })?;
