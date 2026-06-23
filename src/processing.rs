@@ -2145,18 +2145,40 @@ pub fn run_all_samples(
                 // Merge FASTA sequences into the contigs that came from gb, or create new
                 // contigs if there was no gb for this MAG.
                 if mag.gb_path.is_some() {
-                    // member_names already populated; just merge sequences.
+                    // member_names already populated from annotation; merge sequences.
                     let fasta_records = crate::parser::parse_fasta(asm)?;
                     let name_to_idx: HashMap<String, usize> = all_contigs.iter()
                         .enumerate()
                         .map(|(i, c)| (c.name.clone(), i))
                         .collect();
+                    let mut unmatched_count = 0usize;
                     for (name, seq) in fasta_records {
                         if let Some(&idx) = name_to_idx.get(&name) {
                             if all_contigs[idx].sequence.is_none() {
                                 all_contigs[idx].sequence = Some(seq);
                             }
+                        } else {
+                            // FASTA contig name doesn't match any annotation contig (e.g.
+                            // annotation used the MAG bin name while the assembly uses
+                            // assembler node names). Add as a real contig and include in
+                            // this MAG's member list so BAM coverage is attributed to the MAG.
+                            member_names.push(name.clone());
+                            all_contigs.push(ContigInfo {
+                                name,
+                                aliases: vec![],
+                                length: seq.len(),
+                                sequence: Some(seq),
+                            });
+                            unmatched_count += 1;
                         }
+                    }
+                    if unmatched_count > 0 {
+                        eprintln!(
+                            "WARNING: MAG '{}': {} assembly FASTA contigs not found in annotation \
+                             file — added as contigs for BAM matching. Annotation seqids and \
+                             assembly contig names differ (check your annotation pipeline).",
+                            mag.name, unmatched_count
+                        );
                     }
                 } else {
                     let fasta_records = crate::parser::parse_fasta(asm)?;

@@ -697,7 +697,7 @@ pub fn parse_gff3(
         }
     }
     if !fasta_records.is_empty() {
-        eprintln!("Parsed {} sequences from embedded ##FASTA section", fasta_records.len());
+        eprintln!("Parsed {} sequences from embedded ##FASTA section ({})", fasta_records.len(), path.display());
     }
 
     // Normalize qualifiers on every row so ID/Parent lookups and downstream
