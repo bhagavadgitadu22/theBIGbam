@@ -1200,8 +1200,6 @@ _SERVE_INDEXES = [
     ("idx_feature_blob",       "Feature_blob",       "(Contig_id, Sample_id, Feature_id)"),
     # Feature_blob_chunk: base-resolution chunk queries (small window rendering)
     ("idx_feature_blob_chunk", "Feature_blob_chunk", "(Contig_id, Sample_id, Feature_id, Chunk_idx)"),
-    # Coverage sort in MAG view: LEFT JOIN on string columns for contig ordering
-    ("idx_coverage_sort",      "Coverage",           "(Sample_name, Contig_name)"),
     # Contig-level blob lookups (GC content, GC skew, repeats, etc.)
     ("idx_contig_blob",        "Contig_blob",        "(Contig_id, Feature_id)"),
     ("idx_contig_blob_chunk",  "Contig_blob_chunk",  "(Contig_id, Feature_id, Chunk_idx)"),

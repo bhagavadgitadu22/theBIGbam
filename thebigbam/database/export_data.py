@@ -195,6 +195,9 @@ def run_export(args):
             samples_seen.setdefault(sample, None)
             matrix[(entity, sample)] = value
 
+        first_value = next((v for _, _, v in rows if v is not None), None)
+        na_fill = '' if isinstance(first_value, str) else 0
+
         entities = list(entities_seen.keys())
         samples = list(samples_seen.keys())
 
@@ -203,7 +206,7 @@ def run_export(args):
             writer.writerow([entity_label] + samples)
             for entity in entities:
                 row = [entity] + [
-                    matrix.get((entity, s), '') for s in samples
+                    matrix.get((entity, s), na_fill) for s in samples
                 ]
                 writer.writerow(row)
 

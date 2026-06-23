@@ -164,6 +164,7 @@ mod python {
         let result = PyDict::new(py);
         result.set_item("samples_processed", process_result.samples_processed)?;
         result.set_item("samples_failed", process_result.samples_failed)?;
+        result.set_item("samples_discarded", process_result.samples_discarded)?;
         result.set_item("total_time", process_result.total_time_secs)?;
         result.set_item("processing_time", process_result.processing_time_secs)?;
         result.set_item("writing_time", process_result.writing_time_secs)?;

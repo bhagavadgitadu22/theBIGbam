@@ -172,6 +172,7 @@ impl ProcessConfig {
 pub struct ProcessResult {
     pub samples_processed: usize,
     pub samples_failed: usize,
+    pub samples_discarded: usize,
     pub total_time_secs: f64,
     pub processing_time_secs: f64,
     pub writing_time_secs: f64,
@@ -1633,7 +1634,10 @@ pub struct SampleProcessResult {
     pub sample_name: String,
     pub seq_type: SequencingType,
     pub total_reads: u64,
+    /// Primary reads from contigs that *passed* the coverage filter (used for DB).
     pub mapped_reads: u64,
+    /// Total mapped reads from BAI index — non-zero even when all contigs are filtered out.
+    pub bai_mapped_reads: u64,
     pub is_circular: bool,
     pub timings: Option<SampleTimings>,
     /// MAG-level coverage stats, ready to write. Empty in contig mode.
@@ -1694,6 +1698,7 @@ pub fn process_sample(
         .with_context(|| format!("Failed to get index stats from: {}", bam_path.display()))?;
     let unmapped_reads: u64 = idx_stats.iter().map(|(_, _, _, unmapped)| *unmapped).sum();
     let mapped_per_tid: Vec<u64> = idx_stats.iter().map(|(_, _, mapped, _)| *mapped).collect();
+    let bai_mapped_reads: u64 = mapped_per_tid.iter().sum();
 
     if let (Some(s), Some(t)) = (st.as_mut(), t0) {
         s.total_read_count = t.elapsed();
@@ -1764,9 +1769,13 @@ pub fn process_sample(
             .par_chunks(chunk_size.max(1))
             .flat_map_iter(|chunk| {
                 let ts_open = accum_ref.map(|_| std::time::Instant::now());
-                let mut bam = IndexedReader::from_path(bam_path)
-                    .ok()
-                    .and_then(|mut b| b.set_threads(1).ok().map(|_| b));
+                let mut bam = match IndexedReader::from_path(bam_path) {
+                    Ok(mut b) => { b.set_threads(1).ok(); Some(b) }
+                    Err(e) => {
+                        eprintln!("WARNING: Failed to open BAM in parallel worker for {}: {}", bam_path.display(), e);
+                        None
+                    }
+                };
                 if let (Some(a), Some(t)) = (accum_ref, ts_open) {
                     a.bam_open_ns.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
                 }
@@ -1818,9 +1827,13 @@ pub fn process_sample(
             .par_chunks(chunk_size.max(1))
             .flat_map_iter(|chunk| {
                 let ts_open = accum_ref.map(|_| std::time::Instant::now());
-                let mut bam = IndexedReader::from_path(bam_path)
-                    .ok()
-                    .and_then(|mut b| b.set_threads(1).ok().map(|_| b));
+                let mut bam = match IndexedReader::from_path(bam_path) {
+                    Ok(mut b) => { b.set_threads(1).ok(); Some(b) }
+                    Err(e) => {
+                        eprintln!("WARNING: Failed to open BAM in parallel worker for {}: {}", bam_path.display(), e);
+                        None
+                    }
+                };
                 if let (Some(a), Some(t)) = (accum_ref, ts_open) {
                     a.bam_open_ns.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
                 }
@@ -2001,6 +2014,7 @@ pub fn process_sample(
         seq_type,
         total_reads,
         mapped_reads,
+        bai_mapped_reads,
         is_circular,
         timings: st,
         mag_results,
@@ -2840,6 +2854,7 @@ pub fn run_all_samples(
         return Ok(ProcessResult {
             samples_processed: 0,
             samples_failed: 0,
+            samples_discarded: 0,
             total_time_secs: 0.0,
             processing_time_secs: 0.0,
             writing_time_secs: 0.0,
@@ -2999,6 +3014,7 @@ struct SampleResult {
     sequencing_type: SequencingType,
     total_reads: u64,
     mapped_reads: u64,
+    bai_mapped_reads: u64,
     is_circular: bool,
     /// Compressed BLOB data: Vec<(feature_name, contig_name, encoded_blob)>
     feature_blobs: Vec<(String, i64, crate::blob::EncodedBlob)>,
@@ -3153,10 +3169,11 @@ fn process_samples_parallel(
     }
 
     // Spawn dedicated writer thread
-    let writer_handle = thread::spawn(move || -> Result<(usize, std::time::Duration, Vec<SampleTimings>, usize)> {
+    let writer_handle = thread::spawn(move || -> Result<(usize, std::time::Duration, Vec<SampleTimings>, usize, usize)> {
         let write_start = std::time::Instant::now();
         let mut written_count = 0usize;
         let mut mag_drops: usize = 0;
+        let mut samples_discarded: usize = 0;
         let mut all_timings: Vec<SampleTimings> = Vec::new();
         let mut timing_file = timing_file;
 
@@ -3181,12 +3198,13 @@ fn process_samples_parallel(
                 };
 
             if presences.is_empty() {
-                if result.mapped_reads > 0 {
+                samples_discarded += 1;
+                if result.bai_mapped_reads > 0 {
                     eprintln!(
-                        "WARNING: Sample '{}': {} mapped reads but all contigs filtered out \
-                         (min_aligned_fraction={:.1}%, min_coverage_depth={:.1}). \
-                         Lowering thresholds may recover this sample.",
-                        result.sample_name, result.mapped_reads,
+                        "WARNING: Sample '{}': {} reads in BAM index but all contigs were \
+                         filtered out (min_aligned_fraction={:.1}%, \
+                         min_coverage_depth={:.1}). Check BAM conversion or lower thresholds.",
+                        result.sample_name, result.bai_mapped_reads,
                         min_af, min_cov,
                     );
                 }
@@ -3297,7 +3315,7 @@ fn process_samples_parallel(
             let _ = f.flush();
         }
 
-        Ok((written_count, write_start.elapsed(), all_timings, mag_drops))
+        Ok((written_count, write_start.elapsed(), all_timings, mag_drops, samples_discarded))
     });
 
     // Process samples in parallel, sending to channel immediately
@@ -3326,6 +3344,7 @@ fn process_samples_parallel(
                     sequencing_type: r.seq_type,
                     total_reads: r.total_reads,
                     mapped_reads: r.mapped_reads,
+                    bai_mapped_reads: r.bai_mapped_reads,
                     is_circular: r.is_circular,
                     feature_blobs: r.feature_blobs,
                     presences: r.presences,
@@ -3360,12 +3379,19 @@ fn process_samples_parallel(
     let processing_time = start_time.elapsed();
 
     // Wait for writer thread to finish
-    let (written_count, writing_time, all_timings, mag_drops) = writer_handle
+    let (written_count, writing_time, all_timings, mag_drops, samples_discarded) = writer_handle
         .join()
         .map_err(|_| anyhow::anyhow!("Writer thread panicked"))??;
 
+    if samples_discarded > 0 {
+        eprintln!("### Discarded {} samples (all contigs failed thresholds)", samples_discarded);
+    }
+    let dropped_contigs = config.contig_drops_counter.load(Ordering::Relaxed);
+    if dropped_contigs > 0 {
+        eprintln!("### Discarded {} contigs (failed coverage thresholds)", dropped_contigs);
+    }
     if mag_drops > 0 {
-        eprintln!("### Dropped {} (MAG, Sample) groups that failed thresholds", mag_drops);
+        eprintln!("### Discarded {} MAGs (failed coverage thresholds)", mag_drops);
     }
 
     // Clear MultiProgress to avoid duplicate bar display
@@ -3390,6 +3416,7 @@ fn process_samples_parallel(
     Ok(ProcessResult {
         samples_processed: written_count,
         samples_failed: failed,
+        samples_discarded,
         total_time_secs: elapsed.as_secs_f64(),
         processing_time_secs: processing_time.as_secs_f64(),
         writing_time_secs: writing_time.as_secs_f64(),
@@ -3418,6 +3445,7 @@ fn process_samples_sequential(
     let start_time = std::time::Instant::now();
     let is_mag_mode = config.view_mode == ViewMode::Mag;
     let mut mag_drops: usize = 0;
+    let mut samples_discarded: usize = 0;
 
     let pb = if is_tty {
         let pb = ProgressBar::new(total as u64);
@@ -3515,12 +3543,13 @@ fn process_samples_sequential(
                     };
 
                 if presences.is_empty() {
-                    if r.mapped_reads > 0 {
+                    samples_discarded += 1;
+                    if r.bai_mapped_reads > 0 {
                         eprintln!(
-                            "WARNING: Sample '{}': {} mapped reads but all contigs filtered out \
-                             (min_aligned_fraction={:.1}%, min_coverage_depth={:.1}). \
-                             Lowering thresholds may recover this sample.",
-                            r.sample_name, r.mapped_reads,
+                            "WARNING: Sample '{}': {} reads in BAM index but all contigs were \
+                             filtered out (min_aligned_fraction={:.1}%, \
+                             min_coverage_depth={:.1}). Check BAM conversion or lower thresholds.",
+                            r.sample_name, r.bai_mapped_reads,
                             config.min_aligned_fraction, config.min_coverage_depth,
                         );
                     }
@@ -3622,13 +3651,15 @@ fn process_samples_sequential(
         }
     }
 
-    if is_mag_mode && mag_drops > 0 {
-        eprintln!("### Dropped {} (MAG, Sample) groups that failed thresholds", mag_drops);
-    } else if !is_mag_mode {
-        let dropped = config.contig_drops_counter.load(Ordering::Relaxed);
-        if dropped > 0 {
-            eprintln!("### Dropped {} (Contig, Sample) pairs that failed thresholds", dropped);
-        }
+    if samples_discarded > 0 {
+        eprintln!("### Discarded {} samples (all contigs failed thresholds)", samples_discarded);
+    }
+    let dropped_contigs = config.contig_drops_counter.load(Ordering::Relaxed);
+    if dropped_contigs > 0 {
+        eprintln!("### Discarded {} contigs (failed coverage thresholds)", dropped_contigs);
+    }
+    if mag_drops > 0 {
+        eprintln!("### Discarded {} MAGs (failed coverage thresholds)", mag_drops);
     }
 
     // Finalize database
@@ -3668,6 +3699,7 @@ fn process_samples_sequential(
     Ok(ProcessResult {
         samples_processed: processed,
         samples_failed: failed,
+        samples_discarded,
         total_time_secs: start_time.elapsed().as_secs_f64(),
         processing_time_secs: processing_time_total.as_secs_f64(),
         writing_time_secs: writing_time_total.as_secs_f64(),
@@ -3870,7 +3902,10 @@ fn print_summary(result: &ProcessResult, output_db: &Path) {
     eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     eprintln!("### Complete");
     eprintln!();
-    eprintln!("  Samples processed: {}/{}", result.samples_processed, result.samples_processed + result.samples_failed);
+    eprintln!("  Samples processed: {}/{}", result.samples_processed, result.samples_processed + result.samples_failed + result.samples_discarded);
+    if result.samples_discarded > 0 {
+        eprintln!("  Samples discarded: {} (all contigs failed thresholds)", result.samples_discarded);
+    }
     eprintln!("  Total time:        {:.2}s", result.total_time_secs);
     eprintln!();
     eprintln!("  Output: {:?}", output_db);
