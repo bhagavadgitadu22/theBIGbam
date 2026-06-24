@@ -1267,6 +1267,7 @@ def create_layout(db_path, preloaded, enable_timing=False):
     def _do_apply():
         doc = curdoc()
         doc.hold('combine')
+        print(flush=True)
         t_apply_start = None
         try:
             global _current_op
@@ -4439,6 +4440,7 @@ def run_serve(args):
 
     enable_timing = getattr(args, 'time', False)
 
+    print(flush=True)
     print("Preloading database data...", flush=True)
     preloaded = preload_db_data(args.db, enable_timing=enable_timing)
     if enable_timing:
@@ -4449,6 +4451,7 @@ def run_serve(args):
         return create_layout(args.db, preloaded, enable_timing=enable_timing)
 
     static_path = os.path.join(os.path.dirname(__file__), "..", "static")
+    print(flush=True)
     pn.serve(
         create_app,
         port=args.port,
