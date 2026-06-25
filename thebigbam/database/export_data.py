@@ -183,23 +183,39 @@ def run_export(args):
             f"FROM {view_name} ORDER BY {entity_col}, Sample_name"
         ).fetchall()
 
-        if not rows:
-            print(f"No data found for metric '{metric}'.", file=sys.stderr, flush=True)
-            return 2
-
-        entities_seen = {}
-        samples_seen = {}
+        # Build presence matrix from view data
         matrix = {}
         for entity, sample, value in rows:
-            entities_seen.setdefault(entity, None)
-            samples_seen.setdefault(sample, None)
             matrix[(entity, sample)] = value
 
+        # Determine fill value ('' for string metrics, 0 for numeric)
         first_value = next((v for _, _, v in rows if v is not None), None)
         na_fill = '' if isinstance(first_value, str) else 0
 
-        entities = list(entities_seen.keys())
-        samples = list(samples_seen.keys())
+        # Fetch all known entities from base table, including those with zero coverage
+        if view_mode == 'mag':
+            entities = [r[0] for r in conn.execute(
+                "SELECT MAG_name FROM MAG ORDER BY MAG_name"
+            ).fetchall()]
+        else:
+            entities = [r[0] for r in conn.execute(
+                "SELECT Contig_name FROM Contig ORDER BY Contig_name"
+            ).fetchall()]
+
+        # Fetch all known samples, including those written with zero coverage
+        samples = [r[0] for r in conn.execute(
+            "SELECT Sample_name FROM Sample ORDER BY Sample_name"
+        ).fetchall()]
+
+        # Fallback: if base tables are empty use whatever the view returned
+        if not entities:
+            entities = list(dict.fromkeys(e for e, _, _ in rows))
+        if not samples:
+            samples = list(dict.fromkeys(s for _, s, _ in rows))
+
+        if not entities and not samples:
+            print(f"No data found for metric '{metric}'.", file=sys.stderr, flush=True)
+            return 2
 
         with open(args.output, 'w', newline='') as fh:
             writer = csv.writer(fh, delimiter='\t')

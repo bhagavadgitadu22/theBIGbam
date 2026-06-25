@@ -60,6 +60,8 @@ pub fn compute_all_metrics(
     circularising_confirmed: bool,
     // Min overlaps for each circularising read (for median computation)
     circularising_min_overlaps: &[usize],
+    // Whether this sample was mapped in circular mode
+    is_circular: bool,
     // Side misassembly: needs clip runs for left/right side detection
     left_clip_runs: &[Run],
     right_clip_runs: &[Run],
@@ -310,6 +312,8 @@ pub fn compute_all_metrics(
     // Circularising reads percentage based on mean coverage at junction
     let circularising_reads = if circularising_confirmed && circularising_reads_count > 0 {
         Some(circularising_reads_count)
+    } else if is_circular {
+        Some(0)
     } else {
         None
     };
@@ -320,9 +324,13 @@ pub fn compute_all_metrics(
         let mean_junction_coverage = (first + last) / 2.0;
         if mean_junction_coverage > 0.0 {
             Some(((circularising_reads_count as f64 / mean_junction_coverage) * 100.0).round() as i32)
+        } else if is_circular {
+            Some(0)
         } else {
             None
         }
+    } else if is_circular {
+        Some(0)
     } else {
         None
     };

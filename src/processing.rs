@@ -172,7 +172,8 @@ impl ProcessConfig {
 pub struct ProcessResult {
     pub samples_processed: usize,
     pub samples_failed: usize,
-    pub samples_discarded: usize,
+    /// Samples written to DB with zero contig coverage (all contigs failed filters).
+    pub samples_no_coverage: usize,
     pub total_time_secs: f64,
     pub processing_time_secs: f64,
     pub writing_time_secs: f64,
@@ -1405,6 +1406,7 @@ fn add_features_from_arrays(
             arrays.contig_end_mates_mapped_on_another_contig,
             arrays.circularising_confirmed,
             &arrays.circularising_min_overlaps,
+            is_circular,
             &left_clip_runs,
             &right_clip_runs,
         );
@@ -2913,7 +2915,7 @@ pub fn run_all_samples(
         return Ok(ProcessResult {
             samples_processed: 0,
             samples_failed: 0,
-            samples_discarded: 0,
+            samples_no_coverage: 0,
             total_time_secs: 0.0,
             processing_time_secs: 0.0,
             writing_time_secs: 0.0,
@@ -3235,7 +3237,7 @@ fn process_samples_parallel(
         let write_start = std::time::Instant::now();
         let mut written_count = 0usize;
         let mut mag_drops: usize = 0;
-        let mut samples_discarded: usize = 0;
+        let mut samples_no_coverage: usize = 0;
         let mut all_timings: Vec<SampleTimings> = Vec::new();
         let mut timing_file = timing_file;
 
@@ -3260,15 +3262,26 @@ fn process_samples_parallel(
                 };
 
             if presences.is_empty() {
-                samples_discarded += 1;
+                samples_no_coverage += 1;
                 if result.bai_mapped_reads > 0 {
                     eprintln!(
-                        "WARNING: Sample '{}': {} reads in BAM index but all contigs were \
-                         filtered out (min_aligned_fraction={:.1}%, \
-                         min_coverage_depth={:.1}). Check BAM conversion or lower thresholds.",
+                        "INFO: Sample '{}': {} reads in BAM index but no contig passed coverage \
+                         filters (min_aligned_fraction={:.1}%, min_coverage_depth={:.1}). \
+                         Sample recorded in DB with zero coverage.",
                         result.sample_name, result.bai_mapped_reads,
                         min_af, min_cov,
                     );
+                }
+                // Still write the Sample row so the sample appears in the DB.
+                // total_reads = bai_mapped + unmapped (result.total_reads == unmapped here)
+                if let Err(e) = db_writer.insert_sample(
+                    &result.sample_name,
+                    result.sequencing_type.as_str(),
+                    result.bai_mapped_reads + result.total_reads,
+                    result.bai_mapped_reads,
+                    result.is_circular,
+                ) {
+                    eprintln!("\nError inserting sample {}: {}", result.sample_name, e);
                 }
                 write_pb_clone.inc(1);
                 continue;
@@ -3370,7 +3383,7 @@ fn process_samples_parallel(
         let rss_after_finalize = get_rss_mb();
         write_pb_clone.finish();
 
-        Ok((written_count, write_start.elapsed(), all_timings, mag_drops, samples_discarded, ft, index_secs, finalize_secs, rss_before_finalize, rss_after_finalize))
+        Ok((written_count, write_start.elapsed(), all_timings, mag_drops, samples_no_coverage, ft, index_secs, finalize_secs, rss_before_finalize, rss_after_finalize))
     });
 
     // Process samples in parallel, sending to channel immediately
@@ -3434,19 +3447,25 @@ fn process_samples_parallel(
     let processing_time = start_time.elapsed();
 
     // Wait for writer thread to finish
-    let (written_count, writing_time, all_timings, mag_drops, samples_discarded, ft, index_secs, finalize_secs, rss_before_finalize, rss_after_finalize) = writer_handle
+    let (written_count, writing_time, all_timings, mag_drops, samples_no_coverage, ft, index_secs, finalize_secs, rss_before_finalize, rss_after_finalize) = writer_handle
         .join()
         .map_err(|_| anyhow::anyhow!("Writer thread panicked"))??;
 
-    if samples_discarded > 0 {
-        eprintln!("Discarded {} samples (all contigs failed thresholds)", samples_discarded);
+    if samples_no_coverage > 0 {
+        eprintln!("{} samples written with zero coverage (no contigs passed filters)", samples_no_coverage);
     }
     let dropped_contigs = config.contig_drops_counter.load(Ordering::Relaxed);
     if dropped_contigs > 0 {
-        eprintln!("Discarded {} contig/sample pairs (failed coverage thresholds)", dropped_contigs);
+        eprintln!("{} contig/sample pairs had no coverage (failed coverage thresholds)", dropped_contigs);
     }
     if mag_drops > 0 {
-        eprintln!("Discarded {} MAGs (failed coverage thresholds)", mag_drops);
+        eprintln!("{} MAGs had no coverage for some samples (failed coverage thresholds)", mag_drops);
+    }
+    if ft.zero_coverage_contigs > 0 {
+        eprintln!("INFO: {} contigs had no coverage in any sample (Contig rows retained, Number_of_samples=0)", ft.zero_coverage_contigs);
+    }
+    if ft.zero_coverage_mags > 0 {
+        eprintln!("INFO: {} MAGs had no coverage in any sample (MAG rows retained, Number_of_samples=0)", ft.zero_coverage_mags);
     }
 
     // Clear MultiProgress to avoid duplicate bar display
@@ -3471,7 +3490,7 @@ fn process_samples_parallel(
     Ok(ProcessResult {
         samples_processed: written_count,
         samples_failed: failed,
-        samples_discarded,
+        samples_no_coverage,
         total_time_secs: elapsed.as_secs_f64(),
         processing_time_secs: processing_time.as_secs_f64(),
         writing_time_secs: writing_time.as_secs_f64(),
@@ -3501,7 +3520,7 @@ fn process_samples_sequential(
     let start_time = std::time::Instant::now();
     let is_mag_mode = config.view_mode == ViewMode::Mag;
     let mut mag_drops: usize = 0;
-    let mut samples_discarded: usize = 0;
+    let mut samples_no_coverage: usize = 0;
 
     let pb = if is_tty {
         let pb = ProgressBar::new(total as u64);
@@ -3598,15 +3617,26 @@ fn process_samples_sequential(
                     };
 
                 if presences.is_empty() {
-                    samples_discarded += 1;
+                    samples_no_coverage += 1;
                     if r.bai_mapped_reads > 0 {
                         eprintln!(
-                            "WARNING: Sample '{}': {} reads in BAM index but all contigs were \
-                             filtered out (min_aligned_fraction={:.1}%, \
-                             min_coverage_depth={:.1}). Check BAM conversion or lower thresholds.",
+                            "INFO: Sample '{}': {} reads in BAM index but no contig passed coverage \
+                             filters (min_aligned_fraction={:.1}%, min_coverage_depth={:.1}). \
+                             Sample recorded in DB with zero coverage.",
                             r.sample_name, r.bai_mapped_reads,
                             config.min_aligned_fraction, config.min_coverage_depth,
                         );
+                    }
+                    // Still write the Sample row so the sample appears in the DB.
+                    // total_reads = bai_mapped + unmapped (r.total_reads == unmapped here)
+                    if let Err(e) = db_writer.insert_sample(
+                        &r.sample_name,
+                        r.seq_type.as_str(),
+                        r.bai_mapped_reads + r.total_reads,
+                        r.bai_mapped_reads,
+                        r.is_circular,
+                    ) {
+                        eprintln!("\nError inserting sample {}: {}", r.sample_name, e);
                     }
                     pb.inc(1);
                     continue;
@@ -3706,15 +3736,15 @@ fn process_samples_sequential(
         }
     }
 
-    if samples_discarded > 0 {
-        eprintln!("Discarded {} samples (all contigs failed thresholds)", samples_discarded);
+    if samples_no_coverage > 0 {
+        eprintln!("{} samples written with zero coverage (no contigs passed filters)", samples_no_coverage);
     }
     let dropped_contigs = config.contig_drops_counter.load(Ordering::Relaxed);
     if dropped_contigs > 0 {
-        eprintln!("Discarded {} contig/sample pairs (failed coverage thresholds)", dropped_contigs);
+        eprintln!("{} contig/sample pairs had no coverage (failed coverage thresholds)", dropped_contigs);
     }
     if mag_drops > 0 {
-        eprintln!("Discarded {} MAGs (failed coverage thresholds)", mag_drops);
+        eprintln!("{} MAGs had no coverage for some samples (failed coverage thresholds)", mag_drops);
     }
 
     // Build query indexes
@@ -3729,6 +3759,12 @@ fn process_samples_sequential(
     let t_finalize = std::time::Instant::now();
     let ft = db_writer.finalize()?;
     let finalize_secs = t_finalize.elapsed().as_secs_f64();
+    if ft.zero_coverage_contigs > 0 {
+        eprintln!("INFO: {} contigs had no coverage in any sample (Contig rows retained, Number_of_samples=0)", ft.zero_coverage_contigs);
+    }
+    if ft.zero_coverage_mags > 0 {
+        eprintln!("INFO: {} MAGs had no coverage in any sample (MAG rows retained, Number_of_samples=0)", ft.zero_coverage_mags);
+    }
     let rss_after_finalize = get_rss_mb();
     pb.finish_with_message("Done");
     if !is_tty {
@@ -3747,7 +3783,7 @@ fn process_samples_sequential(
     Ok(ProcessResult {
         samples_processed: processed,
         samples_failed: failed,
-        samples_discarded,
+        samples_no_coverage,
         total_time_secs: start_time.elapsed().as_secs_f64(),
         processing_time_secs: processing_time_total.as_secs_f64(),
         writing_time_secs: writing_time_total.as_secs_f64(),
@@ -3967,9 +4003,9 @@ fn print_summary(result: &ProcessResult, output_db: &Path) {
     eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     eprintln!("### Complete");
     eprintln!();
-    eprintln!("  Samples processed: {}/{}", result.samples_processed, result.samples_processed + result.samples_failed + result.samples_discarded);
-    if result.samples_discarded > 0 {
-        eprintln!("  Samples discarded: {} (all contigs failed thresholds)", result.samples_discarded);
+    eprintln!("  Samples processed: {}/{}", result.samples_processed, result.samples_processed + result.samples_failed + result.samples_no_coverage);
+    if result.samples_no_coverage > 0 {
+        eprintln!("  Samples with zero coverage: {} (written to DB; no contigs passed filters)", result.samples_no_coverage);
     }
     eprintln!("  Total time:        {:.2}s", result.total_time_secs);
     if let Ok(meta) = std::fs::metadata(output_db) {

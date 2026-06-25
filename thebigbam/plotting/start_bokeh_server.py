@@ -759,8 +759,11 @@ def create_layout(db_path, preloaded, enable_timing=False):
         """Update widget completions. Clear value if not in completions."""
         if widget.options == completions:
             return
+        current_value = widget.value
         widget.options = completions
-        if widget.value and widget.value not in completions:
+        if current_value and current_value in completions and not widget.value:
+            widget.value = current_value
+        elif widget.value and widget.value not in completions:
             widget.value = ""
     
     def refresh_contig_options_unlocked():

@@ -195,6 +195,10 @@ pub struct FinalizeTimings {
     pub drop_empty_secs: f64,
     pub update_counts_secs: f64,
     pub checkpoint_secs: f64,
+    /// Contigs with Number_of_samples = 0 after finalize (contig mode only).
+    pub zero_coverage_contigs: u64,
+    /// MAGs with Number_of_samples = 0 after finalize (MAG mode only).
+    pub zero_coverage_mags: u64,
 }
 
 impl DbWriter {
@@ -1832,12 +1836,27 @@ impl DbWriter {
             0.0
         };
 
-        let update_counts_secs = if has_bam {
+        let (update_counts_secs, zero_coverage_contigs, zero_coverage_mags) = if has_bam {
             let t = std::time::Instant::now();
             update_sample_counts(&conn, is_mag_mode)?;
-            t.elapsed().as_secs_f64()
+            let elapsed = t.elapsed().as_secs_f64();
+            let zero_contigs: u64 = if !is_mag_mode {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM Contig WHERE Number_of_samples = 0",
+                    [],
+                    |r| r.get(0),
+                ).unwrap_or(0)
+            } else { 0 };
+            let zero_mags: u64 = if is_mag_mode {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM MAG WHERE Number_of_samples = 0",
+                    [],
+                    |r| r.get(0),
+                ).unwrap_or(0)
+            } else { 0 };
+            (elapsed, zero_contigs, zero_mags)
         } else {
-            0.0
+            (0.0, 0, 0)
         };
 
         let t = std::time::Instant::now();
@@ -1851,6 +1870,8 @@ impl DbWriter {
             drop_empty_secs,
             update_counts_secs,
             checkpoint_secs,
+            zero_coverage_contigs,
+            zero_coverage_mags,
         })
     }
 
