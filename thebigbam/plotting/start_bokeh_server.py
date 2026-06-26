@@ -505,6 +505,14 @@ def create_layout(db_path, preloaded, enable_timing=False):
             params = [value]
             has_samples = widgets['has_samples']
 
+            # Build value-match clause for qualifier sources: = and != must match any ^-delimited token
+            def _qual_val_clause(alias):
+                if operator == '=':
+                    return f"('^' || {alias}.\"Value\" || '^') LIKE ('%^' || ? || '^%')"
+                if operator == '!=':
+                    return f"('^' || {alias}.\"Value\" || '^') NOT LIKE ('%^' || ? || '^%')"
+                return f"{alias}.\"Value\" {operator} ?"
+
             if col_source == 'Contig_annotation':
                 if has_samples:
                     query = f'''
@@ -532,7 +540,7 @@ def create_layout(db_path, preloaded, enable_timing=False):
                         JOIN Contig c ON cac.Contig_id = c.Contig_id
                         LEFT JOIN Coverage p ON c.Contig_id = p.Contig_id
                         LEFT JOIN Sample s ON p.Sample_id = s.Sample_id
-                        WHERE aq."Key" = ? AND aq."Value" {operator} ?
+                        WHERE aq."Key" = ? AND {_qual_val_clause('aq')}
                     '''
                 else:
                     query = f'''
@@ -540,7 +548,7 @@ def create_layout(db_path, preloaded, enable_timing=False):
                         FROM Annotation_qualifier aq
                         JOIN Contig_annotation_core cac ON aq.Annotation_id = cac.Annotation_id
                         JOIN Contig c ON cac.Contig_id = c.Contig_id
-                        WHERE aq."Key" = ? AND aq."Value" {operator} ?
+                        WHERE aq."Key" = ? AND {_qual_val_clause('aq')}
                     '''
             elif col_source == 'Contig_qualifier':
                 params = [qualifier_key, value]
@@ -551,14 +559,14 @@ def create_layout(db_path, preloaded, enable_timing=False):
                         JOIN Contig c ON cq.Contig_id = c.Contig_id
                         LEFT JOIN Coverage p ON c.Contig_id = p.Contig_id
                         LEFT JOIN Sample s ON p.Sample_id = s.Sample_id
-                        WHERE cq."Key" = ? AND cq."Value" {operator} ?
+                        WHERE cq."Key" = ? AND {_qual_val_clause('cq')}
                     '''
                 else:
                     query = f'''
                         SELECT DISTINCT c.Contig_id, NULL
                         FROM Contig_qualifier cq
                         JOIN Contig c ON cq.Contig_id = c.Contig_id
-                        WHERE cq."Key" = ? AND cq."Value" {operator} ?
+                        WHERE cq."Key" = ? AND {_qual_val_clause('cq')}
                     '''
             elif category == 'Contig' and has_samples:
                 query = f'''

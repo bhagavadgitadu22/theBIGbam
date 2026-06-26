@@ -14,6 +14,110 @@ from dna_features_viewer import BiopythonTranslator
 
 _NULL_STRINGS = {'', 'none', 'null', 'nan'}
 
+_MULTI_VALUE_SEP = "^"
+
+
+def _first_value(val):
+    """Return the first token of a multi-value string joined with MULTI_VALUE_SEP."""
+    s = str(val)
+    idx = s.find(_MULTI_VALUE_SEP)
+    return s[:idx] if idx != -1 else s
+
+
+def _apply_color_rules(values, rules, custom_color_map, ann_ids):
+    """Apply one qualifier's color rules against pre-fetched values. Mutates custom_color_map."""
+    for rule in rules:
+        mode = rule.get('match_mode', 'exact')
+
+        if mode == 'random':
+            filtered = {aid: val for aid, val in values.items() if not _is_nullish(val)}
+            numeric_map = _try_numeric_map(_first_value(v) for v in filtered.values())
+            if numeric_map is not None:
+                value_to_color = _gradient_palette(numeric_map)
+            else:
+                distinct = {_first_value(v) for v in filtered.values()}
+                value_to_color = {v: _hash_color(v) for v in distinct}
+            for aid, val in filtered.items():
+                if aid not in custom_color_map:
+                    color = value_to_color.get(_first_value(val))
+                    if color:
+                        custom_color_map[aid] = color
+            continue
+
+        rule_val = rule['value']
+
+        if mode in ('lt', 'gt'):
+            try:
+                rule_num = float(rule_val)
+            except (TypeError, ValueError):
+                continue
+            for aid, val in values.items():
+                if aid in custom_color_map or _is_nullish(val):
+                    continue
+                try:
+                    v_num = float(_first_value(val))
+                except (TypeError, ValueError):
+                    continue
+                if mode == 'lt' and v_num < rule_num:
+                    custom_color_map[aid] = rule['color']
+                elif mode == 'gt' and v_num > rule_num:
+                    custom_color_map[aid] = rule['color']
+            continue
+
+        rule_val_str = str(rule_val)
+        rule_val_lower = rule_val_str.lower()
+        # For numeric rule values (Spinner), attempt float equality so
+        # a rule value of 1.0 matches a stored int of 1. Fall back to
+        # string equality when either side isn't numeric.
+        rule_val_num = float(rule_val) if isinstance(rule_val, (int, float)) else None
+
+        def _any_value_equal(val, _rvn=rule_val_num, _rvs=rule_val_str):
+            for fv in str(val).split(_MULTI_VALUE_SEP):
+                if _rvn is not None:
+                    try:
+                        if float(fv) == _rvn:
+                            return True
+                    except (TypeError, ValueError):
+                        pass
+                if fv == _rvs:
+                    return True
+            return False
+
+        is_negation = mode in ('has_not', 'not_equal')
+        for aid, val in values.items():
+            if aid in custom_color_map or _is_nullish(val):
+                continue
+            parts = str(val).split(_MULTI_VALUE_SEP)
+            if mode == 'has':
+                if any(rule_val_lower in p.lower() for p in parts):
+                    custom_color_map[aid] = rule['color']
+            elif mode == 'has_not':
+                if not any(rule_val_lower in p.lower() for p in parts):
+                    custom_color_map[aid] = rule['color']
+            elif mode == 'not_equal':
+                if not _any_value_equal(val):
+                    custom_color_map[aid] = rule['color']
+            else:  # 'exact'
+                if _any_value_equal(val):
+                    custom_color_map[aid] = rule['color']
+
+        if is_negation:
+            for aid in ann_ids:
+                if aid not in custom_color_map and aid not in values:
+                    custom_color_map[aid] = rule['color']
+
+
+def _build_color_map(custom_colors, fetch_fn, ann_ids):
+    """Build annotation_id → hex color dict from color rules, using fetch_fn(qkey) → {aid: val}."""
+    from collections import defaultdict
+    custom_color_map = {}
+    rules_by_key = defaultdict(list)
+    for rule in custom_colors:
+        rules_by_key[rule['qualifier_key']].append(rule)
+    for qkey, rules in rules_by_key.items():
+        _apply_color_rules(fetch_fn(qkey), rules, custom_color_map, ann_ids)
+    return custom_color_map
+
 
 _CORE_ANNOTATION_COLUMNS = {'Start', 'End', 'Strand', 'Type', 'Main_isoform'}
 _MODE_TO_SQL_OP = {'exact': '=', 'not_equal': '!=', 'lt': '<', 'gt': '>'}
@@ -50,6 +154,13 @@ def compute_mag_track_dots(conn, mag_members, mag_track_colors, max_dots=1000):
         else:
             op = _MODE_TO_SQL_OP.get(mode, '=')
             sql_val = value
+        # For qualifier columns, = and != must match any ^-delimited token
+        if op == '=':
+            aq_val_clause = "('^' || aq.Value || '^') LIKE ('%^' || ? || '^%')"
+        elif op == '!=':
+            aq_val_clause = "('^' || aq.Value || '^') NOT LIKE ('%^' || ? || '^%')"
+        else:
+            aq_val_clause = f"aq.Value {op} ?"
         try:
             if key in _CORE_ANNOTATION_COLUMNS:
                 matching = conn.cursor().execute(
@@ -61,7 +172,7 @@ def compute_mag_track_dots(conn, mag_members, mag_track_colors, max_dots=1000):
                 matching = conn.cursor().execute(
                     f'SELECT a.Annotation_id FROM Contig_annotation_core a'
                     f' JOIN Annotation_qualifier aq ON aq.Annotation_id = a.Annotation_id'
-                    f' WHERE aq.Key = ? AND aq.Value {op} ? AND a.Contig_id IN ({ph})',
+                    f' WHERE aq.Key = ? AND {aq_val_clause} AND a.Contig_id IN ({ph})',
                     [key, sql_val] + contig_ids
                 ).fetchall()
         except Exception as e:
@@ -409,92 +520,7 @@ def make_bokeh_genemap(conn, contig_id, locus_name, locus_size, subplot_size, sh
     # Build custom color map: annotation_id -> hex color (first matching rule wins)
     custom_color_map = {}
     if custom_colors and seq_ann_rows:
-        from collections import defaultdict
-        rules_by_key = defaultdict(list)
-        for rule in custom_colors:
-            rules_by_key[rule['qualifier_key']].append(rule)
-
-        for qkey, rules in rules_by_key.items():
-            values = fetch_values_for_qkey(qkey)
-            for rule in rules:
-                mode = rule.get('match_mode', 'exact')
-
-                if mode == 'random':
-                    # Skip nullish values; they fall through to the default color.
-                    filtered = {aid: val for aid, val in values.items() if not _is_nullish(val)}
-                    numeric_map = _try_numeric_map(filtered.values())
-                    if numeric_map is not None:
-                        value_to_color = _gradient_palette(numeric_map)
-                    else:
-                        distinct = {str(v) for v in filtered.values()}
-                        value_to_color = {v: _hash_color(v) for v in distinct}
-                    for aid, val in filtered.items():
-                        if aid in custom_color_map:
-                            continue
-                        color = value_to_color.get(str(val))
-                        if color:
-                            custom_color_map[aid] = color
-                    continue
-
-                rule_val = rule['value']
-
-                if mode in ('lt', 'gt'):
-                    # Numeric comparison: both sides must parse as floats.
-                    try:
-                        rule_num = float(rule_val)
-                    except (TypeError, ValueError):
-                        continue
-                    for aid, val in values.items():
-                        if aid in custom_color_map or _is_nullish(val):
-                            continue
-                        try:
-                            v_num = float(val)
-                        except (TypeError, ValueError):
-                            continue
-                        if mode == 'lt' and v_num < rule_num:
-                            custom_color_map[aid] = rule['color']
-                        elif mode == 'gt' and v_num > rule_num:
-                            custom_color_map[aid] = rule['color']
-                    continue
-
-                rule_val_str = str(rule_val)
-                rule_val_lower = rule_val_str.lower()
-                # For numeric rule values (Spinner), attempt float equality so
-                # a rule value of 1.0 matches a stored int of 1. Fall back to
-                # string equality when either side isn't numeric.
-                rule_val_num = float(rule_val) if isinstance(rule_val, (int, float)) else None
-
-                def _values_equal(val):
-                    if rule_val_num is not None:
-                        try:
-                            return float(val) == rule_val_num
-                        except (TypeError, ValueError):
-                            pass
-                    return str(val) == rule_val_str
-
-                is_negation = mode in ('has_not', 'not_equal')
-                for aid, val in values.items():
-                    if aid in custom_color_map or _is_nullish(val):
-                        continue
-                    val_str = str(val)
-                    val_lower = val_str.lower()
-                    if mode == 'has':
-                        if rule_val_lower in val_lower:
-                            custom_color_map[aid] = rule['color']
-                    elif mode == 'has_not':
-                        if rule_val_lower not in val_lower:
-                            custom_color_map[aid] = rule['color']
-                    elif mode == 'not_equal':
-                        if not _values_equal(val):
-                            custom_color_map[aid] = rule['color']
-                    else:  # 'exact'
-                        if _values_equal(val):
-                            custom_color_map[aid] = rule['color']
-
-                if is_negation:
-                    for aid in ann_ids:
-                        if aid not in custom_color_map and aid not in values:
-                            custom_color_map[aid] = rule['color']
+        custom_color_map = _build_color_map(custom_colors, fetch_values_for_qkey, ann_ids)
 
     sequence_annotations = []
     for ann_id, start, end, strand, ftype, product, function, locus_tag in seq_ann_rows:
@@ -2581,82 +2607,7 @@ def make_bokeh_genemap_mag(conn, mag_id, mag_name, mag_length, subplot_size,
 
     custom_color_map = {}
     if custom_colors and seq_ann_rows:
-        from collections import defaultdict
-        rules_by_key = defaultdict(list)
-        for rule in custom_colors:
-            rules_by_key[rule['qualifier_key']].append(rule)
-        for qkey, rules in rules_by_key.items():
-            values = fetch_values_for_qkey(qkey)
-            for rule in rules:
-                mode = rule.get('match_mode', 'exact')
-                if mode == 'random':
-                    filtered = {aid: val for aid, val in values.items() if not _is_nullish(val)}
-                    numeric_map = _try_numeric_map(filtered.values())
-                    if numeric_map is not None:
-                        value_to_color = _gradient_palette(numeric_map)
-                    else:
-                        distinct = {str(v) for v in filtered.values()}
-                        value_to_color = {v: _hash_color(v) for v in distinct}
-                    for aid, val in filtered.items():
-                        if aid in custom_color_map:
-                            continue
-                        color = value_to_color.get(str(val))
-                        if color:
-                            custom_color_map[aid] = color
-                    continue
-                rule_val = rule['value']
-                if mode in ('lt', 'gt'):
-                    try:
-                        rule_num = float(rule_val)
-                    except (TypeError, ValueError):
-                        continue
-                    for aid, val in values.items():
-                        if aid in custom_color_map or _is_nullish(val):
-                            continue
-                        try:
-                            v_num = float(val)
-                        except (TypeError, ValueError):
-                            continue
-                        if mode == 'lt' and v_num < rule_num:
-                            custom_color_map[aid] = rule['color']
-                        elif mode == 'gt' and v_num > rule_num:
-                            custom_color_map[aid] = rule['color']
-                    continue
-                rule_val_str = str(rule_val)
-                rule_val_lower = rule_val_str.lower()
-                rule_val_num = float(rule_val) if isinstance(rule_val, (int, float)) else None
-
-                def _values_equal(val):
-                    if rule_val_num is not None:
-                        try:
-                            return float(val) == rule_val_num
-                        except (TypeError, ValueError):
-                            pass
-                    return str(val) == rule_val_str
-
-                is_negation = mode in ('has_not', 'not_equal')
-                for aid, val in values.items():
-                    if aid in custom_color_map or _is_nullish(val):
-                        continue
-                    val_str = str(val)
-                    val_lower = val_str.lower()
-                    if mode == 'has':
-                        if rule_val_lower in val_lower:
-                            custom_color_map[aid] = rule['color']
-                    elif mode == 'has_not':
-                        if rule_val_lower not in val_lower:
-                            custom_color_map[aid] = rule['color']
-                    elif mode == 'not_equal':
-                        if not _values_equal(val):
-                            custom_color_map[aid] = rule['color']
-                    else:
-                        if _values_equal(val):
-                            custom_color_map[aid] = rule['color']
-
-                if is_negation:
-                    for aid in ann_ids:
-                        if aid not in custom_color_map and aid not in values:
-                            custom_color_map[aid] = rule['color']
+        custom_color_map = _build_color_map(custom_colors, fetch_values_for_qkey, ann_ids)
 
     sequence_annotations = []
     for ann_id, start, end, strand, ftype, product, function, locus_tag, _main in seq_ann_rows:

@@ -13,6 +13,15 @@ GFF_EXTS = ('.gff', '.gff3')
 ANNOTATION_EXTS = GENBANK_EXTS + GFF_EXTS
 CSV_EXTS = ('.csv',)
 
+MULTI_VALUE_SEP = "^"
+
+
+def _sanitize_value(val, warn_cb):
+    if "^" in val:
+        warn_cb(f"value contains reserved separator '^' — replacing with '_': {val!r}")
+        return val.replace("^", "_")
+    return val
+
 
 EPILOG = """\
 CSV format (wide / spreadsheet style):
@@ -82,7 +91,12 @@ def add_add_contig_annotations_args(parser):
     parser.add_argument('-o', '--output', required=True,
                         help='Output file or directory for modified annotations')
     parser.add_argument('--force', action='store_true', default=False,
-                        help='Replace existing qualifiers instead of erroring')
+                        help='Replace existing qualifiers instead of keeping the first value')
+    parser.add_argument('--keep-multiple', dest='keep_multiple', action='store_true', default=False,
+                        help='When a qualifier already exists on a feature, append the new value '
+                             'with "^" separator instead of keeping the first value. '
+                             'Warning: links between qualifiers from the same CSV row are lost. '
+                             'Use --force to overwrite instead.')
     parser.add_argument('--prefix', dest='prefix', default=None,
                         help='String prepended to every qualifier name written to the output '
                              '(e.g. --prefix mydb_ writes CSV column "category" as "mydb_category"). '
@@ -166,7 +180,7 @@ def _get_genbank_match_key(feature, match_by_cols, record_name):
     return tuple(vals)
 
 
-def _process_genbank_file(annot_path, csv_lookup, match_by_cols, value_cols, force, prefix=None):
+def _process_genbank_file(annot_path, csv_lookup, match_by_cols, value_cols, force, prefix=None, keep_multiple=False):
     """Process a single GenBank file. Returns (output_records, stats)."""
     records = list(SeqIO.parse(annot_path, "genbank"))
     stats = {
@@ -178,6 +192,7 @@ def _process_genbank_file(annot_path, csv_lookup, match_by_cols, value_cols, for
         "multi_match_rows": 0,
         "multi_match_features": 0,
         "errors": [],
+        "warnings": [],
         "modified": False,
     }
 
@@ -209,13 +224,27 @@ def _process_genbank_file(annot_path, csv_lookup, match_by_cols, value_cols, for
                     if not val:
                         continue
                     out_col = (prefix + col) if prefix else col
-                    if out_col in feat.qualifiers and not force:
-                        key_desc = ", ".join(f"{mc}={kv}" for mc, kv in zip(match_by_cols, key))
-                        stats["errors"].append(
-                            f"{row_source}: qualifier '{out_col}' already exists on {key_desc} "
-                            f"(use --force to overwrite)")
-                        continue
-                    feat.qualifiers[out_col] = [val]
+                    val = _sanitize_value(
+                        val, lambda msg: stats["warnings"].append(f"{row_source}: {msg}"))
+                    if out_col in feat.qualifiers:
+                        key_desc = ", ".join(
+                            f"{mc}={kv}" for mc, kv in zip(match_by_cols, key))
+                        if force:
+                            feat.qualifiers[out_col] = [val]
+                        elif keep_multiple:
+                            existing = feat.qualifiers[out_col][0]
+                            feat.qualifiers[out_col] = [existing + MULTI_VALUE_SEP + val]
+                            stats["warnings"].append(
+                                f"{row_source}: qualifier '{out_col}' already exists on "
+                                f"{key_desc} — appending value (use --force to overwrite)")
+                        else:
+                            stats["warnings"].append(
+                                f"{row_source}: qualifier '{out_col}' already exists on "
+                                f"{key_desc} — keeping first value "
+                                f"(use --keep-multiple to append, --force to overwrite)")
+                            continue
+                    else:
+                        feat.qualifiers[out_col] = [val]
                     stats["qualifiers_added"][col] += 1
                     feat_modified = True
                 if feat_modified:
@@ -246,7 +275,7 @@ def _rebuild_gff_attributes(pairs):
     return ";".join(f"{k}={v}" if v else k for k, v in pairs)
 
 
-def _process_gff_file(annot_path, csv_lookup, match_by_cols, value_cols, force, prefix=None):
+def _process_gff_file(annot_path, csv_lookup, match_by_cols, value_cols, force, prefix=None, keep_multiple=False):
     """Process a single GFF3 file. Returns (output_lines, stats)."""
     stats = {
         "file": annot_path,
@@ -257,6 +286,7 @@ def _process_gff_file(annot_path, csv_lookup, match_by_cols, value_cols, force, 
         "multi_match_rows": 0,
         "multi_match_features": 0,
         "errors": [],
+        "warnings": [],
         "modified": False,
     }
 
@@ -317,20 +347,38 @@ def _process_gff_file(annot_path, csv_lookup, match_by_cols, value_cols, force, 
                     if not val:
                         continue
                     out_col = (prefix + col) if prefix else col
-                    if out_col in attr_dict and not force:
-                        key_desc = ", ".join(f"{mc}={kv}" for mc, kv in zip(match_by_cols, key))
-                        stats["errors"].append(
-                            f"{row_source}: qualifier '{out_col}' already exists on {key_desc} "
-                            f"(use --force to overwrite)")
-                        continue
-
-                    encoded_val = urllib.parse.quote(val, safe=" /:.^*$@!+?|")
-                    existing_idx = next((i for i, (k, _) in enumerate(attrs) if k == out_col), None)
-                    if existing_idx is not None:
-                        attrs[existing_idx] = (out_col, encoded_val)
+                    val = _sanitize_value(
+                        val, lambda msg: stats["warnings"].append(f"{row_source}: {msg}"))
+                    existing_idx = next(
+                        (i for i, (k, _) in enumerate(attrs) if k == out_col), None)
+                    if out_col in attr_dict:
+                        key_desc = ", ".join(
+                            f"{mc}={kv}" for mc, kv in zip(match_by_cols, key))
+                        if force:
+                            encoded_val = urllib.parse.quote(val, safe=" /:.^*$@!+?")
+                            if existing_idx is not None:
+                                attrs[existing_idx] = (out_col, encoded_val)
+                            attr_dict[out_col] = encoded_val
+                        elif keep_multiple:
+                            existing_decoded = urllib.parse.unquote(attr_dict[out_col])
+                            combined = existing_decoded + MULTI_VALUE_SEP + val
+                            encoded_combined = urllib.parse.quote(combined, safe=" /:.^*$@!+?")
+                            if existing_idx is not None:
+                                attrs[existing_idx] = (out_col, encoded_combined)
+                            attr_dict[out_col] = encoded_combined
+                            stats["warnings"].append(
+                                f"{row_source}: qualifier '{out_col}' already exists on "
+                                f"{key_desc} — appending value (use --force to overwrite)")
+                        else:
+                            stats["warnings"].append(
+                                f"{row_source}: qualifier '{out_col}' already exists on "
+                                f"{key_desc} — keeping first value "
+                                f"(use --keep-multiple to append, --force to overwrite)")
+                            continue
                     else:
+                        encoded_val = urllib.parse.quote(val, safe=" /:.^*$@!+?")
                         attrs.append((out_col, encoded_val))
-                    attr_dict[out_col] = encoded_val
+                        attr_dict[out_col] = encoded_val
                     stats["qualifiers_added"][col] += 1
                     feat_modified = True
 
@@ -343,13 +391,13 @@ def _process_gff_file(annot_path, csv_lookup, match_by_cols, value_cols, force, 
     return lines, stats
 
 
-def _process_one_file(annot_path, csv_lookup, match_by_cols, value_cols, force, prefix=None):
+def _process_one_file(annot_path, csv_lookup, match_by_cols, value_cols, force, prefix=None, keep_multiple=False):
     lower = annot_path.lower()
     if lower.endswith(GENBANK_EXTS):
-        records, stats = _process_genbank_file(annot_path, csv_lookup, match_by_cols, value_cols, force, prefix)
+        records, stats = _process_genbank_file(annot_path, csv_lookup, match_by_cols, value_cols, force, prefix, keep_multiple)
         return "genbank", records, stats
     elif lower.endswith(GFF_EXTS):
-        lines, stats = _process_gff_file(annot_path, csv_lookup, match_by_cols, value_cols, force, prefix)
+        lines, stats = _process_gff_file(annot_path, csv_lookup, match_by_cols, value_cols, force, prefix, keep_multiple)
         return "gff", lines, stats
     else:
         sys.exit(f"ERROR: Unsupported annotation format: {annot_path}")
@@ -397,6 +445,7 @@ def run_add_contig_annotations(args):
 
     all_matched_keys = set()
     all_errors = []
+    all_warnings = []
     total_features = 0
     total_features_modified = 0
     total_multi_match_rows = 0
@@ -415,6 +464,7 @@ def run_add_contig_annotations(args):
         total_multi_match_features += stats["multi_match_features"]
         all_matched_keys.update(stats["matched_keys"])
         all_errors.extend(stats["errors"])
+        all_warnings.extend(stats["warnings"])
         for col in value_cols:
             total_qualifiers_added[col] += stats["qualifiers_added"][col]
 
@@ -434,7 +484,7 @@ def run_add_contig_annotations(args):
                 print(f"  {Path(annot_path).name}: no modifications, not written", flush=True)
 
     for af in annot_files:
-        fmt, data, stats = _process_one_file(af, csv_lookup, match_by_cols, value_cols, args.force, prefix or None)
+        fmt, data, stats = _process_one_file(af, csv_lookup, match_by_cols, value_cols, args.force, prefix or None, args.keep_multiple)
         _handle_result(af, fmt, data, stats)
 
     if pending_copies:
@@ -463,6 +513,11 @@ def run_add_contig_annotations(args):
     print(f"  Qualifiers added:", flush=True)
     for col, out_col in zip(value_cols, out_cols):
         print(f"    {out_col}: {total_qualifiers_added[col]}", flush=True)
+
+    if all_warnings:
+        print(f"\nWarnings ({len(all_warnings)}):", flush=True)
+        for w in all_warnings:
+            print(f"  {w}", flush=True)
 
     if all_errors:
         print(f"\nErrors ({len(all_errors)}):", flush=True)
