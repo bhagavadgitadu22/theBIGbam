@@ -176,6 +176,8 @@ We can then update our Bakta annotation files with the newly identified defense 
 First, we need to reformat the DefenseFinder output to match the input format expected by `add-contig-annotations`:
 
 ```bash
+for f in $(find . -name "*_defense_finder_genes.tsv"); do tail -n +2 $f; done > MAGs_defense_finder_genes.tsv
+
 echo "replicon,locus_tag,gene_name,hit_pos,model_fqn,sys_id,sys_loci,locus_num,sys_wholeness,sys_score,sys_occ,hit_gene_ref,hit_status,hit_seq_len,hit_i_eval,hit_score,hit_profile_cov,hit_seq_cov,hit_begin_match,hit_end_match,counterpart,used_in,type,subtype,activity" > MAGs_defense_finder_genes_reformatted.csv
 # replace "," by "|" and replace "\t" by ","
 sed 's/,/|/g' MAGs_defense_finder_genes.tsv | sed $'s/\t/,/g' >> MAGs_defense_finder_genes_reformatted.csv
@@ -186,8 +188,10 @@ awk 'BEGIN{FS=OFS=","} NR==1{print $0,"feature_type"; next} {print $0,"CDS"}' MA
 Then we use `add-contig-annotations` to get a new directory of annotation files comprising both the Bakta and the DefenseFinder qualifiers for each coding sequence:
 
 ```bash
-sbatch -q serial -N 1 -n 1 -c 1 -t 10:00:00 --wrap="thebigbam add-contig-annotations -g annotations_on_mags --csv MAGs_defense_finder_genes_reformatted_CDS_only.csv --match-by feature_type,locus_tag -o annotations_on_mags_enriched"
+sbatch -q serial -N 1 -n 1 -c 1 -t 10:00:00 --wrap="thebigbam add-contig-annotations -g annotations_on_mags --csv MAGs_defense_finder_genes_reformatted_CDS_only.csv --match-by feature_type,locus_tag --prefix defensefinder --keep-multiple -o annotations_on_mags_enriched"
 ```
+
+A protein can be assigned multiple defense roles by DefenseFinder. Using `--keep-multiple` retains all values for each qualifier, whereas the default behavior keeps only the first value recorded for a given qualifier and feature.
 
 ### Calculate
 

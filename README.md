@@ -428,7 +428,7 @@ For more details on theBIGbam circular genome support, you can consult [the circ
 All annotations provided through annotation files are stored in the database during its creation. Therefore, you may want to enrich your annotation files with additional metadata before computing the database. This is done via:
 
 ```bash
-thebigbam add-contig-annotations -g tests/HK97/HK97_GCF_000848825.1_pharokka.gbk --csv new_qualifiers.csv --match-by feature_type,ID -o annotations_enriched.gbk
+thebigbam add-contig-annotations -g tests/HK97/HK97_GCF_000848825.1_pharokka.gbk --csv new_qualifiers.csv --match-by feature_type,ID --prefix toolX_ -o annotations_enriched.gbk
 ```
 
 Where new_qualifiers.tsv contains:
@@ -444,8 +444,10 @@ CDS,TTVDVOOI_CDS_0010,,butter3
 
 In this example, the new file annotations_enriched.gbk will contain new annotations:
 
-- The feature `TTVDVOOI_CDS_0006` receives the qualifiers `new_qualifier=butter` and `new_qualifier2=butter2`
-- The feature `TTVDVOOI_CDS_0010` receives only `new_qualifier2=butter3`, as empty values are ignored
+- The feature `TTVDVOOI_CDS_0006` receives the qualifiers `toolX_new_qualifier=butter` and `toolX_new_qualifier2=butter2`
+- The feature `TTVDVOOI_CDS_0010` receives only `toolX_new_qualifier2=butter3`, as empty values are ignored
+
+We recommend using `--prefix` to prepend a string (here `toolX_`) to the new qualifier names. This makes the new qualifiers easy to identify and helps avoid naming conflicts with the original qualifiers.
 
 ## Database maintenance
 
