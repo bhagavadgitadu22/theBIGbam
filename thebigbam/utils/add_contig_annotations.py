@@ -96,6 +96,8 @@ def add_add_contig_annotations_args(parser):
                         help='When a qualifier already exists on a feature, append the new value '
                              'with "^" separator instead of keeping the first value. '
                              'Warning: links between qualifiers from the same CSV row are lost. '
+                             'If the original annotation file already contains "^" in a qualifier '
+                             'value, it will be indistinguishable from the multi-value separator. '
                              'Use --force to overwrite instead.')
     parser.add_argument('--prefix', dest='prefix', default=None,
                         help='String prepended to every qualifier name written to the output '

@@ -205,10 +205,6 @@ def run(args):
                     """,
                     ann_ids,
                 ).fetchall():
-                    if "^" in value:
-                        print(f"WARNING: value for key '{key}' contains reserved separator '^' "
-                              f"— replacing with '_': {value!r}", file=sys.stderr, flush=True)
-                        value = value.replace("^", "_")
                     if key in quals[ann_id]:
                         quals[ann_id][key] = quals[ann_id][key] + "^" + value
                     else:

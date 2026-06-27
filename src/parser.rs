@@ -412,7 +412,7 @@ fn resolve_genbank_parents(features: &mut [FeatureAnnotation]) {
 /// Collect all qualifiers from a GenBank feature into a HashMap.
 ///
 /// When a qualifier key appears multiple times (e.g., multiple db_xref entries),
-/// values are joined with "; ".
+/// values are joined with "^".
 fn collect_qualifiers(qualifiers: &[(std::borrow::Cow<'static, str>, Option<String>)]) -> HashMap<String, String> {
     let mut map = HashMap::new();
     for (key, value) in qualifiers {
@@ -420,7 +420,7 @@ fn collect_qualifiers(qualifiers: &[(std::borrow::Cow<'static, str>, Option<Stri
             let key_str = key.to_string();
             map.entry(key_str)
                 .and_modify(|existing: &mut String| {
-                    existing.push_str("; ");
+                    existing.push_str("^");
                     existing.push_str(val);
                 })
                 .or_insert_with(|| val.clone());
