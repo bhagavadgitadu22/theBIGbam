@@ -66,10 +66,10 @@ _MAG_EXTRA_COLUMNS = {
 }
 
 
-def _build_columns(mag_mode):
+def _build_columns(include_mag):
     cols = []
     for c in _BASE_COLUMNS:
-        if mag_mode and c in _MAG_EXTRA_COLUMNS:
+        if include_mag and c in _MAG_EXTRA_COLUMNS:
             cols.append(_MAG_EXTRA_COLUMNS[c])
         cols.append(c)
     return cols
@@ -270,7 +270,7 @@ def _build_gene_names(genes, contig_info):
 
 def process_sample(conn, sample_id, sample_name, contig_info, cov_map, af_map,
                    id_to_name, name_to_id, genes_by_contig, gene_names_by_contig,
-                   mag_mode=False, contig_to_mag=None, mag_cov_map=None,
+                   include_mag=False, contig_to_mag=None, mag_cov_map=None,
                    mag_id_to_name=None):
     """Process all CDS for one sample. Yields row tuples."""
     contig_ids = [cid for cid in cov_map if cid in genes_by_contig]
@@ -291,7 +291,7 @@ def process_sample(conn, sample_id, sample_name, contig_info, cov_map, af_map,
             mag_name = ""
             mag_af = None
             mag_cov_tmean = None
-            if mag_mode and contig_to_mag:
+            if include_mag and contig_to_mag:
                 mag_id = contig_to_mag.get(contig_id)
                 if mag_id is not None:
                     mag_name = (mag_id_to_name or {}).get(mag_id, "")
@@ -341,17 +341,17 @@ def process_sample(conn, sample_id, sample_name, contig_info, cov_map, af_map,
                 row = [
                     sample_name,
                 ]
-                if mag_mode:
+                if include_mag:
                     row.append(mag_name)
                 row.extend([
                     contig_name,
                     gene_name,
                 ])
-                if mag_mode:
+                if include_mag:
                     row.append(mag_af)
                 row.append(contig_af)
                 row.append(gene_af)
-                if mag_mode:
+                if include_mag:
                     row.append(mag_cov_tmean)
                 row.extend([
                     contig_cov_tmean,
@@ -382,15 +382,22 @@ def process_sample(conn, sample_id, sample_name, contig_info, cov_map, af_map,
 DESCRIPTION = """\
 Export per-CDS mapping signals from a theBIGbam database.
 
+Use --view to control the filtering level:
+  --view contig (default): filters on contig-level coverage/aligned_fraction.
+      Output contains no MAG columns.
+  --view mag: filters on MAG-level coverage/aligned_fraction. All contigs
+      belonging to a qualifying MAG are included. Output includes MAG columns.
+      Requires a MAG-mode database.
+
 Output columns (one row per sample x CDS):
 - sample_name: BAM sample name
-- mag_name: (MAG mode only) MAG the contig belongs to
+- mag_name: (--view mag only) MAG the contig belongs to
 - contig_name: contig the CDS belongs to
 - gene_name: stable identifier <contig_name>_tbb_<N>, numbered per contig by start position
-- mag_aligned_fraction: (MAG mode only) percentage of the MAG covered by aligned reads (0-100)
+- mag_aligned_fraction: (--view mag only) percentage of the MAG covered by aligned reads (0-100)
 - contig_aligned_fraction: percentage of the contig covered by aligned reads (0-100)
 - gene_aligned_fraction: percentage of positions in the CDS covered by at least one primary read (0-100)
-- mag_coverage_trimmed_mean: (MAG mode only) trimmed mean primary read depth across the whole MAG
+- mag_coverage_trimmed_mean: (--view mag only) trimmed mean primary read depth across the whole MAG
 - contig_coverage_trimmed_mean: trimmed mean primary read depth across the whole contig
 - gene_coverage_median: median primary read depth across the CDS
 - coverage_ratio: gene_coverage_median / contig_coverage_trimmed_mean
@@ -420,16 +427,21 @@ def add_args(parser):
     parser.add_argument("--db", required=True, help="Path to the theBIGbam DuckDB database")
     parser.add_argument("--output", required=True, help="Path to the output TSV file")
     parser.add_argument(
+        "--view", choices=["contig", "mag"], default="contig",
+        help="Aggregation level for filtering: 'contig' (default) filters per-contig; "
+             "'mag' filters per-MAG and includes MAG columns (requires MAG-mode database)",
+    )
+    parser.add_argument(
         "--min_aligned_fraction",
         type=float,
-        default=50,
-        help="Minimum aligned fraction percentage (0-100) to include a contig-sample pair (default: 50)",
+        default=0,
+        help="Minimum aligned fraction percentage (0-100) to include a contig or MAG, depending on --view (default: 0, no filter)",
     )
     parser.add_argument(
         "--min_coverage_depth",
         type=float,
         default=10,
-        help="Minimum trimmed mean coverage depth to include a contig-sample pair (default: 10)",
+        help="Minimum trimmed mean coverage depth to include a contig or MAG, depending on --view (default: 10)",
     )
 
 
@@ -440,6 +452,8 @@ def run(args):
         print("Error: --min_aligned_fraction must be between 0 and 100.", file=sys.stderr, flush=True)
         sys.exit(1)
 
+    view_mode = args.view
+
     conn = duckdb.connect(args.db, read_only=True)
 
     _cov_scales = {r[0]: float(r[1]) for r in conn.execute(
@@ -449,11 +463,27 @@ def run(args):
     _s_tm = _cov_scales["Coverage_trimmed_mean"]
 
     from thebigbam.database.database_getters import is_mag_mode
-    mag_mode = is_mag_mode(conn)
+    include_mag = False
     contig_to_mag = {}
     mag_id_to_name = {}
     mag_cov_map = {}
-    if mag_mode:
+
+    if view_mode == "mag":
+        if not is_mag_mode(conn):
+            print(
+                "Error: --view mag requires a MAG-mode database. "
+                "This database was built in contig mode.",
+                file=sys.stderr, flush=True,
+            )
+            sys.exit(1)
+        if not _table_exists(conn, "MAG_coverage"):
+            print(
+                "Error: --view mag requires a MAG_coverage table. "
+                "No MAG-level coverage data found.",
+                file=sys.stderr, flush=True,
+            )
+            sys.exit(1)
+        include_mag = True
         contig_to_mag = {
             r[0]: r[1] for r in conn.execute(
                 "SELECT Contig_id, MAG_id FROM MAG_contigs_association"
@@ -464,14 +494,13 @@ def run(args):
                 "SELECT MAG_id, MAG_name FROM MAG"
             ).fetchall()
         }
-        if _table_exists(conn, "MAG_coverage"):
-            mag_cov_map = {
-                (r[0], r[1]): (r[2] / _s_af, r[3] / _s_tm)
-                for r in conn.execute(
-                    "SELECT MAG_id, Sample_id, Aligned_fraction_percentage, "
-                    "Coverage_trimmed_mean FROM MAG_coverage"
-                ).fetchall()
-            }
+        mag_cov_map = {
+            (r[0], r[1]): (r[2] / _s_af, r[3] / _s_tm)
+            for r in conn.execute(
+                "SELECT MAG_id, Sample_id, Aligned_fraction_percentage, "
+                "Coverage_trimmed_mean FROM MAG_coverage"
+            ).fetchall()
+        }
 
     if not _table_exists(conn, "Contig_annotation"):
         print("Error: No Contig_annotation table. Run annotation first.", file=sys.stderr, flush=True)
@@ -545,8 +574,9 @@ def run(args):
         f"{len(all_genes)} CDS...",
         file=sys.stderr, flush=True,
     )
+    filter_level = "MAG" if view_mode == "mag" else "contig"
     print(
-        f"Filters: aligned_fraction >= {args.min_aligned_fraction}%, "
+        f"Filters (at {filter_level} level): aligned_fraction >= {args.min_aligned_fraction}%, "
         f"coverage_depth >= {args.min_coverage_depth}",
         file=sys.stderr, flush=True,
     )
@@ -556,37 +586,70 @@ def run(args):
 
     total_rows = 0
 
-    columns = _build_columns(mag_mode)
+    columns = _build_columns(include_mag)
 
     with open(args.output, "w", newline="") as f:
         writer = csv.writer(f, delimiter="\t")
         writer.writerow(columns)
 
         for sample_id, sample_name in samples:
-            if has_coverage:
-                qualifying = conn.execute(
-                    f"""
-                    SELECT Contig_id, Aligned_fraction_percentage / {_s_af},
-                           Coverage_trimmed_mean / {_s_tm}
-                    FROM Coverage
-                    WHERE Sample_id = ?
-                      AND Aligned_fraction_percentage >= ?
-                      AND Coverage_trimmed_mean >= ?
-                    """,
-                    [sample_id, af_threshold, cov_threshold],
-                ).fetchall()
-            else:
-                qualifying = []
+            if view_mode == "mag":
+                # Filter at MAG level, then include all contigs of qualifying MAGs
+                qualifying_mag_ids = set()
+                for (mag_id, sid), (mag_af, mag_tm) in mag_cov_map.items():
+                    if sid != sample_id:
+                        continue
+                    if mag_af * _s_af >= af_threshold and mag_tm * _s_tm >= cov_threshold:
+                        qualifying_mag_ids.add(mag_id)
 
-            af_map = {r[0]: r[1] for r in qualifying}
-            cov_map = {r[0]: r[2] for r in qualifying}
+                qualifying_contig_ids = [
+                    cid for cid, mid in contig_to_mag.items()
+                    if mid in qualifying_mag_ids
+                ]
+
+                # Fetch contig-level coverage (unfiltered) for informational columns
+                af_map = {}
+                cov_map = {}
+                if has_coverage and qualifying_contig_ids:
+                    placeholders = ",".join("?" * len(qualifying_contig_ids))
+                    rows = conn.execute(
+                        f"""
+                        SELECT Contig_id, Aligned_fraction_percentage / {_s_af},
+                               Coverage_trimmed_mean / {_s_tm}
+                        FROM Coverage
+                        WHERE Sample_id = ? AND Contig_id IN ({placeholders})
+                        """,
+                        [sample_id] + qualifying_contig_ids,
+                    ).fetchall()
+                    af_map = {r[0]: r[1] for r in rows}
+                    cov_map = {r[0]: r[2] for r in rows}
+
+            else:
+                # Filter at contig level (default)
+                if has_coverage:
+                    qualifying = conn.execute(
+                        f"""
+                        SELECT Contig_id, Aligned_fraction_percentage / {_s_af},
+                               Coverage_trimmed_mean / {_s_tm}
+                        FROM Coverage
+                        WHERE Sample_id = ?
+                          AND Aligned_fraction_percentage >= ?
+                          AND Coverage_trimmed_mean >= ?
+                        """,
+                        [sample_id, af_threshold, cov_threshold],
+                    ).fetchall()
+                else:
+                    qualifying = []
+
+                af_map = {r[0]: r[1] for r in qualifying}
+                cov_map = {r[0]: r[2] for r in qualifying}
 
             sample_rows = 0
             for row in process_sample(
                 conn, sample_id, sample_name, contig_info, cov_map, af_map,
                 id_to_name, name_to_id, genes_by_contig, gene_names_by_contig,
-                mag_mode=mag_mode, contig_to_mag=contig_to_mag, mag_cov_map=mag_cov_map,
-                mag_id_to_name=mag_id_to_name,
+                include_mag=include_mag, contig_to_mag=contig_to_mag,
+                mag_cov_map=mag_cov_map, mag_id_to_name=mag_id_to_name,
             ):
                 writer.writerow(row)
                 sample_rows += 1
