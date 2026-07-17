@@ -1,5 +1,7 @@
 import argparse
+import datetime
 import io
+import json
 import os
 import threading
 import time
@@ -317,6 +319,7 @@ def build_controls(preloaded):
         value=mags[0] if len(mags) == 1 else "",
         options=mags,
         placeholder="Type to search MAGs...",
+        server_search=True,
         sizing_mode="stretch_width",
         margin=(0, 5, 0, 5),
         visible=has_mags,
@@ -334,6 +337,7 @@ def build_controls(preloaded):
         value=contigs[0] if len(contigs) == 1 else "",
         options=contigs,
         placeholder="Type to search contigs...",
+        server_search=True,
         sizing_mode="stretch_width",
         margin=(0, 5, 0, 5)
     )
@@ -342,6 +346,7 @@ def build_controls(preloaded):
         value=samples[0] if len(samples) == 1 else "",
         options=samples,
         placeholder="Type to search samples...",
+        server_search=True,
         sizing_mode="stretch_width",
         margin=(0, 5, 0, 5)
     )
@@ -398,7 +403,7 @@ def build_controls(preloaded):
     }
     return widgets
 
-def create_layout(db_path, preloaded, enable_timing=False):
+def create_layout(db_path, preloaded, enable_timing=False, initial_settings=None):
     """Create and return the application layout for Panel serve."""
     global _current_op
     _current_op = "session_init"
@@ -773,9 +778,32 @@ def create_layout(db_path, preloaded, enable_timing=False):
             widget.value = current_value
         elif widget.value and widget.value not in completions:
             widget.value = ""
-    
-    def refresh_contig_options_unlocked():
-        """Core logic — does NOT check the lock."""
+
+    def push_search_completions(widget, completions):
+        """Update completions for a server-side search response.
+
+        Unlike update_widget_completions, always force-fires the 'options'
+        watcher (via param.trigger) even when the resulting list happens to
+        be identical to what's already loaded — the frontend's pending
+        Tom Select load() callback is resolved from that event, and Param's
+        onlychanged watcher would otherwise never fire for a no-op update,
+        leaving the search box stuck in its loading state.
+        """
+        update_widget_completions(widget, completions)
+        widget.param.trigger('options')
+
+    def _compute_contig_completions(search_term=""):
+        """Core logic — does NOT check the lock. search_term additionally
+        narrows results server-side (used for SearchableSelect type-ahead)."""
+        search_term = (search_term or "").strip()
+        search_sql = " AND c.Contig_name ILIKE '%' || ? || '%'" if search_term else ""
+        search_where = " WHERE c.Contig_name ILIKE '%' || ? || '%'" if search_term else ""
+        search_params = [search_term] if search_term else []
+        # Tie-break so the currently-selected contig always survives LIMIT
+        # 100 (it's a no-op when nothing is selected, since '' never
+        # matches a real contig name) — keeps the cap as a real payload
+        # guard while never silently dropping what's already selected.
+        preserve_contig = widgets['contig_select'].value
         if widgets['has_mags']:
             # MAG mode: contig list is a child of the selected MAG, not of the sample.
             sel_mag = widgets['mag_select'].value
@@ -783,6 +811,9 @@ def create_layout(db_path, preloaded, enable_timing=False):
                 completions = list(widgets['mag_to_contigs'][sel_mag])
             else:
                 completions = list(orig_contigs)
+            if search_term:
+                _st = search_term.lower()
+                completions = [c for c in completions if _st in c.lower()]
 
             # Apply Filtering query builder filters (MAG mode)
             filtered = get_filtering_filtered_pairs()
@@ -799,9 +830,9 @@ def create_layout(db_path, preloaded, enable_timing=False):
                                 f" JOIN Contig c ON c.Contig_id = f.Contig_id"
                                 f" JOIN MAG_contigs_association mca ON mca.Contig_id = c.Contig_id"
                                 f" JOIN MAG mg ON mg.MAG_id = mca.MAG_id"
-                                f" WHERE mg.MAG_name = ? AND (f.Sample_id = ? OR f.Sample_id IS NULL)"
-                                f" ORDER BY c.Contig_name LIMIT 100",
-                                fparams + [sel_mag, sel_sid]
+                                f" WHERE mg.MAG_name = ? AND (f.Sample_id = ? OR f.Sample_id IS NULL){search_sql}"
+                                f" ORDER BY (c.Contig_name = ?) DESC, c.Contig_name LIMIT 100",
+                                fparams + [sel_mag, sel_sid] + search_params + [preserve_contig]
                             ).fetchall()
                         else:
                             rows = fc.execute(
@@ -809,25 +840,26 @@ def create_layout(db_path, preloaded, enable_timing=False):
                                 f" JOIN Contig c ON c.Contig_id = f.Contig_id"
                                 f" JOIN MAG_contigs_association mca ON mca.Contig_id = c.Contig_id"
                                 f" JOIN MAG mg ON mg.MAG_id = mca.MAG_id"
-                                f" WHERE mg.MAG_name = ?"
-                                f" ORDER BY c.Contig_name LIMIT 100",
-                                fparams + [sel_mag]
+                                f" WHERE mg.MAG_name = ?{search_sql}"
+                                f" ORDER BY (c.Contig_name = ?) DESC, c.Contig_name LIMIT 100",
+                                fparams + [sel_mag] + search_params + [preserve_contig]
                             ).fetchall()
                     elif views.active == 0 and widgets['sample_select'].value:
                         sel_sid = widgets['sample_name_to_id'].get(widgets['sample_select'].value)
                         rows = fc.execute(
                             f"SELECT DISTINCT c.Contig_name FROM ({fsql}) f"
                             f" JOIN Contig c ON c.Contig_id = f.Contig_id"
-                            f" WHERE f.Sample_id = ? OR f.Sample_id IS NULL"
-                            f" ORDER BY c.Contig_name LIMIT 100",
-                            fparams + [sel_sid]
+                            f" WHERE f.Sample_id = ? OR f.Sample_id IS NULL{search_sql}"
+                            f" ORDER BY (c.Contig_name = ?) DESC, c.Contig_name LIMIT 100",
+                            fparams + [sel_sid] + search_params + [preserve_contig]
                         ).fetchall()
                     else:
                         rows = fc.execute(
                             f"SELECT DISTINCT c.Contig_name FROM ({fsql}) f"
                             f" JOIN Contig c ON c.Contig_id = f.Contig_id"
-                            f" ORDER BY c.Contig_name LIMIT 100",
-                            fparams
+                            f"{search_where}"
+                            f" ORDER BY (c.Contig_name = ?) DESC, c.Contig_name LIMIT 100",
+                            fparams + search_params + [preserve_contig]
                         ).fetchall()
                     filter_allowed = {row[0] for row in rows}
                     completions = [c for c in completions if c in filter_allowed]
@@ -841,14 +873,17 @@ def create_layout(db_path, preloaded, enable_timing=False):
                     rows = conn.cursor().execute(
                         "SELECT DISTINCT c.Contig_name FROM Coverage p"
                         " JOIN Contig c ON c.Contig_id = p.Contig_id"
-                        " WHERE p.Sample_id = ? ORDER BY c.Contig_name LIMIT 100",
-                        [sel_sid]
+                        f" WHERE p.Sample_id = ?{search_sql} ORDER BY (c.Contig_name = ?) DESC, c.Contig_name LIMIT 100",
+                        [sel_sid] + search_params + [preserve_contig]
                     ).fetchall()
                     completions = [row[0] for row in rows]
                 else:
                     completions = []
             else:
                 completions = list(orig_contigs)
+                if search_term:
+                    _st = search_term.lower()
+                    completions = [c for c in completions if _st in c.lower()]
 
             # Apply Filtering query builder filters (contig mode)
             filtered = get_filtering_filtered_pairs()
@@ -861,26 +896,40 @@ def create_layout(db_path, preloaded, enable_timing=False):
                         rows = fc.execute(
                             f"SELECT DISTINCT c.Contig_name FROM ({fsql}) f"
                             f" JOIN Contig c ON c.Contig_id = f.Contig_id"
-                            f" WHERE f.Sample_id = ? OR f.Sample_id IS NULL"
-                            f" ORDER BY c.Contig_name LIMIT 100",
-                            fparams + [sel_sid]
+                            f" WHERE f.Sample_id = ? OR f.Sample_id IS NULL{search_sql}"
+                            f" ORDER BY (c.Contig_name = ?) DESC, c.Contig_name LIMIT 100",
+                            fparams + [sel_sid] + search_params + [preserve_contig]
                         ).fetchall()
                     else:
                         rows = fc.execute(
                             f"SELECT DISTINCT c.Contig_name FROM ({fsql}) f"
                             f" JOIN Contig c ON c.Contig_id = f.Contig_id"
-                            f" ORDER BY c.Contig_name LIMIT 100",
-                            fparams
+                            f"{search_where}"
+                            f" ORDER BY (c.Contig_name = ?) DESC, c.Contig_name LIMIT 100",
+                            fparams + search_params + [preserve_contig]
                         ).fetchall()
                     filter_allowed = {row[0] for row in rows}
                     completions = [c for c in completions if c in filter_allowed]
                 except duckdb.Error as e:
                     print(f"[filtering] Contig autocomplete query error: {e}", flush=True)
 
-        update_widget_completions(widgets['contig_select'], completions)
+        return completions
 
-    def refresh_sample_options_unlocked():
-        """Core logic — does NOT check the lock."""
+    def refresh_contig_options_unlocked(search_term=""):
+        update_widget_completions(widgets['contig_select'], _compute_contig_completions(search_term))
+
+    def _compute_sample_completions(search_term=""):
+        """Core logic — does NOT check the lock. search_term additionally
+        narrows results server-side (used for SearchableSelect type-ahead)."""
+        search_term = (search_term or "").strip()
+        search_sql = " AND s.Sample_name ILIKE '%' || ? || '%'" if search_term else ""
+        search_where = " WHERE s.Sample_name ILIKE '%' || ? || '%'" if search_term else ""
+        search_params = [search_term] if search_term else []
+        # Tie-break so whatever's currently selected in either consumer of
+        # this list (sample_select, and the sort-sample widget which mirrors
+        # it) always survives LIMIT 100 — no-op when either is "".
+        preserve_sample = widgets['sample_select'].value
+        preserve_sort_sample = mag_params_sort_sample_select.value
         if widgets['has_mags']:
             # MAG mode: filter samples by selected MAG.
             sel_mag = widgets['mag_select'].value
@@ -890,6 +939,9 @@ def create_layout(db_path, preloaded, enable_timing=False):
                 completions = [s for s in orig_samples if _s2id.get(s) in allowed_sids]
             else:
                 completions = list(orig_samples)
+            if search_term:
+                _st = search_term.lower()
+                completions = [s for s in completions if _st in s.lower()]
 
             # Apply Filtering query builder filters (MAG mode)
             filtered = get_filtering_filtered_pairs()
@@ -902,9 +954,9 @@ def create_layout(db_path, preloaded, enable_timing=False):
                         rows = fc.execute(
                             f"SELECT DISTINCT s.Sample_name FROM ({fsql}) f"
                             f" JOIN Sample s ON s.Sample_id = f.Sample_id"
-                            f" WHERE f.Contig_id = ?"
-                            f" ORDER BY s.Sample_name LIMIT 100",
-                            fparams + [sel_cid]
+                            f" WHERE f.Contig_id = ?{search_sql}"
+                            f" ORDER BY (s.Sample_name = ? OR s.Sample_name = ?) DESC, s.Sample_name LIMIT 100",
+                            fparams + [sel_cid] + search_params + [preserve_sample, preserve_sort_sample]
                         ).fetchall()
                     elif sel_mag and sel_mag in widgets['mag_to_sample_ids']:
                         rows = fc.execute(
@@ -912,16 +964,17 @@ def create_layout(db_path, preloaded, enable_timing=False):
                             f" JOIN Sample s ON s.Sample_id = f.Sample_id"
                             f" JOIN MAG_contigs_association mca ON mca.Contig_id = f.Contig_id"
                             f" JOIN MAG mg ON mg.MAG_id = mca.MAG_id"
-                            f" WHERE mg.MAG_name = ?"
-                            f" ORDER BY s.Sample_name LIMIT 100",
-                            fparams + [sel_mag]
+                            f" WHERE mg.MAG_name = ?{search_sql}"
+                            f" ORDER BY (s.Sample_name = ? OR s.Sample_name = ?) DESC, s.Sample_name LIMIT 100",
+                            fparams + [sel_mag] + search_params + [preserve_sample, preserve_sort_sample]
                         ).fetchall()
                     else:
                         rows = fc.execute(
                             f"SELECT DISTINCT s.Sample_name FROM ({fsql}) f"
                             f" JOIN Sample s ON s.Sample_id = f.Sample_id"
-                            f" ORDER BY s.Sample_name LIMIT 100",
-                            fparams
+                            f"{search_where}"
+                            f" ORDER BY (s.Sample_name = ? OR s.Sample_name = ?) DESC, s.Sample_name LIMIT 100",
+                            fparams + search_params + [preserve_sample, preserve_sort_sample]
                         ).fetchall()
                     filter_allowed = {row[0] for row in rows}
                     completions = [s for s in completions if s in filter_allowed]
@@ -935,14 +988,17 @@ def create_layout(db_path, preloaded, enable_timing=False):
                     rows = conn.cursor().execute(
                         "SELECT DISTINCT s.Sample_name FROM Coverage p"
                         " JOIN Sample s ON s.Sample_id = p.Sample_id"
-                        " WHERE p.Contig_id = ? ORDER BY s.Sample_name",
-                        [sel_cid]
+                        f" WHERE p.Contig_id = ?{search_sql} ORDER BY s.Sample_name",
+                        [sel_cid] + search_params
                     ).fetchall()
                     completions = [row[0] for row in rows]
                 else:
                     completions = []
             else:
                 completions = list(orig_samples)
+                if search_term:
+                    _st = search_term.lower()
+                    completions = [s for s in completions if _st in s.lower()]
 
             # Apply Filtering query builder filters (contig mode)
             filtered = get_filtering_filtered_pairs()
@@ -955,30 +1011,53 @@ def create_layout(db_path, preloaded, enable_timing=False):
                         rows = fc.execute(
                             f"SELECT DISTINCT s.Sample_name FROM ({fsql}) f"
                             f" JOIN Sample s ON s.Sample_id = f.Sample_id"
-                            f" WHERE f.Contig_id = ?"
-                            f" ORDER BY s.Sample_name LIMIT 100",
-                            fparams + [sel_cid]
+                            f" WHERE f.Contig_id = ?{search_sql}"
+                            f" ORDER BY (s.Sample_name = ? OR s.Sample_name = ?) DESC, s.Sample_name LIMIT 100",
+                            fparams + [sel_cid] + search_params + [preserve_sample, preserve_sort_sample]
                         ).fetchall()
                     else:
                         rows = fc.execute(
                             f"SELECT DISTINCT s.Sample_name FROM ({fsql}) f"
                             f" JOIN Sample s ON s.Sample_id = f.Sample_id"
-                            f" ORDER BY s.Sample_name LIMIT 100",
-                            fparams
+                            f"{search_where}"
+                            f" ORDER BY (s.Sample_name = ? OR s.Sample_name = ?) DESC, s.Sample_name LIMIT 100",
+                            fparams + search_params + [preserve_sample, preserve_sort_sample]
                         ).fetchall()
                     filter_allowed = {row[0] for row in rows}
                     completions = [s for s in completions if s in filter_allowed]
                 except duckdb.Error as e:
                     print(f"[filtering] Sample autocomplete query error: {e}", flush=True)
-        update_widget_completions(widgets['sample_select'], completions)
+        return completions
 
-    def refresh_mag_options_unlocked():
+    def _sort_sample_completions_for(base_completions, sel_mag=None):
+        """Narrow an already-computed sample list to the ones containing the
+        currently selected MAG — cheap in-memory filter, no extra query."""
+        if not widgets['has_mags']:
+            return base_completions
+        sel_mag = sel_mag if sel_mag is not None else widgets['mag_select'].value
+        if sel_mag and sel_mag in widgets['mag_to_sample_ids']:
+            allowed_sids = widgets['mag_to_sample_ids'][sel_mag]
+            _s2id = widgets['sample_name_to_id']
+            return [s for s in base_completions if _s2id.get(s) in allowed_sids]
+        return base_completions
+
+    def refresh_sample_options_unlocked(search_term=""):
+        completions = _compute_sample_completions(search_term)
+        update_widget_completions(widgets['sample_select'], completions)
+        if widgets['has_mags']:
+            update_widget_completions(mag_params_sort_sample_select, _sort_sample_completions_for(completions))
+
+    def _compute_mag_completions(search_term=""):
         """Recompute MAG dropdown based on selected sample (ONE SAMPLE view).
         A MAG is valid iff at least one of its member contigs has coverage for that sample.
-        Only meaningful in MAG-mode DBs; no-op otherwise.
-        """
+        Only meaningful in MAG-mode DBs; no-op otherwise. search_term additionally
+        narrows results server-side (used for SearchableSelect type-ahead)."""
         if not widgets['has_mags']:
-            return
+            return []
+        search_term = (search_term or "").strip()
+        search_sql = " AND mg.MAG_name ILIKE '%' || ? || '%'" if search_term else ""
+        search_where = " WHERE mg.MAG_name ILIKE '%' || ? || '%'" if search_term else ""
+        search_params = [search_term] if search_term else []
         mag_to_contigs = widgets['mag_to_contigs']
         sel_sample = widgets['sample_select'].value
         if views.active == 0 and sel_sample:
@@ -989,14 +1068,17 @@ def create_layout(db_path, preloaded, enable_timing=False):
                     " FROM MAG mg"
                     " JOIN MAG_contigs_association mca ON mca.MAG_id = mg.MAG_id"
                     " JOIN Coverage p ON p.Contig_id = mca.Contig_id"
-                    " WHERE p.Sample_id = ? ORDER BY mg.MAG_name",
-                    [sel_sid]
+                    f" WHERE p.Sample_id = ?{search_sql} ORDER BY mg.MAG_name",
+                    [sel_sid] + search_params
                 ).fetchall()
                 completions = [row[0] for row in rows]
             else:
                 completions = []
         else:
             completions = sorted(mag_to_contigs.keys())
+            if search_term:
+                _st = search_term.lower()
+                completions = [m for m in completions if _st in m.lower()]
 
         # Apply Filtering query builder filters: keep a MAG only if at least
         # one of its member contigs survives the filter.
@@ -1011,63 +1093,71 @@ def create_layout(db_path, preloaded, enable_timing=False):
                         f"SELECT DISTINCT mg.MAG_name FROM ({fsql}) f"
                         f" JOIN MAG_contigs_association mca ON mca.Contig_id = f.Contig_id"
                         f" JOIN MAG mg ON mg.MAG_id = mca.MAG_id"
-                        f" WHERE f.Sample_id = ? OR f.Sample_id IS NULL"
+                        f" WHERE f.Sample_id = ? OR f.Sample_id IS NULL{search_sql}"
                         f" ORDER BY mg.MAG_name",
-                        fparams + [sel_sid]
+                        fparams + [sel_sid] + search_params
                     ).fetchall()
                 else:
                     rows = fc.execute(
                         f"SELECT DISTINCT mg.MAG_name FROM ({fsql}) f"
                         f" JOIN MAG_contigs_association mca ON mca.Contig_id = f.Contig_id"
                         f" JOIN MAG mg ON mg.MAG_id = mca.MAG_id"
+                        f"{search_where}"
                         f" ORDER BY mg.MAG_name",
-                        fparams
+                        fparams + search_params
                     ).fetchall()
                 filter_allowed = {row[0] for row in rows}
                 completions = [m for m in completions if m in filter_allowed]
             except duckdb.Error as e:
                 print(f"[filtering] MAG autocomplete query error: {e}", flush=True)
-        update_widget_completions(widgets['mag_select'], completions)
-        refresh_sort_sample_options()
+        return completions
 
-    def refresh_sort_sample_options():
+    def refresh_mag_options_unlocked(search_term=""):
         if not widgets['has_mags']:
             return
-        sel_mag = widgets['mag_select'].value
-        if views.active == 0 and sel_mag and sel_mag in widgets['mag_to_sample_ids']:
-            allowed_sids = widgets['mag_to_sample_ids'][sel_mag]
-            completions = [s for s in orig_samples if widgets['sample_name_to_id'].get(s) in allowed_sids]
-        else:
-            completions = list(orig_samples)
-        filtered = get_filtering_filtered_pairs()
-        if filtered is not None:
-            fsql, fparams = filtered['sql'], filtered['params']
-            fc = conn.cursor()
-            try:
-                if views.active == 0 and sel_mag and sel_mag in widgets['mag_to_sample_ids']:
-                    rows = fc.execute(
-                        f"SELECT DISTINCT s.Sample_name FROM ({fsql}) f"
-                        f" JOIN Sample s ON s.Sample_id = f.Sample_id"
-                        f" JOIN MAG_contigs_association mca ON mca.Contig_id = f.Contig_id"
-                        f" JOIN MAG mg ON mg.MAG_id = mca.MAG_id"
-                        f" WHERE mg.MAG_name = ?"
-                        f" ORDER BY s.Sample_name LIMIT 100",
-                        fparams + [sel_mag]
-                    ).fetchall()
-                else:
-                    rows = fc.execute(
-                        f"SELECT DISTINCT s.Sample_name FROM ({fsql}) f"
-                        f" JOIN Sample s ON s.Sample_id = f.Sample_id"
-                        f" ORDER BY s.Sample_name LIMIT 100",
-                        fparams
-                    ).fetchall()
-                filter_allowed = {row[0] for row in rows}
-                completions = [s for s in completions if s in filter_allowed]
-            except duckdb.Error as e:
-                print(f"[filtering] Sort sample autocomplete query error: {e}", flush=True)
-        update_widget_completions(mag_params_sort_sample_select, completions)
+        update_widget_completions(widgets['mag_select'], _compute_mag_completions(search_term))
 
     _title_fingerprint = {'last': None}
+
+    def _count_contigs_available():
+        """True (uncapped) count of contigs valid for the current selection —
+        mirrors _compute_contig_completions' base filter (Sample in non-MAG
+        mode, MAG-only in MAG mode — MAG mode's Sample->MAG->Contig chain is
+        intentional indirection, not filtered here directly), minus the
+        LIMIT 100 dropdown-payload cap."""
+        if widgets['contig_select'].value:
+            return 1
+        if widgets['has_mags']:
+            sel_mag = widgets['mag_select'].value
+            if sel_mag and sel_mag in widgets['mag_to_contigs']:
+                return len(widgets['mag_to_contigs'][sel_mag])
+            return len(orig_contigs)
+        if views.active == 0 and widgets['sample_select'].value:
+            sel_sid = widgets['sample_name_to_id'].get(widgets['sample_select'].value)
+            if sel_sid is None:
+                return 0
+            return conn.cursor().execute(
+                "SELECT COUNT(DISTINCT Contig_id) FROM Coverage WHERE Sample_id = ?", [sel_sid]
+            ).fetchone()[0]
+        return len(orig_contigs)
+
+    def _count_samples_available():
+        """Mirror of _count_contigs_available for the Samples header."""
+        if widgets['sample_select'].value:
+            return 1
+        if widgets['has_mags']:
+            sel_mag = widgets['mag_select'].value
+            if views.active == 0 and sel_mag and sel_mag in widgets['mag_to_sample_ids']:
+                return len(widgets['mag_to_sample_ids'][sel_mag])
+            return len(orig_samples)
+        if views.active == 0 and widgets['contig_select'].value:
+            sel_cid = widgets['contig_name_to_id'].get(widgets['contig_select'].value)
+            if sel_cid is None:
+                return 0
+            return conn.cursor().execute(
+                "SELECT COUNT(DISTINCT Sample_id) FROM Coverage WHERE Contig_id = ?", [sel_cid]
+            ).fetchone()[0]
+        return len(orig_samples)
 
     def update_section_titles():
         """Update Filtering, Contigs, Samples, and MAGs section titles with current counts."""
@@ -1081,14 +1171,6 @@ def create_layout(db_path, preloaded, enable_timing=False):
         if fp == _title_fingerprint['last']:
             return
         _title_fingerprint['last'] = fp
-
-        filtered_contigs = set(opts_c) - {""}
-        filtered_samples = set(opts_s) - {""}
-
-        if val_c:
-            filtered_contigs = {val_c}
-        if val_s:
-            filtered_samples = {val_s}
 
         # Use cached counts from filter SQL when filter is active; otherwise count from preloaded maps
         cache = _filtering_cache
@@ -1125,9 +1207,12 @@ def create_layout(db_path, preloaded, enable_timing=False):
             else:
                 samples_count = cache.get('count_samples', 0)
         else:
-            # No active filter — use autocomplete list lengths (full list, no LIMIT applied)
-            contigs_count = len(filtered_contigs)
-            samples_count = len(filtered_samples)
+            # No active filter — true uncapped counts (the autocomplete
+            # lists themselves are capped at LIMIT 100 for dropdown payload
+            # size, which would otherwise make this header get stuck
+            # reporting "100" regardless of selection)
+            contigs_count = _count_contigs_available()
+            samples_count = _count_samples_available()
             presences_count = _total_coverage_count
             if widgets['has_mags']:
                 # Use preloaded mag_to_sample_ids (small: ~2837 MAGs × samples)
@@ -1249,13 +1334,14 @@ def create_layout(db_path, preloaded, enable_timing=False):
             mag_params_sort_sample_row.visible = (
                 is_all and mag_params_category_select.value != "Contig"
             )
-            refresh_sort_sample_options()
 
             # Refresh options while still locked (suppresses cascading callbacks)
             # Don't invalidate filtering cache - filtering is shared between views and hasn't changed
+            # (refresh_sample_options_unlocked also drives the sort-sample mirror below,
+            # which is what makes the sort-sample row's list correct on entering ALL SAMPLES —
+            # so this can no longer be skipped when switching to that view)
             refresh_contig_options_unlocked()
-            if not is_all:
-                refresh_sample_options_unlocked()
+            refresh_sample_options_unlocked()
             refresh_mag_options_unlocked()
             update_section_titles()
             if enable_timing:
@@ -1486,6 +1572,11 @@ def create_layout(db_path, preloaded, enable_timing=False):
                 if _sort_cat != "Contig" and _sort_source:
                     if is_all:
                         _sort_sample_name = mag_params_sort_sample_select.value
+                        if not _sort_sample_name:
+                            raise ValueError(
+                                "Please select a sample to use for 'Order contigs by' — "
+                                "the selected sort category requires per-sample values."
+                            )
                     else:
                         _sort_sample_name = sample
 
@@ -2079,6 +2170,28 @@ def create_layout(db_path, preloaded, enable_timing=False):
         t_init = time.perf_counter()
     conn = duckdb.connect(db_path, read_only=True)
     widgets = build_controls(preloaded)
+
+    # Server-side search: fired by SearchableSelect's Tom Select load() as the
+    # user types (search_nonce always changes, unlike search_query, so this
+    # fires even when the same text is searched twice in a row).
+    def _on_mag_search(event):
+        if global_toggle_lock['locked']:
+            return
+        push_search_completions(widgets['mag_select'], _compute_mag_completions(widgets['mag_select'].search_query))
+    widgets['mag_select'].param.watch(_on_mag_search, 'search_nonce')
+
+    def _on_contig_search(event):
+        if global_toggle_lock['locked']:
+            return
+        push_search_completions(widgets['contig_select'], _compute_contig_completions(widgets['contig_select'].search_query))
+    widgets['contig_select'].param.watch(_on_contig_search, 'search_nonce')
+
+    def _on_sample_search(event):
+        if global_toggle_lock['locked']:
+            return
+        push_search_completions(widgets['sample_select'], _compute_sample_completions(widgets['sample_select'].search_query))
+    widgets['sample_select'].param.watch(_on_sample_search, 'search_nonce')
+
     if widgets['has_mags']:
         for _mag, _ctgs in widgets['mag_to_contigs'].items():
             for _c in _ctgs:
@@ -2453,19 +2566,28 @@ def create_layout(db_path, preloaded, enable_timing=False):
             return [dist_label, pane, bridge_pane]
         return [pane, bridge_pane]
 
-    def create_query_row(section_data):
-        """Create a single query row with cascading selects, comparison, dynamic input and remove button."""
+    def create_query_row(section_data, initial_category=None, initial_column=None, initial_operator=None):
+        """Create a single query row with cascading selects, comparison, dynamic input and remove button.
+
+        initial_category/initial_column/initial_operator let a caller (e.g. the
+        settings restore path) build a row for a specific saved column/operator
+        synchronously, using the same construction path as the default first
+        row instead of simulating UI changes through the (partly deferred)
+        update_subcategories/update_input_widget callbacks.
+        """
         # Get categories from metadata
         categories = list(filtering_metadata.keys())
         if not categories:
             categories = ["No data"]
 
-        initial_category = categories[0]
+        if initial_category is None or initial_category not in categories:
+            initial_category = categories[0]
         initial_columns_raw = list(filtering_metadata.get(initial_category, {}).get('columns', {}).keys())
         if not initial_columns_raw:
             initial_columns_raw = ["No columns"]
         initial_columns = [(c, c.replace("_", " ").replace("percentage", "(%)")) for c in initial_columns_raw]
-        initial_column = initial_columns_raw[0]
+        if initial_column is None or initial_column not in initial_columns_raw:
+            initial_column = initial_columns_raw[0]
 
         # Determine initial column type
         initial_col_info = filtering_metadata.get(initial_category, {}).get('columns', {}).get(initial_column, {})
@@ -2488,9 +2610,13 @@ def create_layout(db_path, preloaded, enable_timing=False):
         )
 
         # Comparison operator select - "=" and "!=" for text, all operators for numeric
+        _default_operator = "=" if initial_is_text else ">"
+        _initial_ops = ["=", "!=", "has", "has not"] if initial_is_text else ["=", ">", "<", "!="]
+        if initial_operator is not None and initial_operator in _initial_ops:
+            _default_operator = initial_operator
         comparison_select = Select(
-            options=["=", "!=", "has", "has not"] if initial_is_text else ["=", ">", "<", "!="],
-            value="=" if initial_is_text else ">",
+            options=_initial_ops,
+            value=_default_operator,
             width=50,
             margin=(0, 2, 0, 0)
         )
@@ -2499,7 +2625,12 @@ def create_layout(db_path, preloaded, enable_timing=False):
         input_container = pn.Column(width=90, margin=(0, 2, 0, 0))
 
         # Create initial input widget based on column type
-        if initial_is_text:
+        if initial_is_text and _default_operator in ("has", "has not"):
+            initial_input = TextInput(value="", placeholder="Search...", width=90, margin=(0, 2, 0, 0))
+            input_container.objects = [initial_input]
+            initial_input.on_change('value', lambda attr, old, new: refresh_on_filter_change())
+            initial_is_panel = False
+        elif initial_is_text:
             distinct_values = resolve_distinct_values(db_path, filtering_metadata, initial_category, initial_column, enable_timing=enable_timing)
             initial_input = SearchableSelect(
                 value="", options=distinct_values,
@@ -3080,7 +3211,6 @@ def create_layout(db_path, preloaded, enable_timing=False):
             try:
                 refresh_contig_options_unlocked()
                 refresh_sample_options_unlocked()
-                refresh_sort_sample_options()
                 update_section_titles()
                 if widgets['view_radio'].active == 0 and new:
                     total = sum(
@@ -3652,6 +3782,7 @@ def create_layout(db_path, preloaded, enable_timing=False):
         translated_sequence_cbg = CheckboxGroup(labels=["Plot translated sequence"], active=[])
         translated_sequence_row = row(translated_sequence_cbg, sizing_mode="stretch_width")
 
+    genome_master_cbg = None
     if feature_type_multichoice is not None or combined_features_cbg is not None:
         # --- Subsection 1: "Genomic annotations to plot" (collapsible) ---
         # Covers the feature type multichoice, isoform toggle, and both
@@ -4026,14 +4157,26 @@ def create_layout(db_path, preloaded, enable_timing=False):
     )
 
     mag_params_sort_sample_label = Div(text="Using values from sample", margin=(5, 5, 5, 5))
-    mag_params_sort_sample_select = Select(
+    mag_params_sort_sample_select = SearchableSelect(
         value=orig_samples[0] if orig_samples else "",
-        options=list(orig_samples) if orig_samples else ["",],
+        options=list(orig_samples),
+        placeholder="Type to search samples...",
+        server_search=True,
         sizing_mode="stretch_width",
         margin=(0, 0, 0, 0)
     )
-    mag_params_sort_sample_row = row(mag_params_sort_sample_label, mag_params_sort_sample_select, sizing_mode="stretch_width", margin=(5, 10, 0, 0))
+    # A Panel component can't be a child of bokeh's native row() (it expects
+    # Bokeh model children), so this uses pn.Row instead — same pattern as
+    # sample_section above, which mixes bokeh Divs with a SearchableSelect.
+    mag_params_sort_sample_row = pn.Row(mag_params_sort_sample_label, mag_params_sort_sample_select, sizing_mode="stretch_width", margin=(5, 10, 0, 0))
     mag_params_sort_sample_row.visible = False
+
+    def _on_sort_sample_search(event):
+        if global_toggle_lock['locked']:
+            return
+        base = _compute_sample_completions(mag_params_sort_sample_select.search_query)
+        push_search_completions(mag_params_sort_sample_select, _sort_sample_completions_for(base))
+    mag_params_sort_sample_select.param.watch(_on_sort_sample_search, 'search_nonce')
 
     mag_track_max_dots_input = Spinner(value=1000, low=1, step=100, width=100, margin=(0, 2, 0, 0))
     mag_track_max_dots_label = Div(text="Maximum number of points on MAG track", margin=(5, 0, 5, 5))
@@ -4347,9 +4490,390 @@ def create_layout(db_path, preloaded, enable_timing=False):
     download_data_button.on_click(_show_inspect_command)
     download_widgets['data'] = download_data_button
 
-    # Only Apply button in left panel now
-    buttons_row = apply_button
+    def collect_current_settings():
+        """Snapshot every widget that affects the plot into a JSON-serializable dict.
 
+        Mirrors exactly what apply_clicked/_do_apply reads — that function is
+        the authoritative list of "settings that affect the view". Keyed by
+        stable names (module/variable labels, column names) rather than
+        indices, so a saved file can be restored against a different --db
+        whose schema/ordering differs (apply_saved_settings validates each
+        field against that db's widgets and skips/warns on mismatches).
+        """
+        variables_out = {}
+        for i, mod_name in enumerate(widgets['module_names']):
+            variables_out[mod_name] = {
+                'module_enabled': bool(widgets['module_widgets_one'][i].active),
+                'selected_one': [widgets['variables_widgets_one'][i].labels[idx]
+                                  for idx in widgets['variables_widgets_one'][i].active],
+                'selected_all': [widgets['variables_widgets_all'][i].labels[idx]
+                                  for idx in widgets['variables_widgets_all'][i].active],
+            }
+
+        filtering_out = []
+        for si, section_data in enumerate(or_sections):
+            section_and_or = inter_section_selects[si - 1].value if si > 0 and si - 1 < len(inter_section_selects) else None
+            rows_out = []
+            for ri, row_data in enumerate(section_data['rows']):
+                row_and_or = row_data['and_div'].value if ri > 0 and row_data['and_div'] is not None else None
+                rows_out.append({
+                    'category': row_data['category_select'].value,
+                    'column': row_data['subcategory_select'].value,
+                    'operator': row_data['comparison_select'].value,
+                    'value': row_data['input_ref']['widget'].value,
+                    'row_and_or': row_and_or,
+                })
+            filtering_out.append({'section_and_or': section_and_or, 'rows': rows_out})
+
+        def _color_rows_out(rows):
+            return [{
+                'qualifier': rd['qualifier_select'].value,
+                'operator': rd['operator_select'].value,
+                'value': rd['input_ref']['widget'].value,
+                'color': rd['color_picker'].color,
+            } for rd in rows]
+
+        settings = {
+            '_meta': {
+                'source_db': os.path.basename(db_path),
+                'saved_at': datetime.datetime.now().isoformat(timespec='seconds'),
+            },
+            'view_mode': {
+                'mag_or_contig': widgets['view_radio'].active,
+                'one_or_all_samples': views.active,
+            },
+            'selection': {
+                'sample': widgets['sample_select'].value,
+                'contig': widgets['contig_select'].value,
+                'mag': widgets['mag_select'].value,
+            },
+            'contig': {
+                'position_range': {
+                    'from': from_position_input.value,
+                    'to': to_position_input.value,
+                },
+                'feature_widgets': {
+                    'feature_types': list(feature_type_multichoice.value) if feature_type_multichoice is not None else None,
+                    'plot_isoforms': bool(plot_isoforms_cbg.active) if plot_isoforms_cbg is not None else None,
+                    'combined_features': [combined_features_cbg.labels[i] for i in combined_features_cbg.active] if combined_features_cbg is not None else None,
+                    'sequence': bool(sequence_cbg.active) if sequence_cbg is not None else None,
+                    'translated_sequence': bool(translated_sequence_cbg.active) if translated_sequence_cbg is not None else None,
+                    'genome_master': bool(genome_master_cbg.active) if genome_master_cbg is not None else None,
+                    'feature_label': feature_label_select.value if feature_label_select is not None else None,
+                },
+                'coloring': {
+                    'custom_color_rows': _color_rows_out(custom_color_rows),
+                    'mag_track_color_rows': _color_rows_out(mag_track_color_rows),
+                    'apply_annotation_rules_to_mag_track': bool(apply_annotation_rules_cbg.active) if apply_annotation_rules_cbg is not None else None,
+                },
+            },
+            'variables': variables_out,
+            'filtering': filtering_out,
+            'plotting_params': {
+                'min_coverage_freq': min_coverage_freq_input.value,
+                'max_genemap_window': max_genemap_window_input.value,
+                'max_sequence_window': max_sequence_window_input.value,
+                'max_binning_window': max_binning_window_input.value,
+                'genemap_height': genemap_height_input.value,
+                'sequence_height': sequence_height_input.value,
+                'translated_sequence_height': translated_sequence_height_input.value,
+                'subplot_height': subplot_height_input.value,
+                'mag_params': {
+                    'category': mag_params_category_select.value,
+                    'metric': mag_params_metric_select.value,
+                    'direction': mag_params_direction.active,
+                    'sort_sample': mag_params_sort_sample_select.value,
+                    'max_dots': mag_track_max_dots_input.value,
+                },
+                'sample_params': {
+                    'max_samples': max_samples_input.value,
+                    'order_category': sample_order_category_select.value,
+                    'order_metric': sample_order_metric_select.value,
+                    'order_direction': sample_order_direction.active,
+                    'same_y_scale': bool(same_y_scale_cbg.active),
+                },
+            },
+        }
+        return settings
+
+    # Hidden carrier to trigger a "Saved!" tooltip once the settings file has
+    # actually been written server-side — mirrors summary_carrier's pattern.
+    save_confirm_carrier = Div(text="", visible=False)
+    save_confirm_carrier.js_on_change('text', CustomJS(code="""
+        if (!cb_obj.text) return;
+        var btn = document.querySelector('.save-settings-btn');
+        if (btn) {
+            var rect = btn.getBoundingClientRect();
+            var tip = document.createElement('div');
+            tip.textContent = 'Saved!';
+            Object.assign(tip.style, {
+                position: 'fixed',
+                left: (rect.left + rect.width / 2) + 'px',
+                top: (rect.top - 28) + 'px',
+                transform: 'translateX(-50%)',
+                background: '#333',
+                color: '#fff',
+                padding: '3px 8px',
+                borderRadius: '4px',
+                fontSize: '12px',
+                pointerEvents: 'none',
+                zIndex: '9999',
+                opacity: '1',
+                transition: 'opacity 0.4s ease',
+            });
+            document.body.appendChild(tip);
+            setTimeout(function() { tip.style.opacity = '0'; }, 700);
+            setTimeout(function() { if (tip.parentNode) tip.parentNode.removeChild(tip); }, 1100);
+        }
+        cb_obj.text = '';
+    """))
+
+    save_settings_button = Button(
+        label="SAVE SETTINGS", align="center",
+        stylesheets=[stylesheet], css_classes=["apply-btn", "save-settings-btn"],
+        margin=(5, 0, 0, 5),
+    )
+
+    def _save_settings_clicked(event):
+        settings = collect_current_settings()
+        db_stem = os.path.splitext(os.path.basename(db_path))[0]
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        filepath = os.path.join(os.getcwd(), f"{db_stem}_{timestamp}.json")
+        with open(filepath, 'w') as f:
+            json.dump(settings, f, indent=2)
+        print(f"[settings] Saved to {filepath}", flush=True)
+        save_confirm_carrier.text = "1"
+
+    save_settings_button.on_click(_save_settings_clicked)
+
+    # Apply and Save Settings, side by side, centered, small gap between them
+    buttons_row = pn.Row(apply_button, save_settings_button, save_confirm_carrier, align="center")
+
+    def apply_saved_settings(settings):
+        """Pre-fill widgets from a settings dict produced by collect_current_settings().
+
+        Restores tolerantly: a field that doesn't fit this --db (missing
+        column, stale option, out-of-range index, ...) is skipped with a
+        logged warning instead of aborting the whole restore. Never triggers
+        APPLY — the user reviews the restored state and clicks it themselves.
+        Restore order follows top-to-bottom UI order since later widgets'
+        option lists depend on earlier ones (setting .active/.value fires the
+        same on_change callbacks a manual click would).
+        """
+        def _restore(label, fn):
+            try:
+                fn()
+            except Exception as e:
+                print(f"[settings] Warning: could not restore '{label}': {e}", flush=True)
+
+        def _warn(label, reason):
+            print(f"[settings] Warning: skipped '{label}' — {reason}", flush=True)
+
+        # 1. View mode
+        view_mode = settings.get('view_mode') or {}
+        if 'mag_or_contig' in view_mode:
+            _restore('view_mode.mag_or_contig', lambda: setattr(widgets['view_radio'], 'active', view_mode['mag_or_contig']))
+        if 'one_or_all_samples' in view_mode:
+            _restore('view_mode.one_or_all_samples', lambda: setattr(views, 'active', view_mode['one_or_all_samples']))
+
+        # 2. Sample/contig/MAG selection
+        selection = settings.get('selection') or {}
+        for key, widget in (('sample', widgets['sample_select']), ('contig', widgets['contig_select']), ('mag', widgets['mag_select'])):
+            val = selection.get(key)
+            if not val:
+                continue
+            if val in widget.options:
+                _restore(f'selection.{key}', lambda widget=widget, val=val: setattr(widget, 'value', val))
+            else:
+                _warn(f'selection.{key}', f"'{val}' not found in this database")
+
+        # 3. Position range
+        contig_settings = settings.get('contig') or {}
+        position_range = contig_settings.get('position_range') or {}
+        if 'from' in position_range:
+            _restore('contig.position_range.from', lambda: setattr(from_position_input, 'value', position_range['from']))
+        if 'to' in position_range:
+            _restore('contig.position_range.to', lambda: setattr(to_position_input, 'value', position_range['to']))
+
+        # 4. Module / variable checkboxes (matched by name, not index)
+        for mod_name, mod_settings in (settings.get('variables') or {}).items():
+            if mod_name not in widgets['module_names']:
+                _warn(f'variables.{mod_name}', "module not present in this database")
+                continue
+            i = widgets['module_names'].index(mod_name)
+            module_cbg = widgets['module_widgets_one'][i]
+            if mod_settings.get('module_enabled'):
+                _restore(f'variables.{mod_name}.module_enabled', lambda module_cbg=module_cbg: setattr(module_cbg, 'active', [0]))
+            for scope_key, cbg in (('selected_one', widgets['variables_widgets_one'][i]), ('selected_all', widgets['variables_widgets_all'][i])):
+                saved_labels = mod_settings.get(scope_key) or []
+                indices = [cbg.labels.index(lbl) for lbl in saved_labels if lbl in cbg.labels]
+                missing = [lbl for lbl in saved_labels if lbl not in cbg.labels]
+                for lbl in missing:
+                    _warn(f'variables.{mod_name}.{scope_key}', f"variable '{lbl}' not found")
+                if indices:
+                    _restore(f'variables.{mod_name}.{scope_key}', lambda cbg=cbg, indices=indices: setattr(cbg, 'active', indices))
+
+        # 5. Filtering query builder
+        saved_filtering = settings.get('filtering') or []
+        if saved_filtering:
+            new_sections = []
+            for section_i, saved_section in enumerate(saved_filtering):
+                section_data = create_or_section()
+                section_data['rows'].clear()
+                valid_saved_rows = []
+                for saved_row in saved_section.get('rows', []):
+                    category = saved_row.get('category')
+                    column = saved_row.get('column')
+                    col_info = filtering_metadata.get(category, {}).get('columns', {}).get(column)
+                    if col_info is None:
+                        _warn(f'filtering[{section_i}] row', f"column '{category}.{column}' not found in this database")
+                        continue
+                    operator = saved_row.get('operator')
+                    row_data = create_query_row(section_data, initial_category=category, initial_column=column, initial_operator=operator)
+                    section_data['rows'].append(row_data)
+                    valid_saved_rows.append(saved_row)
+                if not section_data['rows']:
+                    continue
+                rebuild_section(section_data)
+                for ri, (row_data, saved_row) in enumerate(zip(section_data['rows'], valid_saved_rows)):
+                    value = saved_row.get('value')
+                    widget = row_data['input_ref']['widget']
+
+                    def _set_row_value(widget=widget, value=value, row_data=row_data):
+                        if isinstance(widget, SearchableSelect) and value and value not in widget.options:
+                            widget.options = list(widget.options) + [value]
+                        widget.value = value
+                    _restore(f'filtering[{section_i}] row value', _set_row_value)
+                    row_and_or = saved_row.get('row_and_or')
+                    if ri > 0 and row_and_or and row_data['and_div'] is not None:
+                        _restore(f'filtering[{section_i}] row_and_or', lambda row_data=row_data, row_and_or=row_and_or: setattr(row_data['and_div'], 'value', row_and_or))
+                new_sections.append((section_data, saved_section.get('section_and_or')))
+            if new_sections:
+                or_sections.clear()
+                for section_data, _ in new_sections:
+                    or_sections.append(section_data)
+                rebuild_filtering_content()
+                for i, (_, section_and_or) in enumerate(new_sections):
+                    if i > 0 and section_and_or and (i - 1) < len(inter_section_selects):
+                        _restore('filtering section_and_or', lambda i=i, section_and_or=section_and_or: setattr(inter_section_selects[i - 1], 'value', section_and_or))
+            else:
+                _warn('filtering', "no valid rows could be restored — keeping the default empty filter")
+
+        # 6. Coloring rules (custom + MAG track), mirroring on_template_change's restore pattern
+        def _restore_color_rows(saved_rows, target_rows, rebuild_fn, label):
+            target_rows.clear()
+            for saved_rule in saved_rows or []:
+                qualifier = saved_rule.get('qualifier')
+                if qualifier not in color_qualifier_options:
+                    _warn(label, f"qualifier '{qualifier}' not found in this database")
+                    continue
+                row_data = create_color_row(target_rows, rebuild_fn)
+                row_data['qualifier_select'].value = qualifier
+                operator = saved_rule.get('operator')
+                if operator in row_data['operator_select'].options:
+                    row_data['operator_select'].value = operator
+                if operator != "Use random colors":
+                    widget = row_data['input_ref']['widget']
+                    value = saved_rule.get('value')
+
+                    def _set_color_value(widget=widget, value=value):
+                        if isinstance(widget, SearchableSelect) and value and value not in widget.options:
+                            widget.options = list(widget.options) + [value]
+                        widget.value = value
+                    _restore(f'{label} value', _set_color_value)
+                    color = saved_rule.get('color')
+                    if color:
+                        _restore(f'{label} color', lambda row_data=row_data, color=color: setattr(row_data['color_picker'], 'color', color))
+                target_rows.append(row_data)
+            rebuild_fn()
+
+        coloring = contig_settings.get('coloring') or {}
+        if coloring.get('custom_color_rows') is not None:
+            _restore_color_rows(coloring.get('custom_color_rows'), custom_color_rows, rebuild_color_rows, 'contig.coloring.custom_color_rows')
+        if coloring.get('mag_track_color_rows') is not None:
+            _restore_color_rows(coloring.get('mag_track_color_rows'), mag_track_color_rows, rebuild_mag_track_color_rows, 'contig.coloring.mag_track_color_rows')
+        if coloring.get('apply_annotation_rules_to_mag_track') and apply_annotation_rules_cbg is not None:
+            _restore('contig.coloring.apply_annotation_rules_to_mag_track', lambda: setattr(apply_annotation_rules_cbg, 'active', [0]))
+
+        # 7. Genomic feature widgets
+        feature_widgets = contig_settings.get('feature_widgets') or {}
+        if feature_type_multichoice is not None and feature_widgets.get('feature_types') is not None:
+            valid = [v for v in feature_widgets['feature_types'] if v in feature_type_multichoice.options]
+            missing = [v for v in feature_widgets['feature_types'] if v not in feature_type_multichoice.options]
+            for v in missing:
+                _warn('contig.feature_widgets.feature_types', f"'{v}' not found in this database")
+            _restore('contig.feature_widgets.feature_types', lambda: setattr(feature_type_multichoice, 'value', valid))
+        if plot_isoforms_cbg is not None and feature_widgets.get('plot_isoforms') is not None:
+            _restore('contig.feature_widgets.plot_isoforms', lambda: setattr(plot_isoforms_cbg, 'active', [0] if feature_widgets['plot_isoforms'] else []))
+        if combined_features_cbg is not None and feature_widgets.get('combined_features') is not None:
+            indices = [combined_features_cbg.labels.index(lbl) for lbl in feature_widgets['combined_features'] if lbl in combined_features_cbg.labels]
+            missing = [lbl for lbl in feature_widgets['combined_features'] if lbl not in combined_features_cbg.labels]
+            for lbl in missing:
+                _warn('contig.feature_widgets.combined_features', f"'{lbl}' not found in this database")
+            _restore('contig.feature_widgets.combined_features', lambda: setattr(combined_features_cbg, 'active', indices))
+        if sequence_cbg is not None and feature_widgets.get('sequence') is not None:
+            _restore('contig.feature_widgets.sequence', lambda: setattr(sequence_cbg, 'active', [0] if feature_widgets['sequence'] else []))
+        if translated_sequence_cbg is not None and feature_widgets.get('translated_sequence') is not None:
+            _restore('contig.feature_widgets.translated_sequence', lambda: setattr(translated_sequence_cbg, 'active', [0] if feature_widgets['translated_sequence'] else []))
+        if genome_master_cbg is not None and feature_widgets.get('genome_master') is not None:
+            _restore('contig.feature_widgets.genome_master', lambda: setattr(genome_master_cbg, 'active', [0] if feature_widgets['genome_master'] else []))
+        if feature_label_select is not None and feature_widgets.get('feature_label'):
+            if feature_widgets['feature_label'] in feature_label_select.options:
+                _restore('contig.feature_widgets.feature_label', lambda: setattr(feature_label_select, 'value', feature_widgets['feature_label']))
+            else:
+                _warn('contig.feature_widgets.feature_label', f"'{feature_widgets['feature_label']}' not found in this database")
+
+        # 8. Plotting parameters
+        pp = settings.get('plotting_params') or {}
+        for key, widget in (
+            ('min_coverage_freq', min_coverage_freq_input),
+            ('max_genemap_window', max_genemap_window_input),
+            ('max_sequence_window', max_sequence_window_input),
+            ('max_binning_window', max_binning_window_input),
+            ('genemap_height', genemap_height_input),
+            ('sequence_height', sequence_height_input),
+            ('translated_sequence_height', translated_sequence_height_input),
+            ('subplot_height', subplot_height_input),
+        ):
+            if key in pp and pp[key] is not None:
+                _restore(f'plotting_params.{key}', lambda widget=widget, value=pp[key]: setattr(widget, 'value', value))
+
+        mag_params = pp.get('mag_params') or {}
+        if mag_params.get('category') in mag_params_category_select.options:
+            _restore('plotting_params.mag_params.category', lambda: setattr(mag_params_category_select, 'value', mag_params['category']))
+        elif mag_params.get('category'):
+            _warn('plotting_params.mag_params.category', f"'{mag_params['category']}' not available in this database")
+        _mag_metric_values = [v for v, _l in mag_params_metric_select.options] if all(isinstance(o, tuple) for o in mag_params_metric_select.options) else list(mag_params_metric_select.options)
+        if mag_params.get('metric') in _mag_metric_values:
+            _restore('plotting_params.mag_params.metric', lambda: setattr(mag_params_metric_select, 'value', mag_params['metric']))
+        elif mag_params.get('metric'):
+            _warn('plotting_params.mag_params.metric', f"'{mag_params['metric']}' not available for this category")
+        if 'direction' in mag_params:
+            _restore('plotting_params.mag_params.direction', lambda: setattr(mag_params_direction, 'active', mag_params['direction']))
+        if mag_params.get('sort_sample') and mag_params['sort_sample'] in mag_params_sort_sample_select.options:
+            _restore('plotting_params.mag_params.sort_sample', lambda: setattr(mag_params_sort_sample_select, 'value', mag_params['sort_sample']))
+        if 'max_dots' in mag_params and mag_params['max_dots'] is not None:
+            _restore('plotting_params.mag_params.max_dots', lambda: setattr(mag_track_max_dots_input, 'value', mag_params['max_dots']))
+
+        sample_params = pp.get('sample_params') or {}
+        if 'max_samples' in sample_params and sample_params['max_samples'] is not None:
+            _restore('plotting_params.sample_params.max_samples', lambda: setattr(max_samples_input, 'value', sample_params['max_samples']))
+        if sample_params.get('order_category') in sample_order_category_select.options:
+            _restore('plotting_params.sample_params.order_category', lambda: setattr(sample_order_category_select, 'value', sample_params['order_category']))
+        elif sample_params.get('order_category'):
+            _warn('plotting_params.sample_params.order_category', f"'{sample_params['order_category']}' not available in this database")
+        _metric_values = [v for v, _l in sample_order_metric_select.options] if all(isinstance(o, tuple) for o in sample_order_metric_select.options) else sample_order_metric_select.options
+        if sample_params.get('order_metric') in _metric_values:
+            _restore('plotting_params.sample_params.order_metric', lambda: setattr(sample_order_metric_select, 'value', sample_params['order_metric']))
+        elif sample_params.get('order_metric'):
+            _warn('plotting_params.sample_params.order_metric', f"'{sample_params['order_metric']}' not available for this category")
+        if 'order_direction' in sample_params:
+            _restore('plotting_params.sample_params.order_direction', lambda: setattr(sample_order_direction, 'active', sample_params['order_direction']))
+        if sample_params.get('same_y_scale') is not None:
+            _restore('plotting_params.sample_params.same_y_scale', lambda: setattr(same_y_scale_cbg, 'active', [0] if sample_params['same_y_scale'] else []))
+
+    if initial_settings:
+        apply_saved_settings(initial_settings)
 
     ## Initialize section titles with counts
     update_section_titles()
@@ -4420,6 +4944,9 @@ def add_serve_args(parser):
     parser.add_argument("--db", required=True, help="Path to DuckDB database")
     parser.add_argument("--port", type=int, default=5006, help="Port to serve Panel app")
     parser.add_argument('--time', action='store_true', default=False, help="Print timing and memory diagnostics to the terminal")
+    parser.add_argument("--json", dest="settings_json", default=None,
+                         help="Path to a settings JSON file (from SAVE SETTINGS) to restore on load. "
+                              "Settings that don't fit this --db are skipped with a logged warning.")
 
 def run_serve(args):
     global _TIMING
@@ -4451,6 +4978,12 @@ def run_serve(args):
 
     enable_timing = getattr(args, 'time', False)
 
+    initial_settings = None
+    settings_json_path = getattr(args, 'settings_json', None)
+    if settings_json_path:
+        with open(settings_json_path) as _f:
+            initial_settings = json.load(_f)
+
     print(flush=True)
     print("Preloading database data...", flush=True)
     preloaded = preload_db_data(args.db, enable_timing=enable_timing)
@@ -4459,7 +4992,7 @@ def run_serve(args):
     print(f"Server ready. Open localhost:{args.port} in your browser.", flush=True)
 
     def create_app():
-        return create_layout(args.db, preloaded, enable_timing=enable_timing)
+        return create_layout(args.db, preloaded, enable_timing=enable_timing, initial_settings=initial_settings)
 
     static_path = os.path.join(os.path.dirname(__file__), "..", "static")
     print(flush=True)

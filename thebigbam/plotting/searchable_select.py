@@ -8,6 +8,9 @@ class SearchableSelect(JSComponent):
     value = param.String(default="")
     options = param.List(default=[])
     placeholder = param.String(default="")
+    server_search = param.Boolean(default=False)
+    search_query = param.String(default="")
+    search_nonce = param.Integer(default=0)
 
     _stylesheets = [
         "https://cdn.jsdelivr.net/npm/tom-select@2.4.1/dist/css/tom-select.css",
@@ -80,14 +83,33 @@ class SearchableSelect(JSComponent):
             initialOptions.push({value: model.value, text: model.value});
         }
 
-        const ts = new TomSelect(select, {
+        // When server_search is on, typed queries are sent to Python (via
+        // model.search_query) instead of being filtered purely client-side —
+        // the 'options' handler below resolves the pending load() callback
+        // once Python pushes back the matching results.
+        let pendingLoadCallback = null;
+        const tsConfig = {
             create: false,
             maxOptions: 100,
             placeholder: model.placeholder,
             options: allOptions,
             items: model.value ? [model.value] : [],
             onChange: (val) => { model.value = val; }
-        });
+        };
+        if (model.server_search) {
+            tsConfig.loadThrottle = 300;
+            tsConfig.shouldLoad = (query) => true;
+            tsConfig.load = (query, callback) => {
+                pendingLoadCallback = callback;
+                model.search_query = query;
+                // search_nonce always changes, so Python's watcher fires even
+                // when the same text is searched twice in a row (Param skips
+                // no-op assignments to search_query itself).
+                model.search_nonce = model.search_nonce + 1;
+            };
+        }
+
+        const ts = new TomSelect(select, tsConfig);
 
         let lastClickTime = 0;
         container.addEventListener('mousedown', (event) => {
@@ -111,18 +133,35 @@ class SearchableSelect(JSComponent):
         });
 
         model.on('options', () => {
-            const currentVal = model.value;
-            allOptions = model.options.map(o => ({value: o, text: o}));
-            // Rebuild options: clear render cache, repopulate, then sync UI
-            ts.clearOptions();
-            ts.addOptions(allOptions);
-            ts.refreshItems();
+            const newOptions = model.options;  // fresh array of strings from Python
+            allOptions = newOptions.map(o => ({value: o, text: o}));
+
+            // Surgically diff the option pool only — never touch selection
+            // here. model.on('value', ...) below is the sole owner of what's
+            // selected; Python already decided whether the value needs to
+            // change as part of the same update, so duplicating that
+            // decision here (via clear()/clearOptions()/setValue()) is both
+            // unnecessary and a source of subtle selection-clobbering bugs.
+            const newSet = new Set(newOptions);
+            Object.keys(ts.options).forEach((key) => {
+                if (!newSet.has(key)) {
+                    ts.removeOption(key, true);  // silent: never fires onChange
+                }
+            });
+            newOptions.forEach((opt) => {
+                if (!ts.options.hasOwnProperty(opt)) {
+                    ts.addOption({value: opt, text: opt});
+                }
+            });
             ts.refreshOptions(false);  // false = don't open dropdown
-            // Restore the current value if still valid
-            if (currentVal && model.options.includes(currentVal)) {
-                ts.setValue(currentVal, true);
-            } else {
-                ts.setValue('', true);
+
+            // Resolve any in-flight server-side search: tells Tom Select the
+            // load() for the current query has finished, so it renders these
+            // results (and clears its loading indicator).
+            if (pendingLoadCallback) {
+                const cb = pendingLoadCallback;
+                pendingLoadCallback = null;
+                cb(allOptions);
             }
         });
 
