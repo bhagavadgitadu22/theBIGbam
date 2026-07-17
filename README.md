@@ -23,7 +23,7 @@ Built with **Rust** for fast BAM processing and **Python + Bokeh** for interacti
       - [Annotation files](#annotation-files)
     + [Which features can I calculate?](#which-features-can-i-calculate)
     + [Database compression](#database-compression)
-    + [Metrics computed per contig/MAG and per sample](#metrics-computed-per-contigmag-and-per-sample)
+    + [Metrics computed summary contig/MAG and per sample](#metrics-computed-per-contigmag-and-per-sample)
   * [Parallelisation](#parallelisation)
   * [Visualization](#visualization)
     + [Serving from a remote server](#serving-from-a-remote-server)
@@ -318,7 +318,9 @@ You are initially in the **One Sample** mode, which allows exploration of all co
 
 - **Plotting parameters**: You can customize several aesthetic aspects of the plots: [adaptive resolution parameters](docs/README.md#adaptive-resolution-rendering), heights of the genomic feature tracks and mapping-derived plots, MAG and sample parameters to order the MAG contigs and sample plots
 
-Finally, click **Apply** to visualize the requested features for the selected contig and sample. Alternatively, click **Peruse Data** to display tables containing the metrics and feature values.
+Finally, click **APPLY** to visualize the requested features for the selected contig and sample. 
+
+Alternatively, click **SAVE SETTINGS** to save a JSON file containing your current settings in the directory from which you are serving the database. You can later restart with the same panel configuration using: `thebigbam serve --db <db> --json <settings>`.
 
 #### All Samples mode
 
@@ -377,7 +379,7 @@ The binning resolution depends on the window size:
 - Up to 1 Mbp: 1 kbp bins
 - Above 1 Mbp: 10 kbp bins
 
-When zooming or panning, you need to re-click APPLY to refresh the plots with the current window size. For more information consult [the visualization section](docs/VISUALIZATION.md).
+When zooming or panning, you need to re-click **APPLY** to refresh the plots with the current window size. For more information consult [the visualization section](docs/VISUALIZATION.md).
 
 ## Mapping
 
