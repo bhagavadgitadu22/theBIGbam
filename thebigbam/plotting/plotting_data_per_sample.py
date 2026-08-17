@@ -5,7 +5,7 @@ import numpy as np
 from Bio.Seq import Seq
 from Bio.SeqRecord import SeqRecord
 from Bio.SeqFeature import SeqFeature, FeatureLocation
-from bokeh.models import Range1d, ColumnDataSource, HoverTool, WheelZoomTool, BoxZoomTool, NumeralTickFormatter, TapTool, Label
+from bokeh.models import Range1d, ColumnDataSource, HoverTool, WheelZoomTool, BoxZoomTool, SaveTool, NumeralTickFormatter, TapTool, Label
 from bokeh.layouts import gridplot
 from bokeh.palettes import Viridis256
 from bokeh.plotting import figure
@@ -234,6 +234,7 @@ def make_bokeh_mag_track(conn, mag_name, height=30, shared_xrange=None, members=
         fig.add_tools(wheel)
         fig.toolbar.active_scroll = wheel
         fig.add_tools(BoxZoomTool(dimensions='width'))
+    fig.add_tools(SaveTool())
     fig.yaxis.visible = False
     fig.xgrid.grid_line_color = None
     fig.ygrid.grid_line_color = None
@@ -566,6 +567,7 @@ def make_bokeh_genemap(conn, contig_id, locus_name, locus_size, subplot_size, sh
     annotation_fig.add_tools(wheel)
     annotation_fig.toolbar.active_scroll = wheel
     annotation_fig.add_tools(BoxZoomTool(dimensions='width'))
+    annotation_fig.add_tools(SaveTool())
 
     annotation_fig.x_range = shared_xrange
 
@@ -2643,6 +2645,7 @@ def make_bokeh_genemap_mag(conn, mag_id, mag_name, mag_length, subplot_size,
     annotation_fig.add_tools(wheel)
     annotation_fig.toolbar.active_scroll = wheel
     annotation_fig.add_tools(BoxZoomTool(dimensions='width'))
+    annotation_fig.add_tools(SaveTool())
     annotation_fig.x_range = shared_xrange
     return annotation_fig
 

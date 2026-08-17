@@ -4872,6 +4872,14 @@ def create_layout(db_path, preloaded, enable_timing=False, initial_settings=None
         if sample_params.get('same_y_scale') is not None:
             _restore('plotting_params.sample_params.same_y_scale', lambda: setattr(same_y_scale_cbg, 'active', [0] if sample_params['same_y_scale'] else []))
 
+    # sample_section must exist before apply_saved_settings runs, since restoring the
+    # ALL SAMPLES scope fires on_view_change, which sets sample_section.visible.
+    separator_samples = Div(text="", height=2, sizing_mode="stretch_width", styles={'background-color': '#333', 'margin-top': '10px', 'margin-bottom': '10px'})
+    sample_section = pn.Column(
+        separator_samples, sample_title, widgets['sample_select'],
+        sizing_mode="stretch_width", margin=0,
+    )
+
     if initial_settings:
         apply_saved_settings(initial_settings)
 
@@ -4881,17 +4889,12 @@ def create_layout(db_path, preloaded, enable_timing=False, initial_settings=None
     ## Put together all DOM elements
     # Create visual separators (horizontal lines) - using 2px height for consistent rendering at all zoom levels
     separator_filtering = Div(text="", height=2, sizing_mode="stretch_width", styles={'background-color': '#333', 'margin-top': '10px', 'margin-bottom': '10px'})
-    separator_samples = Div(text="", height=2, sizing_mode="stretch_width", styles={'background-color': '#333', 'margin-top': '10px', 'margin-bottom': '10px'})
     separator_contigs = Div(text="", height=2, sizing_mode="stretch_width", styles={'background-color': '#333', 'margin-top': '10px', 'margin-bottom': '10px'})
     separator_variables = Div(text="", height=2, sizing_mode="stretch_width", styles={'background-color': '#333', 'margin-top': '10px', 'margin-bottom': '10px'})
-    
+
     # Gene map is now part of the Genome module's CheckboxButtonGroup
     # Build controls list conditionally based on whether samples exist
     # When no samples: hide views toggle, samples section, and variables section
-    sample_section = pn.Column(
-        separator_samples, sample_title, widgets['sample_select'],
-        sizing_mode="stretch_width", margin=0,
-    )
     if widgets['has_samples']:
         controls_children = [logo, views, separator_filtering, filtering_header, filtering_content,
                              separator_mags, mag_header, widgets['view_radio'], widgets['mag_select'],
