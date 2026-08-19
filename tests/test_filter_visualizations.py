@@ -1,10 +1,11 @@
-from thebigbam.plotting.controls import filter_visualizations
-from thebigbam.plotting.controls.filter_visualizations import FilterVisualizations
+from types import SimpleNamespace
+
+from thebigbam.plotting.renderers.filter_distributions import FilterVisualizations
 
 
 def test_numeric_visualization_skips_non_numeric_columns():
     visualizations = FilterVisualizations(
-        "example.db",
+        SimpleNamespace(),
         {"Sample": {"columns": {"Group": {"type": "text"}}}},
         False,
         "",
@@ -17,9 +18,9 @@ def test_numeric_visualization_skips_non_numeric_columns():
     assert row["threshold_span"] is None
 
 
-def test_text_visualization_handles_empty_distribution(monkeypatch):
-    monkeypatch.setattr(filter_visualizations, "resolve_value_counts", lambda *args, **kwargs: [])
-    visualizations = FilterVisualizations("example.db", {}, False, "", lambda: None)
+def test_text_visualization_handles_empty_distribution():
+    service = SimpleNamespace(value_counts=lambda *_args: [])
+    visualizations = FilterVisualizations(service, {}, False, "", lambda: None)
     row = {}
 
     assert visualizations.build_text_treemap(row, "Sample", "Group", {}, object()) is None

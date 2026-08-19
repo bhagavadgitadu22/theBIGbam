@@ -29,8 +29,9 @@ class PreparedFeatures:
 
 
 class CompositionDataService:
-    def __init__(self, cursor: Any, cache=None, profiler=None) -> None:
-        self.cursor = cursor
+    def __init__(self, feature_repository: Any, composition_repository=None, cache=None, profiler=None) -> None:
+        self.feature_repository = feature_repository
+        self.composition_repository = composition_repository
         self.cache = cache
         self.profiler = profiler
 
@@ -57,11 +58,13 @@ class CompositionDataService:
         )
         return PreparedFeatures(tuple(contig), tuple(sample))
 
-    def for_mag(self, request, context, repository, sample_id: int | None) -> PreparedFeatures:
+    def for_mag(self, request, context, sample_id: int | None) -> PreparedFeatures:
         _requested, metadata, contig_features, sample_features = self._classify(request)
         contig = self._load_mag_features(request, context, contig_features, metadata, [(None, None)])
         if request.is_all:
-            samples = repository.ordered_mag_samples(request, context.mag_id)
+            if self.composition_repository is None:
+                raise ValueError("A composition repository is required for all-sample MAG plots")
+            samples = self.ordered_mag_samples(request, context.mag_id)
         elif sample_id is not None:
             samples = [(sample_id, request.sample_name)]
         else:
@@ -69,10 +72,32 @@ class CompositionDataService:
         sample = self._load_mag_features(request, context, sample_features, metadata, samples)
         return PreparedFeatures(tuple(contig), tuple(sample))
 
+    def ordered_mag_samples(self, request, mag_id):
+        """Apply user filtering, ordering, and limits to repository sample rows."""
+        rows = self.composition_repository.mag_samples(mag_id)
+        if request.allowed_samples is not None:
+            rows = [(sid, name) for sid, name in rows if name in request.allowed_samples]
+        ordering = request.sample_ordering
+        if ordering.source and ordering.metric and ordering.metric != "Sample_name" and rows:
+            try:
+                rows = self.composition_repository.order_mag_samples(rows, request.mag_name, ordering)
+            except Exception as error:
+                print(f"Warning: Could not order samples by '{ordering.metric}': {error}", flush=True)
+                rows.sort(key=lambda row: row[1], reverse=not ordering.ascending)
+        else:
+            rows.sort(key=lambda row: row[1], reverse=not ordering.ascending)
+        if request.max_samples is not None and len(rows) > request.max_samples:
+            print(
+                f"Plotting {request.max_samples}/{len(rows)} samples (limited by 'Max number of samples plotted')",
+                flush=True,
+            )
+            rows = rows[: request.max_samples]
+        return rows
+
     def primary_maximum(self, request, contig_id: int, sample_id: int) -> float:
         try:
             series = get_feature_data(
-                self.cursor,
+                self.feature_repository,
                 "Primary alignments",
                 contig_id,
                 sample_id,
@@ -87,7 +112,7 @@ class CompositionDataService:
 
     def _classify(self, request):
         requested = parse_requested_features(request.tracks.features)
-        metadata = get_variable_metadata_batch(self.cursor, requested)
+        metadata = get_variable_metadata_batch(self.feature_repository, requested)
         contig, sample = split_contig_vs_sample_features(metadata, requested)
         return requested, metadata, contig, sample
 
@@ -108,7 +133,7 @@ class CompositionDataService:
                 series = self._cached(
                     key,
                     lambda: get_feature_data(
-                        self.cursor,
+                        self.feature_repository,
                         feature,
                         contig_id,
                         sample_id,
@@ -146,7 +171,7 @@ class CompositionDataService:
                     series = self._cached(
                         key,
                         lambda: get_mag_feature_data(
-                            self.cursor,
+                            self.feature_repository,
                             feature,
                             context.mag_id,
                             sample_id,

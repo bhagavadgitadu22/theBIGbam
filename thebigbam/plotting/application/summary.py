@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import time
+import traceback
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -33,12 +34,16 @@ class SummaryController:
         timing = self.bindings.timing
 
         from ..reports.summary import generate_peruse_html
+        from ..repositories.summary import SummaryRepository
+        from ..services.summary import SummaryDataService, decode_map
 
         if enable_timing:
             timing.start_phase("Peruse")
             t_peruse = time.perf_counter()
 
         is_mag_view = widgets["has_mags"] and widgets["view_radio"].active == 0
+        repository = SummaryRepository(conn)
+        service = SummaryDataService(repository)
 
         if is_mag_view:
             mag = widgets["mag_select"].value
@@ -47,7 +52,12 @@ class SummaryController:
                 return
             sample = widgets["sample_select"].value
             sample_names = [sample] if sample else []
-            html_content = generate_peruse_html(conn, None, sample_names, mag_name=mag, is_mag_view=True)
+            try:
+                report = service.report(None, sample_names, mag_name=mag, is_mag_view=True)
+                html_content = generate_peruse_html(report, decode_map(repository))
+            except Exception:
+                print(f"[summary] Exception: {traceback.format_exc()}", flush=True)
+                return
             if enable_timing:
                 _step = time.perf_counter() - t_peruse
                 print(f"[timing] SHOW SUMMARY (MAG view): {_step:.3f}s{timing.tag(_step)}", flush=True)
@@ -81,7 +91,12 @@ class SummaryController:
                         return
                     sample_names = [sample]
 
-            html_content = generate_peruse_html(conn, contig, sample_names, mag_name=parent_mag, is_mag_view=False)
+            try:
+                report = service.report(contig, sample_names, mag_name=parent_mag, is_mag_view=False)
+                html_content = generate_peruse_html(report, decode_map(repository))
+            except Exception:
+                print(f"[summary] Exception: {traceback.format_exc()}", flush=True)
+                return
             if enable_timing:
                 _step = time.perf_counter() - t_peruse
                 print(

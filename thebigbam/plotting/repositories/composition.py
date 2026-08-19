@@ -6,10 +6,10 @@ from dataclasses import dataclass
 from typing import Any
 
 from ...database.database_getters import (
-    get_mag_contigs_sorted,
+    get_mag_contigs,
     get_mag_id,
     get_mag_members_full,
-    get_mag_members_sorted,
+    get_mag_members_full_sorted,
 )
 
 
@@ -62,21 +62,17 @@ class CompositionRepository:
             raise ValueError(f"Sample not found: {name}")
         return int(row[0]), row[1]
 
+    def mag_contigs(self, name: str) -> tuple[tuple[str, int, int], ...]:
+        """Return ordered MAG members as plain plotting-domain values."""
+        return tuple(get_mag_contigs(self.connection, name))
+
     def mag(self, request) -> MagContext:
         mag_id = get_mag_id(self.connection, request.mag_name)
         if mag_id is None:
             raise ValueError(f"MAG_id lookup failed for: {request.mag_name}")
         ordering = request.ordering
         if ordering.source is not None and ordering.metric:
-            members = get_mag_contigs_sorted(
-                self.connection,
-                mag_id,
-                ordering.source,
-                ordering.metric,
-                ordering.ascending,
-                ordering.sample_name,
-            )
-            feature_members = get_mag_members_sorted(
+            full = get_mag_members_full_sorted(
                 self.connection,
                 mag_id,
                 ordering.source,
@@ -86,8 +82,8 @@ class CompositionRepository:
             )
         else:
             full = get_mag_members_full(self.connection, mag_id)
-            members = [(name, length, offset) for _cid, name, length, offset in full]
-            feature_members = [(cid, length, offset) for cid, _name, length, offset in full]
+        members = [(name, length, offset) for _cid, name, length, offset in full]
+        feature_members = [(cid, length, offset) for cid, _name, length, offset in full]
         if not members:
             raise ValueError(f"MAG not found or empty: {request.mag_name}")
         xstart, xend = request.xstart, request.xend
@@ -108,7 +104,7 @@ class CompositionRepository:
             xend,
         )
 
-    def ordered_mag_samples(self, request, mag_id: int) -> list[tuple[int, str]]:
+    def mag_samples(self, mag_id: int) -> list[tuple[int, str]]:
         rows = self.connection.execute(
             "SELECT DISTINCT s.Sample_id, s.Sample_name FROM Sample s "
             "JOIN Feature_blob fb ON fb.Sample_id = s.Sample_id "
@@ -116,26 +112,9 @@ class CompositionRepository:
             "WHERE mca.MAG_id = ?",
             [mag_id],
         ).fetchall()
-        if request.allowed_samples is not None:
-            rows = [(sid, name) for sid, name in rows if name in request.allowed_samples]
-        ordering = request.sample_ordering
-        if ordering.source and ordering.metric and ordering.metric != "Sample_name" and rows:
-            try:
-                rows = self._order_samples(rows, request.mag_name, ordering)
-            except Exception as error:
-                print(f"Warning: Could not order samples by '{ordering.metric}': {error}", flush=True)
-                rows.sort(key=lambda row: row[1], reverse=not ordering.ascending)
-        else:
-            rows.sort(key=lambda row: row[1], reverse=not ordering.ascending)
-        if request.max_samples is not None and len(rows) > request.max_samples:
-            print(
-                f"Plotting {request.max_samples}/{len(rows)} samples (limited by 'Max number of samples plotted')",
-                flush=True,
-            )
-            rows = rows[: request.max_samples]
         return [(int(sid), name) for sid, name in rows]
 
-    def _order_samples(self, rows, mag_name, ordering):
+    def order_mag_samples(self, rows, mag_name, ordering):
         direction = "ASC" if ordering.ascending else "DESC"
         if ordering.source == "Sample":
             ids = [sid for sid, _name in rows]

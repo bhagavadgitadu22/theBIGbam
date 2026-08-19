@@ -99,21 +99,21 @@ TOPOLOGY = {
 SQL_ALIASES = {key: key.removeprefix("Micro_") for key in MICRO}
 
 
-def column_scales(connection):
-    return {name: float(scale) for name, scale in SummaryRepository(connection).column_scales()}
+def column_scales(repository: SummaryRepository):
+    return {name: float(scale) for name, scale in repository.column_scales()}
 
 
-def decode_map(connection):
+def decode_map(repository: SummaryRepository):
     result = {}
-    for column, scale in column_scales(connection).items():
+    for column, scale in column_scales(repository).items():
         if scale != 1:
             digits = max(0, len(str(int(scale))) - 1)
             result[column] = lambda value, scale=scale, digits=digits: round(value / scale, digits)
     return result
 
 
-def filter_encode(connection):
-    return {column: scale for column, scale in column_scales(connection).items() if scale != 1}
+def filter_encode(repository: SummaryRepository):
+    return {column: scale for column, scale in column_scales(repository).items() if scale != 1}
 
 
 def round_significant(value, figures=2):

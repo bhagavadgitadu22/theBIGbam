@@ -22,17 +22,7 @@ def test_genome_control_repository_reports_database_capabilities():
     assert capabilities == GenomeControlCapabilities(True, True, False)
 
 
-def test_genome_control_factory_builds_position_controls_without_optional_tracks(monkeypatch):
-    monkeypatch.setattr(
-        genome_controls.ColorTemplateRepository,
-        "load",
-        lambda self: {},
-    )
-    monkeypatch.setattr(
-        genome_controls.GenomeControlRepository,
-        "capabilities",
-        lambda self: GenomeControlCapabilities(False, False, False),
-    )
+def test_genome_control_factory_builds_position_controls_without_optional_tracks():
     widgets = {
         "annotation_types": [],
         "custom_contig_subplots": [],
@@ -46,8 +36,9 @@ def test_genome_control_factory_builds_position_controls_without_optional_tracks
     }
 
     controls = genome_controls.build_genome_controls(
-        connection=object(),
-        db_path="example.db",
+        metadata_service=SimpleNamespace(distinct_values=lambda *_args: []),
+        color_templates={},
+        genome_capabilities=GenomeControlCapabilities(False, False, False),
         widgets=widgets,
         filtering_metadata={},
         genome_checkbox=None,
@@ -65,13 +56,7 @@ def test_genome_control_factory_builds_position_controls_without_optional_tracks
     assert controls.translated_sequence is None
 
 
-def test_genome_control_projects_immutable_annotation_types_to_bokeh_list(monkeypatch):
-    monkeypatch.setattr(genome_controls.ColorTemplateRepository, "load", lambda self: {})
-    monkeypatch.setattr(
-        genome_controls.GenomeControlRepository,
-        "capabilities",
-        lambda self: GenomeControlCapabilities(False, False, False),
-    )
+def test_genome_control_projects_immutable_annotation_types_to_bokeh_list():
     widgets = {
         "annotation_types": ("CDS", "tRNA"),
         "custom_contig_subplots": [],
@@ -85,8 +70,9 @@ def test_genome_control_projects_immutable_annotation_types_to_bokeh_list(monkey
     }
 
     controls = genome_controls.build_genome_controls(
-        connection=object(),
-        db_path="example.db",
+        metadata_service=SimpleNamespace(distinct_values=lambda *_args: []),
+        color_templates={},
+        genome_capabilities=GenomeControlCapabilities(False, False, False),
         widgets=widgets,
         filtering_metadata={},
         genome_checkbox=None,

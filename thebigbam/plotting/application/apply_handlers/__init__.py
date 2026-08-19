@@ -5,7 +5,7 @@ from .contig_all import ContigAllHandler
 from .contig_one import ContigOneHandler
 from .mag_all import MagAllHandler
 from .mag_one import MagOneHandler
-from .rendering import ApplyRenderEngine, warm_composer_imports
+from .rendering import ApplyRenderEngine, warm_plot_pipeline_imports
 
 __all__ = [
     "ApplyBindings",
@@ -14,5 +14,5 @@ __all__ = [
     "ContigOneHandler",
     "MagAllHandler",
     "MagOneHandler",
-    "warm_composer_imports",
+    "warm_plot_pipeline_imports",
 ]

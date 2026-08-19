@@ -12,7 +12,7 @@ from ..settings.persistence import load_settings_document
 from ..shared.paths import static_directory
 from ..shared.timing import TimingPhase
 from . import composition_root as application
-from .apply_render_handlers import warm_composer_imports
+from .apply_render_handlers import warm_plot_pipeline_imports
 
 
 def add_serve_args(parser) -> None:
@@ -78,7 +78,7 @@ def run_serve(args) -> int:
     print("\nPreloading database data...", flush=True)
     preloaded = application.preload_db_data(args.db, enable_timing=enable_timing)
     warm_started = time.perf_counter()
-    warm_composer_imports()
+    warm_plot_pipeline_imports()
     if enable_timing:
         elapsed = time.perf_counter() - warm_started
         print(f"[timing] Composer import warm-up: {elapsed:.3f}s{application._TIMING.tag(elapsed)}", flush=True)

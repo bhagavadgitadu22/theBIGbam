@@ -1,4 +1,4 @@
-"""Distribution visualizations used by dynamic filtering rows."""
+"""Bokeh rendering for prepared filtering distributions."""
 
 from __future__ import annotations
 
@@ -11,20 +11,18 @@ from bokeh.models import ColumnDataSource, CustomJSTickFormatter, HoverTool, Ran
 from bokeh.models.callbacks import CustomJS
 from bokeh.plotting import figure as bk_figure
 
-from ...database.database_getters import resolve_column_null_stats, resolve_histogram_bins, resolve_value_counts
-
 
 class FilterVisualizations:
     def __init__(
         self,
-        db_path: str,
+        metadata_service: Any,
         filtering_metadata: Mapping[str, Any],
         enable_timing: bool,
         grey_buttons_stylesheet: Any,
         refresh_on_filter_change: Callable[[], None],
         filter_encode: Mapping[str, float] | None = None,
     ) -> None:
-        self.db_path = db_path
+        self.metadata_service = metadata_service
         self.filtering_metadata = filtering_metadata
         self.enable_timing = enable_timing
         self.grey_buttons_stylesheet = grey_buttons_stylesheet
@@ -43,15 +41,7 @@ class FilterVisualizations:
             return None
 
         scale = self.filter_encode.get(col_name)
-        bin_result = resolve_histogram_bins(
-            self.db_path,
-            self.filtering_metadata,
-            category,
-            col_name,
-            n_bins=50,
-            log_mode=log_mode,
-            enable_timing=self.enable_timing,
-        )
+        bin_result = self.metadata_service.histogram_bins(category, col_name, n_bins=50, log_mode=log_mode)
         if bin_result is None:
             row_data["histogram_pane"] = None
             row_data["histogram_fig"] = None
@@ -236,7 +226,7 @@ class FilterVisualizations:
         row_data["histogram_pane"] = pane
         row_data["histogram_fig"] = fig
         row_data["threshold_span"] = threshold_span
-        null_stats = resolve_column_null_stats(self.db_path, self.filtering_metadata, category, col_name)
+        null_stats = self.metadata_service.column_null_stats(category, col_name)
         if null_stats is not None:
             non_null_count, total_possible = null_stats
             label_html = (
@@ -251,13 +241,7 @@ class FilterVisualizations:
         """Build a 1D treemap showing value distribution for a text column."""
         from bokeh.palettes import Category20_20
 
-        value_counts = resolve_value_counts(
-            self.db_path,
-            self.filtering_metadata,
-            category,
-            col_name,
-            enable_timing=self.enable_timing,
-        )
+        value_counts = self.metadata_service.value_counts(category, col_name)
         if not value_counts:
             row_data["treemap_pane"] = None
             return None
@@ -371,7 +355,7 @@ class FilterVisualizations:
         pane = pn.pane.Bokeh(fig, sizing_mode="stretch_width", margin=(0, 0, 0, 0))
         row_data["treemap_pane"] = pane
         row_data["bridge_input"] = bridge
-        null_stats = resolve_column_null_stats(self.db_path, self.filtering_metadata, category, col_name)
+        null_stats = self.metadata_service.column_null_stats(category, col_name)
         if null_stats is not None:
             non_null_count, total_possible = null_stats
             label_html = (

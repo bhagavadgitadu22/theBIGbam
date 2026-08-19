@@ -59,17 +59,19 @@ def repository_db(tmp_path):
 
 def test_repository_does_not_apply_autocomplete_limit(repository_db):
     repository = AllSamplesRepository(repository_db)
-    samples = repository.resolve_samples(1, None, SampleOrdering())
+    samples = repository.available_samples(1)
     assert len(samples) == 150
 
 
-def test_repository_orders_then_limits_samples(repository_db):
+def test_service_orders_then_limits_repository_samples(repository_db):
     repository = AllSamplesRepository(repository_db)
-    samples = repository.resolve_samples(
-        1,
+    request = AllSamplesPlotRequest(
+        "c1",
         None,
-        SampleOrdering(source="Sample", column="rank", ascending=True, max_samples=3),
+        GenomicRegion(1, 10),
+        ordering=SampleOrdering(source="Sample", column="rank", ascending=True, max_samples=3),
     )
+    samples = AllSamplesDataService(repository)._resolve_samples(1, request)
     assert [name for _, name in samples] == ["sample_150", "sample_149", "sample_148"]
 
 
@@ -87,8 +89,11 @@ class _FakeRepository:
     def resolve_contig(self, name):
         return 1, name, 100
 
-    def resolve_samples(self, contig_id, allowed, ordering):
+    def available_samples(self, contig_id):
         return [(1, "sample")]
+
+    def order_samples(self, contig_id, samples, ordering):
+        return samples
 
     def feature_styles(self, subplot, table=None):
         if table == "Feature_blob":

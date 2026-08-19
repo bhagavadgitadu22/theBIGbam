@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from bokeh.layouts import gridplot
 from bokeh.models import Range1d
 
 from ..models.plots import AllSamplesPlotData
@@ -54,10 +53,3 @@ class AllSamplesRenderer:
                     figure.y_range = Range1d(plot_data.y_min, plot_data.y_max)
                 sample_figures.append(figure)
         return shared_xrange, genome_figures, sample_figures
-
-    @staticmethod
-    def compose(figures):
-        figures = list(figures)
-        if not figures:
-            raise ValueError("No plots to display")
-        return gridplot([[figure] for figure in figures], merge_tools=True, sizing_mode="stretch_width")

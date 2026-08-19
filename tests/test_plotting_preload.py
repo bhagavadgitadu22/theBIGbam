@@ -3,11 +3,13 @@ from pathlib import Path
 import duckdb
 
 from thebigbam.plotting.controls.base import build_controls
+from thebigbam.plotting.models.preload import PreloadedPlotData
 from thebigbam.plotting.models.session import CurrentPlotState, PlotSessionContext
-from thebigbam.plotting.reports.summary import _get_column_scales
 from thebigbam.plotting.repositories.filtering import FilteringRepository
-from thebigbam.plotting.repositories.preload import PreloadedPlotData, PreloadRepository
+from thebigbam.plotting.repositories.preload import PreloadRepository
+from thebigbam.plotting.repositories.summary import SummaryRepository
 from thebigbam.plotting.services.filtering import FilteringAvailabilityService
+from thebigbam.plotting.services.summary import column_scales
 
 
 def _create_preload_database(path):
@@ -154,7 +156,7 @@ def test_column_scales_are_scoped_to_each_database_connection():
         connection.execute("CREATE TABLE Column_scales (Column_name VARCHAR, Scale DOUBLE, Feature_name VARCHAR)")
         connection.execute("INSERT INTO Column_scales VALUES ('Depth', ?, 'Coverage')", [scale])
 
-    assert _get_column_scales(first) == {"Depth": 10.0}
-    assert _get_column_scales(second) == {"Depth": 100.0}
+    assert column_scales(SummaryRepository(first)) == {"Depth": 10.0}
+    assert column_scales(SummaryRepository(second)) == {"Depth": 100.0}
     first.close()
     second.close()

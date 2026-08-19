@@ -2,6 +2,11 @@ from thebigbam.plotting.controls.color_rules import build_color_rule_controls
 from thebigbam.plotting.repositories.color_templates import ColorTemplateRepository
 
 
+class MetadataService:
+    def distinct_values(self, category, column):
+        return []
+
+
 class Connection:
     def execute(self, sql):
         assert "Color_templates" in sql
@@ -25,7 +30,7 @@ def test_color_template_repository_groups_rules():
 
 def test_color_controls_expose_independent_annotation_and_mag_rule_lists():
     controls = build_color_rule_controls(
-        "example.db",
+        MetadataService(),
         {"Annotations": {"columns": {}}},
         {"default": []},
         "",

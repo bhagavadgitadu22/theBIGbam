@@ -3,7 +3,9 @@ from types import SimpleNamespace
 import duckdb
 import pytest
 
+from thebigbam.plotting.models.composition import MagCompositionRequest, MagOrdering
 from thebigbam.plotting.repositories.composition import CompositionRepository, MagContext
+from thebigbam.plotting.services.composition import CompositionDataService
 
 
 def test_repository_validates_contigs_and_optional_samples():
@@ -39,7 +41,8 @@ def test_repository_filters_orders_and_limits_mag_samples():
         mag_name="m7",
     )
 
-    rows = CompositionRepository(connection).ordered_mag_samples(request, 7)
+    repository = CompositionRepository(connection)
+    rows = CompositionDataService(object(), repository).ordered_mag_samples(request, 7)
 
     assert rows == [(2, "alpha")]
     connection.close()
@@ -56,3 +59,26 @@ def test_mag_context_projects_named_genome_members_without_database_lookup():
     )
 
     assert context.genome_members == ((22, "c2", 20, 10), (11, "c1", 10, 0))
+
+
+def test_sorted_mag_context_reuses_one_full_member_query(monkeypatch):
+    calls = []
+
+    monkeypatch.setattr("thebigbam.plotting.repositories.composition.get_mag_id", lambda _conn, _name: 7)
+
+    def load_sorted(*args):
+        calls.append(args)
+        return [(11, "c1", 10, 0), (22, "c2", 20, 10)]
+
+    monkeypatch.setattr("thebigbam.plotting.repositories.composition.get_mag_members_full_sorted", load_sorted)
+    request = MagCompositionRequest(
+        mag_name="m7",
+        sample_name="s1",
+        ordering=MagOrdering(source="Coverage", metric="Depth", ascending=False, sample_name="s1"),
+    )
+
+    context = CompositionRepository(object()).mag(request)
+
+    assert len(calls) == 1
+    assert context.members == (("c1", 10, 0), ("c2", 20, 10))
+    assert context.feature_members == ((11, 10, 0), (22, 20, 10))

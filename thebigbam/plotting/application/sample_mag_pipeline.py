@@ -2,23 +2,25 @@ import time
 
 from bokeh.models import Range1d
 
+from ..composers.layout import assemble_grid
 from ..models.composition import (
     MagCompositionRequest,
     SingleSampleCompositionRequest,
 )
-from ..renderers.composition import apply_per_feature_y_ranges, apply_primary_relative_y_range, assemble_grid
+from ..renderers.composition import apply_per_feature_y_ranges, apply_primary_relative_y_range
 from ..renderers.features import render_feature_tracks
 from ..renderers.mag_tracks import MagTrackRenderer
 from ..repositories.composition import CompositionRepository
+from ..repositories.features import FeatureRepository
 from ..repositories.mag_overview import MagOverviewRepository
 from ..services.composition import CompositionDataService
+from ..services.mag_overview import MagOverviewService
 from ..shared.defaults import DEFAULT_GENEMAP_WINDOW, DEFAULT_SEQUENCE_WINDOW
 from ..shared.timing import PipelineTimings, profile_phase
-from .genome_tracks import GenomeTrackComposer
+from .genome_track_pipeline import GenomeTrackPipeline
 
 
-### Function to generate the bokeh plot
-def compose_single_sample_plot(conn, request: SingleSampleCompositionRequest):
+def build_single_sample_plot(conn, request: SingleSampleCompositionRequest):
     """Generate a single-sample plot from an immutable request."""
     contig_name = request.contig_name
     sample_name = request.sample_name
@@ -39,9 +41,9 @@ def compose_single_sample_plot(conn, request: SingleSampleCompositionRequest):
     genbank_path = request.genbank_path
     mag_name = request.mag_name
     enable_timing = request.enable_timing
-    cur = conn.cursor()
     phase_timings = PipelineTimings()
     repository = CompositionRepository(conn)
+    feature_repository = FeatureRepository(conn)
     profiler = request.profiler
 
     # Get contig characteristics
@@ -56,7 +58,7 @@ def compose_single_sample_plot(conn, request: SingleSampleCompositionRequest):
     if xstart is not None and xend is not None:
         shared_xrange.start = xstart
         shared_xrange.end = xend
-    genome_tracks = GenomeTrackComposer(conn)
+    genome_tracks = GenomeTrackPipeline(conn)
     genome_members = ((int(contig_id), locus_name, int(locus_size), 0),)
 
     _genemap_threshold = max_genemap_window if max_genemap_window is not None else DEFAULT_GENEMAP_WINDOW
@@ -111,7 +113,7 @@ def compose_single_sample_plot(conn, request: SingleSampleCompositionRequest):
         print(f"Translated sequence not plotted: window > {_seq_threshold} bp", flush=True)
 
     t_features = time.perf_counter()
-    data_service = CompositionDataService(cur, request.data_cache, profiler)
+    data_service = CompositionDataService(feature_repository, repository, cache=request.data_cache, profiler=profiler)
     with phase_timings.phase("service"):
         with profile_phase(profiler, "service_transformation"):
             prepared = data_service.for_contig(request, contig_id, sample_id)
@@ -153,9 +155,7 @@ def compose_single_sample_plot(conn, request: SingleSampleCompositionRequest):
     mag_fig = None
     if mag_name:
         try:
-            from ...database.database_getters import get_mag_contigs
-
-            mag_fig = MagTrackRenderer().render(get_mag_contigs(conn, mag_name), 30)
+            mag_fig = MagTrackRenderer().render(repository.mag_contigs(mag_name), 30)
         except Exception as e:
             print(f"Error building MAG track for '{mag_name}': {e}", flush=True)
             mag_fig = None
@@ -169,7 +169,7 @@ def compose_single_sample_plot(conn, request: SingleSampleCompositionRequest):
     return grid
 
 
-def compose_mag_plot(conn, request: MagCompositionRequest):
+def build_mag_plot(conn, request: MagCompositionRequest):
     """Generate a concatenated MAG plot from an immutable request."""
     mag_name = request.mag_name
     sample_name = request.sample_name
@@ -193,9 +193,9 @@ def compose_mag_plot(conn, request: MagCompositionRequest):
     is_all = request.is_all
     enable_timing = request.enable_timing
 
-    cur = conn.cursor()
     phase_timings = PipelineTimings()
     repository = CompositionRepository(conn)
+    feature_repository = FeatureRepository(conn)
     profiler = request.profiler
     with phase_timings.phase("repository"):
         with profile_phase(profiler, "mag_context"):
@@ -204,7 +204,7 @@ def compose_mag_plot(conn, request: MagCompositionRequest):
     mag_members = context.feature_members
     total_len = context.total_length
     xstart, xend = context.xstart, context.xend
-    genome_tracks = GenomeTrackComposer(conn)
+    genome_tracks = GenomeTrackPipeline(conn)
     with profile_phase(profiler, "genome_member_preparation"):
         genome_members = context.genome_members
     print(f"MAG {mag_name}: {len(members)} contigs, {total_len} bp total", flush=True)
@@ -220,7 +220,7 @@ def compose_mag_plot(conn, request: MagCompositionRequest):
     if mag_track_colors:
         try:
             with profile_phase(profiler, "mag_overview_retrieval"):
-                dot_xs, dot_colors, dot_total = MagOverviewRepository(conn).annotation_dots(
+                dot_xs, dot_colors, dot_total = MagOverviewService(MagOverviewRepository(conn)).annotation_dots(
                     mag_members, mag_track_colors, max_track_dots
                 )
             if dot_xs:
@@ -291,9 +291,9 @@ def compose_mag_plot(conn, request: MagCompositionRequest):
 
     with phase_timings.phase("service"):
         with profile_phase(profiler, "service_transformation"):
-            prepared = CompositionDataService(cur, request.data_cache, profiler).for_mag(
-                request, context, repository, sample_id
-            )
+            prepared = CompositionDataService(
+                feature_repository, repository, cache=request.data_cache, profiler=profiler
+            ).for_mag(request, context, sample_id)
     feature_subplot_info = []
     render_phase = profiler.phase("track_rendering") if profiler is not None else phase_timings.phase("renderer")
     with render_phase:

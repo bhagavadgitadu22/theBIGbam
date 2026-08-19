@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from typing import Iterable
 
-from ..models.plots import FeatureStyle, SampleOrdering
+from ..models.plots import FeatureStyle
 from .features import FeatureRepository
 
 _IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -28,29 +28,15 @@ class AllSamplesRepository(FeatureRepository):
             raise ValueError(f"Unknown contig: {name}")
         return int(row[0]), str(row[1]), int(row[2])
 
-    def resolve_samples(
-        self,
-        contig_id: int,
-        allowed_samples: frozenset[str] | None,
-        ordering: SampleOrdering,
-    ) -> list[tuple[int, str]]:
+    def available_samples(self, contig_id: int) -> list[tuple[int, str]]:
         rows = self._execute(
             "SELECT DISTINCT s.Sample_id, s.Sample_name FROM Coverage c "
             "JOIN Sample s ON s.Sample_id = c.Sample_id WHERE c.Contig_id = ? ORDER BY s.Sample_name",
             [contig_id],
         ).fetchall()
-        samples = [(int(sid), str(name)) for sid, name in rows]
-        if allowed_samples is not None:
-            samples = [item for item in samples if item[1] in allowed_samples]
-        if not samples:
-            raise ValueError("No samples match the current contig and filters")
-        if ordering.column:
-            samples = self._order_samples(contig_id, samples, ordering)
-        if ordering.max_samples is not None:
-            samples = samples[: ordering.max_samples]
-        return samples
+        return [(int(sid), str(name)) for sid, name in rows]
 
-    def _order_samples(self, contig_id, samples, ordering):
+    def order_samples(self, contig_id, samples, ordering):
         source = ordering.source or "Sample"
         column = ordering.column
         if not _IDENTIFIER.fullmatch(source) or not _IDENTIFIER.fullmatch(column):

@@ -8,7 +8,6 @@ from typing import Any, Mapping
 import panel as pn
 from bokeh.models.widgets import ColorPicker, Select, Spinner, TextInput
 
-from ...database.database_getters import resolve_distinct_values
 from .searchable_select import SearchableSelect
 
 
@@ -27,7 +26,7 @@ class ColorRuleControls:
 
 
 def build_color_rule_controls(
-    db_path: str,
+    metadata_service: Any,
     filtering_metadata: Mapping[str, Any],
     color_templates: Mapping[str, list[dict[str, Any]]],
     stylesheet: Any,
@@ -100,13 +99,7 @@ def build_color_rule_controls(
         initial_key = color_qualifier_options[0] if color_qualifier_options else ""
         initial_info = annotation_meta.get(initial_key, {})
         initial_is_text = initial_info.get("type") == "text"
-        initial_distinct = (
-            resolve_distinct_values(
-                db_path, filtering_metadata, "Annotations", initial_key, enable_timing=enable_timing
-            )
-            if initial_is_text
-            else []
-        )
+        initial_distinct = metadata_service.distinct_values("Annotations", initial_key) if initial_is_text else []
 
         qualifier_select = Select(
             options=[(k, k.replace("_", " ").replace("percentage", "(%)")) for k in color_qualifier_options],
@@ -178,13 +171,7 @@ def build_color_rule_controls(
             """Rebuild operator options and the value widget for the new column type."""
             col_info = annotation_meta.get(col_name, {})
             is_text = col_info.get("type") == "text"
-            distinct = (
-                resolve_distinct_values(
-                    db_path, filtering_metadata, "Annotations", col_name, enable_timing=enable_timing
-                )
-                if is_text
-                else []
-            )
+            distinct = metadata_service.distinct_values("Annotations", col_name) if is_text else []
 
             # Swap operator options for the new type; preserve current operator
             # if still valid, otherwise default back to "=".
@@ -220,9 +207,7 @@ def build_color_rule_controls(
                     _swap_value_widget(new_input, is_panel)
                 elif not want_text_input and not isinstance(cur, SearchableSelect):
                     col_name_val = qualifier_select.value
-                    distinct = resolve_distinct_values(
-                        db_path, filtering_metadata, "Annotations", col_name_val, enable_timing=enable_timing
-                    )
+                    distinct = metadata_service.distinct_values("Annotations", col_name_val)
                     new_input, is_panel = _build_color_value_widget(True, new, distinct)
                     _swap_value_widget(new_input, is_panel)
 

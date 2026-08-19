@@ -11,6 +11,7 @@ from thebigbam.plotting.models.composition import (
     TrackSelection,
 )
 from thebigbam.plotting.repositories.mag_overview import MagOverviewRepository
+from thebigbam.plotting.services.mag_overview import MagOverviewService
 
 
 def test_composition_requests_are_immutable_and_group_related_options():
@@ -53,7 +54,7 @@ def test_mag_overview_repository_retrieves_and_limits_annotation_dots(tmp_path):
     connection.execute("INSERT INTO Annotation_qualifier VALUES (1, 'product', 'capsid'), (2, 'product', 'capsid')")
 
     repository = MagOverviewRepository(connection)
-    xs, colors, total = repository.annotation_dots(
+    xs, colors, total = MagOverviewService(repository).annotation_dots(
         ((10, 100, 0), (11, 50, 100)),
         ({"qualifier_key": "product", "match_mode": "exact", "value": "capsid", "color": "red"},),
         max_dots=1,
@@ -67,7 +68,7 @@ def test_mag_overview_repository_retrieves_and_limits_annotation_dots(tmp_path):
 
 
 def test_legacy_plot_function_adapters_are_removed():
-    source = Path("thebigbam/plotting/composers/sample_mag.py").read_text(encoding="utf-8")
+    source = Path("thebigbam/plotting/application/sample_mag_pipeline.py").read_text(encoding="utf-8")
     assert "def generate_bokeh_plot_per_sample" not in source
     assert "def generate_bokeh_plot_mag_view" not in source
     assert "def compute_mag_track_dots" not in source
@@ -79,8 +80,8 @@ def test_server_uses_typed_composers_and_mag_repository_is_rendering_free():
     handlers = Path("thebigbam/plotting/application/apply_handlers/rendering.py").read_text(encoding="utf-8")
     repository = Path("thebigbam/plotting/repositories/mag_overview.py").read_text(encoding="utf-8")
 
-    assert "compose_single_sample_plot(conn, request)" in handlers
-    assert "compose_mag_plot(conn, request)" in handlers
+    assert "build_single_sample_plot(conn, request)" in handlers
+    assert "build_mag_plot(conn, request)" in handlers
     assert "compose_" not in controller
     assert "generate_bokeh_plot_per_sample(" not in handlers
     assert "generate_bokeh_plot_mag_view(" not in handlers
@@ -91,7 +92,7 @@ def test_server_uses_typed_composers_and_mag_repository_is_rendering_free():
 
 
 def test_composers_are_sql_free_and_services_are_bokeh_free():
-    composers = Path("thebigbam/plotting/composers/sample_mag.py").read_text(encoding="utf-8")
+    composers = Path("thebigbam/plotting/composers/layout.py").read_text(encoding="utf-8")
     repository = Path("thebigbam/plotting/repositories/composition.py").read_text(encoding="utf-8")
     service = Path("thebigbam/plotting/services/composition.py").read_text(encoding="utf-8")
 

@@ -12,9 +12,9 @@ def test_summary_scale_retrieval_and_decoding_are_layered():
     repository = SummaryRepository(connection)
     assert repository.column_scales() == [("Depth", 10.0)]
     assert repository.query_count == 1
-    assert column_scales(connection) == {"Depth": 10.0}
-    assert decode_map(connection)["Depth"](123) == 12.3
-    assert filter_encode(connection) == {"Depth": 10.0}
+    assert column_scales(repository) == {"Depth": 10.0}
+    assert decode_map(repository)["Depth"](123) == 12.3
+    assert filter_encode(repository) == {"Depth": 10.0}
 
 
 def test_summary_numeric_formatting_is_database_free():

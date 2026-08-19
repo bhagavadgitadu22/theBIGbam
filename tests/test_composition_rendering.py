@@ -4,11 +4,8 @@ import pytest
 from bokeh.models import Range1d
 from bokeh.plotting import figure
 
-from thebigbam.plotting.renderers.composition import (
-    apply_per_feature_y_ranges,
-    apply_primary_relative_y_range,
-    assemble_grid,
-)
+from thebigbam.plotting.composers.layout import assemble_grid
+from thebigbam.plotting.renderers.composition import apply_per_feature_y_ranges, apply_primary_relative_y_range
 
 
 def test_grid_assembly_filters_missing_optional_tracks():
@@ -28,8 +25,6 @@ def test_y_range_policies_are_sql_free_and_deterministic():
 
     relative = SimpleNamespace(y_range=None)
     unrelated = SimpleNamespace(y_range=None)
-    apply_primary_relative_y_range(
-        [("Clippings", relative, 2), ("GC content", unrelated, 5)], 12
-    )
+    apply_primary_relative_y_range([("Clippings", relative, 2), ("GC content", unrelated, 5)], 12)
     assert relative.y_range.end == 12
     assert unrelated.y_range is None

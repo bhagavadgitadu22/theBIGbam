@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from bokeh.models import CheckboxButtonGroup, CheckboxGroup, RadioButtonGroup, Tooltip
 
-from ..repositories.preload import PreloadedPlotData
+from ..models.preload import PreloadedPlotData
 from .searchable_select import SearchableSelect
 
 

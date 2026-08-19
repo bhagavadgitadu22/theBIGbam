@@ -9,7 +9,7 @@ def _run(monkeypatch, *, enable_timing):
     monkeypatch.setattr(server.application, "_start_rss_watchdog", lambda: watchdog_calls.append(True))
     monkeypatch.setattr(server, "_print_database_metadata", lambda _path: None)
     monkeypatch.setattr(server.application, "preload_db_data", lambda *_args, **_kwargs: object())
-    monkeypatch.setattr(server, "warm_composer_imports", lambda: None)
+    monkeypatch.setattr(server, "warm_plot_pipeline_imports", lambda: None)
     monkeypatch.setattr(server.pn, "serve", lambda *_args, **kwargs: serve_kwargs.update(kwargs))
     result = server.run_serve(
         SimpleNamespace(

@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import time
 
+from ..composers.layout import assemble_grid
 from ..models.plots import AllSamplesPlotRequest, DisplayOptions, GenomicRegion, SampleOrdering
 from ..renderers.all_samples import AllSamplesRenderer
 from ..repositories.all_samples import AllSamplesRepository
 from ..services.all_samples import AllSamplesDataService
 from ..shared.defaults import DEFAULT_GENEMAP_WINDOW
 from ..shared.timing import PipelineTimings, profile_phase
-from .genome_tracks import GenomeTrackComposer
+from .genome_track_pipeline import GenomeTrackPipeline
 
 
 def _expand_genome_features(features):
@@ -23,7 +24,7 @@ def _expand_genome_features(features):
     return tuple(dict.fromkeys(expanded))
 
 
-def compose_all_samples_plot(
+def build_all_samples_plot(
     conn,
     variable,
     contig_name,
@@ -87,7 +88,7 @@ def compose_all_samples_plot(
     with render_phase:
         shared_xrange, genome_figures, sample_figures = renderer.render_figures(plot_data, subplot_size, same_y_scale)
 
-    genome_track_composer = GenomeTrackComposer(conn)
+    genome_track_composer = GenomeTrackPipeline(conn)
     members = ((contig_id, contig_name, locus_size, 0),)
     supplemental_figures = []
     threshold = max_genemap_window if max_genemap_window is not None else DEFAULT_GENEMAP_WINDOW
@@ -125,7 +126,7 @@ def compose_all_samples_plot(
 
     grid_phase = profiler.phase("grid_assembly") if profiler is not None else phase_timings.phase("renderer")
     with grid_phase:
-        grid = renderer.compose([*supplemental_figures, *genome_figures, *sample_figures])
+        grid = assemble_grid([*supplemental_figures, *genome_figures, *sample_figures])
     if enable_timing:
         phases = ", ".join(f"{name}={seconds:.3f}s" for name, seconds in service.phase_seconds.items())
         print(

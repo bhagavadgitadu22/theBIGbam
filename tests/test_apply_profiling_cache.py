@@ -21,8 +21,8 @@ class EmptyRepository:
         self.resolve_calls += 1
         return 1, name, 100
 
-    def resolve_samples(self, contig_id, allowed, ordering):
-        return []
+    def available_samples(self, contig_id):
+        return [(1, "sample")]
 
 
 def test_session_cache_is_bounded_and_records_invalidation_reason():

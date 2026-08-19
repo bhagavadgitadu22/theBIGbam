@@ -21,13 +21,17 @@ from ..apply_pipeline import (
 from .bindings import ApplyBindings
 
 
-def warm_composer_imports() -> None:
-    """Load heavy composer modules before the first interactive Apply."""
-    from ...composers import all_samples, sample_mag
+def warm_plot_pipeline_imports() -> None:
+    """Load heavy rendering pipelines before the first interactive Apply."""
+    from .. import all_samples_pipeline, sample_mag_pipeline
 
     # Keep explicit references so static analysis and future refactors cannot
     # accidentally turn this warm-up into a no-op import.
-    _ = all_samples.compose_all_samples_plot, sample_mag.compose_mag_plot, sample_mag.compose_single_sample_plot
+    _ = (
+        all_samples_pipeline.build_all_samples_plot,
+        sample_mag_pipeline.build_mag_plot,
+        sample_mag_pipeline.build_single_sample_plot,
+    )
 
 
 class ApplyRenderEngine:
@@ -228,9 +232,9 @@ class ApplyRenderEngine:
             ),
             focus_contig=focus_contig,
         )
-        from ...composers.sample_mag import compose_mag_plot
+        from ..sample_mag_pipeline import build_mag_plot
 
-        grid, mag_meta = compose_mag_plot(conn, request)
+        grid, mag_meta = build_mag_plot(conn, request)
         if enable_timing:
             _step = time.perf_counter() - t_plot
             print(
@@ -391,9 +395,9 @@ class ApplyRenderEngine:
             if enable_timing:
                 print(f"[timing] RSS before compose_all_samples_plot: {rss_mb():.0f} MB", flush=True)
                 t_plot = time.perf_counter()
-            from ...composers.all_samples import compose_all_samples_plot
+            from ..all_samples_pipeline import build_all_samples_plot
 
-            grid = compose_all_samples_plot(
+            grid = build_all_samples_plot(
                 conn,
                 selected_var,
                 contig,
@@ -475,9 +479,9 @@ class ApplyRenderEngine:
                 data_cache=bindings.data_cache,
                 profiler=profiler,
             )
-            from ...composers.sample_mag import compose_single_sample_plot
+            from ..sample_mag_pipeline import build_single_sample_plot
 
-            grid = compose_single_sample_plot(conn, request)
+            grid = build_single_sample_plot(conn, request)
             if enable_timing:
                 _step = time.perf_counter() - t_plot
                 print(

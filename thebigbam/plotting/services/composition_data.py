@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 from ..models.blobs import FeatureLoadRequest, FeatureRegion, MagFeatureLoadRequest, MagMember
-from ..repositories.features import FeatureRepository, split_features_by_storage
+from ..repositories.features import split_features_by_storage
 from ..shared.defaults import DEFAULT_MAX_BASE_RESOLUTION
 
 
-def get_variable_metadata_batch(cursor, subplot_list):
-    return FeatureRepository(cursor).metadata_batch(subplot_list)
+def get_variable_metadata_batch(repository, subplot_list):
+    return repository.metadata_batch(subplot_list)
 
 
 def split_contig_vs_sample_features(metadata_cache, requested_features):
@@ -16,7 +16,7 @@ def split_contig_vs_sample_features(metadata_cache, requested_features):
 
 
 def get_feature_data(
-    cursor,
+    repository,
     feature,
     contig_id,
     sample_id,
@@ -33,7 +33,6 @@ def get_feature_data(
     """Load one contig feature through the repository/service pipeline."""
     from .blob_features import FeatureDataService
 
-    repository = FeatureRepository(cursor)
     end = int(xend if xend is not None else repository.contig_length(contig_id))
     request = FeatureLoadRequest(
         feature=feature,
@@ -59,7 +58,7 @@ def get_feature_data(
 
 
 def get_mag_feature_data(
-    cursor,
+    repository,
     feature,
     mag_id,
     sample_id,
@@ -77,9 +76,7 @@ def get_mag_feature_data(
     from .blob_features import FeatureDataService
 
     if members is None:
-        from thebigbam.database.database_getters import get_mag_members
-
-        members = get_mag_members(cursor, mag_id)
+        raise ValueError("MAG members must be loaded by a repository before service transformation")
     request = MagFeatureLoadRequest(
         feature=feature,
         sample_id=int(sample_id) if sample_id is not None else None,
@@ -89,7 +86,7 @@ def get_mag_feature_data(
         minimum_relative_value=float(min_relative_value),
         encoding_by_feature=encoding_by_feature,
     )
-    service = FeatureDataService(FeatureRepository(cursor))
+    service = FeatureDataService(repository)
     result = service.load_mag(request, variable_metadata)
     if profiler is not None:
         for name, seconds in service.phase_seconds.items():

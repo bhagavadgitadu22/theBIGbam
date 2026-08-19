@@ -135,7 +135,7 @@ class AllSamplesDataService:
                 return cached
         started = time.perf_counter()
         contig_id, contig_name, contig_length = self.repository.resolve_contig(request.contig_name)
-        samples = self.repository.resolve_samples(contig_id, request.allowed_samples, request.ordering)
+        samples = self._resolve_samples(contig_id, request)
         self._phase("resolve_subjects", started)
 
         sample_series: dict[int, list[FeatureSeries]] = {sid: [] for sid, _ in samples}
@@ -168,6 +168,18 @@ class AllSamplesDataService:
         if request.data_cache is not None:
             request.data_cache.put(cache_key, result)
         return result
+
+    def _resolve_samples(self, contig_id, request):
+        samples = self.repository.available_samples(contig_id)
+        if request.allowed_samples is not None:
+            samples = [item for item in samples if item[1] in request.allowed_samples]
+        if not samples:
+            raise ValueError("No samples match the current contig and filters")
+        if request.ordering.column:
+            samples = self.repository.order_samples(contig_id, samples, request.ordering)
+        if request.ordering.max_samples is not None:
+            samples = samples[: request.ordering.max_samples]
+        return samples
 
     def _load_sample_style(self, contig_id, sample_ids, style, request):
         feature_id = self.repository.feature_id(style.variable_name)

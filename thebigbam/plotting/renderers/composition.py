@@ -1,11 +1,9 @@
-"""SQL-free rendering helpers shared by single-sample and MAG composers."""
+"""Bokeh range projection shared by single-sample and MAG renderers."""
 
 from __future__ import annotations
 
-import time
 from collections import defaultdict
 
-from bokeh.layouts import gridplot
 from bokeh.models import Range1d
 
 PRIMARY_RELATIVE_SUBPLOTS = frozenset(
@@ -23,17 +21,6 @@ PRIMARY_RELATIVE_SUBPLOTS = frozenset(
         "Missing mates",
     }
 )
-
-
-def assemble_grid(plots, *, empty_message="No plots to display", enable_timing=False):
-    plots = [plot for plot in plots if plot is not None]
-    if not plots:
-        raise ValueError(empty_message)
-    started = time.perf_counter()
-    grid = gridplot([[plot] for plot in plots], merge_tools=True, sizing_mode="stretch_width")
-    if enable_timing:
-        print(f"[timing]   gridplot ({len(plots)} figures): {time.perf_counter() - started:.3f}s", flush=True)
-    return grid
 
 
 def apply_per_feature_y_ranges(feature_subplots) -> None:

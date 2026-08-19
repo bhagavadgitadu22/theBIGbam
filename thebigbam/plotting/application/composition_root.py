@@ -22,10 +22,16 @@ from ..controls.filter_panel import build_filter_panel
 from ..controls.genome import build_genome_controls
 from ..controls.plot_parameters import build_plot_parameter_controls
 from ..controls.variables import attach_module_synchronization, build_variable_controls
+from ..models.preload import PreloadedPlotData
 from ..models.session import PlotSessionContext
+from ..repositories.color_templates import ColorTemplateRepository
+from ..repositories.filter_metadata import FilterMetadataRepository
 from ..repositories.filtering import FilteringRepository
-from ..repositories.preload import PreloadedPlotData, PreloadRepository
-from ..services.filtering import FilteringAvailabilityService
+from ..repositories.genome_controls import GenomeControlRepository
+from ..repositories.preload import PreloadRepository
+from ..services.filter_metadata import FilterMetadataService
+from ..services.filter_query import FilterQueryBuilder
+from ..services.filtering import FilterExpressionService, FilteringAvailabilityService
 from ..shared.data_cache import SessionDataCache
 
 # Import the plotting function from the repo
@@ -245,6 +251,9 @@ def create_layout(
     )
 
     filtering_metadata = preloaded["filtering_metadata"]
+    filter_metadata_service = FilterMetadataService(
+        FilterMetadataRepository(db_path, filtering_metadata, enable_timing=enable_timing)
+    )
 
     def refresh_on_filter_change():
         """Refresh contig and sample options when Filtering2 values change."""
@@ -268,10 +277,14 @@ def create_layout(
             doc.unhold()
 
     filter_panel = build_filter_panel(
-        db_path=db_path,
         preloaded=preloaded,
         widgets=widgets,
-        repository=filtering_repository,
+        expression_service=FilterExpressionService(
+            filtering_repository,
+            FilterQueryBuilder(filtering_metadata, preloaded.filter_encode, has_samples=widgets["has_samples"]),
+            has_mags=widgets["has_mags"],
+        ),
+        metadata_service=filter_metadata_service,
         refresh=refresh_on_filter_change,
         make_toggle_callback=make_toggle_callback,
         stylesheet=stylesheet,
@@ -369,8 +382,9 @@ def create_layout(
     genome_index_one = variable_controls.genome_index
 
     genome_controls = build_genome_controls(
-        connection=conn,
-        db_path=db_path,
+        metadata_service=filter_metadata_service,
+        color_templates=ColorTemplateRepository(conn).load(),
+        genome_capabilities=GenomeControlRepository(conn).capabilities(),
         widgets=widgets,
         filtering_metadata=filtering_metadata,
         genome_checkbox=genome_cbg_one,

@@ -8,15 +8,14 @@ import panel as pn
 from bokeh.io import curdoc
 from bokeh.models.widgets import Select, Spinner, TextInput
 
-from ...database.database_getters import resolve_column_null_stats, resolve_distinct_values
-from .filter_visualizations import FilterVisualizations
+from ..renderers.filter_distributions import FilterVisualizations
 from .searchable_select import SearchableSelect
 
 
 class FilterRowFactory:
     def __init__(
         self,
-        db_path: str,
+        metadata_service: Any,
         filtering_metadata: Mapping[str, Any],
         columns: Mapping[str, Any],
         raw_columns: Mapping[str, Any],
@@ -26,7 +25,7 @@ class FilterRowFactory:
         enable_timing: bool,
         filter_encode: Mapping[str, float] | None = None,
     ) -> None:
-        self.db_path = db_path
+        self.metadata_service = metadata_service
         self.filtering_metadata = filtering_metadata
         self.columns = columns
         self.raw_columns = raw_columns
@@ -80,7 +79,7 @@ class FilterRowFactory:
                     row_data, category, column, row_data["input_ref"], container
                 )
             else:
-                stats = resolve_column_null_stats(self.db_path, self.filtering_metadata, category, column)
+                stats = self.metadata_service.column_null_stats(category, column)
                 result = None
                 if stats is not None:
                     non_null_count, total_possible = stats
@@ -149,13 +148,7 @@ class FilterRowFactory:
             initial_input.on_change("value", lambda attr, old, new: self.refresh())
             initial_is_panel = False
         elif initial_is_text:
-            distinct_values = resolve_distinct_values(
-                self.db_path,
-                self.filtering_metadata,
-                initial_category,
-                initial_column,
-                enable_timing=self.enable_timing,
-            )
+            distinct_values = self.metadata_service.distinct_values(initial_category, initial_column)
             initial_input = SearchableSelect(value="", options=distinct_values, placeholder="Search...", width=90)
             input_container.objects = [initial_input]
             initial_input.param.watch(lambda event: self.refresh(), "value")
@@ -268,9 +261,7 @@ class FilterRowFactory:
                 if is_text:
                     current_op = comparison_select.value
                     if current_op not in ("has", "has not"):
-                        distinct_values = resolve_distinct_values(
-                            self.db_path, self.filtering_metadata, category, col_name, enable_timing=self.enable_timing
-                        )
+                        distinct_values = self.metadata_service.distinct_values(category, col_name)
                         new_input = SearchableSelect(
                             value="", options=distinct_values, placeholder="Search...", width=90
                         )
@@ -345,9 +336,7 @@ class FilterRowFactory:
                     current_input_ref["is_panel"] = True
 
                     def _deferred_resolve():
-                        distinct_values = resolve_distinct_values(
-                            self.db_path, self.filtering_metadata, category, col_name, enable_timing=self.enable_timing
-                        )
+                        distinct_values = self.metadata_service.distinct_values(category, col_name)
                         new_input = SearchableSelect(
                             value="", options=distinct_values, placeholder="Search...", width=90
                         )

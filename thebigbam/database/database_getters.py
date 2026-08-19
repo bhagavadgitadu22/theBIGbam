@@ -188,23 +188,33 @@ def _sorted_members_query(conn, mag_id, source_table, metric, ascending, sample_
 
 def get_mag_members_sorted(conn, mag_id, source_table, metric, ascending, sample_name=None):
     """Return [(contig_id, contig_length, offset)] sorted by metric with recomputed offsets."""
-    rows = _sorted_members_query(conn, mag_id, source_table, metric, ascending, sample_name)
-    offset = 0
-    result = []
-    for cid, _cname, clen in rows:
-        result.append((int(cid), int(clen), offset))
-        offset += int(clen)
-    return result
+    return [
+        (contig_id, contig_length, offset)
+        for contig_id, _contig_name, contig_length, offset in get_mag_members_full_sorted(
+            conn, mag_id, source_table, metric, ascending, sample_name
+        )
+    ]
 
 
 def get_mag_contigs_sorted(conn, mag_id, source_table, metric, ascending, sample_name=None):
     """Return [(contig_name, contig_length, offset)] sorted by metric with recomputed offsets."""
+    return [
+        (contig_name, contig_length, offset)
+        for _contig_id, contig_name, contig_length, offset in get_mag_members_full_sorted(
+            conn, mag_id, source_table, metric, ascending, sample_name
+        )
+    ]
+
+
+def get_mag_members_full_sorted(conn, mag_id, source_table, metric, ascending, sample_name=None):
+    """Return sorted members with names and IDs from one database query."""
     rows = _sorted_members_query(conn, mag_id, source_table, metric, ascending, sample_name)
     offset = 0
     result = []
-    for _cid, cname, clen in rows:
-        result.append((str(cname), int(clen), offset))
-        offset += int(clen)
+    for contig_id, contig_name, contig_length in rows:
+        length = int(contig_length)
+        result.append((int(contig_id), str(contig_name), length, offset))
+        offset += length
     return result
 
 
@@ -1190,4 +1200,3 @@ def resolve_column_null_stats(
 
     col_info["null_stats"] = result
     return result
-

@@ -18,7 +18,7 @@ def test_filter_row_factory_builds_row_from_cached_column_options():
         }
     }
     factory = FilterRowFactory(
-        db_path="example.db",
+        metadata_service=SimpleNamespace(),
         filtering_metadata=metadata,
         columns={"Contig": [("Contig_length", "Contig length")]},
         raw_columns={"Contig": ["Contig_length"]},

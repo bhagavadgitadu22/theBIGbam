@@ -1,4 +1,4 @@
-"""Composition facade for database-backed genome tracks."""
+"""Application pipeline for database-backed genome tracks."""
 
 from __future__ import annotations
 
@@ -7,8 +7,8 @@ from ..repositories.genome_tracks import GenomeTrackRepository
 from ..services.genome_tracks import GenomeTrackService
 
 
-class GenomeTrackComposer:
-    """Coordinate retrieval, transformation and rendering without mixing their responsibilities."""
+class GenomeTrackPipeline:
+    """Orchestrate genome-track retrieval, transformation, and rendering."""
 
     def __init__(self, conn) -> None:
         self.repository = GenomeTrackRepository(conn)

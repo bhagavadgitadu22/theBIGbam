@@ -9,12 +9,9 @@ from bokeh.layouts import row
 from bokeh.models import Div, Tooltip
 from bokeh.models.widgets import Button, HelpButton
 
-from ..repositories.filtering import FilteringRepository
-from ..services.filter_query import FilterQueryBuilder
-from ..services.filtering import FilterExpressionService
+from ..renderers.filter_distributions import FilterVisualizations
 from .filter_projection import FilterWidgetProjection
 from .filter_rows import FilterRowFactory
-from .filter_visualizations import FilterVisualizations
 from .filtering import FilterSectionController
 from .parameter_options import ParameterOptionCatalog
 
@@ -31,10 +28,10 @@ class FilterPanel:
 
 def build_filter_panel(
     *,
-    db_path: str,
     preloaded: Any,
     widgets: dict[str, Any],
-    repository: FilteringRepository,
+    expression_service: Any,
+    metadata_service: Any,
     refresh: Callable[[], None],
     make_toggle_callback: Callable[[Any, Any], Callable[[], None]],
     stylesheet: Any,
@@ -69,13 +66,8 @@ def build_filter_panel(
 
     metadata = preloaded["filtering_metadata"]
     options = ParameterOptionCatalog.from_filtering_metadata(metadata)
-    expression_service = FilterExpressionService(
-        repository,
-        FilterQueryBuilder(metadata, preloaded.filter_encode, has_samples=widgets["has_samples"]),
-        has_mags=widgets["has_mags"],
-    )
     visualizations = FilterVisualizations(
-        db_path,
+        metadata_service,
         metadata,
         enable_timing,
         grey_button_stylesheet,
@@ -83,7 +75,7 @@ def build_filter_panel(
         preloaded.filter_encode,
     )
     row_factory = FilterRowFactory(
-        db_path=db_path,
+        metadata_service=metadata_service,
         filtering_metadata=metadata,
         columns=options.columns,
         raw_columns=options.columns_raw,

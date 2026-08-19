@@ -7,7 +7,7 @@ from .apply_handlers import (
     ContigOneHandler,
     MagAllHandler,
     MagOneHandler,
-    warm_composer_imports,
+    warm_plot_pipeline_imports,
 )
 
 __all__ = [
@@ -17,5 +17,5 @@ __all__ = [
     "ContigOneHandler",
     "MagAllHandler",
     "MagOneHandler",
-    "warm_composer_imports",
+    "warm_plot_pipeline_imports",
 ]

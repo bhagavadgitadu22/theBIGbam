@@ -17,8 +17,6 @@ from bokeh.models.widgets import (
     TextInput,
 )
 
-from ..repositories.color_templates import ColorTemplateRepository
-from ..repositories.genome_controls import GenomeControlRepository
 from .color_rules import build_color_rule_controls
 
 
@@ -86,8 +84,9 @@ def _wire_master_checkbox(master, features, interaction_lock) -> None:
 
 
 def build_genome_controls(
-    connection: Any,
-    db_path: str,
+    metadata_service: Any,
+    color_templates: Mapping[str, list[dict[str, Any]]],
+    genome_capabilities: Any,
     widgets: Mapping[str, Any],
     filtering_metadata: Mapping[str, Any],
     genome_checkbox: Any | None,
@@ -98,7 +97,6 @@ def build_genome_controls(
     enable_timing: bool,
     interaction_lock: Mapping[str, bool],
 ) -> GenomeControls:
-    conn = connection
     genome_cbg_one = genome_checkbox
     genome_index_one = genome_index
     ## Build Genome module controls (placed in Contigs section, shared between views)
@@ -120,9 +118,8 @@ def build_genome_controls(
             stylesheets=[multichoice_stylesheet],
         )
 
-    color_templates = ColorTemplateRepository(conn).load()
     color_controls = build_color_rule_controls(
-        db_path,
+        metadata_service,
         filtering_metadata,
         color_templates,
         stylesheet,
@@ -138,8 +135,6 @@ def build_genome_controls(
     create_color_row = color_controls.create_row
     rebuild_color_rows = color_controls.rebuild_custom
     rebuild_mag_track_color_rows = color_controls.rebuild_mag
-    genome_capabilities = GenomeControlRepository(conn).capabilities()
-
     # Plot isoforms checkbox - only show if at least one locus_tag appears more than once
     plot_isoforms_cbg = None
     if genome_capabilities.has_isoforms:
