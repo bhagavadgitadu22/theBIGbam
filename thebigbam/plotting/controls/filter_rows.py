@@ -1,0 +1,417 @@
+"""Factory for dynamic filtering query rows."""
+
+from __future__ import annotations
+
+from typing import Any, Callable, Mapping
+
+import panel as pn
+from bokeh.io import curdoc
+from bokeh.models.widgets import Select, Spinner, TextInput
+
+from ...database.database_getters import resolve_column_null_stats, resolve_distinct_values
+from .filter_visualizations import FilterVisualizations
+from .searchable_select import SearchableSelect
+
+
+class FilterRowFactory:
+    def __init__(
+        self,
+        db_path: str,
+        filtering_metadata: Mapping[str, Any],
+        columns: Mapping[str, Any],
+        raw_columns: Mapping[str, Any],
+        visualizations: FilterVisualizations,
+        refresh: Callable[[], None],
+        stylesheet: Any,
+        enable_timing: bool,
+        filter_encode: Mapping[str, float] | None = None,
+    ) -> None:
+        self.db_path = db_path
+        self.filtering_metadata = filtering_metadata
+        self.columns = columns
+        self.raw_columns = raw_columns
+        self.visualizations = visualizations
+        self.refresh = refresh
+        self.stylesheet = stylesheet
+        self.enable_timing = enable_timing
+        self.filter_encode = filter_encode or {}
+        self.controller: Any | None = None
+
+    def attach_controller(self, controller: Any) -> None:
+        self.controller = controller
+
+    def _remove_row(self, row_data) -> None:
+        row_data["loading_gen"] += 1
+        if self.controller.count_rows() <= 1:
+            return
+        for section in self.controller.sections:
+            if row_data not in section["rows"]:
+                continue
+            section["rows"].remove(row_data)
+            self.controller.rebuild_section(section)
+            if not section["rows"]:
+                self.controller.sections.remove(section)
+                self.controller.rebuild_content()
+            self.refresh()
+            return
+
+    def _toggle_distribution(self, row_data) -> None:
+        container = row_data["hist_container"]
+        row_data["loading_gen"] += 1
+        if container.objects:
+            container.objects = []
+            for key in ("histogram_pane", "histogram_fig", "threshold_span", "treemap_pane", "bridge_input"):
+                row_data[key] = None
+            return
+        generation = row_data["loading_gen"]
+
+        def load_distribution():
+            if row_data["loading_gen"] != generation:
+                return
+            category = row_data["category_select"].value
+            column = row_data["subcategory_select"].value
+            info = self.filtering_metadata.get(category, {}).get("columns", {}).get(column, {})
+            if info.get("type") == "numeric" and not info.get("is_bool"):
+                result = self.visualizations.build_numeric_histogram(
+                    row_data, category, column, row_data["input_ref"]["widget"]
+                )
+            elif info.get("type") == "text":
+                result = self.visualizations.build_text_treemap(
+                    row_data, category, column, row_data["input_ref"], container
+                )
+            else:
+                stats = resolve_column_null_stats(self.db_path, self.filtering_metadata, category, column)
+                result = None
+                if stats is not None:
+                    non_null_count, total_possible = stats
+                    result = [
+                        pn.pane.HTML(
+                            '<span style="font-size:11px; color:#666; font-style:italic;">'
+                            f"Used {non_null_count:,} times (out of {total_possible:,} possible)</span>",
+                            sizing_mode="stretch_width",
+                            margin=(2, 5, 0, 5),
+                        )
+                    ]
+            if result and row_data["loading_gen"] == generation:
+                container.objects = result
+
+        curdoc().add_next_tick_callback(load_distribution)
+
+    def create_row(self, section_data, initial_category=None, initial_column=None, initial_operator=None):
+        """Create a single query row with cascading selects, comparison, dynamic input and remove button.
+
+        initial_category/initial_column/initial_operator let a caller (e.g. the
+        settings restore path) build a row for a specific saved column/operator
+        synchronously, using the same construction path as the default first
+        row instead of simulating UI changes through the (partly deferred)
+        update_subcategories/update_input_widget callbacks.
+        """
+        # Get categories from metadata
+        categories = list(self.filtering_metadata.keys())
+        if not categories:
+            categories = ["No data"]
+
+        if initial_category is None or initial_category not in categories:
+            initial_category = categories[0]
+        initial_columns_raw = list(self.filtering_metadata.get(initial_category, {}).get("columns", {}).keys())
+        if not initial_columns_raw:
+            initial_columns_raw = ["No columns"]
+        initial_columns = [(c, c.replace("_", " ").replace("percentage", "(%)")) for c in initial_columns_raw]
+        if initial_column is None or initial_column not in initial_columns_raw:
+            initial_column = initial_columns_raw[0]
+
+        # Determine initial column type
+        initial_col_info = self.filtering_metadata.get(initial_category, {}).get("columns", {}).get(initial_column, {})
+        initial_is_text = initial_col_info.get("type") == "text"
+
+        # First level select (categories)
+        category_select = Select(options=categories, value=initial_category, width=70, margin=(0, 2, 0, 0))
+
+        # Second level select (columns)
+        subcategory_select = Select(
+            options=initial_columns, value=initial_column, sizing_mode="stretch_width", margin=(0, 2, 0, 0)
+        )
+
+        # Comparison operator select - "=" and "!=" for text, all operators for numeric
+        _default_operator = "=" if initial_is_text else ">"
+        _initial_ops = ["=", "!=", "has", "has not"] if initial_is_text else ["=", ">", "<", "!="]
+        if initial_operator is not None and initial_operator in _initial_ops:
+            _default_operator = initial_operator
+        comparison_select = Select(options=_initial_ops, value=_default_operator, width=50, margin=(0, 2, 0, 0))
+
+        # Container for the dynamic input widget
+        input_container = pn.Column(width=90, margin=(0, 2, 0, 0))
+
+        # Create initial input widget based on column type
+        if initial_is_text and _default_operator in ("has", "has not"):
+            initial_input = TextInput(value="", placeholder="Search...", width=90, margin=(0, 2, 0, 0))
+            input_container.objects = [initial_input]
+            initial_input.on_change("value", lambda attr, old, new: self.refresh())
+            initial_is_panel = False
+        elif initial_is_text:
+            distinct_values = resolve_distinct_values(
+                self.db_path,
+                self.filtering_metadata,
+                initial_category,
+                initial_column,
+                enable_timing=self.enable_timing,
+            )
+            initial_input = SearchableSelect(value="", options=distinct_values, placeholder="Search...", width=90)
+            input_container.objects = [initial_input]
+            initial_input.param.watch(lambda event: self.refresh(), "value")
+            initial_is_panel = True
+        else:
+            _enc_scale = self.filter_encode.get(initial_column)
+            _step = 1.0 / _enc_scale if _enc_scale else 1
+            initial_input = Spinner(value=None, step=_step, placeholder="Value...", width=90, margin=(0, 2, 0, 0))
+            input_container.objects = [initial_input]
+
+            # Add callback for Bokeh Spinner (also syncs histogram threshold)
+            def _on_initial_spinner(attr, old, new):
+                if row_data.get("threshold_span") is not None and new is not None:
+                    import math as _m
+
+                    if row_data.get("log_mode") and new > 0:
+                        row_data["threshold_span"].location = _m.log10(new)
+                    else:
+                        row_data["threshold_span"].location = new
+                self.refresh()
+
+            initial_input.on_change("value", _on_initial_spinner)
+            initial_is_panel = False
+
+        # Store reference to current input widget (for later retrieval)
+        current_input_ref = {"widget": initial_input, "is_panel": initial_is_panel}
+
+        def update_input_widget(col_name):
+            """Update the input widget based on column type.
+
+            Synchronous part: update comparison/input widgets from metadata
+            (no DB call) and clear the inset immediately.  Deferred part:
+            resolve distinct values and rebuild the inset via next-tick.
+            """
+
+            category = category_select.value
+            col_info = self.filtering_metadata.get(category, {}).get("columns", {}).get(col_name, {})
+            is_text = col_info.get("type") == "text"
+
+            # --- synchronous: update comparison + input widget (no DB) ---
+            if is_text:
+                comparison_select.options = ["=", "!=", "has", "has not"]
+                if comparison_select.value not in comparison_select.options:
+                    comparison_select.value = "="
+            else:
+                comparison_select.options = ["=", ">", "<", "!="]
+                if comparison_select.value not in comparison_select.options:
+                    comparison_select.value = "="
+
+            if is_text:
+                current_op = comparison_select.value
+                if current_op in ("has", "has not"):
+                    new_input = TextInput(value="", placeholder="Search...", width=90, margin=(0, 2, 0, 0))
+                    input_container.objects = [new_input]
+                    current_input_ref["widget"] = new_input
+                    current_input_ref["is_panel"] = False
+                    new_input.on_change("value", lambda attr, old, new: self.refresh())
+                else:
+                    placeholder_input = SearchableSelect(value="", options=[], placeholder="Loading...", width=90)
+                    input_container.objects = [placeholder_input]
+                    current_input_ref["widget"] = placeholder_input
+                    current_input_ref["is_panel"] = True
+            else:
+                _enc_scale = self.filter_encode.get(col_name)
+                _step = 1.0 / _enc_scale if _enc_scale else 1
+                new_input = Spinner(value=None, step=_step, placeholder="Value...", width=90, margin=(0, 2, 0, 0))
+                input_container.objects = [new_input]
+                current_input_ref["widget"] = new_input
+                current_input_ref["is_panel"] = False
+
+                def _on_spinner_change(attr, old, new):
+                    if row_data.get("threshold_span") is not None and new is not None:
+                        import math as _m
+
+                        if row_data.get("log_mode") and new > 0:
+                            row_data["threshold_span"].location = _m.log10(new)
+                        else:
+                            row_data["threshold_span"].location = new
+                    self.refresh()
+
+                new_input.on_change("value", _on_spinner_change)
+
+            # --- synchronous: clear inset immediately, show spinner if rebuilding ---
+            had_inset = bool(hist_container.objects)
+            if had_inset:
+                _spinner_html = pn.pane.HTML(
+                    '<div style="display:flex;align-items:center;gap:8px;padding:8px 0;">'
+                    '<div style="width:18px;height:18px;border:2px solid #ddd;border-top:2px solid #888;'
+                    'border-radius:50%;animation:spin 0.8s linear infinite;"></div>'
+                    '<span style="font-size:11px;color:#888;font-style:italic;">Loading...</span>'
+                    "</div>"
+                    "<style>@keyframes spin{to{transform:rotate(360deg)}}</style>",
+                    sizing_mode="stretch_width",
+                    margin=(2, 5, 0, 5),
+                )
+                hist_container.objects = [_spinner_html]
+                row_data["histogram_pane"] = None
+                row_data["histogram_fig"] = None
+                row_data["threshold_span"] = None
+                row_data["treemap_pane"] = None
+                row_data["bridge_input"] = None
+
+            self.refresh()
+
+            # --- deferred: DB queries for distinct values + inset rebuild ---
+            row_data["loading_gen"] += 1
+            gen = row_data["loading_gen"]
+
+            def _deferred_update():
+                if is_text:
+                    current_op = comparison_select.value
+                    if current_op not in ("has", "has not"):
+                        distinct_values = resolve_distinct_values(
+                            self.db_path, self.filtering_metadata, category, col_name, enable_timing=self.enable_timing
+                        )
+                        new_input = SearchableSelect(
+                            value="", options=distinct_values, placeholder="Search...", width=90
+                        )
+                        input_container.objects = [new_input]
+                        current_input_ref["widget"] = new_input
+                        current_input_ref["is_panel"] = True
+                        new_input.param.watch(lambda event: self.refresh(), "value")
+
+                if had_inset and row_data["loading_gen"] == gen:
+                    if is_text:
+                        result = self.visualizations.build_text_treemap(
+                            row_data, category, col_name, current_input_ref, hist_container
+                        )
+                        if result:
+                            hist_container.objects = result
+                        else:
+                            hist_container.objects = []
+                    elif not col_info.get("is_bool"):
+                        result = self.visualizations.build_numeric_histogram(
+                            row_data, category, col_name, current_input_ref["widget"]
+                        )
+                        if result:
+                            hist_container.objects = result
+                        else:
+                            hist_container.objects = []
+                    else:
+                        hist_container.objects = []
+
+            curdoc().add_next_tick_callback(_deferred_update)
+
+        def update_subcategories(attr, old, new):
+            """Update column options when category changes.
+
+            Uses the startup-time self.columns cache — no self.filtering_metadata
+            re-derivation on every change.  Clamps the selected value to the first
+            valid column so stale/invalid selections are never left behind.
+            """
+            raw_columns = self.raw_columns.get(new, [])
+            columns = raw_columns if raw_columns else ["No columns"]
+            new_options = self.columns.get(new) or [(c, c) for c in columns]
+            if subcategory_select.options != new_options:
+                subcategory_select.options = new_options
+            # Clamp: reset to first column when current value is not valid for new category.
+            if subcategory_select.value not in set(columns):
+                subcategory_select.value = columns[0]
+            # Update input widget for the (possibly new) selected column.
+            update_input_widget(subcategory_select.value)
+
+        def update_input_on_column_change(attr, old, new):
+            """Update input widget when column changes."""
+            update_input_widget(new)
+
+        def update_input_on_operator_change(attr, old, new):
+            """Swap input widget between TextInput and SearchableSelect based on operator."""
+
+            category = category_select.value
+            col_name = subcategory_select.value
+            col_info = self.filtering_metadata.get(category, {}).get("columns", {}).get(col_name, {})
+            is_text = col_info.get("type") == "text"
+
+            if is_text:
+                if new in ("has", "has not"):
+                    new_input = TextInput(value="", placeholder="Search...", width=90, margin=(0, 2, 0, 0))
+                    input_container.objects = [new_input]
+                    current_input_ref["widget"] = new_input
+                    current_input_ref["is_panel"] = False
+                    new_input.on_change("value", lambda attr, old, new: self.refresh())
+                else:
+                    placeholder_input = SearchableSelect(value="", options=[], placeholder="Loading...", width=90)
+                    input_container.objects = [placeholder_input]
+                    current_input_ref["widget"] = placeholder_input
+                    current_input_ref["is_panel"] = True
+
+                    def _deferred_resolve():
+                        distinct_values = resolve_distinct_values(
+                            self.db_path, self.filtering_metadata, category, col_name, enable_timing=self.enable_timing
+                        )
+                        new_input = SearchableSelect(
+                            value="", options=distinct_values, placeholder="Search...", width=90
+                        )
+                        input_container.objects = [new_input]
+                        current_input_ref["widget"] = new_input
+                        current_input_ref["is_panel"] = True
+                        new_input.param.watch(lambda event: self.refresh(), "value")
+
+                    curdoc().add_next_tick_callback(_deferred_resolve)
+
+            self.refresh()
+
+        category_select.on_change("value", update_subcategories)
+        subcategory_select.on_change("value", update_input_on_column_change)
+        comparison_select.on_change("value", update_input_on_operator_change)
+
+        dist_toggle = pn.widgets.Button(
+            name="\U0001f50d",
+            width=40,
+            height=30,
+            margin=(0, 10, 0, 0),
+            description="See distribution of values",
+            stylesheets=[self.stylesheet],
+        )
+
+        # Remove button (Panel button for proper dynamic event handling)
+        minus_btn = pn.widgets.Button(name="−", width=30, height=30, margin=(2, 5, 0, 0), stylesheets=[self.stylesheet])
+
+        query_row = pn.Row(
+            category_select,
+            subcategory_select,
+            comparison_select,
+            input_container,
+            dist_toggle,
+            sizing_mode="stretch_width",
+            margin=(3, 0, 3, 0),
+        )
+
+        hist_container = pn.Column(sizing_mode="stretch_width", margin=(0, 5, 0, 0))
+        row_wrapper = pn.Column(query_row, hist_container, sizing_mode="stretch_width", margin=(0, 0, 2, 0))
+
+        # Store reference to this row
+        row_data = {
+            "query_row": query_row,
+            "row_wrapper": row_wrapper,
+            "hist_container": hist_container,
+            "dist_toggle": dist_toggle,
+            "category_select": category_select,
+            "subcategory_select": subcategory_select,
+            "comparison_select": comparison_select,
+            "input_ref": current_input_ref,
+            "minus_btn": minus_btn,
+            "and_div": None,
+            "histogram_pane": None,
+            "histogram_fig": None,
+            "threshold_span": None,
+            "treemap_pane": None,
+            "bridge_input": None,
+            "log_mode": False,
+            "log_y": False,
+            "loading_gen": 0,
+        }
+
+        minus_btn.on_click(lambda _event: self._remove_row(row_data))
+        dist_toggle.on_click(lambda _event: self._toggle_distribution(row_data))
+
+        return row_data

@@ -1,0 +1,1 @@
+"""Cross-cutting plotting infrastructure."""

@@ -1,0 +1,119 @@
+"""Assemble the stable outer Panel layout for the plotting application."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any
+
+import panel as pn
+from bokeh.models import Div
+
+
+def separator() -> Div:
+    return Div(
+        text="",
+        height=2,
+        sizing_mode="stretch_width",
+        styles={"background-color": "#333", "margin-top": "10px", "margin-bottom": "10px"},
+    )
+
+
+@dataclass(frozen=True)
+class LayoutParts:
+    logo: Any
+    sample_scope: Any
+    filtering_header: Any
+    filtering_content: Any
+    mag_separator: Any
+    mag_header: Any
+    view_radio: Any
+    mag_select: Any
+    contig_header: Any
+    contig_select: Any
+    below_contig_content: Any
+    sample_section: Any
+    variables_one: Any
+    variables_all: Any
+    plotting_separator: Any
+    plotting_header: Any
+    plotting_content: Any
+    buttons: Any
+
+
+@dataclass(frozen=True)
+class AssembledLayout:
+    layout: Any
+    placeholder: Any
+    controls: Any
+
+
+def assemble_layout(
+    parts: LayoutParts,
+    *,
+    has_samples: bool,
+    summary_carrier: Any,
+    stylesheet: Any,
+    timing_models: tuple[Any, ...] = (),
+) -> AssembledLayout:
+    filtering_separator = separator()
+    contig_separator = separator()
+    variable_separator = separator()
+    if has_samples:
+        children = [
+            parts.logo,
+            parts.sample_scope,
+            filtering_separator,
+            parts.filtering_header,
+            parts.filtering_content,
+            parts.mag_separator,
+            parts.mag_header,
+            parts.view_radio,
+            parts.mag_select,
+            contig_separator,
+            parts.contig_header,
+            parts.contig_select,
+            parts.below_contig_content,
+            parts.sample_section,
+            variable_separator,
+            parts.variables_one,
+            parts.variables_all,
+            parts.plotting_separator,
+            parts.plotting_header,
+            parts.plotting_content,
+            parts.buttons,
+        ]
+        placeholder_text = (
+            '<i>No plot yet. Select one sample, one contig and at least one variable in "One sample" mode '
+            'or one contig and one variable in "All samples" mode and click Apply.</i>'
+        )
+    else:
+        children = [
+            parts.logo,
+            parts.filtering_header,
+            parts.filtering_content,
+            parts.mag_separator,
+            parts.mag_header,
+            parts.view_radio,
+            parts.mag_select,
+            contig_separator,
+            parts.contig_header,
+            parts.contig_select,
+            parts.below_contig_content,
+            parts.plotting_separator,
+            parts.plotting_header,
+            parts.plotting_content,
+            parts.buttons,
+        ]
+        placeholder_text = "<i>No plot yet. Select one contig and click Apply to view the genome annotation.</i>"
+    children.extend(timing_models)
+    controls = pn.Column(*children, sizing_mode="stretch_height", width=400, css_classes=["left-col"])
+    placeholder = pn.Column(pn.pane.HTML(placeholder_text), sizing_mode="stretch_both", css_classes=["main-right"])
+    layout = pn.Row(
+        controls,
+        placeholder,
+        pn.pane.Bokeh(summary_carrier),
+        sizing_mode="stretch_both",
+        css_classes=["main-layout"],
+    )
+    layout.stylesheets = [stylesheet]
+    return AssembledLayout(layout, placeholder, controls)
