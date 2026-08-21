@@ -73,7 +73,9 @@ jobs:
           tests/test_blob_feature_pipeline.py
           tests/test_mag_track_renderer.py
       - name: Test plotting state
-        run: pytest -q tests/test_plotting_state.py tests/test_all_samples_pipeline.py tests/test_genome_tracks.py tests/test_feature_pipeline.py tests/test_blob_feature_pipeline.py tests/test_mag_track_renderer.py
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+        run: python -m pytest -q tests/test_plotting_state.py tests/test_all_samples_pipeline.py tests/test_genome_tracks.py tests/test_feature_pipeline.py tests/test_blob_feature_pipeline.py tests/test_mag_track_renderer.py
 
   build-wheels:
     if: startsWith(github.ref, 'refs/tags/v')
