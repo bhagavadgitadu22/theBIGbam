@@ -8,6 +8,7 @@ from typing import Any, Mapping
 import panel as pn
 from bokeh.models.widgets import ColorPicker, Select, Spinner, TextInput
 
+from ..shared.styles import panel_stylesheet
 from .searchable_select import SearchableSelect
 
 
@@ -49,7 +50,10 @@ def build_color_rule_controls(
     # Custom color row system (Panel widgets, same pattern as filtering rows)
     custom_color_rows = []
     add_color_btn = pn.widgets.Button(
-        name="+ Add coloring rule", margin=(2, 0, 2, 0), button_type="success", stylesheets=[stylesheet]
+        name="+ Add coloring rule",
+        margin=(2, 0, 2, 0),
+        button_type="success",
+        stylesheets=[panel_stylesheet(stylesheet)],
     )
     custom_color_column = pn.Column(
         add_color_btn,
@@ -125,7 +129,11 @@ def build_color_rule_controls(
         color_picker = ColorPicker(color="#cccccc", width=60, height=30, margin=(0, 2, 0, 0))
 
         minus_btn = pn.widgets.Button(
-            name="\u2212", width=30, height=30, margin=(0, 10, 0, 0), stylesheets=[stylesheet]
+            name="\u2212",
+            width=30,
+            height=30,
+            margin=(0, 10, 0, 0),
+            stylesheets=[panel_stylesheet(stylesheet)],
         )
 
         row_widget = pn.Row(
@@ -241,7 +249,10 @@ def build_color_rule_controls(
     # --- MAG track coloring rules (same widget pattern, separate list) ---
     mag_track_color_rows = []
     add_mag_track_btn = pn.widgets.Button(
-        name="+ Add coloring rule", margin=(2, 0, 2, 0), button_type="success", stylesheets=[stylesheet]
+        name="+ Add coloring rule",
+        margin=(2, 0, 2, 0),
+        button_type="success",
+        stylesheets=[panel_stylesheet(stylesheet)],
     )
     mag_track_color_column = pn.Column(
         add_mag_track_btn,

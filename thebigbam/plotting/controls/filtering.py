@@ -7,6 +7,8 @@ from typing import Any, Callable
 import panel as pn
 from bokeh.models.widgets import Select
 
+from ..shared.styles import panel_stylesheet
+
 
 class FilterSectionController:
     """Own OR sections, row connectors, and their Panel containers."""
@@ -28,7 +30,7 @@ class FilterSectionController:
             name="+ Add AND/OR",
             margin=(10, 0, 5, 0),
             button_type="primary",
-            stylesheets=[add_stylesheet],
+            stylesheets=[panel_stylesheet(add_stylesheet)],
         )
         self._global_add.on_click(self._add_section)
         self._tail_widget: Any = self._global_add
@@ -70,7 +72,7 @@ class FilterSectionController:
                 height=30,
                 margin=(2, 0, 2, 0),
                 button_type="success",
-                stylesheets=[self._stylesheet],
+                stylesheets=[panel_stylesheet(self._stylesheet)],
             ),
         }
 

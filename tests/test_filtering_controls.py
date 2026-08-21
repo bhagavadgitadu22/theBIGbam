@@ -1,4 +1,5 @@
 import panel as pn
+from bokeh.models import InlineStyleSheet
 
 from thebigbam.plotting.controls.filtering import FilterSectionController
 
@@ -35,3 +36,12 @@ def test_filter_section_controller_add_row_refreshes_once():
     assert controller.count_rows() == 2
     assert changes == [True]
     assert section["rows"][1]["and_div"].value == "AND"
+
+
+def test_filter_section_converts_bokeh_stylesheets_for_panel_widgets():
+    stylesheet = InlineStyleSheet(css=":host { color: red; }")
+
+    controller = FilterSectionController(_row, lambda: None, stylesheet, stylesheet)
+
+    assert controller._global_add.stylesheets == [stylesheet.css]
+    assert controller.sections[0]["add_and_btn"].stylesheets == [stylesheet.css]

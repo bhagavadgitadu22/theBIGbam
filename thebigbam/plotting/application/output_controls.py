@@ -10,6 +10,7 @@ from bokeh.models import CustomJS, Div
 
 from ..downloads.callbacks import make_contig_metrics_callback, make_mag_metrics_callback
 from ..downloads.inspect_command import InspectCommandBindings, InspectCommandController
+from ..shared.styles import panel_stylesheet
 from .summary import SummaryBindings, SummaryController
 
 
@@ -45,7 +46,7 @@ def build_output_controls(
     peruse = pn.widgets.Button(
         name="SHOW SUMMARY",
         height=30,
-        stylesheets=[stylesheet],
+        stylesheets=[panel_stylesheet(stylesheet)],
         css_classes=["apply-btn"],
         visible=False,
     )

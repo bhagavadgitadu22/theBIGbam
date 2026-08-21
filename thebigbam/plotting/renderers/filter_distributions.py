@@ -11,6 +11,8 @@ from bokeh.models import ColumnDataSource, CustomJSTickFormatter, HoverTool, Ran
 from bokeh.models.callbacks import CustomJS
 from bokeh.plotting import figure as bk_figure
 
+from ..shared.styles import panel_stylesheet
+
 
 class FilterVisualizations:
     def __init__(
@@ -195,14 +197,14 @@ class FilterVisualizations:
             margin=(0, 2, 3, 0),
             button_type="primary" if log_mode else "default",
             description="Only positive values will be considered for the plot",
-            stylesheets=[self.grey_buttons_stylesheet],
+            stylesheets=[panel_stylesheet(self.grey_buttons_stylesheet)],
         )
         log_y_btn = pn.widgets.Button(
             name="log y",
             height=30,
             margin=(0, 0, 3, 2),
             button_type="primary" if log_y else "default",
-            stylesheets=[self.grey_buttons_stylesheet],
+            stylesheets=[panel_stylesheet(self.grey_buttons_stylesheet)],
         )
 
         def _on_log_x(event):

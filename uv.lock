@@ -1467,6 +1467,7 @@ dependencies = [
     { name = "dna-features-viewer" },
     { name = "duckdb" },
     { name = "panel" },
+    { name = "param" },
     { name = "pysam" },
     { name = "zstandard" },
 ]
@@ -1481,11 +1482,12 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "biopython", specifier = ">=1.79" },
-    { name = "bokeh", specifier = ">=3.0" },
+    { name = "bokeh", specifier = ">=3.8,<3.10" },
     { name = "dna-features-viewer", specifier = ">=1.0" },
     { name = "duckdb", specifier = ">=1.0" },
     { name = "maturin", marker = "extra == 'dev'", specifier = ">=1.4" },
-    { name = "panel", specifier = ">=1.4" },
+    { name = "panel", specifier = ">=1.8,<1.10" },
+    { name = "param", specifier = ">=2.3,<2.5" },
     { name = "pysam", specifier = ">=0.20" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.12" },

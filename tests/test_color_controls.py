@@ -1,3 +1,5 @@
+from bokeh.models import InlineStyleSheet
+
 from thebigbam.plotting.controls.color_rules import build_color_rule_controls
 from thebigbam.plotting.repositories.color_templates import ColorTemplateRepository
 
@@ -29,11 +31,12 @@ def test_color_template_repository_groups_rules():
 
 
 def test_color_controls_expose_independent_annotation_and_mag_rule_lists():
+    stylesheet = InlineStyleSheet(css=":host { color: red; }")
     controls = build_color_rule_controls(
         MetadataService(),
         {"Annotations": {"columns": {}}},
         {"default": []},
-        "",
+        stylesheet,
         False,
     )
 
@@ -42,3 +45,4 @@ def test_color_controls_expose_independent_annotation_and_mag_rule_lists():
     assert controls.mag_rows == []
     assert controls.custom_rows is not controls.mag_rows
     assert controls.custom_column.objects[-1].name == "+ Add coloring rule"
+    assert controls.custom_column.objects[-1].stylesheets == [stylesheet.css]

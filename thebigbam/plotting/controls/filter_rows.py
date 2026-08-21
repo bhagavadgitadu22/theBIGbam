@@ -9,6 +9,7 @@ from bokeh.io import curdoc
 from bokeh.models.widgets import Select, Spinner, TextInput
 
 from ..renderers.filter_distributions import FilterVisualizations
+from ..shared.styles import panel_stylesheet
 from .searchable_select import SearchableSelect
 
 
@@ -359,11 +360,17 @@ class FilterRowFactory:
             height=30,
             margin=(0, 10, 0, 0),
             description="See distribution of values",
-            stylesheets=[self.stylesheet],
+            stylesheets=[panel_stylesheet(self.stylesheet)],
         )
 
         # Remove button (Panel button for proper dynamic event handling)
-        minus_btn = pn.widgets.Button(name="−", width=30, height=30, margin=(2, 5, 0, 0), stylesheets=[self.stylesheet])
+        minus_btn = pn.widgets.Button(
+            name="−",
+            width=30,
+            height=30,
+            margin=(2, 5, 0, 0),
+            stylesheets=[panel_stylesheet(self.stylesheet)],
+        )
 
         query_row = pn.Row(
             category_select,

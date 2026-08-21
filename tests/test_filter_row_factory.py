@@ -1,5 +1,7 @@
 from types import SimpleNamespace
 
+from bokeh.models import InlineStyleSheet
+
 from thebigbam.plotting.controls.filter_rows import FilterRowFactory
 
 
@@ -24,7 +26,7 @@ def test_filter_row_factory_builds_row_from_cached_column_options():
         raw_columns={"Contig": ["Contig_length"]},
         visualizations=Visualizations(),
         refresh=lambda: None,
-        stylesheet="",
+        stylesheet=InlineStyleSheet(css=":host { color: red; }"),
         enable_timing=False,
     )
     factory.attach_controller(SimpleNamespace(count_rows=lambda: 1, sections=[]))
@@ -35,3 +37,4 @@ def test_filter_row_factory_builds_row_from_cached_column_options():
     assert result["subcategory_select"].value == "Contig_length"
     assert result["comparison_select"].value == ">"
     assert result["input_ref"]["widget"].value is None
+    assert result["minus_btn"].stylesheets == [":host { color: red; }"]
