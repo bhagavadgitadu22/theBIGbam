@@ -21,9 +21,57 @@ jobs:
       - name: Install Python validation dependencies
         run: python -m pip install pytest ruff duckdb bokeh panel biopython dna-features-viewer zstandard
       - name: Lint new plotting boundaries
-        run: ruff check thebigbam/plotting/state.py thebigbam/plotting/diagnostics.py thebigbam/plotting/plot_models.py thebigbam/plotting/blob_models.py thebigbam/plotting/blob_feature_service.py thebigbam/plotting/all_samples_repository.py thebigbam/plotting/all_samples_service.py thebigbam/plotting/all_samples_renderer.py thebigbam/plotting/genome_track_data.py thebigbam/plotting/genome_track_renderers.py thebigbam/plotting/genome_tracks.py thebigbam/plotting/feature_repository.py thebigbam/plotting/feature_service.py thebigbam/plotting/feature_renderer.py thebigbam/plotting/mag_track_renderer.py thebigbam/plotting/all_samples_composer.py tests/test_plotting_state.py tests/test_all_samples_pipeline.py tests/test_genome_tracks.py tests/test_feature_pipeline.py tests/test_blob_feature_pipeline.py tests/test_mag_track_renderer.py
+        run: >-
+          ruff check
+          thebigbam/plotting/application/state.py
+          thebigbam/plotting/application/all_samples_pipeline.py
+          thebigbam/plotting/application/genome_track_pipeline.py
+          thebigbam/plotting/shared/diagnostics.py
+          thebigbam/plotting/models/plots.py
+          thebigbam/plotting/models/blobs.py
+          thebigbam/plotting/repositories/all_samples.py
+          thebigbam/plotting/repositories/features.py
+          thebigbam/plotting/repositories/genome_tracks.py
+          thebigbam/plotting/services/all_samples.py
+          thebigbam/plotting/services/blob_features.py
+          thebigbam/plotting/services/features.py
+          thebigbam/plotting/services/genome_tracks.py
+          thebigbam/plotting/renderers/all_samples.py
+          thebigbam/plotting/renderers/features.py
+          thebigbam/plotting/renderers/genome_tracks.py
+          thebigbam/plotting/renderers/mag_tracks.py
+          tests/test_plotting_state.py
+          tests/test_all_samples_pipeline.py
+          tests/test_genome_tracks.py
+          tests/test_feature_pipeline.py
+          tests/test_blob_feature_pipeline.py
+          tests/test_mag_track_renderer.py
       - name: Check plotting boundary formatting
-        run: ruff format --check thebigbam/plotting/state.py thebigbam/plotting/diagnostics.py thebigbam/plotting/plot_models.py thebigbam/plotting/blob_models.py thebigbam/plotting/blob_feature_service.py thebigbam/plotting/all_samples_repository.py thebigbam/plotting/all_samples_service.py thebigbam/plotting/all_samples_renderer.py thebigbam/plotting/genome_track_data.py thebigbam/plotting/genome_track_renderers.py thebigbam/plotting/genome_tracks.py thebigbam/plotting/feature_repository.py thebigbam/plotting/feature_service.py thebigbam/plotting/feature_renderer.py thebigbam/plotting/mag_track_renderer.py thebigbam/plotting/all_samples_composer.py tests/test_plotting_state.py tests/test_all_samples_pipeline.py tests/test_genome_tracks.py tests/test_feature_pipeline.py tests/test_blob_feature_pipeline.py tests/test_mag_track_renderer.py
+        run: >-
+          ruff format --check
+          thebigbam/plotting/application/state.py
+          thebigbam/plotting/application/all_samples_pipeline.py
+          thebigbam/plotting/application/genome_track_pipeline.py
+          thebigbam/plotting/shared/diagnostics.py
+          thebigbam/plotting/models/plots.py
+          thebigbam/plotting/models/blobs.py
+          thebigbam/plotting/repositories/all_samples.py
+          thebigbam/plotting/repositories/features.py
+          thebigbam/plotting/repositories/genome_tracks.py
+          thebigbam/plotting/services/all_samples.py
+          thebigbam/plotting/services/blob_features.py
+          thebigbam/plotting/services/features.py
+          thebigbam/plotting/services/genome_tracks.py
+          thebigbam/plotting/renderers/all_samples.py
+          thebigbam/plotting/renderers/features.py
+          thebigbam/plotting/renderers/genome_tracks.py
+          thebigbam/plotting/renderers/mag_tracks.py
+          tests/test_plotting_state.py
+          tests/test_all_samples_pipeline.py
+          tests/test_genome_tracks.py
+          tests/test_feature_pipeline.py
+          tests/test_blob_feature_pipeline.py
+          tests/test_mag_track_renderer.py
       - name: Test plotting state
         run: pytest -q tests/test_plotting_state.py tests/test_all_samples_pipeline.py tests/test_genome_tracks.py tests/test_feature_pipeline.py tests/test_blob_feature_pipeline.py tests/test_mag_track_renderer.py
 
