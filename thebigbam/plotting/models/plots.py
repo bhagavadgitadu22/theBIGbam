@@ -13,8 +13,8 @@ class GenomicRegion:
     max_base_resolution: int = 10_000
 
     def __post_init__(self) -> None:
-        if self.start < 1 or self.end <= self.start:
-            raise ValueError("Region must use 1-based coordinates with end > start")
+        if self.end <= self.start:
+            raise ValueError("Region end must be greater than start")
         if self.max_base_resolution < 1:
             raise ValueError("max_base_resolution must be positive")
 

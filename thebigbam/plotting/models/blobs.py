@@ -12,8 +12,8 @@ class FeatureRegion:
     end: int
 
     def __post_init__(self):
-        if self.start < 1 or self.end < self.start:
-            raise ValueError("Feature regions use inclusive, 1-based coordinates")
+        if self.end < self.start:
+            raise ValueError("Feature region end must be greater than or equal to start")
 
     @property
     def length(self):

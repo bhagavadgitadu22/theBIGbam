@@ -21,6 +21,13 @@ from thebigbam.plotting.repositories.features import FeatureRepository
 from thebigbam.plotting.services.blob_features import FeatureDataService, _slice_with_anchors
 
 
+def test_feature_region_allows_display_window_before_first_base():
+    region = FeatureRegion(-100, 100)
+
+    assert region.start == -100
+    assert region.length == 201
+
+
 class FakeBlobRepository:
     def __init__(self):
         self.chunk_calls = 0
@@ -71,7 +78,7 @@ def test_contig_service_decodes_and_thresholds_without_sql(monkeypatch):
         "decode_raw_chunks",
         lambda rows, scale, chunk_size: {
             "x": np.asarray([0, 1, 2]),
-            "y": np.asarray([1.0, 5.0, 10.0]),
+            "y": np.asarray([0.2, 0.5, 0.8]),
             "sparse": False,
         },
     )
@@ -79,7 +86,7 @@ def test_contig_service_decodes_and_thresholds_without_sql(monkeypatch):
     service = FeatureDataService(repository)
     result = service.load_contig(FeatureLoadRequest("Coverage", 1, 7, FeatureRegion(1, 3), minimum_relative_value=0.5))
     assert result[0]["x"] == [1, 2, 3]
-    assert result[0]["y"] == [0, 5.0, 10.0]
+    assert result[0]["y"] == [0, 0.5, 0.8]
     assert repository.chunk_calls == 1
     assert service.decoded_points == 3
 

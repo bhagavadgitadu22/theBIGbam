@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 
-def apply_relative_threshold(values, minimum_relative_value):
-    """Zero values below a fraction of the series maximum without mutating input."""
+def apply_minimum_frequency(values, minimum_frequency):
+    """Zero values below an absolute frequency cutoff without mutating input."""
     values = list(values)
-    if minimum_relative_value <= 0 or not values:
+    if minimum_frequency <= 0 or not values:
         return values
-    maximum = max(values)
-    if maximum <= 0:
-        return values
-    threshold = minimum_relative_value * maximum
-    return [value if value >= threshold else 0 for value in values]
+    return [value if value >= minimum_frequency else 0 for value in values]
+
+
+# Kept as an import-compatible alias for callers outside the plotting package.
+apply_relative_threshold = apply_minimum_frequency

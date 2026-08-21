@@ -5,7 +5,7 @@ from bokeh.models import Range1d
 
 from thebigbam.plotting.renderers.features import FeatureRenderer
 from thebigbam.plotting.repositories.features import FeatureRepository, split_features_by_storage
-from thebigbam.plotting.services.features import apply_relative_threshold
+from thebigbam.plotting.services.features import apply_minimum_frequency
 
 
 def test_metadata_batch_uses_one_query_and_preserves_storage_split():
@@ -27,11 +27,11 @@ def test_metadata_batch_uses_one_query_and_preserves_storage_split():
     )
 
 
-def test_relative_threshold_is_pure_and_handles_zero_series():
-    original = [1.0, 5.0, 10.0]
-    assert apply_relative_threshold(original, 0.5) == [0, 5.0, 10.0]
-    assert original == [1.0, 5.0, 10.0]
-    assert apply_relative_threshold([0, 0], 0.5) == [0, 0]
+def test_minimum_frequency_is_absolute_pure_and_handles_zero_series():
+    original = [0.2, 0.5, 0.8]
+    assert apply_minimum_frequency(original, 0.5) == [0, 0.5, 0.8]
+    assert original == [0.2, 0.5, 0.8]
+    assert apply_minimum_frequency([0, 0], 0.5) == [0, 0]
 
 
 def test_feature_renderer_handles_curves_bars_and_relative_scale():

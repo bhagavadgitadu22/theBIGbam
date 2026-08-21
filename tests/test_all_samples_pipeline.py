@@ -17,6 +17,7 @@ if "thebigbam_rs" not in sys.modules:
 from thebigbam.plotting.models.plots import (
     AllSamplesPlotData,
     AllSamplesPlotRequest,
+    DisplayOptions,
     FeatureSeries,
     FeatureStyle,
     GenomicRegion,
@@ -26,6 +27,13 @@ from thebigbam.plotting.models.plots import (
 from thebigbam.plotting.renderers.all_samples import AllSamplesRenderer
 from thebigbam.plotting.repositories.all_samples import AllSamplesRepository
 from thebigbam.plotting.services.all_samples import AllSamplesDataService
+
+
+def test_genomic_region_allows_display_window_before_first_base():
+    region = GenomicRegion(-100, 100)
+
+    assert region.start == -100
+    assert region.length == 200
 
 
 @pytest.fixture
@@ -128,6 +136,30 @@ def test_service_returns_plain_data_without_bokeh(monkeypatch):
     source = inspect.getsource(service_module)
     assert "import bokeh" not in source.lower()
     assert "import panel" not in source.lower()
+
+
+def test_all_samples_minimum_frequency_is_absolute(monkeypatch):
+    import thebigbam.plotting.services.all_samples as service_module
+
+    monkeypatch.setattr(
+        service_module,
+        "decode_raw_chunks",
+        lambda rows, scale, chunk_size: {
+            "x": np.array([0, 1, 2]),
+            "y": np.array([0.2, 0.5, 0.8]),
+            "sparse": False,
+        },
+    )
+    request = AllSamplesPlotRequest(
+        "c1",
+        "Coverage",
+        GenomicRegion(1, 10),
+        display=DisplayOptions(min_relative_value=0.5),
+    )
+
+    result = AllSamplesDataService(_FakeRepository()).load(request)
+
+    assert result.sample_tracks[0].series[0].data["y"] == (0, 0.5, 0.8)
 
 
 def test_renderer_accepts_plain_data_without_database_calls():

@@ -13,6 +13,7 @@ import numpy as np
 from ...database.blob_decoder import decode_raw_chunks, decode_raw_sparse_chunks, decode_zoom_standalone
 from ..models.plots import AllSamplesPlotData, AllSamplesPlotRequest, FeatureSeries, GenomeTrack, SampleTrack
 from ..repositories.all_samples import AllSamplesRepository
+from .features import apply_minimum_frequency
 
 
 def _as_tuple_mapping(data: Mapping) -> dict[str, tuple]:
@@ -109,10 +110,7 @@ def _format_chunks(data, plot_type, start, end, position_scale=1, position_offse
 def _apply_threshold(data, relative_threshold):
     if not data or relative_threshold <= 0 or not data.get("y"):
         return data
-    maximum = max(data["y"])
-    if maximum > 0:
-        cutoff = relative_threshold * maximum
-        data["y"] = [value if value >= cutoff else 0 for value in data["y"]]
+    data["y"] = apply_minimum_frequency(data["y"], relative_threshold)
     return data
 
 

@@ -14,7 +14,7 @@ from thebigbam.database.blob_decoder import (
 )
 
 from ..models.blobs import FeatureLoadRequest, MagFeatureLoadRequest
-from .features import apply_relative_threshold
+from .features import apply_minimum_frequency
 
 
 def _slice_with_anchors(data, start, end, plot_type):
@@ -223,7 +223,7 @@ class FeatureDataService:
                 )
             if values:
                 transformed = time.perf_counter()
-                values["y"] = apply_relative_threshold(values["y"], request.minimum_relative_value)
+                values["y"] = apply_minimum_frequency(values["y"], request.minimum_relative_value)
                 self._resolve_partners(values, variable)
                 output.append(self._style(row, values))
                 self.phase_seconds["transformation"] = self.phase_seconds.get("transformation", 0) + (
@@ -317,7 +317,7 @@ class FeatureDataService:
                 )
             if values:
                 transformed = time.perf_counter()
-                values["y"] = apply_relative_threshold(values["y"], request.minimum_relative_value)
+                values["y"] = apply_minimum_frequency(values["y"], request.minimum_relative_value)
                 self._resolve_partners(values, variable)
                 output.append(self._style(row, values))
                 self.phase_seconds["transformation"] = self.phase_seconds.get("transformation", 0) + (

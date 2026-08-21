@@ -105,7 +105,12 @@ def build_plot_parameter_controls(
 
     # Subsection: Max window sizes for plotting
     max_genemap_window_input = Spinner(
-        value=DEFAULT_GENEMAP_WINDOW, low=10, high=1000000, step=1000, width=100, margin=(0, 2, 0, 0)
+        value=DEFAULT_GENEMAP_WINDOW,
+        low=10,
+        high=1_000_000_000,
+        step=1000,
+        width=100,
+        margin=(0, 2, 0, 0),
     )
     max_genemap_window_label = Div(text="Gene map (bp)", margin=(5, 0, 5, 5))
     max_genemap_window_row = row(
