@@ -64,6 +64,18 @@ After running a first compilation with maturin, you will not need to recompile w
 maturin develop --release
 ```
 
+Install the development dependencies, including pytest, Ruff, maturin, and
+Playwright, with:
+
+```bash
+python -m pip install -e ".[dev]"
+python -m playwright install chromium
+```
+
+The second command installs the Chromium browser used by plotting performance
+and browser-interaction tests. On systems where Chromium's shared libraries are
+missing, an administrator may need to install the corresponding OS packages.
+
 Building the tool can be quite long if building from scratch. To speed up repeated builds, set a persistent target directory so Cargo does not recompile everything:
 
 ```bash

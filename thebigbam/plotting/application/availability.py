@@ -282,8 +282,6 @@ class AvailabilityController:
 
         def _count_samples_available():
             """Mirror of _count_contigs_available for the Samples header."""
-            if widgets["sample_select"].value:
-                return 1
             is_mag_view = widgets["has_mags"] and widgets["view_radio"].active == 0
             if is_mag_view:
                 sel_mag = widgets["mag_select"].value
@@ -325,9 +323,7 @@ class AvailabilityController:
                     contigs_count = filtered_mag_counts[0]
                 else:
                     contigs_count = filtered.get("count_contigs", 0)
-                if val_s:
-                    samples_count = 1
-                elif val_m:
+                if val_m:
                     samples_count = filtered_mag_counts[1]
                 else:
                     samples_count = filtered.get("count_samples", 0)

@@ -159,8 +159,11 @@ def restore_settings(settings: Mapping[str, Any], bindings: SettingsRestoreBindi
         ("contig", widgets["contig_select"]),
         ("mag", widgets["mag_select"]),
     ):
-        val = selection.get(key)
+        if key not in selection:
+            continue
+        val = selection[key]
         if not val:
+            _restore(f"selection.{key}", lambda widget=widget: setattr(widget, "value", ""))
             continue
         if val in widget.options:
             _restore(f"selection.{key}", lambda widget=widget, val=val: setattr(widget, "value", val))
@@ -182,25 +185,28 @@ def restore_settings(settings: Mapping[str, Any], bindings: SettingsRestoreBindi
             continue
         i = widgets["module_names"].index(mod_name)
         module_cbg = widgets["module_widgets_one"][i]
-        if mod_settings.get("module_enabled"):
+        if "module_enabled" in mod_settings:
             _restore(
                 f"variables.{mod_name}.module_enabled",
-                lambda module_cbg=module_cbg: setattr(module_cbg, "active", [0]),
+                lambda module_cbg=module_cbg, enabled=bool(mod_settings["module_enabled"]): setattr(
+                    module_cbg, "active", [0] if enabled else []
+                ),
             )
         for scope_key, cbg in (
             ("selected_one", widgets["variables_widgets_one"][i]),
             ("selected_all", widgets["variables_widgets_all"][i]),
         ):
-            saved_labels = mod_settings.get(scope_key) or []
+            if scope_key not in mod_settings:
+                continue
+            saved_labels = mod_settings[scope_key] or []
             indices = [cbg.labels.index(lbl) for lbl in saved_labels if lbl in cbg.labels]
             missing = [lbl for lbl in saved_labels if lbl not in cbg.labels]
             for lbl in missing:
                 _warn(f"variables.{mod_name}.{scope_key}", f"variable '{lbl}' not found")
-            if indices:
-                _restore(
-                    f"variables.{mod_name}.{scope_key}",
-                    lambda cbg=cbg, indices=indices: setattr(cbg, "active", indices),
-                )
+            _restore(
+                f"variables.{mod_name}.{scope_key}",
+                lambda cbg=cbg, indices=indices: setattr(cbg, "active", indices),
+            )
 
     # 5. Filtering query builder
     saved_filtering = settings.get("filtering") or []
@@ -308,10 +314,14 @@ def restore_settings(settings: Mapping[str, Any], bindings: SettingsRestoreBindi
             rebuild_mag_track_color_rows,
             "contig.coloring.mag_track_color_rows",
         )
-    if coloring.get("apply_annotation_rules_to_mag_track") and apply_annotation_rules_cbg is not None:
+    if "apply_annotation_rules_to_mag_track" in coloring and apply_annotation_rules_cbg is not None:
         _restore(
             "contig.coloring.apply_annotation_rules_to_mag_track",
-            lambda: setattr(apply_annotation_rules_cbg, "active", [0]),
+            lambda: setattr(
+                apply_annotation_rules_cbg,
+                "active",
+                [0] if coloring["apply_annotation_rules_to_mag_track"] else [],
+            ),
         )
 
     # 7. Genomic feature widgets
@@ -357,7 +367,9 @@ def restore_settings(settings: Mapping[str, Any], bindings: SettingsRestoreBindi
             "plotting_params.mag_params.direction",
             lambda: setattr(mag_params_direction, "active", mag_params["direction"]),
         )
-    if mag_params.get("sort_sample") and mag_params["sort_sample"] in mag_params_sort_sample_select.options:
+    if "sort_sample" in mag_params and (
+        not mag_params["sort_sample"] or mag_params["sort_sample"] in mag_params_sort_sample_select.options
+    ):
         _restore(
             "plotting_params.mag_params.sort_sample",
             lambda: setattr(mag_params_sort_sample_select, "value", mag_params["sort_sample"]),

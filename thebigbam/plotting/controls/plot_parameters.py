@@ -193,6 +193,7 @@ def build_plot_parameter_controls(
 
     mag_params_order_label = Div(text="Order contigs by:", margin=(5, 0, 2, 0))
     mag_params_category_select = Select(
+        name="benchmark-mag-order-category",
         value=_mag_sort_categories[0] if _mag_sort_categories else "",
         options=_mag_sort_categories,
         sizing_mode="stretch_width",
@@ -200,6 +201,7 @@ def build_plot_parameter_controls(
     )
     _initial_metric_values = [v for v, _l in _initial_metrics]
     mag_params_metric_select = Select(
+        name="benchmark-mag-order-metric",
         value="Contig_length"
         if "Contig_length" in _initial_metric_values
         else (_initial_metric_values[0] if _initial_metric_values else ""),
@@ -285,6 +287,7 @@ def build_plot_parameter_controls(
     sample_params_header.visible = False  # Only shown in All Samples mode
 
     max_samples_input = Spinner(value=20, low=1, high=500, step=5, width=100, margin=(0, 2, 0, 0))
+    max_samples_input.name = "benchmark-max-samples"
     max_samples_label = Div(text="Max number of samples plotted", margin=(5, 0, 5, 5))
     max_samples_row = row(max_samples_input, max_samples_label, sizing_mode="stretch_width", margin=(5, 0, 0, 0))
 
@@ -302,12 +305,14 @@ def build_plot_parameter_controls(
     _initial_sample_metric_values = [value for value, _label in _initial_sample_metrics]
     sample_order_label = Div(text="Order samples by:", margin=(5, 0, 2, 0))
     sample_order_category_select = Select(
+        name="benchmark-sample-order-category",
         value=_sample_sort_current_categories[0] if _sample_sort_current_categories else "",
         options=_sample_sort_current_categories,
         sizing_mode="stretch_width",
         margin=(0, 2, 0, 0),
     )
     sample_order_metric_select = Select(
+        name="benchmark-sample-order-metric",
         value="Sample_name"
         if "Sample_name" in _initial_sample_metric_values
         else (_initial_sample_metric_values[0] if _initial_sample_metric_values else ""),
@@ -337,7 +342,12 @@ def build_plot_parameter_controls(
 
     sample_order_category_select.on_change("value", _on_sample_order_category_change)
 
-    same_y_scale_cbg = CheckboxGroup(labels=["Use same y scale for all samples"], active=[], margin=(5, 0, 5, 0))
+    same_y_scale_cbg = CheckboxGroup(
+        name="benchmark-same-y-scale",
+        labels=["Use same y scale for all samples"],
+        active=[],
+        margin=(5, 0, 5, 0),
+    )
     same_y_scale_row = row(same_y_scale_cbg, sizing_mode="stretch_width")
 
     sample_params_content = pn.Column(

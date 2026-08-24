@@ -1,5 +1,6 @@
 """Panel/Bokeh plotting application construction."""
 
+import json
 import os
 import time
 from dataclasses import dataclass
@@ -15,6 +16,7 @@ from bokeh.models.widgets import (
     Button,
     HelpButton,
     RadioButtonGroup,
+    TextAreaInput,
 )
 
 from ..controls.base import build_controls
@@ -32,17 +34,19 @@ from ..repositories.preload import PreloadRepository
 from ..services.filter_metadata import FilterMetadataService
 from ..services.filter_query import FilterQueryBuilder
 from ..services.filtering import FilterExpressionService, FilteringAvailabilityService
+from ..settings.scenario import ScenarioRecorder
 from ..shared.data_cache import SessionDataCache
 
 # Import the plotting function from the repo
 from ..shared.diagnostics import PlotDiagnostics
+from ..shared.histogram_cache import SERVER_HISTOGRAM_CACHE
 from ..shared.lifecycle import PlotLifecycle
 from ..shared.paths import static_directory
 from ..shared.timing import BrowserTimingRelay, estimate_grid_data_size, rss_mb, start_rss_watchdog
 from .availability import AvailabilityBindings, AvailabilityController
 from .availability_facade import AvailabilityFacade
-from .layout import LayoutParts, separator
 from .interactions import InteractionCoordinator
+from .layout import LayoutParts, separator
 from .output_controls import build_output_controls
 from .scope_transition import ScopeTransitionBindings, ScopeTransitionController
 from .session_assembly import finalize_session, inspectable_application
@@ -84,6 +88,31 @@ class PlotApplication:
     apply: Callable[[], None]
 
 
+def _build_scenario_restore_carrier(settings_session):
+    """Build the hidden, settings-shaped browser replay boundary."""
+    carrier = TextAreaInput(name="benchmark-scenario-restore", value="", visible=False)
+    status = TextAreaInput(name="benchmark-scenario-restore-status", value="", visible=False)
+
+    def restore_scenario_state(attr, old, new):
+        del attr, old
+        if not new:
+            return
+        try:
+            request = json.loads(new)
+            nonce = request.get("nonce") if isinstance(request, dict) else None
+            settings = request.get("settings") if isinstance(request, dict) else None
+            if not isinstance(settings, dict):
+                raise ValueError("scenario state must be a JSON object")
+            settings_session.restore(settings)
+            status.value = json.dumps({"nonce": nonce, "status": "completed"})
+        except Exception as error:
+            status.value = json.dumps({"nonce": locals().get("nonce"), "status": "failed", "error": str(error)})
+            print(f"[benchmark] Scenario restoration failed: {error}", flush=True)
+
+    carrier.on_change("value", restore_scenario_state)
+    return carrier, status
+
+
 def _start_rss_watchdog(interval: int = 5) -> None:
     start_rss_watchdog(lambda: _current_op, interval)
 
@@ -104,13 +133,24 @@ def preload_db_data(db_path, enable_timing=False):
 
 
 def create_layout(
-    db_path, preloaded: PreloadedPlotData, enable_timing=False, initial_settings=None, _return_application=False
+    db_path,
+    preloaded: PreloadedPlotData,
+    enable_timing=False,
+    initial_settings=None,
+    scenario_path=None,
+    _return_application=False,
 ):
     """Create and return the application layout for Panel serve."""
     global _current_op
     _current_op = "session_init"
     diagnostics = PlotDiagnostics(enabled=enable_timing)
     data_cache = SessionDataCache()
+    scenario_recorder_ref = {}
+
+    def _record_scenario_action(action, details):
+        recorder = scenario_recorder_ref.get("recorder")
+        if recorder is not None:
+            recorder.record_action(action, details=details)
     if enable_timing:
         print(f"[timing] RSS at session init start: {_get_rss_mb():.0f} MB", flush=True)
         _TIMING.start_phase("Session init")
@@ -233,6 +273,7 @@ def create_layout(
         text=f"""<img src="{logo_url_local}" onerror="this.onerror=function(){{this.style.display='none'}}; this.src='{logo_url_remote}'" style="width:100%; max-width:800px; padding: 0 25%;">"""
     )
     views = RadioButtonGroup(
+        name="benchmark-sample-scope",
         labels=["ONE SAMPLE", "ALL SAMPLES"],
         active=0,
         sizing_mode="stretch_width",
@@ -275,7 +316,8 @@ def create_layout(
 
     filtering_metadata = preloaded["filtering_metadata"]
     filter_metadata_service = FilterMetadataService(
-        FilterMetadataRepository(db_path, filtering_metadata, enable_timing=enable_timing)
+        FilterMetadataRepository(db_path, filtering_metadata, enable_timing=enable_timing),
+        SERVER_HISTOGRAM_CACHE,
     )
 
     filter_ui = {}
@@ -356,6 +398,7 @@ def create_layout(
         set_operation=_set_current_operation,
         header=filtering_header,
         toggle=filtering_toggle_btn,
+        record_action=_record_scenario_action if scenario_path is not None else None,
     )
     filtering_header = filter_panel.header
     filtering_controller = filter_panel.controller
@@ -364,13 +407,14 @@ def create_layout(
     create_query_row = filter_panel.create_query_row
 
     filter_apply_button = Button(
+        name="benchmark-apply-filters",
         label="APPLY FILTERS",
         button_type="default",
         disabled=True,
         width=140,
         align="center",
         stylesheets=[stylesheet],
-        css_classes=["action-primary", "apply-btn"],
+        css_classes=["action-primary", "apply-btn", "benchmark-apply-filters"],
         margin=(8, 0, 3, 0),
     )
     filter_ui.update({"apply": filter_apply_button})
@@ -387,6 +431,9 @@ def create_layout(
             return
         if not interactions.begin("controls"):
             return
+        recorder = scenario_recorder_ref.get("recorder")
+        if recorder is not None:
+            recorder.record_action("apply_filters", settings_session.collector.collect())
         filter_apply_button.disabled = True
         _set_availability_controls_disabled(True)
 
@@ -596,11 +643,12 @@ def create_layout(
 
     ## Create final Apply and Peruse data buttons
     apply_button = Button(
+        name="benchmark-apply-plot",
         label="APPLY",
         align="center",
         button_type="primary",
         stylesheets=[stylesheet],
-        css_classes=["action-primary", "apply-btn"],
+        css_classes=["action-primary", "apply-btn", "benchmark-apply-plot"],
         margin=(5, 0, 0, 0),
     )
     apply_button.on_click(apply_clicked)
@@ -644,6 +692,13 @@ def create_layout(
         stylesheet=stylesheet,
     )
     buttons_row = settings_session.buttons_row
+
+    # Hidden benchmark bridge: scenario replay sends a complete settings-shaped
+    # state through the same tolerant restoration boundary as --json. Keeping
+    # this as one semantic bridge avoids a second, brittle mapping for every
+    # dynamic filtering row and annotation control.
+    scenario_restore_carrier, scenario_restore_status = _build_scenario_restore_carrier(settings_session)
+    buttons_row.objects = [*buttons_row.objects, scenario_restore_carrier, scenario_restore_status]
 
     # sample_section must exist before settings restoration runs, since restoring the
     # ALL SAMPLES scope fires on_view_change, which sets sample_section.visible.
@@ -766,6 +821,30 @@ def create_layout(
     session_callbacks.attach_apply(finalized.apply_controller)
     layout = finalized.layout
 
+    # Start scenario capture only after every control has been constructed and
+    # optional settings restoration has completed. This prevents initialization
+    # callbacks from appearing as user actions.
+    if scenario_path is not None:
+        scenario_recorder = ScenarioRecorder(scenario_path, db_path, settings_session.collector.collect())
+        scenario_recorder_ref["recorder"] = scenario_recorder
+        session_callbacks.attach_scenario(scenario_recorder, settings_session.collector.collect)
+        document = curdoc()
+
+        def _record_scenario_state() -> None:
+            scenario_recorder.record_state(settings_session.collector.collect())
+
+        periodic_callback = document.add_periodic_callback(_record_scenario_state, 250)
+
+        def _close_scenario(_session_context) -> None:
+            try:
+                document.remove_periodic_callback(periodic_callback)
+            except ValueError:
+                pass
+            scenario_recorder.close(settings_session.collector.collect())
+
+        document.on_session_destroyed(_close_scenario)
+        print(f"[scenario] Recording session to {scenario_recorder.path}", flush=True)
+
     if enable_timing:
         _step = time.perf_counter() - t_ui
         print(f"[timing] Session: UI construction: {_step:.3f}s{_TIMING.tag(0)}", flush=True)
@@ -788,12 +867,13 @@ def create_layout(
     return layout
 
 
-def create_application(db_path, preloaded, enable_timing=False, initial_settings=None):
+def create_application(db_path, preloaded, enable_timing=False, initial_settings=None, scenario_path=None):
     """Build an inspectable application object for tests and diagnostics."""
     return create_layout(
         db_path,
         preloaded,
         enable_timing=enable_timing,
         initial_settings=initial_settings,
+        scenario_path=scenario_path,
         _return_application=True,
     )

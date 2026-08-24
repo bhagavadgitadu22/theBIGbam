@@ -6,8 +6,8 @@ from ...database.database_getters import (
     resolve_column_null_stats,
     resolve_distinct_values,
     resolve_histogram_bins,
-    search_distinct_values,
     resolve_value_counts,
+    search_distinct_values,
 )
 
 
@@ -38,7 +38,7 @@ class FilterMetadataRepository:
             limit,
         )
 
-    def histogram_bins(self, category, column, *, n_bins=50, log_mode=False):
+    def histogram_bins(self, category, column, *, n_bins=50, log_mode=False, scale=None):
         return resolve_histogram_bins(
             self.db_path,
             self.metadata,
@@ -46,6 +46,7 @@ class FilterMetadataRepository:
             column,
             n_bins=n_bins,
             log_mode=log_mode,
+            scale=scale,
             enable_timing=self.enable_timing,
         )
 

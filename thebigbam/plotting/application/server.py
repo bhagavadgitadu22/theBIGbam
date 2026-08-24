@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import argparse
 import os
 import time
+from pathlib import Path
 
 import panel as pn
 
 from ..repositories.database_metadata import DatabaseMetadataRepository
 from ..settings.persistence import load_settings_document
+from ..settings.scenario import ScenarioPathAllocator
 from ..shared.paths import static_directory
 from ..shared.timing import TimingPhase
 from . import composition_root as application
@@ -18,6 +21,11 @@ from .apply_render_handlers import warm_plot_pipeline_imports
 def add_serve_args(parser) -> None:
     parser.add_argument("--db", required=True, help="Path to DuckDB database")
     parser.add_argument("--port", type=int, default=5006, help="Port to serve Panel app")
+    parser.add_argument(
+        "--no-browser",
+        action="store_true",
+        help="Do not open a browser automatically (useful for headless benchmarks and remote servers)",
+    )
     parser.add_argument(
         "--allow-websocket-origin",
         action="append",
@@ -36,6 +44,11 @@ def add_serve_args(parser) -> None:
         default=None,
         help="Path to a settings JSON file (from SAVE SETTINGS) to restore on load. "
         "Settings that don't fit this --db are skipped with a logged warning.",
+    )
+    parser.add_argument(
+        "--scenario",
+        default=None,
+        help=argparse.SUPPRESS,
     )
 
 
@@ -74,6 +87,12 @@ def run_serve(args) -> int:
 
     settings_path = getattr(args, "settings_json", None)
     initial_settings = load_settings_document(settings_path) if settings_path else None
+    scenario_path = getattr(args, "scenario", None)
+    scenario_paths = None
+    if scenario_path:
+        requested_path = Path(scenario_path)
+        requested_path.parent.mkdir(parents=True, exist_ok=True)
+        scenario_paths = ScenarioPathAllocator(requested_path)
 
     print("\nPreloading database data...", flush=True)
     preloaded = application.preload_db_data(args.db, enable_timing=enable_timing)
@@ -87,11 +106,13 @@ def run_serve(args) -> int:
     print(f"Server ready. Open localhost:{args.port} in your browser.\n", flush=True)
 
     def create_app():
+        allocated_scenario_path = scenario_paths.next_path() if scenario_paths is not None else None
         return application.create_layout(
             args.db,
             preloaded,
             enable_timing=enable_timing,
             initial_settings=initial_settings,
+            scenario_path=allocated_scenario_path,
         )
 
     allowed_origins = getattr(args, "allow_websocket_origin", None) or [
@@ -103,7 +124,7 @@ def run_serve(args) -> int:
         port=args.port,
         address="0.0.0.0",
         allow_websocket_origin=allowed_origins,
-        show=True,
+        show=not getattr(args, "no_browser", False),
         title="theBIGbam",
         static_dirs={"assets": static_directory()},
         session_token_expiration=3600,

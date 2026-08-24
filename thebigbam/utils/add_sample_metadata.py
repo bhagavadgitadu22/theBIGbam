@@ -4,10 +4,12 @@ This module provides functionality to extend the Sample table with
 additional metadata columns from a user-provided CSV file.
 """
 import csv
+
 import duckdb
 
 from thebigbam.database.database_getters import update_database_metadata
-from thebigbam.utils.metadata_helpers import infer_column_type as _infer_column_type, convert_value as _convert_value
+from thebigbam.utils.metadata_helpers import convert_value as _convert_value
+from thebigbam.utils.metadata_helpers import infer_column_type as _infer_column_type
 
 
 def add_add_sample_metadata_args(parser):

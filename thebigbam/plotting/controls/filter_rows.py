@@ -10,7 +10,7 @@ from bokeh.models.widgets import Select, Spinner, TextInput
 
 from ..renderers.filter_distributions import FilterVisualizations
 from ..shared.styles import panel_stylesheet
-from .searchable_select import SearchableSelect
+from .distinct_value_select import build_distinct_value_select
 
 
 class FilterRowFactory:
@@ -25,6 +25,7 @@ class FilterRowFactory:
         stylesheet: Any,
         enable_timing: bool,
         filter_encode: Mapping[str, float] | None = None,
+        record_action: Callable[[str, Mapping[str, Any]], Any] | None = None,
     ) -> None:
         self.metadata_service = metadata_service
         self.filtering_metadata = filtering_metadata
@@ -35,7 +36,9 @@ class FilterRowFactory:
         self.stylesheet = stylesheet
         self.enable_timing = enable_timing
         self.filter_encode = filter_encode or {}
+        self.record_action = record_action
         self.controller: Any | None = None
+        self._row_sequence = 0
 
     def attach_controller(self, controller: Any) -> None:
         self.controller = controller
@@ -58,6 +61,13 @@ class FilterRowFactory:
     def _toggle_distribution(self, row_data) -> None:
         container = row_data["hist_container"]
         row_data["loading_gen"] += 1
+        category = row_data["category_select"].value
+        column = row_data["subcategory_select"].value
+        if self.record_action is not None:
+            self.record_action(
+                "filter_lookup",
+                {"category": category, "column": column, "opening": not bool(container.objects)},
+            )
         if container.objects:
             container.objects = []
             for key in ("histogram_pane", "histogram_fig", "threshold_span", "treemap_pane", "bridge_input"):
@@ -68,8 +78,6 @@ class FilterRowFactory:
         def load_distribution():
             if row_data["loading_gen"] != generation:
                 return
-            category = row_data["category_select"].value
-            column = row_data["subcategory_select"].value
             info = self.filtering_metadata.get(category, {}).get("columns", {}).get(column, {})
             if info.get("type") == "numeric" and not info.get("is_bool"):
                 result = self.visualizations.build_numeric_histogram(
@@ -106,6 +114,9 @@ class FilterRowFactory:
         row instead of simulating UI changes through the (partly deferred)
         update_subcategories/update_input_widget callbacks.
         """
+        row_index = self._row_sequence
+        self._row_sequence += 1
+
         # Get categories from metadata
         categories = list(self.filtering_metadata.keys())
         if not categories:
@@ -125,10 +136,11 @@ class FilterRowFactory:
         initial_is_text = initial_col_info.get("type") == "text"
 
         # First level select (categories)
-        category_select = Select(options=categories, value=initial_category, width=70, margin=0)
+        category_select = Select(name=f"benchmark-filter-{row_index}-category", options=categories, value=initial_category, width=70, margin=0)
 
         # Second level select (columns)
         subcategory_select = Select(
+            name=f"benchmark-filter-{row_index}-metric",
             options=initial_columns, value=initial_column, sizing_mode="stretch_width", margin=0
         )
 
@@ -137,41 +149,20 @@ class FilterRowFactory:
         _initial_ops = ["=", "!=", "has", "has not"] if initial_is_text else ["=", ">", "<", "!="]
         if initial_operator is not None and initial_operator in _initial_ops:
             _default_operator = initial_operator
-        comparison_select = Select(options=_initial_ops, value=_default_operator, width=50, margin=0)
+        comparison_select = Select(name=f"benchmark-filter-{row_index}-operator", options=_initial_ops, value=_default_operator, width=50, margin=0)
 
         # Container for the dynamic input widget
         input_container = pn.Column(width=90, margin=0)
 
         def make_searchable_input(category, column, *, placeholder="Search..."):
-            widget = SearchableSelect(
-                value="",
-                options=[],
-                placeholder=placeholder,
-                server_search=True,
-                min_search_chars=2,
+            return build_distinct_value_select(
+                self.metadata_service,
+                category,
+                column,
+                name=f"benchmark-filter-{row_index}-value",
+                on_value=self.refresh,
                 width=90,
             )
-
-            def _search(_event):
-                request_nonce = widget.search_nonce
-                query = widget.search_query
-                if len(query) < widget.min_search_chars:
-                    widget.options = []
-                    widget.search_result_query = query
-                    widget.search_result_nonce = request_nonce
-                    return
-                values = self.metadata_service.search_distinct_values(
-                    category, column, query, limit=100
-                )
-                if widget.value and widget.value not in values:
-                    values = [widget.value, *values]
-                widget.options = list(values)
-                widget.search_result_query = query
-                widget.search_result_nonce = request_nonce
-
-            widget.param.watch(_search, "search_nonce")
-            widget.param.watch(lambda event: self.refresh(), "value")
-            return widget
 
         # Create initial input widget based on column type
         if initial_is_text and _default_operator in ("has", "has not"):
@@ -186,7 +177,7 @@ class FilterRowFactory:
         else:
             _enc_scale = self.filter_encode.get(initial_column)
             _step = 1.0 / _enc_scale if _enc_scale else 1
-            initial_input = Spinner(value=None, step=_step, placeholder="Value...", width=90, margin=(0, 2, 0, 0))
+            initial_input = Spinner(name=f"benchmark-filter-{row_index}-value", value=None, step=_step, placeholder="Value...", width=90, margin=(0, 2, 0, 0))
             input_container.objects = [initial_input]
 
             # Add callback for Bokeh Spinner (also syncs histogram threshold)
@@ -249,7 +240,7 @@ class FilterRowFactory:
             if is_text:
                 current_op = comparison_select.value
                 if current_op in ("has", "has not"):
-                    new_input = TextInput(value="", placeholder="Search...", width=90, margin=(0, 2, 0, 0))
+                    new_input = TextInput(name=f"benchmark-filter-{row_index}-value", value="", placeholder="Search...", width=90, margin=(0, 2, 0, 0))
                     input_container.objects = [new_input]
                     current_input_ref["widget"] = new_input
                     current_input_ref["is_panel"] = False
@@ -262,7 +253,7 @@ class FilterRowFactory:
             else:
                 _enc_scale = self.filter_encode.get(col_name)
                 _step = 1.0 / _enc_scale if _enc_scale else 1
-                new_input = Spinner(value=None, step=_step, placeholder="Value...", width=90, margin=(0, 2, 0, 0))
+                new_input = Spinner(name=f"benchmark-filter-{row_index}-value", value=None, step=_step, placeholder="Value...", width=90, margin=(0, 2, 0, 0))
                 input_container.objects = [new_input]
                 current_input_ref["widget"] = new_input
                 current_input_ref["is_panel"] = False
@@ -375,7 +366,7 @@ class FilterRowFactory:
 
             if is_text:
                 if new in ("has", "has not"):
-                    new_input = TextInput(value="", placeholder="Search...", width=90, margin=(0, 2, 0, 0))
+                    new_input = TextInput(name=f"benchmark-filter-{row_index}-value", value="", placeholder="Search...", width=90, margin=(0, 2, 0, 0))
                     input_container.objects = [new_input]
                     current_input_ref["widget"] = new_input
                     current_input_ref["is_panel"] = False
@@ -399,6 +390,7 @@ class FilterRowFactory:
             margin=(0, 10, 0, 0),
             description="See distribution of values",
             stylesheets=[panel_stylesheet(self.stylesheet)],
+            css_classes=[f"benchmark-filter-{row_index}-lookup"],
         )
 
         # Remove button (Panel button for proper dynamic event handling)

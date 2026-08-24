@@ -7,10 +7,10 @@ from typing import Any
 
 import panel as pn
 
-from ..shared.styles import panel_stylesheet
 from ..settings.collection import SettingsCollector
 from ..settings.controls import SettingsSaveControls
 from ..settings.restoration import restore_settings
+from ..shared.styles import panel_stylesheet
 from .wiring import make_settings_collector_bindings, make_settings_restore_bindings
 
 

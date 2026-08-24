@@ -6,10 +6,10 @@ which is useful for detecting terminal repeats and other duplicated regions
 relevant for phage termini analysis.
 """
 
-from pathlib import Path
 import subprocess
 import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 from typing import List
 
 from Bio import SeqIO

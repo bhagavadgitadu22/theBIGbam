@@ -2,6 +2,7 @@ from pathlib import Path
 
 from Bio import SeqIO
 
+
 def _double_fasta(in_path: Path, out_path: Path) -> None:
     records = list(SeqIO.parse(str(in_path), "fasta"))
     with out_path.open("w") as fh:

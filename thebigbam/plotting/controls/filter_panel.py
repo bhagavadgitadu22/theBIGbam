@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 from bokeh.layouts import row
 from bokeh.models import Div, Tooltip
@@ -40,6 +40,7 @@ def build_filter_panel(
     muted_button_stylesheet: Any,
     enable_timing: bool,
     set_operation: Callable[[str], None],
+    record_action: Callable[[str, Mapping[str, Any]], Any] | None = None,
     header: Any | None = None,
     toggle: Any | None = None,
 ) -> FilterPanel:
@@ -73,6 +74,7 @@ def build_filter_panel(
         muted_button_stylesheet,
         refresh,
         preloaded.filter_encode,
+        set_operation,
     )
     row_factory = FilterRowFactory(
         metadata_service=metadata_service,
@@ -84,6 +86,7 @@ def build_filter_panel(
         stylesheet=stylesheet,
         enable_timing=enable_timing,
         filter_encode=preloaded.filter_encode,
+        record_action=record_action,
     )
     controller = FilterSectionController(row_factory.create_row, refresh, stylesheet, button_stylesheet)
     row_factory.attach_controller(controller)

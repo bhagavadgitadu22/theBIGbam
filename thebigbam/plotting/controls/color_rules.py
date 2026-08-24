@@ -9,6 +9,7 @@ import panel as pn
 from bokeh.models.widgets import ColorPicker, Select, Spinner, TextInput
 
 from ..shared.styles import panel_stylesheet
+from .distinct_value_select import build_distinct_value_select
 from .searchable_select import SearchableSelect
 
 
@@ -54,7 +55,7 @@ def build_color_rule_controls(
         margin=(2, 0, 2, 0),
         button_type="success",
         stylesheets=[panel_stylesheet(stylesheet)],
-        css_classes=["action-add"],
+        css_classes=["action-add", "benchmark-add-annotation-rule"],
     )
     custom_color_column = pn.Column(
         add_color_btn,
@@ -66,7 +67,7 @@ def build_color_rule_controls(
     TEXT_OPS = ["=", "!=", "has", "has not", "Use random colors"]
     NUMERIC_OPS = ["=", ">", "<", "!=", "Use random colors"]
 
-    def _build_color_value_widget(is_text, operator, distinct_values):
+    def _build_color_value_widget(is_text, operator, *, category="Annotations", column="", name):
         """Return the value widget that matches (type, operator).
 
         Widgets live directly inside the row (no wrapper container), so each
@@ -76,19 +77,23 @@ def build_color_rule_controls(
         if is_text:
             if operator in ("has", "has not"):
                 return TextInput(
+                    name=name,
                     value="", placeholder="Search...", sizing_mode="stretch_width", margin=(0, 2, 0, 0)
                 ), False
             # = / != / Use random colors → SearchableSelect (kept even in random
             # mode so the widget shape is consistent when user flips back).
-            return SearchableSelect(
-                value="",
-                options=[str(v) for v in distinct_values],
-                placeholder="Search...",
+            return build_distinct_value_select(
+                metadata_service,
+                category,
+                column,
+                name=name,
                 sizing_mode="stretch_width",
                 margin=(0, 2, 0, 0),
             ), True
         # Numeric columns always get a Spinner regardless of operator.
-        return Spinner(value=0, placeholder="Value...", sizing_mode="stretch_width", margin=(0, 2, 0, 0)), False
+        return Spinner(
+            name=name, value=0, placeholder="Value...", sizing_mode="stretch_width", margin=(0, 2, 0, 0)
+        ), False
 
     def create_color_row(target_rows=None, rebuild_fn=None):
         """Create a single custom color row with qualifier / operator / value / color / remove widgets.
@@ -102,12 +107,15 @@ def build_color_rule_controls(
         gain a 'Use random colors' operator that hides the value container and
         the color picker.
         """
+        target = target_rows if target_rows is not None else custom_color_rows
+        rule_kind = "mag" if target is mag_track_color_rows else "annotation"
+        rule_index = len(target)
         initial_key = color_qualifier_options[0] if color_qualifier_options else ""
         initial_info = annotation_meta.get(initial_key, {})
         initial_is_text = initial_info.get("type") == "text"
-        initial_distinct = metadata_service.distinct_values("Annotations", initial_key) if initial_is_text else []
 
         qualifier_select = Select(
+            name=f"benchmark-{rule_kind}-rule-{rule_index}-qualifier",
             options=[(k, k.replace("_", " ").replace("percentage", "(%)")) for k in color_qualifier_options],
             value=initial_key,
             width=100,
@@ -115,6 +123,7 @@ def build_color_rule_controls(
         )
 
         operator_select = Select(
+            name=f"benchmark-{rule_kind}-rule-{rule_index}-operator",
             options=TEXT_OPS if initial_is_text else NUMERIC_OPS,
             value="=",
             width=50,
@@ -125,7 +134,10 @@ def build_color_rule_controls(
         # in place when the qualifier type or operator changes. No wrapper
         # pn.Column, because stretch_width on a wrapper introduces extra
         # vertical/horizontal padding that pushed the widget out of line.
-        initial_input, initial_is_panel = _build_color_value_widget(initial_is_text, "=", initial_distinct)
+        input_name = f"benchmark-{rule_kind}-rule-{rule_index}-value"
+        initial_input, initial_is_panel = _build_color_value_widget(
+            initial_is_text, "=", column=initial_key, name=input_name
+        )
         current_input_ref = {"widget": initial_input, "is_panel": initial_is_panel}
 
         color_picker = ColorPicker(color="#cccccc", width=60, height=30, margin=(0, 2, 0, 0))
@@ -181,7 +193,6 @@ def build_color_rule_controls(
             """Rebuild operator options and the value widget for the new column type."""
             col_info = annotation_meta.get(col_name, {})
             is_text = col_info.get("type") == "text"
-            distinct = metadata_service.distinct_values("Annotations", col_name) if is_text else []
 
             # Swap operator options for the new type; preserve current operator
             # if still valid, otherwise default back to "=".
@@ -190,7 +201,9 @@ def build_color_rule_controls(
             if operator_select.value not in new_ops:
                 operator_select.value = "="
 
-            new_widget, is_panel = _build_color_value_widget(is_text, operator_select.value, distinct)
+            new_widget, is_panel = _build_color_value_widget(
+                is_text, operator_select.value, column=col_name, name=input_name
+            )
             _swap_value_widget(new_widget, is_panel)
 
             # Respect random-mode visibility even after a qualifier swap.
@@ -213,12 +226,14 @@ def build_color_rule_controls(
                 want_text_input = new in ("has", "has not")
                 cur = current_input_ref["widget"]
                 if want_text_input and not isinstance(cur, TextInput):
-                    new_input, is_panel = _build_color_value_widget(True, new, [])
+                    new_input, is_panel = _build_color_value_widget(
+                        True, new, column=qualifier_select.value, name=input_name
+                    )
                     _swap_value_widget(new_input, is_panel)
                 elif not want_text_input and not isinstance(cur, SearchableSelect):
-                    col_name_val = qualifier_select.value
-                    distinct = metadata_service.distinct_values("Annotations", col_name_val)
-                    new_input, is_panel = _build_color_value_widget(True, new, distinct)
+                    new_input, is_panel = _build_color_value_widget(
+                        True, new, column=qualifier_select.value, name=input_name
+                    )
                     _swap_value_widget(new_input, is_panel)
 
             _apply_random_visibility()
@@ -255,7 +270,7 @@ def build_color_rule_controls(
         margin=(2, 0, 2, 0),
         button_type="success",
         stylesheets=[panel_stylesheet(stylesheet)],
-        css_classes=["action-add"],
+        css_classes=["action-add", "benchmark-add-mag-rule"],
     )
     mag_track_color_column = pn.Column(
         add_mag_track_btn,

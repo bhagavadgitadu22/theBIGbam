@@ -6,9 +6,9 @@ All coverage features are now stored as compressed BLOBs in the Feature_blob tab
 """
 
 import os
-import pytest
+
 import duckdb
-import numpy as np
+import pytest
 
 
 def get_contig_length(conn, contig_id):
@@ -25,8 +25,12 @@ def blob_to_int_array(conn, contig_id, sample_id, feature_name, length):
     without data. Dense blobs cover every position; sparse blobs only have events.
     """
     from thebigbam.database.blob_decoder import (
-        feature_name_to_id, decode_raw_chunks, decode_raw_sparse_chunks,
-        get_blob_scale, get_chunk_size, is_sparse_zoom_blob,
+        decode_raw_chunks,
+        decode_raw_sparse_chunks,
+        feature_name_to_id,
+        get_blob_scale,
+        get_chunk_size,
+        is_sparse_zoom_blob,
     )
 
     fid = feature_name_to_id(feature_name, conn)

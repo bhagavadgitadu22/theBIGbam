@@ -8,7 +8,6 @@ from typing import Any, Callable
 
 from bokeh.io import curdoc
 
-
 CONTIG_TO_MAG_SAMPLE_ORDER_CATEGORY = {
     "Coverage": "MAG coverage",
     "Misassembly": "MAG misassembly",
@@ -18,6 +17,28 @@ MAG_TO_CONTIG_SAMPLE_ORDER_CATEGORY = {
     mag_category: contig_category
     for contig_category, mag_category in CONTIG_TO_MAG_SAMPLE_ORDER_CATEGORY.items()
 }
+
+
+def translate_mag_window_to_contig(
+    start: int, end: int, *, offset: int, contig_length: int
+) -> tuple[int, int]:
+    """Translate a 1-based MAG window and keep it inside one contig."""
+    if contig_length <= 0 or start < 1 or end < start:
+        return 1, max(0, contig_length)
+    width = end - start + 1
+    if width >= contig_length:
+        return 1, contig_length
+    local_start = start - offset
+    local_end = end - offset
+    if local_end < 1 or local_start > contig_length:
+        return 1, contig_length
+    if local_start < 1:
+        local_end += 1 - local_start
+        local_start = 1
+    if local_end > contig_length:
+        local_start -= local_end - contig_length
+        local_end = contig_length
+    return max(1, local_start), min(contig_length, local_end)
 
 
 @dataclass(frozen=True)
@@ -74,8 +95,8 @@ class SubjectController:
             return
         with self._held_document():
             valid_samples = self.bindings.compute_samples("")
+            self.bindings.push_completions(self.bindings.widgets["sample_select"], valid_samples)
             if event.new and event.new not in valid_samples:
-                self.bindings.push_completions(self.bindings.widgets["sample_select"], valid_samples)
                 self.bindings.update_titles()
                 return
             if self.bindings.widgets["has_mags"]:
@@ -114,7 +135,21 @@ class SubjectController:
                 self.bindings.refresh_samples()
             self.bindings.update_titles()
             if widgets["has_mags"] and widgets["view_radio"].active == 0:
-                self.sync_selected_contig_position()
+                mag = widgets["mag_select"].value
+                offsets = widgets["mag_to_contig_offsets"].get(mag, {})
+                if event.new not in offsets:
+                    self.sync_selected_contig_position()
+                    offsets = widgets["mag_to_contig_offsets"].get(mag, {})
+                offset = offsets.get(event.new)
+                length = widgets["contig_lengths"].get(event.new, 0)
+                try:
+                    start = int(self.bindings.from_position.value)
+                    end = int(self.bindings.to_position.value)
+                except (TypeError, ValueError):
+                    start, end = 0, 0
+                contig_start, contig_end = (offset + 1, offset + length) if offset is not None else (1, 0)
+                if offset is None or end < contig_start or start > contig_end:
+                    self.sync_selected_contig_position()
             elif event.new and event.new in widgets["contig_lengths"]:
                 self.bindings.from_position.value = "1"
                 self.bindings.to_position.value = str(widgets["contig_lengths"][event.new])
@@ -170,8 +205,21 @@ class SubjectController:
         else:
             contig = widgets["contig_select"].value
             if contig and contig in widgets["contig_lengths"]:
-                bindings.from_position.value = "1"
-                bindings.to_position.value = str(widgets["contig_lengths"][contig])
+                length = widgets["contig_lengths"][contig]
+                offset = widgets["mag_to_contig_offsets"].get(widgets["mag_select"].value, {}).get(contig)
+                try:
+                    start = int(bindings.from_position.value)
+                    end = int(bindings.to_position.value)
+                except (TypeError, ValueError):
+                    start, end = 0, 0
+                if offset is None:
+                    local_start, local_end = 1, length
+                else:
+                    local_start, local_end = translate_mag_window_to_contig(
+                        start, end, offset=offset, contig_length=length
+                    )
+                bindings.from_position.value = str(local_start)
+                bindings.to_position.value = str(local_end)
             bindings.sample_current_categories[:] = bindings.sample_contig_categories
             desired_order_category = MAG_TO_CONTIG_SAMPLE_ORDER_CATEGORY.get(
                 current_order_category, current_order_category

@@ -41,6 +41,43 @@ def test_filter_row_factory_builds_row_from_cached_column_options():
     assert result["minus_btn"].stylesheets == [":host { color: red; }"]
 
 
+def test_lookup_records_semantic_target(monkeypatch):
+    callbacks = []
+    events = []
+    monkeypatch.setattr(
+        "thebigbam.plotting.controls.filter_rows.curdoc",
+        lambda: SimpleNamespace(add_next_tick_callback=callbacks.append),
+    )
+    metadata = {"Coverage": {"columns": {"Coverage_mean": {"type": "numeric", "is_bool": False}}}}
+
+    def record(action, details):
+        events.append((action, details))
+
+    factory = FilterRowFactory(
+        metadata_service=SimpleNamespace(),
+        filtering_metadata=metadata,
+        columns={"Coverage": [("Coverage_mean", "Coverage mean")]},
+        raw_columns={"Coverage": ["Coverage_mean"]},
+        visualizations=Visualizations(),
+        refresh=lambda: None,
+        stylesheet=InlineStyleSheet(css=""),
+        enable_timing=False,
+        record_action=record,
+    )
+    factory.attach_controller(SimpleNamespace(count_rows=lambda: 1, sections=[]))
+    row = factory.create_row({}, initial_category="Coverage", initial_column="Coverage_mean")
+
+    factory._toggle_distribution(row)
+    callbacks.pop(0)()
+
+    assert events == [
+        (
+            "filter_lookup",
+            {"category": "Coverage", "column": "Coverage_mean", "opening": True},
+        ),
+    ]
+
+
 def test_category_change_updates_shared_metric_immediately_and_defers_one_refresh(monkeypatch):
     callbacks = []
     monkeypatch.setattr(

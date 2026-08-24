@@ -14,6 +14,12 @@ class SessionCallbacks:
         self._subject: Any | None = None
         self._scope: Any | None = None
         self.interactions = interactions
+        self._scenario_recorder: Any | None = None
+        self._collect_settings: Callable[[], Any] | None = None
+
+    def attach_scenario(self, recorder: Any, collect_settings: Callable[[], Any]) -> None:
+        self._scenario_recorder = recorder
+        self._collect_settings = collect_settings
 
     def attach_apply(self, controller: Any) -> None:
         self._apply = controller
@@ -40,6 +46,8 @@ class SessionCallbacks:
         if self.interactions is not None and not self.interactions.begin("plot"):
             return
         self._required(self.main_placeholder, "Main placeholder").loading = True
+        if self._scenario_recorder is not None:
+            self._scenario_recorder.record_action("apply_plot", self._collect_settings())
         self.schedule(self.do_apply)
 
     def do_apply(self) -> None:

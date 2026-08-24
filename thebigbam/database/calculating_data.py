@@ -1,6 +1,8 @@
-import argparse, sys, os
-from pathlib import Path
+import argparse
+import os
+import sys
 from multiprocessing import cpu_count
+from pathlib import Path
 
 # Import Rust bindings (required)
 try:

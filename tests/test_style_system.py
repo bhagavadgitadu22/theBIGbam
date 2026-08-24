@@ -1,7 +1,6 @@
 import re
 from pathlib import Path
 
-
 STATIC = Path("thebigbam/static")
 
 

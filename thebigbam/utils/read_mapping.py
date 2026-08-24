@@ -1,10 +1,10 @@
-from pathlib import Path
-import subprocess
-import shutil
 import shlex
+import shutil
+import subprocess
 import sys
 import tempfile
 import warnings
+from pathlib import Path
 from typing import Optional
 
 from Bio import SeqIO
@@ -124,7 +124,7 @@ def run_mapping_per_sample(args):
 def _get_version() -> str:
     """Get theBIGbam version from pyproject.toml or fallback."""
     try:
-        from importlib.metadata import version, PackageNotFoundError
+        from importlib.metadata import PackageNotFoundError, version
         return version("thebigbam")
     except PackageNotFoundError:
         return "unknown"

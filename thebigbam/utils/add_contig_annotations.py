@@ -505,14 +505,14 @@ def run_add_contig_annotations(args):
             key_desc = ", ".join(f"{mc}={kv}" for mc, kv in zip(match_by_cols, key))
             all_errors.append(f"{row_source}: no feature found for {key_desc}")
 
-    print(f"\nSummary:", flush=True)
+    print("\nSummary:", flush=True)
     print(f"  Features annotated: {total_features_modified} / {total_features} total features", flush=True)
     if total_files_copied > 0:
         print(f"  Files copied unchanged: {total_files_copied}", flush=True)
     if total_multi_match_rows > 0:
         print(f"  Rows with multiple matches: {total_multi_match_rows} "
               f"(affected {total_multi_match_features} features)", flush=True)
-    print(f"  Qualifiers added:", flush=True)
+    print("  Qualifiers added:", flush=True)
     for col, out_col in zip(value_cols, out_cols):
         print(f"    {out_col}: {total_qualifiers_added[col]}", flush=True)
 

@@ -20,15 +20,16 @@ import csv
 import sys
 from collections import defaultdict
 
-import numpy as np
 import duckdb
+import numpy as np
 
 from thebigbam.database.blob_decoder import (
+    decode_raw_chunks,
+    decode_raw_sparse_chunks,
     feature_name_to_id,
-    decode_raw_chunks, decode_raw_sparse_chunks,
-    get_blob_scale, get_chunk_size,
+    get_blob_scale,
+    get_chunk_size,
 )
-
 
 _BASE_COLUMNS = [
     "sample_name",

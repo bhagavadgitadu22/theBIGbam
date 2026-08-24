@@ -3,6 +3,7 @@ Tests for BAM generation and database creation verification.
 """
 
 import os
+
 import duckdb
 
 

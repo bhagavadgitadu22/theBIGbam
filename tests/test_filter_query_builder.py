@@ -89,6 +89,8 @@ def test_expression_service_caches_compilation_and_count_queries():
     assert first == second
     assert first is not None
     assert (first.pair_count, first.contig_count, first.sample_count) == (2, 1, 2)
+    assert first.compiled.sql == "SELECT Contig_id, Sample_id FROM _thebigbam_filter_result"
+    assert first.compiled.parameters == ()
     assert repository.query_count == 1
     service.invalidate()
     service.evaluate(expression)
@@ -133,5 +135,21 @@ def test_invalid_numeric_predicate_is_skipped_without_breaking_following_connect
     )
     compiled = _builder().compile(expression)
     assert compiled is not None
-    assert "INTERSECT" in compiled.sql
+    assert "IS NOT DISTINCT FROM" in compiled.sql
     assert "UNION" not in compiled.sql
+
+
+def test_standalone_contig_scoped_filter_expands_to_available_samples_at_boundary():
+    compiled = _builder().compile(
+        FilterExpression(
+            (FilterSection((FilterPredicate("Annotations", "product", "=", "tail"),)),)
+        )
+    )
+
+    assert compiled is not None
+    assert "LEFT JOIN Coverage _coverage" in compiled.sql
+    assert sorted(_database().execute(compiled.sql, compiled.parameters).fetchall()) == [
+        (1, 1),
+        (2, 1),
+        (2, 2),
+    ]

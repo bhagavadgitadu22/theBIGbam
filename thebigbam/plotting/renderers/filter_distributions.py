@@ -23,6 +23,7 @@ class FilterVisualizations:
         muted_buttons_stylesheet: Any,
         refresh_on_filter_change: Callable[[], None],
         filter_encode: Mapping[str, float] | None = None,
+        set_operation: Callable[[str], None] | None = None,
     ) -> None:
         self.metadata_service = metadata_service
         self.filtering_metadata = filtering_metadata
@@ -30,6 +31,7 @@ class FilterVisualizations:
         self.muted_buttons_stylesheet = muted_buttons_stylesheet
         self.refresh_on_filter_change = refresh_on_filter_change
         self.filter_encode = filter_encode or {}
+        self.set_operation = set_operation or (lambda _operation: None)
 
     def build_numeric_histogram(self, row_data, category, col_name, spinner, log_mode=False, log_y=False):
         """Build a histogram with draggable threshold bar for a numeric column."""
@@ -43,14 +45,20 @@ class FilterVisualizations:
             return None
 
         scale = self.filter_encode.get(col_name)
-        bin_result = self.metadata_service.histogram_bins(category, col_name, n_bins=50, log_mode=log_mode)
+        self.set_operation("filter_histogram")
+        try:
+            bin_result = self.metadata_service.histogram_bins(
+                category, col_name, n_bins=50, log_mode=log_mode, scale=scale
+            )
+        finally:
+            self.set_operation("idle")
         if bin_result is None:
             row_data["histogram_pane"] = None
             row_data["histogram_fig"] = None
             row_data["threshold_span"] = None
             return None
 
-        edges, counts = bin_result
+        edges, counts = bin_result.edges, bin_result.counts
         row_data["log_mode"] = log_mode
         row_data["log_y"] = log_y
 
@@ -238,12 +246,22 @@ class FilterVisualizations:
         null_stats = self.metadata_service.column_null_stats(category, col_name)
         if null_stats is not None:
             non_null_count, total_possible = null_stats
+            approximation = (
+                f" Approximate distribution — {bin_result.sampled_rows:,} sampled values."
+                if bin_result.approximate else ""
+            )
             label_html = (
                 f'<span style="font-size:11px; color:#666; font-style:italic;">'
-                f"Used {non_null_count:,} times (out of {total_possible:,} possible)</span>"
+                f"Used {non_null_count:,} times (out of {total_possible:,} possible).{approximation}</span>"
             )
             dist_label = pn.pane.HTML(label_html, sizing_mode="stretch_width", margin=(2, 5, 0, 5))
             return [dist_label, pane]
+        if bin_result.approximate:
+            label_html = (
+                '<span style="font-size:11px; color:#666; font-style:italic;">'
+                f"Approximate distribution — {bin_result.sampled_rows:,} sampled values.</span>"
+            )
+            return [pn.pane.HTML(label_html, sizing_mode="stretch_width", margin=(2, 5, 0, 5)), pane]
         return [pane]
 
     def build_text_treemap(self, row_data, category, col_name, input_ref, hist_container):

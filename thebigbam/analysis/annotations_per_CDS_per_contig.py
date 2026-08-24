@@ -16,15 +16,16 @@ import csv
 import sys
 from collections import defaultdict
 
-import numpy as np
 import duckdb
+import numpy as np
 
 from thebigbam.database.blob_decoder import (
-    feature_name_to_id,
     decode_raw_chunks,
-    get_blob_scale, get_chunk_size, get_gc_window_size,
+    feature_name_to_id,
+    get_blob_scale,
+    get_chunk_size,
+    get_gc_window_size,
 )
-
 
 FIXED_COLUMNS = [
     "contig_name",

@@ -8,6 +8,7 @@ numpy-based decoding for use in Bokeh visualization and CSV export.
 """
 
 import struct
+
 import numpy as np
 from thebigbam_rs import decode_dense_chunk, decode_sparse_chunk
 
@@ -15,7 +16,6 @@ try:
     import zstandard as zstd
 except ImportError:
     zstd = None
-    import zlib  # fallback won't work, but gives clear error
 
 # ============================================================================
 # Binary format magic bytes (fixed protocol constants)
@@ -204,7 +204,6 @@ def _decode_dense_base(blob, header):
     """Decode dense base-resolution data from BLOB."""
     offset = header["base_block_offset"]
     num_chunks = struct.unpack_from("<H", blob, offset)[0]
-    chunk_size = struct.unpack_from("<I", blob, offset + 2)[0]
     offset += 6
 
     all_chunks = []
@@ -827,5 +826,4 @@ def is_contig_blob_feature(name):
     if _contig_features_cache is not None:
         return name in _contig_features_cache
     return False
-
 

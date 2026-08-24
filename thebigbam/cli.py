@@ -1,16 +1,22 @@
 import argparse
 import sys
 
-# Import command modules so we can share arg definitions and run functions
-from thebigbam.utils import (
-    read_mapping, format_mapping, add_sample_metadata, add_contig_metadata,
-    add_mag_metadata, add_contig_annotations,
+from thebigbam.analysis import (
+    annotations_per_CDS_per_contig,
+    mapping_patterns_per_CDS_per_contig_per_sample,
 )
 from thebigbam.database import add_variable, calculating_data, database_getters, export_data, inspect_blob, purge_data
 from thebigbam.plotting import start_bokeh_server
-from thebigbam.analysis import (
-    mapping_patterns_per_CDS_per_contig_per_sample,
-    annotations_per_CDS_per_contig,
+from thebigbam.plotting.settings.scenario import ScenarioFormatError, describe_scenario_file
+
+# Import command modules so we can share arg definitions and run functions
+from thebigbam.utils import (
+    add_contig_annotations,
+    add_contig_metadata,
+    add_mag_metadata,
+    add_sample_metadata,
+    format_mapping,
+    read_mapping,
 )
 
 ANALYSIS_SCRIPTS = {
@@ -61,7 +67,7 @@ SCRIPTS = {
 
 def build_argparser():
     p = argparse.ArgumentParser(prog="thebigbam", description="theBIGbam command-line front-end")
-    sub = p.add_subparsers(dest="cmd", required=True)
+    sub = p.add_subparsers(dest="cmd", required=True, metavar="COMMAND")
 
     # main commands
     sp = sub.add_parser('mapping-per-sample', help=SCRIPTS['mapping-per-sample'])
@@ -75,6 +81,12 @@ def build_argparser():
 
     sp = sub.add_parser('serve', help=SCRIPTS['serve'])
     start_bokeh_server.add_serve_args(sp)
+
+    sp = sub.add_parser('describe-scenario', help=argparse.SUPPRESS)
+    sp.add_argument('scenario', metavar='FILE', help=argparse.SUPPRESS)
+    # argparse has no public hidden-subcommand API. Suppressed choice actions
+    # are safe to omit from help while their parsers remain available.
+    sub._choices_actions.pop()
 
     # export command
     sp = sub.add_parser('export', help=SCRIPTS['export'])
@@ -195,6 +207,15 @@ def main(argv=None):
 
     if args.cmd == 'serve':
         return start_bokeh_server.run_serve(args)
+
+    if args.cmd == 'describe-scenario':
+        try:
+            for line in describe_scenario_file(args.scenario):
+                print(line)
+            return 0
+        except ScenarioFormatError as error:
+            print(f"Error describing scenario: {error}", file=sys.stderr, flush=True)
+            return 2
 
     if args.cmd == 'export':
         return export_data.run_export(args)

@@ -1,5 +1,21 @@
 import time
+from dataclasses import dataclass
+
 import duckdb
+
+
+@dataclass(frozen=True)
+class HistogramResult:
+    """Plain histogram data, including whether it represents a bounded sample."""
+
+    edges: object
+    counts: object
+    sampled_rows: int
+    approximate: bool
+
+    @property
+    def bin_count(self) -> int:
+        return len(self.counts)
 
 # Columns to exclude from annotation filtering UI (internal/metadata columns)
 ANNOTATION_EXCLUDED_COLUMNS = {'Contig_id', 'Start', 'End', 'Parent_annotation_id', 'Annotation_id', 'Segments', 'Nucleotide_sequence', 'Protein_sequence', 'S_sites', 'N_sites'}
@@ -7,9 +23,9 @@ ANNOTATION_EXCLUDED_COLUMNS = {'Contig_id', 'Start', 'End', 'Parent_annotation_i
 
 def update_database_metadata(conn):
     """Update Date_of_last_modification and Tool_version_used_for_last_modification."""
-    from importlib.metadata import version
     import subprocess
     from datetime import datetime
+    from importlib.metadata import version
 
     tool_version = version('thebigbam')
     try:
@@ -566,7 +582,7 @@ def list_variables(db_path, detailed=False):
     cols = [r[0] for r in cur.fetchall()]
 
     # Fields we will display (exclude Feature_table_name)
-    display_fields = [c for c in cols if not(c in ['Variable_id', 'Feature_table_name'])]
+    display_fields = [c for c in cols if c not in ['Variable_id', 'Feature_table_name']]
 
     # Query the table for the display fields
     sel = ", ".join(display_fields)
@@ -1061,22 +1077,27 @@ if __name__ == '__main__':
 def resolve_histogram_bins(db_path: str, filtering_metadata: dict,
                            category: str, col_name: str,
                            n_bins: int = 50, log_mode: bool = False,
-                           scale: float | None = None, enable_timing: bool = False) -> tuple | None:
-    """Compute histogram bins in SQL and cache. Returns (edges, counts) numpy arrays."""
+                           scale: float | None = None, enable_timing: bool = False) -> HistogramResult | None:
+    """Compute a bounded histogram while evaluating its source relation once."""
     import numpy as np
     cat_meta = filtering_metadata.get(category, {})
     col_info = cat_meta.get('columns', {}).get(col_name, {})
     if not col_info or col_info.get('type') != 'numeric' or col_info.get('is_bool'):
         return None
 
-    cache_key = ('histogram_bins_log' if log_mode else 'histogram_bins_lin')
-    if cache_key in col_info:
-        return col_info[cache_key]
-
     source = col_info.get('source') or cat_meta.get('source', '')
     if not source:
-        col_info[cache_key] = None
         return None
+    direct_sources = {
+        'Explicit_coverage': 'Coverage',
+        'Explicit_misassembly': 'Misassembly',
+        'Explicit_microdiversity': 'Microdiversity',
+        'Explicit_side_misassembly': 'Side_misassembly',
+        'Explicit_topology': 'Topology',
+        'Explicit_phage_mechanisms': 'Phage_mechanisms',
+        'Explicit_coverage_per_MAG': 'MAG_coverage',
+    }
+    direct_source = direct_sources.get(source)
 
     if scale:
         val_expr = f'("{col_name}" / {scale})'
@@ -1094,49 +1115,60 @@ def resolve_histogram_bins(db_path: str, filtering_metadata: dict,
     t0 = time.perf_counter()
     conn = duckdb.connect(db_path, read_only=True)
     try:
-        row = conn.execute(
-            f'SELECT MIN({val_expr}), MAX({val_expr}), COUNT(*) '
-            f'FROM {source} WHERE {null_filter}'
-        ).fetchone()
-        if not row or row[2] == 0 or row[0] is None or row[1] is None:
-            col_info[cache_key] = None
-            return None
-        mn, mx, total = float(row[0]), float(row[1]), int(row[2])
+        if direct_source and _validate_column(conn, direct_source, col_name):
+            source = direct_source
 
-        if mn == mx:
-            edges = np.array([mn - 0.5, mx + 0.5])
-            counts = np.array([total])
-            result = (edges, counts)
-            col_info[cache_key] = result
-            return result
-
-        actual_bins = min(n_bins, total)
-        bin_width = (mx - mn) / actual_bins
-        bucket_expr = f'LEAST(CAST(FLOOR(({val_expr} - {mn}) / {bin_width}) AS INTEGER), {actual_bins - 1})'
-        bucket_rows = conn.execute(
-            f'SELECT {bucket_expr} AS bucket, COUNT(*) AS cnt '
-            f'FROM {source} WHERE {null_filter} '
-            f'GROUP BY bucket ORDER BY bucket'
+        plan = conn.execute(f'EXPLAIN SELECT "{col_name}" FROM {source}').fetchall()
+        import re
+        estimates = [int(v.replace(',', '')) for row in plan for v in re.findall(r'~([\d,]+) rows', str(row))]
+        estimated_rows = max(estimates, default=0)
+        approximate = estimated_rows > 250_000
+        sample_clause = ''
+        if approximate:
+            # Oversample blocks before the hard row cap. This avoids empty
+            # SYSTEM samples near the threshold while retaining bounded data.
+            sample_percent = min(100.0, max(0.01, 250_000 / estimated_rows * 100))
+            sample_clause = (
+                f' USING SAMPLE system({sample_percent:.8f} PERCENT) REPEATABLE(42) LIMIT 100000'
+            )
+        rows = conn.execute(
+            f'''WITH vals AS MATERIALIZED (
+                    SELECT {val_expr} AS value FROM {source} WHERE {null_filter}{sample_clause}
+                ), stats AS (
+                    SELECT MIN(value) mn, MAX(value) mx, COUNT(*) total FROM vals
+                ), buckets AS (
+                    SELECT CASE WHEN s.mn = s.mx THEN 0 ELSE LEAST(
+                        CAST(FLOOR((v.value - s.mn) / ((s.mx - s.mn) / LEAST({int(n_bins)}, s.total))) AS INTEGER),
+                        CAST(LEAST({int(n_bins)}, s.total) - 1 AS INTEGER)
+                    ) END bucket, s.mn, s.mx, s.total
+                    FROM vals v CROSS JOIN stats s
+                )
+                SELECT bucket, COUNT(*), MIN(mn), MIN(mx), MIN(total)
+                FROM buckets GROUP BY bucket ORDER BY bucket'''
         ).fetchall()
-
-        edges = np.linspace(mn, mx, actual_bins + 1)
+        if not rows or not rows[0][4]:
+            return None
+        mn, mx, total = float(rows[0][2]), float(rows[0][3]), int(rows[0][4])
+        actual_bins = 1 if mn == mx else min(n_bins, total)
+        edges = np.array([mn - 0.5, mx + 0.5]) if mn == mx else np.linspace(mn, mx, actual_bins + 1)
         counts = np.zeros(actual_bins, dtype=int)
-        for bucket_num, cnt in bucket_rows:
-            idx = int(bucket_num)
-            if 0 <= idx < actual_bins:
-                counts[idx] = cnt
-
-        result = (edges, counts)
+        for bucket_num, count, *_ in rows:
+            if 0 <= int(bucket_num) < actual_bins:
+                counts[int(bucket_num)] = int(count)
+        result = HistogramResult(edges, counts, total, approximate)
     except duckdb.Error as e:
         print(f"[resolve_histogram_bins] {e}", flush=True)
         result = None
     finally:
         conn.close()
 
-    col_info[cache_key] = result
     if enable_timing:
-        n_bins = len(result) if result else 0
-        print(f"[timing] resolve_histogram_bins({category}.{col_name}): {time.perf_counter() - t0:.3f}s ({n_bins} bins)", flush=True)
+        mode = 'log' if log_mode else 'linear'
+        strategy = 'sampled' if result and result.approximate else 'exact'
+        bins = result.bin_count if result else 0
+        sampled = result.sampled_rows if result else 0
+        print(f"[timing] resolve_histogram_bins({category}.{col_name}, {mode}): "
+              f"{time.perf_counter() - t0:.3f}s ({strategy}, {bins} bins, {sampled} rows)", flush=True)
     return result
 
 

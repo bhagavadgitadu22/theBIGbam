@@ -7,6 +7,7 @@ BAMs are generated once and cached in the tests/ directory.
 
 import os
 import subprocess
+
 import pytest
 
 # Test data directory

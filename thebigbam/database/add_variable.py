@@ -1,7 +1,8 @@
-import duckdb
 import csv
 import re
 import traceback
+
+import duckdb
 
 from thebigbam.database.database_getters import update_database_metadata
 
@@ -239,7 +240,7 @@ def run_add_variable(args):
         conn.commit()
         print(f"Variable '{var_name}' added and {len(rows_to_insert)} records inserted into '{feature_table}'", flush=True)
 
-    except Exception as e:
+    except Exception:
         traceback.print_exc()
         return 1
 
@@ -288,7 +289,7 @@ def run_remove_variable(args):
         conn.commit()
         print(f"Variable '{var_name}' removed from the database.", flush=True)
 
-    except Exception as e:
+    except Exception:
         traceback.print_exc()
         return 1
 

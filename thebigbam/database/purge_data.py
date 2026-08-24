@@ -12,7 +12,6 @@ import duckdb
 
 from thebigbam.database.database_getters import _table_exists, update_database_metadata
 
-
 COMPRESSION_METADATA_KEYS = [
     "Min_aligned_fraction",
     "Min_coverage_depth",
@@ -94,7 +93,7 @@ def purge_mapping_data(input_db, output_db):
 
     orig_size = os.path.getsize(input_db) / (1024 * 1024)
     new_size = os.path.getsize(output_db) / (1024 * 1024)
-    print(f"\nPurged mapping data:", flush=True)
+    print("\nPurged mapping data:", flush=True)
     for table, count in deleted.items():
         if count > 0:
             print(f"  {table}: {count} rows removed", flush=True)

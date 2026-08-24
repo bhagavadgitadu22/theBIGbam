@@ -42,6 +42,7 @@ class GenomeControls:
 
 
 def _build_collapsible(title, children, toggle_stylesheet, make_toggle_callback, *, margin=(0, 0, 5, 0)):
+    benchmark_slug = title.lower().replace(" ", "-")
     toggle = Button(
         label="▶",
         width=20,
@@ -50,6 +51,7 @@ def _build_collapsible(title, children, toggle_stylesheet, make_toggle_callback,
         align="center",
         margin=0,
         stylesheets=[toggle_stylesheet],
+        css_classes=[f"benchmark-toggle-{benchmark_slug}"],
     )
     toggle.styles = {"padding": "0px", "line-height": "20px"}
     header = row(toggle, Div(text=title, align="center"), sizing_mode="stretch_width", align="center")
@@ -160,9 +162,11 @@ def build_genome_controls(
 
     # Create position range inputs
     from_position_input = TextInput(
+        name="benchmark-from-position",
         value="1", placeholder="Start position", sizing_mode="stretch_width", margin=(0, 0, 0, 0)
     )
     to_position_input = TextInput(
+        name="benchmark-to-position",
         value="", placeholder="End position", sizing_mode="stretch_width", margin=(0, 0, 0, 0)
     )
 
@@ -270,6 +274,7 @@ def build_genome_controls(
         apply_annotation_rules_cbg = None
         if widgets["has_mags"] and color_qualifier_options:
             apply_annotation_rules_cbg = CheckboxGroup(
+                name="benchmark-apply-annotation-rules-to-mag",
                 labels=["Apply genomic annotations coloring rules"],
                 active=[],
                 margin=(4, 0, 4, 0),

@@ -1,6 +1,58 @@
 from types import SimpleNamespace
 
-from thebigbam.plotting.application.subject import SubjectBindings, SubjectController
+from thebigbam.plotting.application.subject import (
+    SubjectBindings,
+    SubjectController,
+    translate_mag_window_to_contig,
+)
+
+
+def test_translate_mag_window_to_contig_preserves_and_shifts_nearby_window():
+    assert translate_mag_window_to_contig(111, 120, offset=100, contig_length=50) == (11, 20)
+    assert translate_mag_window_to_contig(95, 114, offset=100, contig_length=50) == (1, 20)
+    assert translate_mag_window_to_contig(141, 160, offset=100, contig_length=50) == (31, 50)
+    assert translate_mag_window_to_contig(90, 160, offset=100, contig_length=50) == (1, 50)
+    assert translate_mag_window_to_contig(1, 10, offset=100, contig_length=50) == (1, 50)
+
+
+def test_mag_to_contig_scope_translates_nearby_selected_contig_window():
+    start = SimpleNamespace(value="95")
+    end = SimpleNamespace(value="114")
+    category = SimpleNamespace(options=[], value="MAG coverage")
+    widgets = {
+        "has_mags": True,
+        "view_radio": SimpleNamespace(active=1),
+        "mag_select": SimpleNamespace(value="m1"),
+        "contig_select": SimpleNamespace(value="c2"),
+        "mag_to_contigs": {"m1": ["c1", "c2"]},
+        "mag_to_contig_offsets": {"m1": {"c1": 0, "c2": 100}},
+        "contig_lengths": {"c1": 100, "c2": 50},
+    }
+    controller = SubjectController(
+        SubjectBindings(
+            widgets=widgets,
+            interaction_lock={"locked": False},
+            compute_contigs=lambda search: [],
+            compute_samples=lambda search: [],
+            compute_mags=lambda search: [],
+            push_completions=lambda widget, values: None,
+            refresh_contigs=lambda: None,
+            refresh_samples=lambda: None,
+            refresh_mags=lambda: None,
+            update_titles=lambda: None,
+            from_position=start,
+            to_position=end,
+            sample_order_category=category,
+            sample_contig_categories=["Coverage"],
+            sample_mag_categories=["MAG coverage"],
+            sample_current_categories=["MAG coverage"],
+        )
+    )
+
+    controller._subject_scope_changed_locked("active", 0, 1)
+
+    assert (start.value, end.value) == ("1", "20")
+    assert category.value == "Coverage"
 
 
 def test_subject_controller_projects_selected_contig_into_mag_coordinates():
@@ -84,6 +136,39 @@ def test_invalid_filtered_sample_is_rejected_without_clearing_mag():
     assert sample.options == ["valid"]
     assert widgets["mag_select"].value == "m1"
     assert refreshed_mags == []
+
+
+def test_valid_sample_selection_reconciles_stale_autocomplete_options():
+    sample = SimpleNamespace(value="GL34_UP", options=["GL34_UP", "stale"])
+
+    def push(widget, values):
+        widget.options = values
+
+    controller = SubjectController(
+        SubjectBindings(
+            widgets={"has_mags": False, "sample_select": sample},
+            interaction_lock={"locked": False},
+            compute_contigs=lambda search: [],
+            compute_samples=lambda search: ["GL34_UP"],
+            compute_mags=lambda search: [],
+            push_completions=push,
+            refresh_contigs=lambda: None,
+            refresh_samples=lambda: None,
+            refresh_mags=lambda: None,
+            update_titles=lambda: None,
+            from_position=SimpleNamespace(value=""),
+            to_position=SimpleNamespace(value=""),
+            sample_order_category=SimpleNamespace(options=[], value=""),
+            sample_contig_categories=[],
+            sample_mag_categories=[],
+            sample_current_categories=[],
+        )
+    )
+
+    controller.sample_changed(SimpleNamespace(new="GL34_UP"))
+
+    assert sample.options == ["GL34_UP"]
+    assert sample.value == "GL34_UP"
 
 
 def test_subject_scope_maps_equivalent_sample_order_categories_without_resetting_to_sample():

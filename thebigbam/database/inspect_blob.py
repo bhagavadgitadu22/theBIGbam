@@ -8,19 +8,24 @@ Output format: contig\tsample\tfeature\tposition_start\tposition_end\tvalue
 Consecutive positions with the same value are collapsed into one row (RLE).
 """
 
-import sys
 import io as _io
+import sys
 
-import numpy as np
 import duckdb
+import numpy as np
 
 from thebigbam.database.blob_decoder import (
+    decode_raw_chunks,
+    decode_raw_sparse_chunks,
     decode_zoom_standalone,
-    decode_raw_chunks, decode_raw_sparse_chunks,
-    get_blob_scale, get_chunk_size, get_zoom_bin_sizes,
-    get_gc_window_size, is_sparse_zoom_blob,
-    feature_name_to_id, is_contig_blob_feature,
+    feature_name_to_id,
+    get_blob_scale,
+    get_chunk_size,
+    get_gc_window_size,
+    get_zoom_bin_sizes,
     init_scales,
+    is_contig_blob_feature,
+    is_sparse_zoom_blob,
 )
 
 

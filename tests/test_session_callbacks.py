@@ -62,3 +62,37 @@ def test_plot_apply_holds_interaction_scope_until_controller_finishes():
     scheduled[0]()
 
     assert events == [("begin", "plot"), ("apply", None), ("end", None)]
+
+
+def test_plot_apply_records_semantic_action():
+    scheduled = []
+    events = []
+    recorder = SimpleNamespace(record_action=lambda action, settings: events.append(("record", action, settings)))
+    callbacks = SessionCallbacks(scheduled.append)
+    callbacks.attach_placeholder(SimpleNamespace(loading=False))
+    callbacks.attach_apply(SimpleNamespace(apply=lambda: events.append(("apply",))))
+    callbacks.attach_scenario(recorder, lambda: {"selection": {"sample": "s1"}})
+
+    callbacks.apply_clicked()
+    scheduled[0]()
+
+    assert events == [
+        ("record", "apply_plot", {"selection": {"sample": "s1"}}),
+        ("apply",),
+    ]
+
+
+def test_failed_plot_apply_is_recorded_and_reraised():
+    scheduled = []
+    recorded = []
+    recorder = SimpleNamespace(record_action=lambda action, settings: recorded.append((action, settings)))
+    callbacks = SessionCallbacks(scheduled.append)
+    callbacks.attach_placeholder(SimpleNamespace(loading=False))
+    callbacks.attach_apply(SimpleNamespace(apply=lambda: (_ for _ in ()).throw(RuntimeError("plot failed"))))
+    callbacks.attach_scenario(recorder, dict)
+
+    callbacks.apply_clicked()
+    with pytest.raises(RuntimeError, match="plot failed"):
+        scheduled[0]()
+
+    assert recorded == [("apply_plot", {})]

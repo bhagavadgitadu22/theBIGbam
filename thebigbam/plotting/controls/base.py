@@ -14,15 +14,18 @@ def build_controls(preloaded: PreloadedPlotData):
     contigs = preloaded.contigs
     samples = preloaded.samples
     mag_select = SearchableSelect(
+        name="benchmark-mag-select",
         value=mags[0] if len(mags) == 1 else "",
         options=list(mags),
         placeholder="Type to search MAGs...",
         server_search=True,
+        css_classes=["benchmark-mag-select"],
         sizing_mode="stretch_width",
         margin=0,
         visible=preloaded.has_mags,
     )
     view_radio = RadioButtonGroup(
+        name="benchmark-subject-view",
         labels=["MAG VIEW", "CONTIG VIEW"],
         active=1,
         visible=preloaded.has_mags,
@@ -30,18 +33,22 @@ def build_controls(preloaded: PreloadedPlotData):
         margin=(0, 0, 10, 0),
     )
     contig_select = SearchableSelect(
+        name="benchmark-contig-select",
         value=contigs[0] if len(contigs) == 1 else "",
         options=list(contigs),
         placeholder="Type to search contigs...",
         server_search=True,
+        css_classes=["benchmark-contig-select"],
         sizing_mode="stretch_width",
         margin=0,
     )
     sample_select = SearchableSelect(
+        name="benchmark-sample-select",
         value=samples[0] if len(samples) == 1 else "",
         options=list(samples),
         placeholder="Type to search samples...",
         server_search=True,
+        css_classes=["benchmark-sample-select"],
         sizing_mode="stretch_width",
         margin=0,
     )
@@ -54,12 +61,12 @@ def build_controls(preloaded: PreloadedPlotData):
         preloaded.module_variables,
         preloaded.module_helps,
     ):
-        module_widgets_one.append(CheckboxGroup(labels=[module], active=[]))
+        module_widgets_one.append(CheckboxGroup(name=f"benchmark-module-{module}", labels=[module], active=[]))
         variables_widgets_one.append(
-            CheckboxButtonGroup(labels=list(variables), active=[], sizing_mode="stretch_width", orientation="vertical")
+            CheckboxButtonGroup(name=f"benchmark-one-{module}", labels=list(variables), active=[], sizing_mode="stretch_width", orientation="vertical")
         )
         variables_widgets_all.append(
-            CheckboxButtonGroup(labels=list(variables), active=[], sizing_mode="stretch_width", orientation="vertical")
+            CheckboxButtonGroup(name=f"benchmark-all-{module}", labels=list(variables), active=[], sizing_mode="stretch_width", orientation="vertical")
         )
         helps_widgets.append(Tooltip(content=help_text, position="right") if help_text else None)
     return {

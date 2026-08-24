@@ -38,12 +38,42 @@ class FilterQueryBuilder:
 
     @staticmethod
     def _combine(parts, connectors):
-        sql, parameters = parts[0]
-        for connector, (right_sql, right_parameters) in zip(connectors, parts[1:]):
-            operation = "UNION" if connector == "OR" else "INTERSECT"
-            sql = f"({sql}) {operation} ({right_sql})"
+        sql, parameters, *initial_scope = parts[0]
+        scope = initial_scope[0] if initial_scope else ("wildcard" if "NULL AS Sample_id" in sql else "sample")
+        for connector, right_part in zip(connectors, parts[1:]):
+            right_sql, right_parameters, *declared_scope = right_part
+            right_scope = declared_scope[0] if declared_scope else (
+                "wildcard" if "NULL AS Sample_id" in right_sql else "sample"
+            )
+            if connector == "OR":
+                sql = f"({sql}) UNION ({right_sql})"
+                scope = scope if scope == right_scope else "mixed"
+            else:
+                # A null-safe pair join has the same set semantics as
+                # INTERSECT, while allowing DuckDB to push the selective side
+                # of mixed annotation/MAG filters into the other relation.
+                if scope == "wildcard" and right_scope != "mixed":
+                    sample_projection = "_right.Sample_id"
+                    sample_match = ""
+                    scope = right_scope
+                elif right_scope == "wildcard" and scope != "mixed":
+                    sample_projection = "_left.Sample_id"
+                    sample_match = ""
+                else:
+                    sample_projection = "COALESCE(_left.Sample_id, _right.Sample_id)"
+                    sample_match = (
+                        " AND (_left.Sample_id IS NULL OR _right.Sample_id IS NULL OR "
+                        "_left.Sample_id = _right.Sample_id)"
+                    )
+                    scope = "mixed" if "mixed" in {scope, right_scope} else "sample"
+                sql = (
+                    f"SELECT DISTINCT _left.Contig_id, {sample_projection} AS Sample_id "
+                    f"FROM ({sql}) _left JOIN ({right_sql}) _right ON "
+                    "_left.Contig_id IS NOT DISTINCT FROM _right.Contig_id"
+                    f"{sample_match}"
+                )
             parameters = (*parameters, *right_parameters)
-        return sql, parameters
+        return sql, parameters, scope
 
     @staticmethod
     def _qualifier_clause(alias: str, operator: str) -> str:
@@ -86,16 +116,13 @@ class FilterQueryBuilder:
         column_source = info.get("source")
         qualifier_key = info.get("qualifier_key")
         parameters = (value,)
-        sample_joins = (
-            "LEFT JOIN Coverage p ON c.Contig_id = p.Contig_id LEFT JOIN Sample s ON p.Sample_id = s.Sample_id "
-            if self.has_samples
-            else ""
-        )
-        sample_id = "s.Sample_id" if self.has_samples else "NULL"
+        # Contig-scoped predicates use NULL as an internal wildcard sample.
+        # AND composition can then bind it directly to a sample-scoped metric
+        # without first multiplying the contig across all Coverage rows.
+        sample_id = "NULL"
         if column_source == "Contig_annotation":
             sql = (
-                f"SELECT DISTINCT c.Contig_id, {sample_id} FROM Contig_annotation ca "
-                f"JOIN Contig c ON ca.Contig_id = c.Contig_id {sample_joins}"
+                f"SELECT DISTINCT ca.Contig_id, {sample_id} AS Sample_id FROM Contig_annotation ca "
                 f'WHERE ca."{column}" {operator} ?'
             )
         elif column_source in {"Annotation_qualifier", "Contig_qualifier"}:
@@ -108,13 +135,14 @@ class FilterQueryBuilder:
                 else "FROM Contig_qualifier cq JOIN Contig c ON cq.Contig_id = c.Contig_id "
             )
             sql = (
-                f"SELECT DISTINCT c.Contig_id, {sample_id} {base}{sample_joins}"
+                f"SELECT DISTINCT c.Contig_id, {sample_id} AS Sample_id {base}"
                 f'WHERE {alias}."Key" = ? AND {self._qualifier_clause(alias, operator)}'
             )
             parameters = (qualifier_key, value)
         elif predicate.category == "Contig":
             sql = (
-                f'SELECT DISTINCT c.Contig_id, {sample_id} FROM Contig c {sample_joins}WHERE c."{column}" {operator} ?'
+                f'SELECT DISTINCT c.Contig_id, {sample_id} AS Sample_id FROM Contig c '
+                f'WHERE c."{column}" {operator} ?'
             )
         elif predicate.category == "Sample":
             sql = (
@@ -124,15 +152,10 @@ class FilterQueryBuilder:
                 f'WHERE s."{column}" {operator} ?'
             )
         elif predicate.category == "MAG":
-            joins = (
-                "LEFT JOIN Coverage p ON c.Contig_id = p.Contig_id LEFT JOIN Sample s ON p.Sample_id = s.Sample_id "
-                if self.has_samples
-                else ""
-            )
             sql = (
-                f"SELECT DISTINCT c.Contig_id, {sample_id} FROM MAG mg "
+                f"SELECT DISTINCT c.Contig_id, {sample_id} AS Sample_id FROM MAG mg "
                 "JOIN MAG_contigs_association mca ON mca.MAG_id = mg.MAG_id "
-                f"JOIN Contig c ON c.Contig_id = mca.Contig_id {joins}"
+                "JOIN Contig c ON c.Contig_id = mca.Contig_id "
                 f'WHERE mg."{column}" {operator} ?'
             )
         elif predicate.category in MAG_CATEGORIES:
@@ -179,5 +202,16 @@ class FilterQueryBuilder:
             parts.append(compiled)
         if not parts:
             return None
-        sql, parameters = self._combine(parts, connectors)
+        sql, parameters, scope = self._combine(parts, connectors)
+        if self.has_samples and scope != "sample":
+            # Resolve any contig-scoped wildcard only after all AND/OR
+            # composition. Sample-specific predicates have already replaced
+            # it through COALESCE, so mixed annotation/MAG filters avoid the
+            # all-samples intermediate expansion.
+            sql = (
+                "SELECT DISTINCT _result.Contig_id, "
+                "COALESCE(_result.Sample_id, _coverage.Sample_id) AS Sample_id "
+                f"FROM ({sql}) _result LEFT JOIN Coverage _coverage ON "
+                "_result.Sample_id IS NULL AND _coverage.Contig_id = _result.Contig_id"
+            )
         return CompiledFilter(sql, tuple(parameters))

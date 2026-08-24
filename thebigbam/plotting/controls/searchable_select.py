@@ -167,7 +167,6 @@ class SearchableSelect(JSComponent):
         });
 
         model.on('options', () => {
-            if (model.min_search_chars > 0) return;
             const newOptions = model.options;  // fresh array of strings from Python
             allOptions = newOptions.map(o => ({value: o, text: o}));
 
@@ -193,7 +192,7 @@ class SearchableSelect(JSComponent):
             // Resolve any in-flight server-side search: tells Tom Select the
             // load() for the current query has finished, so it renders these
             // results (and clears its loading indicator).
-            if (pendingLoadCallback) {
+            if (model.min_search_chars <= 0 && pendingLoadCallback) {
                 const cb = pendingLoadCallback;
                 pendingLoadCallback = null;
                 cb(allOptions);

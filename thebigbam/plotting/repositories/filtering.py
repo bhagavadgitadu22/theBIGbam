@@ -16,7 +16,7 @@ class FilteringRepository:
 
     def _values(self, sql, parameters=()):
         self.query_count += 1
-        return tuple(row[0] for row in self.connection.cursor().execute(sql, parameters).fetchall())
+        return tuple(row[0] for row in self.connection.execute(sql, parameters).fetchall())
 
     @staticmethod
     def _search_clause(alias: str, column: str, search_term: str) -> tuple[str, list[str]]:
@@ -156,7 +156,7 @@ class FilteringRepository:
     def filtered_mag_counts(self, sql: str, parameters: list[Any], mag_name: str) -> tuple[int, int]:
         self.query_count += 1
         row = (
-            self.connection.cursor()
+            self.connection
             .execute(
                 f"WITH _f AS ({sql}) SELECT COUNT(DISTINCT _f.Contig_id),"
                 " COUNT(DISTINCT _f.Sample_id) FROM _f"
@@ -181,7 +181,7 @@ class FilteringRepository:
     def count_contigs_for_sample(self, sample_id: int) -> int:
         self.query_count += 1
         return int(
-            self.connection.cursor()
+            self.connection
             .execute("SELECT COUNT(DISTINCT Contig_id) FROM Coverage WHERE Sample_id = ?", [sample_id])
             .fetchone()[0]
         )
@@ -189,21 +189,30 @@ class FilteringRepository:
     def count_samples_for_contig(self, contig_id: int) -> int:
         self.query_count += 1
         return int(
-            self.connection.cursor()
+            self.connection
             .execute("SELECT COUNT(DISTINCT Sample_id) FROM Coverage WHERE Contig_id = ?", [contig_id])
             .fetchone()[0]
         )
 
     def evaluate(self, compiled: CompiledFilter, *, has_mags: bool) -> FilterResult:
         parameters = list(compiled.parameters)
+        materialized = compiled
         try:
             self.query_count += 1
+            # The same applied relation feeds counts and every availability
+            # dropdown. Materialize it once per filter revision instead of
+            # re-running a potentially expensive annotation/MAG expression
+            # for each consumer.
+            self.connection.execute(
+                f"CREATE OR REPLACE TEMP TABLE _thebigbam_filter_result AS {compiled.sql}",
+                parameters,
+            )
+            materialized = CompiledFilter("SELECT Contig_id, Sample_id FROM _thebigbam_filter_result", ())
             pair_count, contig_count, sample_count = (
-                self.connection.cursor()
+                self.connection
                 .execute(
-                    f"WITH _f AS ({compiled.sql}) "
-                    "SELECT COUNT(*), COUNT(DISTINCT Contig_id), COUNT(DISTINCT Sample_id) FROM _f",
-                    parameters,
+                    "SELECT COUNT(*), COUNT(DISTINCT Contig_id), COUNT(DISTINCT Sample_id) "
+                    "FROM _thebigbam_filter_result",
                 )
                 .fetchone()
             )
@@ -211,14 +220,13 @@ class FilteringRepository:
             if has_mags:
                 self.query_count += 1
                 mag_pair_count = (
-                    self.connection.cursor()
+                    self.connection
                     .execute(
-                        f"WITH _f AS ({compiled.sql}) SELECT COUNT(*) FROM ("
+                        "WITH _f AS (SELECT * FROM _thebigbam_filter_result) SELECT COUNT(*) FROM ("
                         "SELECT DISTINCT mg.MAG_name, _f.Sample_id FROM _f "
                         "JOIN MAG_contigs_association mca ON mca.Contig_id = _f.Contig_id "
                         "JOIN MAG mg ON mg.MAG_id = mca.MAG_id "
                         "WHERE _f.Sample_id IS NOT NULL) counted",
-                        parameters,
                     )
                     .fetchone()[0]
                 )
@@ -226,7 +234,7 @@ class FilteringRepository:
             pair_count = contig_count = sample_count = 0
             mag_pair_count = 0 if has_mags else None
         return FilterResult(
-            compiled,
+            materialized,
             int(pair_count),
             int(contig_count),
             int(sample_count),

@@ -55,6 +55,40 @@ def test_availability_controller_uses_service_for_one_sample_subject_constraints
     assert controller.sort_samples_for_mag(["s1"]) == ["s1"]
 
 
+def test_selected_sample_does_not_collapse_available_sample_count_to_one():
+    widgets = {
+        "has_mags": False,
+        "view_radio": SimpleNamespace(active=1),
+        "contig_select": _select(""),
+        "sample_select": _select("s1", ("s1", "s2")),
+        "mag_select": _select(""),
+        "sample_name_to_id": {"s1": 1, "s2": 2},
+        "contig_name_to_id": {},
+    }
+    sample_title = SimpleNamespace(text="")
+    controller = AvailabilityController(
+        AvailabilityBindings(
+            availability_service=AvailabilityService(),
+            filtering_pairs=lambda: None,
+            original_contigs=["c1", "c2"],
+            original_samples=["s1", "s2"],
+            sample_scope=SimpleNamespace(active=0),
+            widgets=widgets,
+            sort_sample_select=_select(),
+            update_completions=lambda widget, values: setattr(widget, "options", list(values)),
+            total_coverage_count=2,
+            filtering_title=SimpleNamespace(text=""),
+            contig_title=SimpleNamespace(text=""),
+            sample_title=sample_title,
+            mag_title=SimpleNamespace(text=""),
+        )
+    )
+
+    controller.update_titles()
+
+    assert "2 available" in sample_title.text
+
+
 def test_mag_capable_database_uses_contig_constraints_in_contig_view():
     widgets = {
         "has_mags": True,

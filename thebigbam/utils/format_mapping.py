@@ -1,10 +1,8 @@
-from pathlib import Path
 import shutil
 import subprocess
-import sys
-import tempfile
+from pathlib import Path
 
-from thebigbam.utils.read_mapping import _resolve_assembly, _inject_bam_headers
+from thebigbam.utils.read_mapping import _inject_bam_headers, _resolve_assembly
 
 
 def _has_md_tags(input_path: str, threads: int) -> bool:
