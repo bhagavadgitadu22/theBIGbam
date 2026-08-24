@@ -3,6 +3,7 @@ from types import SimpleNamespace
 from bokeh.models import InlineStyleSheet
 
 from thebigbam.plotting.controls.filter_rows import FilterRowFactory
+from thebigbam.plotting.controls.searchable_select import SearchableSelect
 
 
 class Visualizations:
@@ -38,3 +39,42 @@ def test_filter_row_factory_builds_row_from_cached_column_options():
     assert result["comparison_select"].value == ">"
     assert result["input_ref"]["widget"].value is None
     assert result["minus_btn"].stylesheets == [":host { color: red; }"]
+
+
+def test_category_change_updates_shared_metric_immediately_and_defers_one_refresh(monkeypatch):
+    callbacks = []
+    monkeypatch.setattr(
+        "thebigbam.plotting.controls.filter_rows.curdoc",
+        lambda: SimpleNamespace(add_next_tick_callback=callbacks.append),
+    )
+    metadata = {
+        "Coverage": {"columns": {"Status": {"type": "numeric", "is_bool": False}}},
+        "MAG coverage": {"columns": {"Status": {"type": "text", "is_bool": False}}},
+    }
+    refreshes = []
+    factory = FilterRowFactory(
+        metadata_service=SimpleNamespace(distinct_values=lambda category, column: ["high", "low"]),
+        filtering_metadata=metadata,
+        columns={"Coverage": [("Status", "Status")], "MAG coverage": [("Status", "Status")]},
+        raw_columns={"Coverage": ["Status"], "MAG coverage": ["Status"]},
+        visualizations=Visualizations(),
+        refresh=lambda: refreshes.append(True),
+        stylesheet=InlineStyleSheet(css=""),
+        enable_timing=False,
+    )
+    factory.attach_controller(SimpleNamespace(count_rows=lambda: 1, sections=[]))
+    row = factory.create_row({}, initial_category="Coverage", initial_column="Status")
+
+    row["category_select"].value = "MAG coverage"
+
+    assert row["subcategory_select"].options == [("Status", "Status")]
+    assert row["comparison_select"].options == ["=", "!=", "has", "has not"]
+    assert isinstance(row["input_ref"]["widget"], SearchableSelect)
+    assert row["input_ref"]["widget"].placeholder == "Loading MAG coverage..."
+    assert refreshes == []
+
+    while callbacks:
+        callbacks.pop(0)()
+
+    assert refreshes == [True]
+    assert row["input_ref"]["widget"].options == ["high", "low"]

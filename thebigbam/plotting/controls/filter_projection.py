@@ -65,8 +65,24 @@ class FilterWidgetProjection:
         self.inter_section_selects = inter_section_selects
         self.enable_timing = enable_timing
         self.set_operation = set_operation
+        self._applied_expression = FilterExpression(())
         self._valid = False
         self._result: dict[str, Any] | None = None
+
+    def draft_expression(self) -> FilterExpression:
+        return expression_from_widgets(self.sections, self.inter_section_selects)
+
+    def has_pending_changes(self) -> bool:
+        return self.draft_expression() != self._applied_expression
+
+    def apply(self) -> bool:
+        """Commit the current widgets as the expression used by consumers."""
+        expression = self.draft_expression()
+        changed = expression != self._applied_expression
+        if changed:
+            self._applied_expression = expression
+            self.invalidate()
+        return changed
 
     def invalidate(self) -> None:
         self._valid = False
@@ -77,7 +93,7 @@ class FilterWidgetProjection:
             return self._result
         self.set_operation("filtering_pairs")
         try:
-            result = self.service.evaluate(expression_from_widgets(self.sections, self.inter_section_selects))
+            result = self.service.evaluate(self._applied_expression)
             if result is None:
                 self._result = None
             else:

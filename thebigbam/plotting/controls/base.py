@@ -23,7 +23,7 @@ def build_controls(preloaded: PreloadedPlotData):
         visible=preloaded.has_mags,
     )
     view_radio = RadioButtonGroup(
-        labels=["MAG view", "Contig view"],
+        labels=["MAG VIEW", "CONTIG VIEW"],
         active=1,
         visible=preloaded.has_mags,
         sizing_mode="stretch_width",

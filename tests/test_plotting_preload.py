@@ -145,6 +145,7 @@ def test_core_control_factory_uses_only_preloaded_data(tmp_path):
 
     assert widgets["contig_select"].options == ["c1", "c2"]
     assert widgets["sample_select"].options == ["s1", "s2"]
+    assert widgets["view_radio"].labels == ["MAG VIEW", "CONTIG VIEW"]
     assert len(widgets["variables_widgets_one"]) == 1
     assert ".execute(" not in Path("thebigbam/plotting/controls/base.py").read_text(encoding="utf-8")
 

@@ -38,3 +38,15 @@ def test_visible_window_clips_segments_boundaries_and_dots_before_rendering():
 
 def test_empty_members_return_no_plot():
     assert MagTrackRenderer().render(()) is None
+
+
+def test_mag_track_double_click_copies_contig_name():
+    plot = MagTrackRenderer().render(_members(2), 40, Range1d(0, 2_000))
+
+    callbacks = plot.js_event_callbacks["doubletap"]
+
+    assert len(callbacks) == 1
+    assert "navigator.clipboard.writeText(name)" in callbacks[0].code
+    assert "tip.textContent = 'Copied'" in callbacks[0].code
+    hover = next(tool for tool in plot.tools if tool.__class__.__name__ == "HoverTool")
+    assert ("Copy", "Double-click this segment") in hover.tooltips

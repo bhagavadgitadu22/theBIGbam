@@ -48,6 +48,7 @@ class SettingsSaveControls:
         self.button = Button(
             label="SAVE SETTINGS",
             align="center",
+            button_type="primary",
             stylesheets=[stylesheet],
             css_classes=["apply-btn", "save-settings-btn"],
             margin=(5, 0, 0, 5),

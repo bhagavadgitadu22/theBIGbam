@@ -45,3 +45,5 @@ def test_filter_section_converts_bokeh_stylesheets_for_panel_widgets():
 
     assert controller._global_add.stylesheets == [stylesheet.css]
     assert controller.sections[0]["add_and_btn"].stylesheets == [stylesheet.css]
+    assert controller._global_add.button_type == "success"
+    assert controller.sections[0]["add_and_btn"].button_type == "success"

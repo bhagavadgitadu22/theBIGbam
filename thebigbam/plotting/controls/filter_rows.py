@@ -176,6 +176,20 @@ class FilterRowFactory:
 
         # Store reference to current input widget (for later retrieval)
         current_input_ref = {"widget": initial_input, "is_panel": initial_is_panel}
+        refresh_state = {"pending": False}
+        input_update_state = {"active": False}
+
+        def schedule_refresh():
+            """Let the browser render control changes before expensive filtering."""
+            if refresh_state["pending"]:
+                return
+            refresh_state["pending"] = True
+
+            def _run_refresh():
+                refresh_state["pending"] = False
+                self.refresh()
+
+            curdoc().add_next_tick_callback(_run_refresh)
 
         def update_input_widget(col_name):
             """Update the input widget based on column type.
@@ -190,14 +204,18 @@ class FilterRowFactory:
             is_text = col_info.get("type") == "text"
 
             # --- synchronous: update comparison + input widget (no DB) ---
-            if is_text:
-                comparison_select.options = ["=", "!=", "has", "has not"]
-                if comparison_select.value not in comparison_select.options:
-                    comparison_select.value = "="
-            else:
-                comparison_select.options = ["=", ">", "<", "!="]
-                if comparison_select.value not in comparison_select.options:
-                    comparison_select.value = "="
+            input_update_state["active"] = True
+            try:
+                if is_text:
+                    comparison_select.options = ["=", "!=", "has", "has not"]
+                    if comparison_select.value not in comparison_select.options:
+                        comparison_select.value = "="
+                else:
+                    comparison_select.options = ["=", ">", "<", "!="]
+                    if comparison_select.value not in comparison_select.options:
+                        comparison_select.value = "="
+            finally:
+                input_update_state["active"] = False
 
             if is_text:
                 current_op = comparison_select.value
@@ -208,7 +226,9 @@ class FilterRowFactory:
                     current_input_ref["is_panel"] = False
                     new_input.on_change("value", lambda attr, old, new: self.refresh())
                 else:
-                    placeholder_input = SearchableSelect(value="", options=[], placeholder="Loading...", width=90)
+                    placeholder_input = SearchableSelect(
+                        value="", options=[], placeholder=f"Loading {category}...", width=90
+                    )
                     input_container.objects = [placeholder_input]
                     current_input_ref["widget"] = placeholder_input
                     current_input_ref["is_panel"] = True
@@ -252,13 +272,19 @@ class FilterRowFactory:
                 row_data["treemap_pane"] = None
                 row_data["bridge_input"] = None
 
-            self.refresh()
+            schedule_refresh()
 
             # --- deferred: DB queries for distinct values + inset rebuild ---
             row_data["loading_gen"] += 1
             gen = row_data["loading_gen"]
 
             def _deferred_update():
+                if (
+                    row_data["loading_gen"] != gen
+                    or category_select.value != category
+                    or subcategory_select.value != col_name
+                ):
+                    return
                 if is_text:
                     current_op = comparison_select.value
                     if current_op not in ("has", "has not"):
@@ -308,7 +334,10 @@ class FilterRowFactory:
             # Clamp: reset to first column when current value is not valid for new category.
             if subcategory_select.value not in set(columns):
                 subcategory_select.value = columns[0]
-            # Update input widget for the (possibly new) selected column.
+                # The value callback owns the input rebuild in this branch.
+                return
+            # The same metric name can exist in both categories, so its value
+            # callback will not fire. Rebuild it explicitly with new metadata.
             update_input_widget(subcategory_select.value)
 
         def update_input_on_column_change(attr, old, new):
@@ -317,6 +346,9 @@ class FilterRowFactory:
 
         def update_input_on_operator_change(attr, old, new):
             """Swap input widget between TextInput and SearchableSelect based on operator."""
+
+            if input_update_state["active"]:
+                return
 
             category = category_select.value
             col_name = subcategory_select.value
@@ -331,7 +363,9 @@ class FilterRowFactory:
                     current_input_ref["is_panel"] = False
                     new_input.on_change("value", lambda attr, old, new: self.refresh())
                 else:
-                    placeholder_input = SearchableSelect(value="", options=[], placeholder="Loading...", width=90)
+                    placeholder_input = SearchableSelect(
+                        value="", options=[], placeholder=f"Loading {category}...", width=90
+                    )
                     input_container.objects = [placeholder_input]
                     current_input_ref["widget"] = placeholder_input
                     current_input_ref["is_panel"] = True
@@ -348,7 +382,7 @@ class FilterRowFactory:
 
                     curdoc().add_next_tick_callback(_deferred_resolve)
 
-            self.refresh()
+            schedule_refresh()
 
         category_select.on_change("value", update_subcategories)
         subcategory_select.on_change("value", update_input_on_column_change)

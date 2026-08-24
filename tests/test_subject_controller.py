@@ -84,3 +84,85 @@ def test_invalid_filtered_sample_is_rejected_without_clearing_mag():
     assert sample.options == ["valid"]
     assert widgets["mag_select"].value == "m1"
     assert refreshed_mags == []
+
+
+def test_subject_scope_maps_equivalent_sample_order_categories_without_resetting_to_sample():
+    widgets = {
+        "has_mags": True,
+        "view_radio": SimpleNamespace(active=0),
+        "mag_select": SimpleNamespace(value="m1"),
+        "contig_select": SimpleNamespace(value="c1"),
+        "mag_to_contigs": {"m1": ["c1"]},
+        "mag_to_contig_offsets": {"m1": {"c1": 0}},
+        "contig_lengths": {"c1": 10},
+    }
+    category = SimpleNamespace(options=[], value="Coverage")
+    controller = SubjectController(
+        SubjectBindings(
+            widgets=widgets,
+            interaction_lock={"locked": False},
+            compute_contigs=lambda search: [],
+            compute_samples=lambda search: [],
+            compute_mags=lambda search: [],
+            push_completions=lambda widget, values: None,
+            refresh_contigs=lambda: None,
+            refresh_samples=lambda: None,
+            refresh_mags=lambda: None,
+            update_titles=lambda: None,
+            from_position=SimpleNamespace(value=""),
+            to_position=SimpleNamespace(value=""),
+            sample_order_category=category,
+            sample_contig_categories=["Sample", "Coverage", "Misassembly", "Microdiversity"],
+            sample_mag_categories=["Sample", "MAG coverage", "MAG misassembly", "MAG microdiversity"],
+            sample_current_categories=["Sample", "Coverage", "Misassembly", "Microdiversity"],
+        )
+    )
+
+    for contig_category, mag_category in (
+        ("Coverage", "MAG coverage"),
+        ("Misassembly", "MAG misassembly"),
+        ("Microdiversity", "MAG microdiversity"),
+    ):
+        category.value = contig_category
+        controller.subject_scope_changed("active", 1, 0)
+        assert category.value == mag_category
+
+        controller.subject_scope_changed("active", 0, 1)
+        assert category.value == contig_category
+
+
+def test_subject_scope_preserves_shared_sample_order_category():
+    widgets = {
+        "has_mags": True,
+        "view_radio": SimpleNamespace(active=0),
+        "mag_select": SimpleNamespace(value="m1"),
+        "contig_select": SimpleNamespace(value="c1"),
+        "mag_to_contigs": {"m1": ["c1"]},
+        "mag_to_contig_offsets": {"m1": {"c1": 0}},
+        "contig_lengths": {"c1": 10},
+    }
+    category = SimpleNamespace(options=[], value="Sample")
+    controller = SubjectController(
+        SubjectBindings(
+            widgets=widgets,
+            interaction_lock={"locked": False},
+            compute_contigs=lambda search: [],
+            compute_samples=lambda search: [],
+            compute_mags=lambda search: [],
+            push_completions=lambda widget, values: None,
+            refresh_contigs=lambda: None,
+            refresh_samples=lambda: None,
+            refresh_mags=lambda: None,
+            update_titles=lambda: None,
+            from_position=SimpleNamespace(value=""),
+            to_position=SimpleNamespace(value=""),
+            sample_order_category=category,
+            sample_contig_categories=["Sample", "Coverage"],
+            sample_mag_categories=["Sample", "MAG coverage"],
+            sample_current_categories=["Sample", "Coverage"],
+        )
+    )
+
+    controller.subject_scope_changed("active", 1, 0)
+
+    assert category.value == "Sample"

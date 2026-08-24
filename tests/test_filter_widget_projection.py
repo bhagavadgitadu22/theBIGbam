@@ -47,10 +47,37 @@ def test_projection_caches_result_until_invalidated():
     service = Service()
     projection = FilterWidgetProjection(service, [{"rows": [_row(10)]}], [])
 
+    assert projection.has_pending_changes()
+    assert projection.apply()
+    assert not projection.has_pending_changes()
     assert projection.evaluate()["count_pairs"] == 4
     assert projection.evaluate()["params"] == [7]
     assert service.calls == 1
     projection.invalidate()
     projection.evaluate()
     assert service.calls == 2
-    assert service.invalidations == 1
+    assert service.invalidations == 2
+
+
+def test_projection_keeps_applied_expression_while_widgets_are_draft():
+    expressions = []
+
+    class Service:
+        def evaluate(self, expression):
+            expressions.append(expression)
+            return None
+
+        def invalidate(self):
+            pass
+
+    row = _row(10)
+    projection = FilterWidgetProjection(Service(), [{"rows": [row]}], [])
+    projection.apply()
+    projection.evaluate()
+    row["input_ref"]["widget"].value = 20
+
+    projection.invalidate()
+    projection.evaluate()
+
+    assert projection.has_pending_changes()
+    assert expressions[-1].sections[0].predicates[0].value == 10

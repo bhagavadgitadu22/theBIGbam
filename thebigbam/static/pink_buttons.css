@@ -10,3 +10,11 @@
     border-color: #cc2b84 !important;
     color: white !important;
 }
+
+.bk-btn.bk-btn-primary,
+:host .bk-btn.bk-btn-primary {
+    background: #fc62b8 !important;
+    border-color: #cc2b84 !important;
+    font-weight: bold !important;
+    color: white !important;
+}

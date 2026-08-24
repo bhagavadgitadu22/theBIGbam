@@ -299,6 +299,7 @@ def build_plot_parameter_controls(
         return _sample_metrics_by_category.get(category, [])
 
     _initial_sample_metrics = _sample_order_columns_for("Sample")
+    _initial_sample_metric_values = [value for value, _label in _initial_sample_metrics]
     sample_order_label = Div(text="Order samples by:", margin=(5, 0, 2, 0))
     sample_order_category_select = Select(
         value=_sample_sort_current_categories[0] if _sample_sort_current_categories else "",
@@ -307,7 +308,9 @@ def build_plot_parameter_controls(
         margin=(0, 2, 0, 0),
     )
     sample_order_metric_select = Select(
-        value="Sample_name",
+        value="Sample_name"
+        if "Sample_name" in _initial_sample_metric_values
+        else (_initial_sample_metric_values[0] if _initial_sample_metric_values else ""),
         options=_initial_sample_metrics if _initial_sample_metrics else [""],
         sizing_mode="stretch_width",
         margin=(0, 2, 0, 2),

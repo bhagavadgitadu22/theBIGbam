@@ -38,14 +38,10 @@ class ParameterOptionCatalog:
             ]
             for category, category_info in metadata.items()
         }
-        sample_metrics = {
-            category: ([format_column("Sample_name")] + values if category == "Sample" else list(values))
-            for category, values in metrics.items()
-        }
-        mag_metrics = {
-            category: list(columns[category] if category == "Contig" else values)
-            for category, values in metrics.items()
-        }
+        # Ordering supports both numeric and text columns.  Use the exact same
+        # column projection as Filtering so shared categories cannot drift.
+        sample_metrics = {category: list(values) for category, values in columns.items()}
+        mag_metrics = {category: list(values) for category, values in columns.items()}
         mag_excluded = {"Sample", "Annotations", "MAG", "MAG coverage", "MAG misassembly", "MAG microdiversity"}
         mag_categories = [category for category in metadata if category not in mag_excluded]
         sample_contig_allowed = {

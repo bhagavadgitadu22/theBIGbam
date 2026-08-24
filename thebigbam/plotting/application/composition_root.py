@@ -214,7 +214,10 @@ def create_layout(
         text=f"""<img src="{logo_url_local}" onerror="this.onerror=function(){{this.style.display='none'}}; this.src='{logo_url_remote}'" style="width:100%; max-width:800px; padding: 0 25%;">"""
     )
     views = RadioButtonGroup(
-        labels=["ONE SAMPLE", "ALL SAMPLES"], active=0, sizing_mode="stretch_width", stylesheets=[stylesheet]
+        labels=["ONE SAMPLE", "ALL SAMPLES"],
+        active=0,
+        sizing_mode="stretch_width",
+        stylesheets=[pink_buttons_stylesheet],
     )
     if enable_timing:
         views.js_on_change(
@@ -255,14 +258,26 @@ def create_layout(
         FilterMetadataRepository(db_path, filtering_metadata, enable_timing=enable_timing)
     )
 
-    def refresh_on_filter_change():
-        """Refresh contig and sample options when Filtering2 values change."""
+    filter_ui = {}
+
+    def mark_filters_dirty():
+        """Mark draft widget changes without querying availability."""
+        projection = filter_projection_ref.get("projection")
+        if projection is None or not filter_ui:
+            return
+        dirty = projection.has_pending_changes()
+        filter_ui["apply"].disabled = not dirty
+        filter_ui["apply"].button_type = "primary" if dirty else "default"
+
+    def apply_filter_changes():
+        """Commit draft filters and atomically refresh availability choices."""
         global _current_op
         _current_op = "filter_change"
         if enable_timing:
             print(f"[timing] RSS at filter_change start: {_get_rss_mb():.0f} MB", flush=True)
         doc = curdoc()
         doc.hold("combine")
+        filter_projection_ref["projection"].apply()
         availability_service.invalidate()
         data_cache.invalidate("filter_change")
         filter_projection_ref["projection"].invalidate()
@@ -285,11 +300,11 @@ def create_layout(
             has_mags=widgets["has_mags"],
         ),
         metadata_service=filter_metadata_service,
-        refresh=refresh_on_filter_change,
+        refresh=mark_filters_dirty,
         make_toggle_callback=make_toggle_callback,
         stylesheet=stylesheet,
         toggle_stylesheet=toggle_stylesheet,
-        button_stylesheet=pink_buttons_stylesheet,
+        button_stylesheet=stylesheet,
         grey_button_stylesheet=grey_buttons_stylesheet,
         enable_timing=enable_timing,
         set_operation=_set_current_operation,
@@ -298,10 +313,73 @@ def create_layout(
     )
     filtering_header = filter_panel.header
     filtering_controller = filter_panel.controller
-    filtering_content = filter_panel.content
     filter_projection_ref["projection"] = filter_panel.projection
     parameter_options = filter_panel.options
     create_query_row = filter_panel.create_query_row
+
+    filter_apply_button = Button(
+        label="APPLY",
+        button_type="default",
+        disabled=True,
+        width=120,
+        align="center",
+        stylesheets=[
+            stylesheet,
+            pink_buttons_stylesheet,
+            InlineStyleSheet(
+                css="""
+                :host .bk-btn:disabled {
+                    background: #d0d0d0 !important;
+                    border-color: #b0b0b0 !important;
+                    color: #666 !important;
+                }
+                """
+            ),
+        ],
+        css_classes=["apply-btn"],
+        margin=(8, 0, 3, 0),
+    )
+    filter_ui.update({"apply": filter_apply_button})
+
+    def _set_availability_controls_disabled(disabled):
+        for key in ("contig_select", "sample_select", "mag_select"):
+            control = widgets.get(key)
+            if control is not None and hasattr(control, "disabled"):
+                control.disabled = disabled
+
+    def _apply_filters_clicked():
+        if not filter_panel.projection.has_pending_changes():
+            mark_filters_dirty()
+            return
+        filter_apply_button.disabled = True
+        _set_availability_controls_disabled(True)
+
+        def _run():
+            try:
+                apply_filter_changes()
+            except Exception:
+                filter_apply_button.disabled = False
+                filter_apply_button.button_type = "primary"
+                raise
+            finally:
+                _set_availability_controls_disabled(False)
+            filter_apply_button.button_type = "default"
+
+        curdoc().add_next_tick_callback(_run)
+
+    filter_apply_button.on_click(lambda _event: _apply_filters_clicked())
+    filter_apply_row = pn.Row(
+        pn.Spacer(sizing_mode="stretch_width"),
+        filter_apply_button,
+        pn.Spacer(sizing_mode="stretch_width"),
+        sizing_mode="stretch_width",
+        margin=0,
+    )
+    filtering_content = pn.Column(
+        filter_panel.content,
+        filter_apply_row,
+        sizing_mode="stretch_width",
+    )
 
     if enable_timing:
         _step = time.perf_counter() - t_section
@@ -479,7 +557,12 @@ def create_layout(
 
     ## Create final Apply and Peruse data buttons
     apply_button = Button(
-        label="APPLY", align="center", stylesheets=[stylesheet], css_classes=["apply-btn"], margin=(5, 0, 0, 0)
+        label="APPLY",
+        align="center",
+        button_type="primary",
+        stylesheets=[pink_buttons_stylesheet],
+        css_classes=["apply-btn"],
+        margin=(5, 0, 0, 0),
     )
     apply_button.on_click(apply_clicked)
 
@@ -494,7 +577,7 @@ def create_layout(
         subplot_variables=_subplot_to_varnames,
         from_position=from_position_input,
         to_position=to_position_input,
-        stylesheet=stylesheet,
+        stylesheet=pink_buttons_stylesheet,
         enable_timing=enable_timing,
         timing=_TIMING,
         report_timing=_report_download_timing if enable_timing else None,
@@ -571,6 +654,7 @@ def create_layout(
 
     if initial_settings:
         settings_session.restore(initial_settings)
+        apply_filter_changes()
 
     ## Initialize section titles with counts
     update_section_titles()

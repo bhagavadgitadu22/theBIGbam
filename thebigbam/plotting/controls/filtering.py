@@ -29,7 +29,7 @@ class FilterSectionController:
         self._global_add = pn.widgets.Button(
             name="+ Add AND/OR",
             margin=(10, 0, 5, 0),
-            button_type="primary",
+            button_type="success",
             stylesheets=[panel_stylesheet(add_stylesheet)],
         )
         self._global_add.on_click(self._add_section)

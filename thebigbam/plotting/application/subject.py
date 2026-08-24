@@ -9,6 +9,17 @@ from typing import Any, Callable
 from bokeh.io import curdoc
 
 
+CONTIG_TO_MAG_SAMPLE_ORDER_CATEGORY = {
+    "Coverage": "MAG coverage",
+    "Misassembly": "MAG misassembly",
+    "Microdiversity": "MAG microdiversity",
+}
+MAG_TO_CONTIG_SAMPLE_ORDER_CATEGORY = {
+    mag_category: contig_category
+    for contig_category, mag_category in CONTIG_TO_MAG_SAMPLE_ORDER_CATEGORY.items()
+}
+
+
 @dataclass(frozen=True)
 class SubjectBindings:
     widgets: dict[str, Any]
@@ -139,6 +150,7 @@ class SubjectController:
     def subject_scope_changed(self, attr: str, old: int, new: int) -> None:
         bindings = self.bindings
         widgets = bindings.widgets
+        current_order_category = bindings.sample_order_category.value
         if new == 0:
             self.sync_selected_contig_position()
             mag = widgets["mag_select"].value
@@ -148,16 +160,23 @@ class SubjectController:
                 bindings.from_position.value = "1"
                 bindings.to_position.value = str(total)
             bindings.sample_current_categories[:] = bindings.sample_mag_categories
+            desired_order_category = CONTIG_TO_MAG_SAMPLE_ORDER_CATEGORY.get(
+                current_order_category, current_order_category
+            )
         else:
             contig = widgets["contig_select"].value
             if contig and contig in widgets["contig_lengths"]:
                 bindings.from_position.value = "1"
                 bindings.to_position.value = str(widgets["contig_lengths"][contig])
             bindings.sample_current_categories[:] = bindings.sample_contig_categories
+            desired_order_category = MAG_TO_CONTIG_SAMPLE_ORDER_CATEGORY.get(
+                current_order_category, current_order_category
+            )
         bindings.sample_order_category.options = list(bindings.sample_current_categories)
-        bindings.sample_order_category.value = (
-            bindings.sample_current_categories[0] if bindings.sample_current_categories else ""
-        )
+        if desired_order_category not in bindings.sample_current_categories:
+            desired_order_category = "Sample" if "Sample" in bindings.sample_current_categories else ""
+        if bindings.sample_order_category.value != desired_order_category:
+            bindings.sample_order_category.value = desired_order_category
 
     @contextmanager
     def _held_document(self):

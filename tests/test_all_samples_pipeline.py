@@ -44,6 +44,9 @@ def repository_db(tmp_path):
     conn.execute("CREATE TABLE Sample (Sample_id INTEGER, Sample_name VARCHAR, rank INTEGER)")
     conn.execute("CREATE TABLE Coverage (Contig_id INTEGER, Sample_id INTEGER)")
     conn.execute(
+        "CREATE TABLE Explicit_coverage (Contig_id INTEGER, Sample_id INTEGER, Coverage_class VARCHAR)"
+    )
+    conn.execute(
         'CREATE TABLE Variable (Variable_id INTEGER, Variable_name VARCHAR, Subplot VARCHAR, "Type" VARCHAR, '
         'Encoding VARCHAR, Color VARCHAR, Alpha REAL, Fill_alpha REAL, "Size" REAL, Title VARCHAR, '
         "Feature_table_name VARCHAR)"
@@ -58,6 +61,10 @@ def repository_db(tmp_path):
         [(index, f"sample_{index:03d}", 151 - index) for index in range(1, 151)],
     )
     conn.executemany("INSERT INTO Coverage VALUES (1, ?)", [(index,) for index in range(1, 151)])
+    conn.executemany(
+        "INSERT INTO Explicit_coverage VALUES (1, ?, ?)",
+        [(index, "high" if index % 2 else "low") for index in range(1, 151)],
+    )
     conn.executemany(
         "INSERT INTO Feature_blob_chunk VALUES (1, ?, 1, 0, ?)",
         [(index, bytes([index % 256])) for index in range(1, 151)],
@@ -81,6 +88,17 @@ def test_service_orders_then_limits_repository_samples(repository_db):
     )
     samples = AllSamplesDataService(repository)._resolve_samples(1, request)
     assert [name for _, name in samples] == ["sample_150", "sample_149", "sample_148"]
+
+
+def test_service_orders_samples_alphabetically_by_text_metric(repository_db):
+    repository = AllSamplesRepository(repository_db)
+    ordering = SampleOrdering(
+        source="Explicit_coverage", column="Coverage_class", ascending=True, max_samples=None
+    )
+
+    samples = repository.order_samples(1, [(2, "sample_002"), (1, "sample_001")], ordering)
+
+    assert [name for _, name in samples] == ["sample_001", "sample_002"]
 
 
 def test_repository_fetches_all_sample_chunks_in_one_query(repository_db):

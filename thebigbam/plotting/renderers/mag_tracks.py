@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from bokeh.events import DoubleTap
 from bokeh.models import (
     BoxZoomTool,
     ColumnDataSource,
+    CustomJS,
     HoverTool,
     Range1d,
     SaveTool,
@@ -80,8 +82,60 @@ class MagTrackRenderer:
                         ("Length", "@length{0,0}"),
                         ("Start", "@x0{0,0}"),
                         ("End", "@x1{0,0}"),
+                        ("Copy", "Double-click this segment"),
                     ],
                 )
+            )
+            plot.js_on_event(
+                DoubleTap,
+                CustomJS(
+                    args={"source": segment_source},
+                    code="""
+                    if (cb_obj.y < -0.8 || cb_obj.y > 0.8) return;
+                    const data = source.data;
+                    const index = data.x0.findIndex((start, i) => start <= cb_obj.x && cb_obj.x <= data.x1[i]);
+                    if (index < 0) return;
+                    const name = data.name[index];
+
+                    function fallbackCopy(text) {
+                        const input = document.createElement('textarea');
+                        input.value = text;
+                        input.style.position = 'fixed';
+                        input.style.opacity = '0';
+                        document.body.appendChild(input);
+                        input.focus();
+                        input.select();
+                        try { document.execCommand('copy'); } catch (_) {}
+                        input.remove();
+                    }
+                    if (navigator.clipboard && navigator.clipboard.writeText) {
+                        navigator.clipboard.writeText(name).catch(() => fallbackCopy(name));
+                    } else {
+                        fallbackCopy(name);
+                    }
+
+                    const tip = document.createElement('div');
+                    tip.textContent = 'Copied';
+                    Object.assign(tip.style, {
+                        position: 'fixed',
+                        left: cb_obj.sx + 'px',
+                        top: Math.max(8, cb_obj.sy - 30) + 'px',
+                        transform: 'translateX(-50%)',
+                        background: '#333',
+                        color: '#fff',
+                        padding: '3px 8px',
+                        borderRadius: '4px',
+                        fontSize: '12px',
+                        pointerEvents: 'none',
+                        zIndex: '9999',
+                        opacity: '1',
+                        transition: 'opacity 0.4s ease',
+                    });
+                    document.body.appendChild(tip);
+                    setTimeout(() => { tip.style.opacity = '0'; }, 700);
+                    setTimeout(() => tip.remove(), 1100);
+                    """,
+                ),
             )
         plot.tags.append(
             {

@@ -282,27 +282,27 @@ def get_filtering_metadata(db_path: str, enable_timing: bool = False) -> dict:
         },
         'Coverage': {
             'source': 'Explicit_coverage',
-            'exclude': ['Contig_name', 'Sample_name']
+            'exclude': ['Contig_id', 'Contig_name', 'Sample_id', 'Sample_name']
         },
         'Misassembly': {
             'source': 'Explicit_misassembly',
-            'exclude': ['Contig_name', 'Sample_name']
+            'exclude': ['Contig_id', 'Contig_name', 'Sample_id', 'Sample_name']
         },
         'Microdiversity': {
             'source': 'Explicit_microdiversity',
-            'exclude': ['Contig_name', 'Sample_name']
+            'exclude': ['Contig_id', 'Contig_name', 'Sample_id', 'Sample_name']
         },
         'Side misassembly': {
             'source': 'Explicit_side_misassembly',
-            'exclude': ['Contig_name', 'Sample_name']
+            'exclude': ['Contig_id', 'Contig_name', 'Sample_id', 'Sample_name']
         },
         'Topology': {
             'source': 'Explicit_topology',
-            'exclude': ['Contig_name', 'Sample_name']
+            'exclude': ['Contig_id', 'Contig_name', 'Sample_id', 'Sample_name']
         },
         'Termini': {
             'source': 'Explicit_phage_mechanisms',
-            'exclude': ['Contig_name', 'Sample_name']
+            'exclude': ['Contig_id', 'Contig_name', 'Sample_id', 'Sample_name']
         }
     }
 
@@ -314,15 +314,15 @@ def get_filtering_metadata(db_path: str, enable_timing: bool = False) -> dict:
             },
             'MAG coverage': {
                 'source': 'Explicit_coverage_per_MAG',
-                'exclude': ['MAG_name', 'Sample_name']
+                'exclude': ['MAG_id', 'MAG_name', 'Sample_id', 'Sample_name']
             },
             'MAG misassembly': {
                 'source': 'Explicit_misassembly_per_MAG',
-                'exclude': ['MAG_name', 'Sample_name']
+                'exclude': ['MAG_id', 'MAG_name', 'Sample_id', 'Sample_name']
             },
             'MAG microdiversity': {
                 'source': 'Explicit_microdiversity_per_MAG',
-                'exclude': ['MAG_name', 'Sample_name']
+                'exclude': ['MAG_id', 'MAG_name', 'Sample_id', 'Sample_name']
             },
         })
 

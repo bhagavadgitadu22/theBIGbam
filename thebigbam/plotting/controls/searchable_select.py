@@ -11,6 +11,7 @@ class SearchableSelect(JSComponent):
     server_search = param.Boolean(default=False)
     search_query = param.String(default="")
     search_nonce = param.Integer(default=0)
+    disabled = param.Boolean(default=False)
 
     _stylesheets = [
         "https://cdn.jsdelivr.net/npm/tom-select@2.4.1/dist/css/tom-select.css",
@@ -110,6 +111,12 @@ class SearchableSelect(JSComponent):
         }
 
         const ts = new TomSelect(select, tsConfig);
+        if (model.disabled) ts.disable();
+
+        model.on('disabled', () => {
+            if (model.disabled) ts.disable();
+            else ts.enable();
+        });
 
         let lastClickTime = 0;
         container.addEventListener('mousedown', (event) => {
