@@ -37,7 +37,7 @@ def build_filter_panel(
     stylesheet: Any,
     toggle_stylesheet: Any,
     button_stylesheet: Any,
-    grey_button_stylesheet: Any,
+    muted_button_stylesheet: Any,
     enable_timing: bool,
     set_operation: Callable[[str], None],
     header: Any | None = None,
@@ -70,7 +70,7 @@ def build_filter_panel(
         metadata_service,
         metadata,
         enable_timing,
-        grey_button_stylesheet,
+        muted_button_stylesheet,
         refresh,
         preloaded.filter_encode,
     )

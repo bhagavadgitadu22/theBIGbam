@@ -75,6 +75,15 @@ class FilterWidgetProjection:
     def has_pending_changes(self) -> bool:
         return self.draft_expression() != self._applied_expression
 
+    def checkpoint(self) -> FilterExpression:
+        """Return the immutable applied expression for transactional rollback."""
+        return self._applied_expression
+
+    def restore(self, expression: FilterExpression) -> None:
+        """Restore a previously checkpointed applied expression."""
+        self._applied_expression = expression
+        self.invalidate()
+
     def apply(self) -> bool:
         """Commit the current widgets as the expression used by consumers."""
         expression = self.draft_expression()

@@ -45,3 +45,20 @@ def test_unattached_controller_fails_explicitly():
     callbacks = SessionCallbacks(lambda callback: None)
     with pytest.raises(RuntimeError, match="Summary controller"):
         callbacks.show_summary()
+
+
+def test_plot_apply_holds_interaction_scope_until_controller_finishes():
+    scheduled = []
+    events = []
+    interactions = SimpleNamespace(
+        begin=lambda scope: events.append(("begin", scope)) or True,
+        end=lambda: events.append(("end", None)),
+    )
+    callbacks = SessionCallbacks(scheduled.append, interactions=interactions)
+    callbacks.attach_placeholder(SimpleNamespace(loading=False))
+    callbacks.attach_apply(SimpleNamespace(apply=lambda: events.append(("apply", None))))
+
+    callbacks.apply_clicked()
+    scheduled[0]()
+
+    assert events == [("begin", "plot"), ("apply", None), ("end", None)]

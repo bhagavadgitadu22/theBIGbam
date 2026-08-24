@@ -509,6 +509,53 @@ def resolve_distinct_values(db_path: str, filtering_metadata: dict,
     return distinct_values
 
 
+def search_distinct_values(
+    db_path: str,
+    filtering_metadata: dict,
+    category: str,
+    col_name: str,
+    search_term: str = "",
+    limit: int = 100,
+) -> list:
+    """Return a bounded text-value search without materializing the full cardinality."""
+    cat_meta = filtering_metadata.get(category, {})
+    col_info = cat_meta.get('columns', {}).get(col_name, {})
+    if col_info.get('type') != 'text':
+        return []
+    limit = max(1, min(int(limit), 500))
+    term = (search_term or '').strip()
+    source_override = col_info.get('source')
+    qualifier_key = col_info.get('qualifier_key')
+    conn = duckdb.connect(db_path, read_only=True)
+    try:
+        if qualifier_key and source_override in {'Contig_qualifier', 'Annotation_qualifier'}:
+            rows = conn.execute(
+                f'SELECT DISTINCT "Value" FROM {source_override} '
+                'WHERE "Key" = ? AND "Value" IS NOT NULL '
+                'AND CAST("Value" AS VARCHAR) ILIKE \'%\' || ? || \'%\' '
+                'ORDER BY (CAST("Value" AS VARCHAR) = ?) DESC, '
+                '(CAST("Value" AS VARCHAR) ILIKE ? || \'%\') DESC, "Value" LIMIT ?',
+                [qualifier_key, term, term, term, limit],
+            ).fetchall()
+        else:
+            source = source_override or cat_meta.get('source', '')
+            if not source:
+                return []
+            rows = conn.execute(
+                f'SELECT DISTINCT "{col_name}" FROM {source} '
+                f'WHERE "{col_name}" IS NOT NULL '
+                f'AND CAST("{col_name}" AS VARCHAR) ILIKE \'%\' || ? || \'%\' '
+                f'ORDER BY (CAST("{col_name}" AS VARCHAR) = ?) DESC, '
+                f'(CAST("{col_name}" AS VARCHAR) ILIKE ? || \'%\') DESC, "{col_name}" LIMIT ?',
+                [term, term, term, limit],
+            ).fetchall()
+        return [row[0] for row in rows]
+    except duckdb.Error:
+        return []
+    finally:
+        conn.close()
+
+
 def list_variables(db_path, detailed=False):
     """Print variables and detailed metadata from Variable table (excluding Feature_table_name)."""
     conn = duckdb.connect(db_path, read_only=True)

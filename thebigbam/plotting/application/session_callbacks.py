@@ -6,13 +6,14 @@ from typing import Any, Callable
 
 
 class SessionCallbacks:
-    def __init__(self, schedule: Callable[[Callable[[], None]], None]) -> None:
+    def __init__(self, schedule: Callable[[Callable[[], None]], None], interactions: Any | None = None) -> None:
         self.main_placeholder: Any | None = None
         self.schedule = schedule
         self._apply: Any | None = None
         self._summary: Any | None = None
         self._subject: Any | None = None
         self._scope: Any | None = None
+        self.interactions = interactions
 
     def attach_apply(self, controller: Any) -> None:
         self._apply = controller
@@ -36,11 +37,17 @@ class SessionCallbacks:
         return controller
 
     def apply_clicked(self, _event: Any = None) -> None:
+        if self.interactions is not None and not self.interactions.begin("plot"):
+            return
         self._required(self.main_placeholder, "Main placeholder").loading = True
         self.schedule(self.do_apply)
 
     def do_apply(self) -> None:
-        self._required(self._apply, "Apply").apply()
+        try:
+            self._required(self._apply, "Apply").apply()
+        finally:
+            if self.interactions is not None:
+                self.interactions.end()
 
     def show_summary(self, _event: Any = None) -> None:
         self._required(self._summary, "Summary").show()

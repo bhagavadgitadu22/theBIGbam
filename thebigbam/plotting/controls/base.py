@@ -19,7 +19,7 @@ def build_controls(preloaded: PreloadedPlotData):
         placeholder="Type to search MAGs...",
         server_search=True,
         sizing_mode="stretch_width",
-        margin=(0, 5, 0, 5),
+        margin=0,
         visible=preloaded.has_mags,
     )
     view_radio = RadioButtonGroup(
@@ -27,7 +27,7 @@ def build_controls(preloaded: PreloadedPlotData):
         active=1,
         visible=preloaded.has_mags,
         sizing_mode="stretch_width",
-        margin=(0, 5, 10, 5),
+        margin=(0, 0, 10, 0),
     )
     contig_select = SearchableSelect(
         value=contigs[0] if len(contigs) == 1 else "",
@@ -35,7 +35,7 @@ def build_controls(preloaded: PreloadedPlotData):
         placeholder="Type to search contigs...",
         server_search=True,
         sizing_mode="stretch_width",
-        margin=(0, 5, 0, 5),
+        margin=0,
     )
     sample_select = SearchableSelect(
         value=samples[0] if len(samples) == 1 else "",
@@ -43,7 +43,7 @@ def build_controls(preloaded: PreloadedPlotData):
         placeholder="Type to search samples...",
         server_search=True,
         sizing_mode="stretch_width",
-        margin=(0, 5, 0, 5),
+        margin=0,
     )
     module_widgets_one = []
     variables_widgets_one = []

@@ -7,6 +7,7 @@ from typing import Any
 
 import panel as pn
 
+from ..shared.styles import panel_stylesheet
 from ..settings.collection import SettingsCollector
 from ..settings.controls import SettingsSaveControls
 from ..settings.restoration import restore_settings
@@ -41,7 +42,14 @@ def build_settings_session(
         make_settings_collector_bindings(db_path, widgets, sample_scope, genome, parameters, filtering)
     )
     save_controls = SettingsSaveControls(db_path, collector.collect, stylesheet)
-    buttons = pn.Row(apply_button, save_controls.button, save_controls.confirmation, align="center")
+    buttons = pn.Row(
+        apply_button,
+        save_controls.button,
+        save_controls.confirmation,
+        align="center",
+        css_classes=["action-row", "sidebar-actions"],
+        stylesheets=[panel_stylesheet(stylesheet)],
+    )
     restore_bindings = make_settings_restore_bindings(
         widgets=widgets,
         sample_scope=sample_scope,

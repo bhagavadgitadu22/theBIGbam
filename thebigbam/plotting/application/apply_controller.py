@@ -46,8 +46,6 @@ class ApplyController:
         try:
             bindings.set_operation("apply/param_parse")
             bindings.diagnostics.next_generation()
-            bindings.plot_lifecycle.prepare_replacement()
-
             if bindings.enable_timing:
                 bindings.timing.start_phase("APPLY")
                 print(f"[timing] Memory (current RSS) at APPLY start: {rss_mb():.0f} MB", flush=True)

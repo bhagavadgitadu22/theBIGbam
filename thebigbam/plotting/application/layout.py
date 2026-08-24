@@ -106,7 +106,10 @@ def assemble_layout(
         ]
         placeholder_text = "<i>No plot yet. Select one contig and click Apply to view the genome annotation.</i>"
     children.extend(timing_models)
-    controls = pn.Column(*children, sizing_mode="stretch_height", width=400, css_classes=["left-col"])
+    sidebar_content = pn.Column(*children, sizing_mode="stretch_width", css_classes=["sidebar-content"])
+    controls = pn.Column(sidebar_content, sizing_mode="stretch_height", width=400, css_classes=["left-col"])
+    sidebar_content.stylesheets = [stylesheet]
+    controls.stylesheets = [stylesheet]
     placeholder = pn.Column(pn.pane.HTML(placeholder_text), sizing_mode="stretch_both", css_classes=["main-right"])
     layout = pn.Row(
         controls,

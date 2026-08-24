@@ -20,14 +20,14 @@ class FilterVisualizations:
         metadata_service: Any,
         filtering_metadata: Mapping[str, Any],
         enable_timing: bool,
-        grey_buttons_stylesheet: Any,
+        muted_buttons_stylesheet: Any,
         refresh_on_filter_change: Callable[[], None],
         filter_encode: Mapping[str, float] | None = None,
     ) -> None:
         self.metadata_service = metadata_service
         self.filtering_metadata = filtering_metadata
         self.enable_timing = enable_timing
-        self.grey_buttons_stylesheet = grey_buttons_stylesheet
+        self.muted_buttons_stylesheet = muted_buttons_stylesheet
         self.refresh_on_filter_change = refresh_on_filter_change
         self.filter_encode = filter_encode or {}
 
@@ -177,17 +177,22 @@ class FilterVisualizations:
             gen = row_data["loading_gen"]
 
             def _do_rebuild():
-                if row_data["loading_gen"] != gen:
-                    return
-                row_data["histogram_pane"] = None
-                row_data["histogram_fig"] = None
-                row_data["threshold_span"] = None
-                result = self.build_numeric_histogram(
-                    row_data, category, col_name, spinner, log_mode=new_log_x, log_y=new_log_y
-                )
-                if result:
-                    hist_container.objects = result
-                hist_container.loading = False
+                try:
+                    if row_data["loading_gen"] != gen:
+                        return
+                    row_data["histogram_pane"] = None
+                    row_data["histogram_fig"] = None
+                    row_data["threshold_span"] = None
+                    result = self.build_numeric_histogram(
+                        row_data, category, col_name, spinner, log_mode=new_log_x, log_y=new_log_y
+                    )
+                    if result:
+                        hist_container.objects = result
+                finally:
+                    # A newer rebuild owns the loading indicator when its
+                    # generation has advanced; only its callback may clear it.
+                    if row_data["loading_gen"] == gen:
+                        hist_container.loading = False
 
             curdoc().add_next_tick_callback(_do_rebuild)
 
@@ -197,14 +202,16 @@ class FilterVisualizations:
             margin=(0, 2, 3, 0),
             button_type="primary" if log_mode else "default",
             description="Only positive values will be considered for the plot",
-            stylesheets=[panel_stylesheet(self.grey_buttons_stylesheet)],
+            stylesheets=[panel_stylesheet(self.muted_buttons_stylesheet)],
+            css_classes=["action-muted"],
         )
         log_y_btn = pn.widgets.Button(
             name="log y",
             height=30,
             margin=(0, 0, 3, 2),
             button_type="primary" if log_y else "default",
-            stylesheets=[panel_stylesheet(self.grey_buttons_stylesheet)],
+            stylesheets=[panel_stylesheet(self.muted_buttons_stylesheet)],
+            css_classes=["action-muted"],
         )
 
         def _on_log_x(event):

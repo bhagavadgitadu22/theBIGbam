@@ -53,7 +53,9 @@ def test_category_change_updates_shared_metric_immediately_and_defers_one_refres
     }
     refreshes = []
     factory = FilterRowFactory(
-        metadata_service=SimpleNamespace(distinct_values=lambda category, column: ["high", "low"]),
+        metadata_service=SimpleNamespace(
+            search_distinct_values=lambda category, column, search, limit: ["high", "low"]
+        ),
         filtering_metadata=metadata,
         columns={"Coverage": [("Status", "Status")], "MAG coverage": [("Status", "Status")]},
         raw_columns={"Coverage": ["Status"], "MAG coverage": ["Status"]},
@@ -70,11 +72,19 @@ def test_category_change_updates_shared_metric_immediately_and_defers_one_refres
     assert row["subcategory_select"].options == [("Status", "Status")]
     assert row["comparison_select"].options == ["=", "!=", "has", "has not"]
     assert isinstance(row["input_ref"]["widget"], SearchableSelect)
-    assert row["input_ref"]["widget"].placeholder == "Loading MAG coverage..."
+    assert row["input_ref"]["widget"].placeholder == "Search..."
+    assert row["input_ref"]["widget"].server_search
+    assert row["input_ref"]["widget"].min_search_chars == 2
+    assert row["input_ref"]["widget"].options == []
     assert refreshes == []
 
     while callbacks:
         callbacks.pop(0)()
 
     assert refreshes == [True]
+    row["input_ref"]["widget"].search_query = "h"
+    row["input_ref"]["widget"].search_nonce += 1
+    assert row["input_ref"]["widget"].options == []
+    row["input_ref"]["widget"].search_query = "hi"
+    row["input_ref"]["widget"].search_nonce += 1
     assert row["input_ref"]["widget"].options == ["high", "low"]

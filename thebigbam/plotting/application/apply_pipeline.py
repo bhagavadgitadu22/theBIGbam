@@ -217,7 +217,11 @@ class PlotPresenter:
             and state["data_xstart"] == start
             and state["data_xend"] == end
         )
-        return RangeSnapshot(preserve, shared.start if preserve else None, shared.end if preserve else None)
+        snapshot = RangeSnapshot(preserve, shared.start if preserve else None, shared.end if preserve else None)
+        # Capture the old range before detaching its callbacks and releasing it.
+        # Render handlers call this exactly once, before installing the new range.
+        self.bindings.plot_lifecycle.prepare_replacement()
+        return snapshot
 
     def install_range(
         self,

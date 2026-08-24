@@ -121,9 +121,13 @@ def test_presenter_preserves_and_installs_matching_range():
         "data_xend": 100,
         "range_callbacks": (),
     }
+    lifecycle = SimpleNamespace(
+        shared_xrange=lambda grid: new_range,
+        prepare_replacement=lambda: state.update(shared_xrange=None),
+    )
     bindings = SimpleNamespace(
         current_plot_state=state,
-        plot_lifecycle=SimpleNamespace(shared_xrange=lambda grid: new_range),
+        plot_lifecycle=lifecycle,
         from_position_input=SimpleNamespace(value=""),
         to_position_input=SimpleNamespace(value=""),
     )

@@ -38,6 +38,7 @@ class SubjectBindings:
     sample_contig_categories: list[str]
     sample_mag_categories: list[str]
     sample_current_categories: list[str]
+    schedule_transition: Callable[[Callable[[], None]], None] = lambda callback: callback()
 
 
 class SubjectController:
@@ -54,7 +55,6 @@ class SubjectController:
         if widgets["has_mags"]:
             widgets["mag_select"].param.watch(self.mag_changed, "value")
             widgets["contig_select"].param.watch(self.contig_sync_mag, "value")
-            widgets["view_radio"].on_change("active", self.subject_scope_changed)
 
     def mag_search(self, event: Any) -> None:
         self._search(self.bindings.widgets["mag_select"], self.bindings.compute_mags)
@@ -148,6 +148,10 @@ class SubjectController:
             self.bindings.update_titles()
 
     def subject_scope_changed(self, attr: str, old: int, new: int) -> None:
+        with self._held_document():
+            self._subject_scope_changed_locked(attr, old, new)
+
+    def _subject_scope_changed_locked(self, attr: str, old: int, new: int) -> None:
         bindings = self.bindings
         widgets = bindings.widgets
         current_order_category = bindings.sample_order_category.value
@@ -177,7 +181,6 @@ class SubjectController:
             desired_order_category = "Sample" if "Sample" in bindings.sample_current_categories else ""
         if bindings.sample_order_category.value != desired_order_category:
             bindings.sample_order_category.value = desired_order_category
-
     @contextmanager
     def _held_document(self):
         document = curdoc()

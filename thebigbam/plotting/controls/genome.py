@@ -170,7 +170,7 @@ def build_genome_controls(
     position_label_to = Div(text="to", width=25, margin=(5, 0, 5, 5))
 
     # Create Reset button to reset position inputs
-    position_reset_button = Button(label="Reset", stylesheets=[stylesheet], margin=(0, 5, 0, 5))
+    position_reset_button = Button(label="Reset", stylesheets=[stylesheet], margin=0)
 
     def reset_position_inputs():
         from_position_input.value = "1"

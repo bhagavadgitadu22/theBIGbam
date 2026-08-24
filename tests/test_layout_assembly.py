@@ -10,7 +10,16 @@ def _parts():
 
 
 def _bokeh_models(controls):
-    return [item.object for item in controls.objects if hasattr(item, "object")]
+    models = []
+
+    def visit(item):
+        if hasattr(item, "object"):
+            models.append(item.object)
+        for child in getattr(item, "objects", ()):  # Panel containers
+            visit(child)
+
+    visit(controls)
+    return models
 
 
 def test_sample_layout_contains_scope_and_sample_specific_sections():
@@ -23,6 +32,7 @@ def test_sample_layout_contains_scope_and_sample_specific_sections():
     assert parts.sample_scope in models
     assert parts.sample_section in models
     assert parts.variables_all in models
+    assert assembled.controls.objects[0].css_classes == ["sidebar-content"]
     assert isinstance(assembled.layout, pn.Row)
 
 

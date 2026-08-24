@@ -59,3 +59,6 @@ class AvailabilityFacade:
 
     def update_titles(self) -> None:
         self.controller.update_titles()
+
+    def invalidate_titles(self) -> None:
+        self.controller.invalidate_titles()

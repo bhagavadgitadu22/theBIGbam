@@ -6,6 +6,7 @@ from ...database.database_getters import (
     resolve_column_null_stats,
     resolve_distinct_values,
     resolve_histogram_bins,
+    search_distinct_values,
     resolve_value_counts,
 )
 
@@ -25,6 +26,16 @@ class FilterMetadataRepository:
             category,
             column,
             enable_timing=self.enable_timing,
+        )
+
+    def search_distinct_values(self, category, column, search_term="", limit=100):
+        return search_distinct_values(
+            self.db_path,
+            self.metadata,
+            category,
+            column,
+            search_term,
+            limit,
         )
 
     def histogram_bins(self, category, column, *, n_bins=50, log_mode=False):

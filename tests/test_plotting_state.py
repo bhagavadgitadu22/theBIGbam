@@ -150,7 +150,9 @@ def test_view_switch_does_not_replace_plot_and_timing_ignores_stale_acknowledgem
     source = Path("thebigbam/plotting/application/composition_root.py").read_text(encoding="utf-8")
     scope_source = Path("thebigbam/plotting/application/scope_transition.py").read_text(encoding="utf-8")
     timing_source = Path("thebigbam/plotting/shared/timing.py").read_text(encoding="utf-8")
-    assert 'views.on_change("active", scope_transition.view_changed)' in source
+    assert "scope_transition.view_changed(attr, old, new)" in source
+    assert "subject_controller.subject_scope_changed(attr, old, new)" in source
+    assert "schedule_control_transition" in source
     assert "main_placeholder.objects" not in scope_source
     assert 'send_timing_ping("view_change")' in scope_source or "send_timing_ping('view_change')" in scope_source
     assert 'token != self.state.get("token")' in timing_source

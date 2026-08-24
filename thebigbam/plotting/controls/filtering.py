@@ -31,6 +31,7 @@ class FilterSectionController:
             margin=(10, 0, 5, 0),
             button_type="success",
             stylesheets=[panel_stylesheet(add_stylesheet)],
+            css_classes=["action-add"],
         )
         self._global_add.on_click(self._add_section)
         self._tail_widget: Any = self._global_add
@@ -57,14 +58,59 @@ class FilterSectionController:
                 connector_items.append(connector)
             else:
                 connector_items.append(section["add_and_btn"])
-            children.append(pn.Row(*connector_items, sizing_mode="stretch_width", height=30, margin=(3, 0, 6, 0)))
+            children.append(
+                pn.Row(
+                    *connector_items,
+                    sizing_mode="stretch_width",
+                    height=30,
+                    margin=(3, 0, 6, 0),
+                    css_classes=["control-row"],
+                    stylesheets=[panel_stylesheet(self._stylesheet)],
+                )
+            )
+        section["column"].objects = children
+
+    def _append_row(self, section: dict[str, Any], row: dict[str, Any]) -> None:
+        """Append one row while preserving the existing Panel model subtree."""
+        previous = section["rows"][-1]
+        connector = Select(options=["AND", "OR"], value="AND", height=30, margin=(2, 0, 2, 0))
+        connector.on_change("value", lambda attr, old, new: self._on_change())
+        row["and_div"] = connector
+        section["rows"].append(row)
+        children = list(section["column"].objects)
+        if children:
+            children.pop()
+        children.extend(
+            [
+                pn.Row(
+                    previous["minus_btn"],
+                    connector,
+                    sizing_mode="stretch_width",
+                    height=30,
+                    margin=(3, 0, 6, 0),
+                    css_classes=["control-row"],
+                    stylesheets=[panel_stylesheet(self._stylesheet)],
+                ),
+                row["row_wrapper"],
+                pn.Row(
+                    row["minus_btn"],
+                    section["add_and_btn"],
+                    sizing_mode="stretch_width",
+                    height=30,
+                    margin=(3, 0, 6, 0),
+                    css_classes=["control-row"],
+                    stylesheets=[panel_stylesheet(self._stylesheet)],
+                ),
+            ]
+        )
         section["column"].objects = children
 
     def create_section(self) -> dict[str, Any]:
         section = {
             "column": pn.Column(
                 sizing_mode="stretch_width",
-                styles={"border-left": "3px solid #00b17c", "padding-left": "10px", "margin-left": "5px"},
+                css_classes=["nested-section"],
+                stylesheets=[panel_stylesheet(self._stylesheet)],
             ),
             "rows": [],
             "add_and_btn": pn.widgets.Button(
@@ -73,12 +119,12 @@ class FilterSectionController:
                 margin=(2, 0, 2, 0),
                 button_type="success",
                 stylesheets=[panel_stylesheet(self._stylesheet)],
+                css_classes=["action-add"],
             ),
         }
 
         def add_row(event: Any) -> None:
-            section["rows"].append(self._create_row(section))
-            self.rebuild_section(section)
+            self._append_row(section, self._create_row(section))
             self._on_change()
 
         section["add_and_btn"].on_click(add_row)

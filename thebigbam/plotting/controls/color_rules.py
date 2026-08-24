@@ -54,11 +54,13 @@ def build_color_rule_controls(
         margin=(2, 0, 2, 0),
         button_type="success",
         stylesheets=[panel_stylesheet(stylesheet)],
+        css_classes=["action-add"],
     )
     custom_color_column = pn.Column(
         add_color_btn,
         sizing_mode="stretch_width",
-        styles={"border-left": "3px solid #00b17c", "padding-left": "10px", "margin-left": "5px"},
+        css_classes=["nested-section"],
+        stylesheets=[panel_stylesheet(stylesheet)],
     )
 
     TEXT_OPS = ["=", "!=", "has", "has not", "Use random colors"]
@@ -253,11 +255,13 @@ def build_color_rule_controls(
         margin=(2, 0, 2, 0),
         button_type="success",
         stylesheets=[panel_stylesheet(stylesheet)],
+        css_classes=["action-add"],
     )
     mag_track_color_column = pn.Column(
         add_mag_track_btn,
         sizing_mode="stretch_width",
-        styles={"border-left": "3px solid #00b17c", "padding-left": "10px", "margin-left": "5px"},
+        css_classes=["nested-section"],
+        stylesheets=[panel_stylesheet(stylesheet)],
     )
 
     def rebuild_mag_track_color_rows():

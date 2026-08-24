@@ -15,6 +15,7 @@ from .wiring import make_apply_bindings
 class FinalizedSession:
     layout: Any
     placeholder: Any
+    controls: Any
     apply_controller: ApplyController
 
 
@@ -36,7 +37,7 @@ def finalize_session(
     )
     apply_arguments = {**apply_arguments, "placeholder": assembled.placeholder}
     controller = ApplyController(make_apply_bindings(**apply_arguments))
-    return FinalizedSession(assembled.layout, assembled.placeholder, controller)
+    return FinalizedSession(assembled.layout, assembled.placeholder, assembled.controls, controller)
 
 
 def inspectable_application(

@@ -11,6 +11,9 @@ class SearchableSelect(JSComponent):
     server_search = param.Boolean(default=False)
     search_query = param.String(default="")
     search_nonce = param.Integer(default=0)
+    search_result_nonce = param.Integer(default=0)
+    search_result_query = param.String(default="")
+    min_search_chars = param.Integer(default=0, bounds=(0, None))
     disabled = param.Boolean(default=False)
 
     _stylesheets = [
@@ -89,6 +92,7 @@ class SearchableSelect(JSComponent):
         // the 'options' handler below resolves the pending load() callback
         // once Python pushes back the matching results.
         let pendingLoadCallback = null;
+        const pendingFilterLoads = new Map();
         const tsConfig = {
             create: false,
             maxOptions: 100,
@@ -99,15 +103,38 @@ class SearchableSelect(JSComponent):
         };
         if (model.server_search) {
             tsConfig.loadThrottle = 300;
-            tsConfig.shouldLoad = (query) => true;
+            tsConfig.shouldLoad = (query) => query.length >= model.min_search_chars;
             tsConfig.load = (query, callback) => {
-                pendingLoadCallback = callback;
+                if (model.min_search_chars > 0) {
+                    const previous = pendingFilterLoads.get(query);
+                    if (previous) previous([]);
+                    pendingFilterLoads.set(query, callback);
+                }
+                else pendingLoadCallback = callback;
                 model.search_query = query;
                 // search_nonce always changes, so Python's watcher fires even
                 // when the same text is searched twice in a row (Param skips
                 // no-op assignments to search_query itself).
                 model.search_nonce = model.search_nonce + 1;
             };
+            tsConfig.onType = (query) => {
+                if (query.length >= model.min_search_chars) return;
+                pendingFilterLoads.forEach((callback) => callback([]));
+                pendingFilterLoads.clear();
+                ts.clearOptions();
+                ts.refreshOptions(false);
+            };
+            if (model.min_search_chars > 0) {
+                tsConfig.render = {
+                    no_results: (data, escape) => {
+                        const query = data.input || '';
+                        const message = query.length < model.min_search_chars
+                            ? `Type at least ${model.min_search_chars} characters`
+                            : 'No results found';
+                        return `<div class="no-results">${escape(message)}</div>`;
+                    },
+                };
+            }
         }
 
         const ts = new TomSelect(select, tsConfig);
@@ -140,6 +167,7 @@ class SearchableSelect(JSComponent):
         });
 
         model.on('options', () => {
+            if (model.min_search_chars > 0) return;
             const newOptions = model.options;  // fresh array of strings from Python
             allOptions = newOptions.map(o => ({value: o, text: o}));
 
@@ -169,6 +197,34 @@ class SearchableSelect(JSComponent):
                 const cb = pendingLoadCallback;
                 pendingLoadCallback = null;
                 cb(allOptions);
+            }
+        });
+
+        model.on('search_result_nonce', () => {
+            if (model.min_search_chars <= 0) return;
+            const query = model.search_result_query;
+            const currentQuery = ts.control_input.value;
+            const callback = pendingFilterLoads.get(query);
+            pendingFilterLoads.delete(query);
+            if (!callback) return;
+            if (query !== currentQuery || query.length < model.min_search_chars) {
+                callback([]);
+                return;
+            }
+            const newOptions = model.options;
+            const newSet = new Set(newOptions);
+            Object.keys(ts.options).forEach((key) => {
+                if (!newSet.has(key)) ts.removeOption(key, true);
+            });
+            newOptions.forEach((opt) => {
+                if (!ts.options.hasOwnProperty(opt)) ts.addOption({value: opt, text: opt});
+            });
+            callback(newOptions.map(o => ({value: o, text: o})));
+            for (const [oldQuery, oldCallback] of pendingFilterLoads.entries()) {
+                if (oldQuery !== currentQuery) {
+                    oldCallback([]);
+                    pendingFilterLoads.delete(oldQuery);
+                }
             }
         });
 

@@ -50,7 +50,7 @@ class SettingsSaveControls:
             align="center",
             button_type="primary",
             stylesheets=[stylesheet],
-            css_classes=["apply-btn", "save-settings-btn"],
+            css_classes=["action-primary", "apply-btn", "save-settings-btn"],
             margin=(5, 0, 0, 5),
         )
         self.button.on_click(self._save)

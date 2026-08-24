@@ -50,7 +50,8 @@ class AvailabilityController:
             # matches a real contig name) — keeps the cap as a real payload
             # guard while never silently dropping what's already selected.
             preserve_contig = widgets["contig_select"].value
-            if widgets["has_mags"]:
+            is_mag_view = widgets["has_mags"] and widgets["view_radio"].active == 0
+            if is_mag_view:
                 # MAG mode: contig list is a child of the selected MAG, not of the sample.
                 sel_mag = widgets["mag_select"].value
                 if sel_mag and sel_mag in widgets["mag_to_contigs"]:
@@ -127,7 +128,8 @@ class AvailabilityController:
             # it) always survives LIMIT 100 — no-op when either is "".
             preserve_sample = widgets["sample_select"].value
             preserve_sort_sample = mag_params_sort_sample_select.value
-            if widgets["has_mags"]:
+            is_mag_view = widgets["has_mags"] and widgets["view_radio"].active == 0
+            if is_mag_view:
                 # MAG mode: filter samples by selected MAG.
                 sel_mag = widgets["mag_select"].value
                 if views.active == 0 and sel_mag and sel_mag in widgets["mag_to_sample_ids"]:
@@ -254,6 +256,9 @@ class AvailabilityController:
 
         _title_fingerprint = {"last": None}
 
+        def invalidate_titles():
+            _title_fingerprint["last"] = None
+
         def _count_contigs_available():
             """True (uncapped) count of contigs valid for the current selection —
             mirrors _compute_contig_completions' base filter (Sample in non-MAG
@@ -262,7 +267,8 @@ class AvailabilityController:
             LIMIT 100 dropdown-payload cap."""
             if widgets["contig_select"].value:
                 return 1
-            if widgets["has_mags"]:
+            is_mag_view = widgets["has_mags"] and widgets["view_radio"].active == 0
+            if is_mag_view:
                 sel_mag = widgets["mag_select"].value
                 if sel_mag and sel_mag in widgets["mag_to_contigs"]:
                     return len(widgets["mag_to_contigs"][sel_mag])
@@ -278,7 +284,8 @@ class AvailabilityController:
             """Mirror of _count_contigs_available for the Samples header."""
             if widgets["sample_select"].value:
                 return 1
-            if widgets["has_mags"]:
+            is_mag_view = widgets["has_mags"] and widgets["view_radio"].active == 0
+            if is_mag_view:
                 sel_mag = widgets["mag_select"].value
                 if views.active == 0 and sel_mag and sel_mag in widgets["mag_to_sample_ids"]:
                     return len(widgets["mag_to_sample_ids"][sel_mag])
@@ -372,3 +379,4 @@ class AvailabilityController:
         self.compute_mags = _compute_mag_completions
         self.refresh_mags = refresh_mag_options_unlocked
         self.update_titles = update_section_titles
+        self.invalidate_titles = invalidate_titles

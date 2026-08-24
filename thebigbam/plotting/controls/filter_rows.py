@@ -125,11 +125,11 @@ class FilterRowFactory:
         initial_is_text = initial_col_info.get("type") == "text"
 
         # First level select (categories)
-        category_select = Select(options=categories, value=initial_category, width=70, margin=(0, 2, 0, 0))
+        category_select = Select(options=categories, value=initial_category, width=70, margin=0)
 
         # Second level select (columns)
         subcategory_select = Select(
-            options=initial_columns, value=initial_column, sizing_mode="stretch_width", margin=(0, 2, 0, 0)
+            options=initial_columns, value=initial_column, sizing_mode="stretch_width", margin=0
         )
 
         # Comparison operator select - "=" and "!=" for text, all operators for numeric
@@ -137,10 +137,41 @@ class FilterRowFactory:
         _initial_ops = ["=", "!=", "has", "has not"] if initial_is_text else ["=", ">", "<", "!="]
         if initial_operator is not None and initial_operator in _initial_ops:
             _default_operator = initial_operator
-        comparison_select = Select(options=_initial_ops, value=_default_operator, width=50, margin=(0, 2, 0, 0))
+        comparison_select = Select(options=_initial_ops, value=_default_operator, width=50, margin=0)
 
         # Container for the dynamic input widget
-        input_container = pn.Column(width=90, margin=(0, 2, 0, 0))
+        input_container = pn.Column(width=90, margin=0)
+
+        def make_searchable_input(category, column, *, placeholder="Search..."):
+            widget = SearchableSelect(
+                value="",
+                options=[],
+                placeholder=placeholder,
+                server_search=True,
+                min_search_chars=2,
+                width=90,
+            )
+
+            def _search(_event):
+                request_nonce = widget.search_nonce
+                query = widget.search_query
+                if len(query) < widget.min_search_chars:
+                    widget.options = []
+                    widget.search_result_query = query
+                    widget.search_result_nonce = request_nonce
+                    return
+                values = self.metadata_service.search_distinct_values(
+                    category, column, query, limit=100
+                )
+                if widget.value and widget.value not in values:
+                    values = [widget.value, *values]
+                widget.options = list(values)
+                widget.search_result_query = query
+                widget.search_result_nonce = request_nonce
+
+            widget.param.watch(_search, "search_nonce")
+            widget.param.watch(lambda event: self.refresh(), "value")
+            return widget
 
         # Create initial input widget based on column type
         if initial_is_text and _default_operator in ("has", "has not"):
@@ -149,10 +180,8 @@ class FilterRowFactory:
             initial_input.on_change("value", lambda attr, old, new: self.refresh())
             initial_is_panel = False
         elif initial_is_text:
-            distinct_values = self.metadata_service.distinct_values(initial_category, initial_column)
-            initial_input = SearchableSelect(value="", options=distinct_values, placeholder="Search...", width=90)
+            initial_input = make_searchable_input(initial_category, initial_column)
             input_container.objects = [initial_input]
-            initial_input.param.watch(lambda event: self.refresh(), "value")
             initial_is_panel = True
         else:
             _enc_scale = self.filter_encode.get(initial_column)
@@ -226,11 +255,9 @@ class FilterRowFactory:
                     current_input_ref["is_panel"] = False
                     new_input.on_change("value", lambda attr, old, new: self.refresh())
                 else:
-                    placeholder_input = SearchableSelect(
-                        value="", options=[], placeholder=f"Loading {category}...", width=90
-                    )
-                    input_container.objects = [placeholder_input]
-                    current_input_ref["widget"] = placeholder_input
+                    searchable_input = make_searchable_input(category, col_name)
+                    input_container.objects = [searchable_input]
+                    current_input_ref["widget"] = searchable_input
                     current_input_ref["is_panel"] = True
             else:
                 _enc_scale = self.filter_encode.get(col_name)
@@ -255,6 +282,9 @@ class FilterRowFactory:
             # --- synchronous: clear inset immediately, show spinner if rebuilding ---
             had_inset = bool(hist_container.objects)
             if had_inset:
+                # Cancel any loading overlay owned by a superseded histogram
+                # rebuild before replacing its contents with this row spinner.
+                hist_container.loading = False
                 _spinner_html = pn.pane.HTML(
                     '<div style="display:flex;align-items:center;gap:8px;padding:8px 0;">'
                     '<div style="width:18px;height:18px;border:2px solid #ddd;border-top:2px solid #888;'
@@ -285,18 +315,6 @@ class FilterRowFactory:
                     or subcategory_select.value != col_name
                 ):
                     return
-                if is_text:
-                    current_op = comparison_select.value
-                    if current_op not in ("has", "has not"):
-                        distinct_values = self.metadata_service.distinct_values(category, col_name)
-                        new_input = SearchableSelect(
-                            value="", options=distinct_values, placeholder="Search...", width=90
-                        )
-                        input_container.objects = [new_input]
-                        current_input_ref["widget"] = new_input
-                        current_input_ref["is_panel"] = True
-                        new_input.param.watch(lambda event: self.refresh(), "value")
-
                 if had_inset and row_data["loading_gen"] == gen:
                     if is_text:
                         result = self.visualizations.build_text_treemap(
@@ -363,24 +381,10 @@ class FilterRowFactory:
                     current_input_ref["is_panel"] = False
                     new_input.on_change("value", lambda attr, old, new: self.refresh())
                 else:
-                    placeholder_input = SearchableSelect(
-                        value="", options=[], placeholder=f"Loading {category}...", width=90
-                    )
-                    input_container.objects = [placeholder_input]
-                    current_input_ref["widget"] = placeholder_input
+                    searchable_input = make_searchable_input(category, col_name)
+                    input_container.objects = [searchable_input]
+                    current_input_ref["widget"] = searchable_input
                     current_input_ref["is_panel"] = True
-
-                    def _deferred_resolve():
-                        distinct_values = self.metadata_service.distinct_values(category, col_name)
-                        new_input = SearchableSelect(
-                            value="", options=distinct_values, placeholder="Search...", width=90
-                        )
-                        input_container.objects = [new_input]
-                        current_input_ref["widget"] = new_input
-                        current_input_ref["is_panel"] = True
-                        new_input.param.watch(lambda event: self.refresh(), "value")
-
-                    curdoc().add_next_tick_callback(_deferred_resolve)
 
             schedule_refresh()
 
@@ -414,6 +418,8 @@ class FilterRowFactory:
             dist_toggle,
             sizing_mode="stretch_width",
             margin=(3, 0, 3, 0),
+            css_classes=["control-row"],
+            stylesheets=[panel_stylesheet(self.stylesheet)],
         )
 
         hist_container = pn.Column(sizing_mode="stretch_width", margin=(0, 5, 0, 0))

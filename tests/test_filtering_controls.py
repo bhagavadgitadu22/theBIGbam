@@ -30,12 +30,14 @@ def test_filter_section_controller_add_row_refreshes_once():
     changes = []
     controller = FilterSectionController(_row, lambda: changes.append(True), "", "")
     section = controller.sections[0]
+    first_wrapper = section["rows"][0]["row_wrapper"]
 
     section["add_and_btn"].param.trigger("clicks")
 
     assert controller.count_rows() == 2
     assert changes == [True]
     assert section["rows"][1]["and_div"].value == "AND"
+    assert section["column"].objects[0] is first_wrapper
 
 
 def test_filter_section_converts_bokeh_stylesheets_for_panel_widgets():
@@ -47,3 +49,5 @@ def test_filter_section_converts_bokeh_stylesheets_for_panel_widgets():
     assert controller.sections[0]["add_and_btn"].stylesheets == [stylesheet.css]
     assert controller._global_add.button_type == "success"
     assert controller.sections[0]["add_and_btn"].button_type == "success"
+    assert controller._global_add.css_classes == ["action-add"]
+    assert controller.sections[0]["column"].css_classes == ["nested-section"]

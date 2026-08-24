@@ -21,6 +21,12 @@ class FilterMetadataService:
             lambda: self.repository.distinct_values(category, column),
         )
 
+    def search_distinct_values(self, category, column, search_term="", limit=100):
+        return self._cached(
+            ("distinct_search", category, column, search_term, limit),
+            lambda: self.repository.search_distinct_values(category, column, search_term, limit),
+        )
+
     def histogram_bins(self, category, column, *, n_bins=50, log_mode=False):
         return self._cached(
             ("histogram", category, column, n_bins, log_mode),

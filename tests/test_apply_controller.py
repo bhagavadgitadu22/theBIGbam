@@ -61,7 +61,8 @@ def test_apply_controller_reports_missing_contig_and_completes_lifecycle():
 
     ApplyController(ApplyBindings(**values)).apply()
 
-    assert lifecycle.prepared
+    # Invalid requests leave the active plot and its callbacks untouched.
+    assert not lifecycle.prepared
     assert "Please select a contig" in placeholder.objects[0].object
     assert placeholder.loading is False
     assert operations == ["apply/param_parse", "idle"]

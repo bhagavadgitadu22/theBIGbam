@@ -42,6 +42,7 @@ from ..shared.timing import BrowserTimingRelay, estimate_grid_data_size, rss_mb,
 from .availability import AvailabilityBindings, AvailabilityController
 from .availability_facade import AvailabilityFacade
 from .layout import LayoutParts, separator
+from .interactions import InteractionCoordinator
 from .output_controls import build_output_controls
 from .scope_transition import ScopeTransitionBindings, ScopeTransitionController
 from .session_assembly import finalize_session, inspectable_application
@@ -155,8 +156,27 @@ def create_layout(
     _compute_mag_completions = availability_facade.compute_mags
     refresh_mag_options_unlocked = availability_facade.refresh_mags
     update_section_titles = availability_facade.update_titles
+    invalidate_section_titles = availability_facade.invalidate_titles
 
-    session_callbacks = SessionCallbacks(lambda callback: curdoc().add_next_tick_callback(callback))
+    interactions = InteractionCoordinator()
+    session_callbacks = SessionCallbacks(
+        lambda callback: curdoc().add_next_tick_callback(callback), interactions=interactions
+    )
+
+    def schedule_control_transition(callback):
+        if interactions.root is None:
+            callback()
+            return
+        if not interactions.begin("controls"):
+            return
+
+        def _run():
+            try:
+                callback()
+            finally:
+                interactions.end()
+
+        curdoc().add_next_tick_callback(_run)
     apply_clicked = session_callbacks.apply_clicked
     _do_apply = session_callbacks.do_apply
     peruse_clicked = session_callbacks.show_summary
@@ -201,10 +221,9 @@ def create_layout(
 
     # Load cached CSS stylesheets
     stylesheet = _get_cached_stylesheet("bokeh_styles.css")
-    pink_buttons_stylesheet = _get_cached_stylesheet("pink_buttons.css")
-    widgets["view_radio"].stylesheets = [pink_buttons_stylesheet]
+    widgets["view_radio"].stylesheets = [stylesheet]
+    widgets["view_radio"].css_classes = ["mode-switch"]
     toggle_stylesheet = _get_cached_stylesheet("toggle_styles.css")
-    grey_buttons_stylesheet = _get_cached_stylesheet("grey_buttons.css")
 
     # Create main elements
     ## Views section
@@ -217,7 +236,8 @@ def create_layout(
         labels=["ONE SAMPLE", "ALL SAMPLES"],
         active=0,
         sizing_mode="stretch_width",
-        stylesheets=[pink_buttons_stylesheet],
+        stylesheets=[stylesheet],
+        css_classes=["mode-switch"],
     )
     if enable_timing:
         views.js_on_change(
@@ -277,16 +297,42 @@ def create_layout(
             print(f"[timing] RSS at filter_change start: {_get_rss_mb():.0f} MB", flush=True)
         doc = curdoc()
         doc.hold("combine")
-        filter_projection_ref["projection"].apply()
+        projection = filter_projection_ref["projection"]
+        checkpoint = projection.checkpoint()
+        choice_widgets = [
+            widgets[key]
+            for key in ("contig_select", "sample_select", "mag_select")
+            if key in widgets
+        ]
+        if widgets["has_mags"]:
+            choice_widgets.append(mag_params_sort_sample_select)
+        choice_snapshot = [(control, list(control.options), control.value) for control in choice_widgets]
+        projection.apply()
         availability_service.invalidate()
         data_cache.invalidate("filter_change")
         filter_projection_ref["projection"].invalidate()
         global_toggle_lock["locked"] = True
         try:
-            refresh_contig_options_unlocked()
+            # Reconcile upstream selections before their dependent choices.
             refresh_sample_options_unlocked()
             refresh_mag_options_unlocked()
+            refresh_contig_options_unlocked()
+            # A cleared sample/MAG can broaden another list; converge once more.
+            refresh_sample_options_unlocked()
+            refresh_mag_options_unlocked()
+            refresh_contig_options_unlocked()
+            invalidate_section_titles()
             update_section_titles()
+        except Exception:
+            projection.restore(checkpoint)
+            availability_service.invalidate()
+            for control, options, value in choice_snapshot:
+                update_widget_completions(control, options)
+                if value in options:
+                    control.value = value
+            invalidate_section_titles()
+            update_section_titles()
+            raise
         finally:
             global_toggle_lock["locked"] = False
             doc.unhold()
@@ -305,7 +351,7 @@ def create_layout(
         stylesheet=stylesheet,
         toggle_stylesheet=toggle_stylesheet,
         button_stylesheet=stylesheet,
-        grey_button_stylesheet=grey_buttons_stylesheet,
+        muted_button_stylesheet=stylesheet,
         enable_timing=enable_timing,
         set_operation=_set_current_operation,
         header=filtering_header,
@@ -318,25 +364,13 @@ def create_layout(
     create_query_row = filter_panel.create_query_row
 
     filter_apply_button = Button(
-        label="APPLY",
+        label="APPLY FILTERS",
         button_type="default",
         disabled=True,
-        width=120,
+        width=140,
         align="center",
-        stylesheets=[
-            stylesheet,
-            pink_buttons_stylesheet,
-            InlineStyleSheet(
-                css="""
-                :host .bk-btn:disabled {
-                    background: #d0d0d0 !important;
-                    border-color: #b0b0b0 !important;
-                    color: #666 !important;
-                }
-                """
-            ),
-        ],
-        css_classes=["apply-btn"],
+        stylesheets=[stylesheet],
+        css_classes=["action-primary", "apply-btn"],
         margin=(8, 0, 3, 0),
     )
     filter_ui.update({"apply": filter_apply_button})
@@ -351,6 +385,8 @@ def create_layout(
         if not filter_panel.projection.has_pending_changes():
             mark_filters_dirty()
             return
+        if not interactions.begin("controls"):
+            return
         filter_apply_button.disabled = True
         _set_availability_controls_disabled(True)
 
@@ -358,21 +394,23 @@ def create_layout(
             try:
                 apply_filter_changes()
             except Exception:
-                filter_apply_button.disabled = False
-                filter_apply_button.button_type = "primary"
+                # apply_filter_changes rolled back the applied expression and
+                # choices, so the unchanged draft remains directly retryable.
+                invalidate_section_titles()
                 raise
             finally:
                 _set_availability_controls_disabled(False)
-            filter_apply_button.button_type = "default"
+                interactions.end()
+            mark_filters_dirty()
 
         curdoc().add_next_tick_callback(_run)
 
     filter_apply_button.on_click(lambda _event: _apply_filters_clicked())
     filter_apply_row = pn.Row(
-        pn.Spacer(sizing_mode="stretch_width"),
         filter_apply_button,
-        pn.Spacer(sizing_mode="stretch_width"),
         sizing_mode="stretch_width",
+        css_classes=["action-row"],
+        stylesheets=[stylesheet],
         margin=0,
     )
     filtering_content = pn.Column(
@@ -550,6 +588,7 @@ def create_layout(
             sample_contig_categories=_sample_contig_categories,
             sample_mag_categories=_sample_mag_categories,
             sample_current_categories=_sample_sort_current_categories,
+            schedule_transition=schedule_control_transition,
         )
     )
     session_callbacks.attach_subject(subject_controller)
@@ -560,8 +599,8 @@ def create_layout(
         label="APPLY",
         align="center",
         button_type="primary",
-        stylesheets=[pink_buttons_stylesheet],
-        css_classes=["apply-btn"],
+        stylesheets=[stylesheet],
+        css_classes=["action-primary", "apply-btn"],
         margin=(5, 0, 0, 0),
     )
     apply_button.on_click(apply_clicked)
@@ -577,7 +616,7 @@ def create_layout(
         subplot_variables=_subplot_to_varnames,
         from_position=from_position_input,
         to_position=to_position_input,
-        stylesheet=pink_buttons_stylesheet,
+        stylesheet=stylesheet,
         enable_timing=enable_timing,
         timing=_TIMING,
         report_timing=_report_download_timing if enable_timing else None,
@@ -650,7 +689,17 @@ def create_layout(
     controller = scope_transition.plot_controller
     for variable_group in widgets["variables_widgets_all"]:
         variable_group.on_change("active", scope_transition.variable_callback(variable_group))
-    views.on_change("active", scope_transition.view_changed)
+    def transition_sample_scope(attr, old, new):
+        """Apply every consequence of ONE/ALL switching as one transaction."""
+
+        def _transition():
+            if widgets["has_mags"]:
+                subject_controller.subject_scope_changed(attr, old, new)
+            scope_transition.view_changed(attr, old, new)
+
+        schedule_control_transition(_transition)
+
+    views.on_change("active", transition_sample_scope)
 
     if initial_settings:
         settings_session.restore(initial_settings)
@@ -712,6 +761,7 @@ def create_layout(
             set_operation=_set_current_operation,
         ),
     )
+    interactions.attach(finalized.controls)
     session_callbacks.attach_placeholder(finalized.placeholder)
     session_callbacks.attach_apply(finalized.apply_controller)
     layout = finalized.layout
