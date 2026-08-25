@@ -43,9 +43,7 @@ def repository_db(tmp_path):
     conn.execute("CREATE TABLE Contig (Contig_id INTEGER, Contig_name VARCHAR, Contig_length INTEGER)")
     conn.execute("CREATE TABLE Sample (Sample_id INTEGER, Sample_name VARCHAR, rank INTEGER)")
     conn.execute("CREATE TABLE Coverage (Contig_id INTEGER, Sample_id INTEGER)")
-    conn.execute(
-        "CREATE TABLE Explicit_coverage (Contig_id INTEGER, Sample_id INTEGER, Coverage_class VARCHAR)"
-    )
+    conn.execute("CREATE TABLE Explicit_coverage (Contig_id INTEGER, Sample_id INTEGER, Coverage_class VARCHAR)")
     conn.execute("CREATE TABLE MAG_contigs_association (MAG_id INTEGER, Contig_id INTEGER)")
     conn.execute("CREATE TABLE Explicit_coverage_per_MAG (MAG_id INTEGER, Sample_id INTEGER, Coverage_mean REAL)")
     conn.execute(
@@ -99,9 +97,7 @@ def test_service_orders_then_limits_repository_samples(repository_db):
 
 def test_service_orders_samples_alphabetically_by_text_metric(repository_db):
     repository = AllSamplesRepository(repository_db)
-    ordering = SampleOrdering(
-        source="Explicit_coverage", column="Coverage_class", ascending=True, max_samples=None
-    )
+    ordering = SampleOrdering(source="Explicit_coverage", column="Coverage_class", ascending=True, max_samples=None)
 
     samples = repository.order_samples(1, [(2, "sample_002"), (1, "sample_001")], ordering)
 
@@ -110,9 +106,7 @@ def test_service_orders_samples_alphabetically_by_text_metric(repository_db):
 
 def test_contig_view_can_order_samples_by_parent_mag_metric(repository_db):
     repository = AllSamplesRepository(repository_db)
-    ordering = SampleOrdering(
-        source="Explicit_coverage_per_MAG", column="Coverage_mean", ascending=False
-    )
+    ordering = SampleOrdering(source="Explicit_coverage_per_MAG", column="Coverage_mean", ascending=False)
 
     samples = repository.order_samples(1, [(1, "sample_001"), (2, "sample_002")], ordering)
 
