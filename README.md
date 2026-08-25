@@ -23,7 +23,7 @@ Built with **Rust** for fast BAM processing and **Python + Bokeh** for interacti
       - [Annotation files](#annotation-files)
     + [Which features can I calculate?](#which-features-can-i-calculate)
     + [Database compression](#database-compression)
-    + [Metrics computed summary contig/MAG and per sample](#metrics-computed-per-contigmag-and-per-sample)
+    + [Metrics computed per contig/MAG and per sample](#metrics-computed-per-contigmag-and-per-sample)
   * [Parallelisation](#parallelisation)
   * [Visualization](#visualization)
     + [Serving from a remote server](#serving-from-a-remote-server)
@@ -43,7 +43,6 @@ Built with **Rust** for fast BAM processing and **Python + Bokeh** for interacti
   * [Analyse data](#analyse-data)
 - [Getting help](#getting-help)
 - [Citing theBIGbam](#citing-thebigbam)
-- [In-depth documentation](#in-depth-documentation)
 
 ---
 
@@ -63,7 +62,7 @@ conda activate thebigbam
 python3.10 -m pip install thebigbam
 ```
 
-In the example we used conda, but the dependencies can be installed using any package manager (e.g. `apt` on Linux, `brew` on macOS) or from the binaries provided on their respective websites. If you do not plan to use the per-sample mapping command, `samtools`, `minimap2`, and `bwa-mem2` are optional. If you do not need to within-contig repeats (for instance to find DTR/ITR), `blast` is optional.
+In the example we used conda, but the dependencies can be installed using any package manager (e.g. `apt` on Linux, `brew` on macOS) or from the binaries provided on their respective websites. If you do not plan to use the per-sample mapping command, `samtools`, `minimap2`, and `bwa-mem2` are optional. If you do not need to detect within-contig repeats (for instance to find DTR/ITR), `blast` is optional.
 
 To install the lastest version directly from GitHub, follow [the developer's guide](docs/DEVELOPERS_NOTE.md).
 
@@ -100,7 +99,7 @@ Finally visualize interactively the test data:
 thebigbam serve --db tests/HK97/test.db --port 5006
 ```
 
-Open browser to http://localhost:5006 to see the visualization. If working from a remote server, see the [Visualisation](#visualisation) section.
+Open browser to http://localhost:5006 to see the visualization. If working from a remote server, see the [Visualization](#visualization) section.
 
 ---
 
@@ -147,8 +146,6 @@ thebigbam calculate
 -o tests/HK97/HK97.db  
 -t 4
 ```
-
-Example command for a 
 
 For more complex examples see [the usage page](docs/USAGE.md).
 
@@ -217,7 +214,7 @@ All mapping-derived modules are computed and stored in the database unless you p
 - **Paired-reads:** computes per-position average insert size of reads along with the number of incorrect pair orientations (non-inward pairs, mates unmapped or mapping or another contig)
 - **Phage termini:** compute per-position coverage for primary-reads starting with an exact match (a short clipping < 5 bp is tolerated). Among those reads, the number of mapped reads starting and ending is computed. **This module requires sequences** to be provided to find terminal repeats
 
-**Important precision:** Except for the Misalignment module, the RNA module and the read starts/ends of the Termini module, coverage tracks are not CIGAR/MD-aware: **we monitor "how many reads span this position" and not "how many reads truly match at this position**. That means mismatches and deletions still count as covered. CIGAR N spans (splices) are substracted though.
+**Important precision:** Except for the Misalignment module, the RNA module and the read starts/ends of the Termini module, coverage tracks are not CIGAR/MD-aware: **we monitor "how many reads span this position" and not "how many reads truly match at this position"**. That means mismatches and deletions still count as covered. CIGAR N spans (splices) are subtracted though.
 
 **When sequences are provided**, the **Genome** module is computed. It calculates GC content, GC skew and the repeats contained within each contig/MAG using an autoblast. Annotations (e.g. positions of the coding sequences and their functions) are also saved when available (GenBank file provided).
 
@@ -266,7 +263,7 @@ Metrics belong to several categories:
 - **Topology**
 - **Phage termini**
 
-A description of all metrics is available in [the metrics section](docs/METRICSmd).
+A description of all metrics is available in [the metrics section](docs/METRICS.md).
 
 ## Parallelisation
 
@@ -308,7 +305,7 @@ When accessing the web server (http://localhost:5006), you will be presented wit
 
 You are initially in the **One Sample** mode, which allows exploration of all computed features for a single sample. Several sections on the left panel control what is plotted:
 
-- **Filtering**: Only pairs of contig/samples matching the selected filters are available in the **Contigs** and **Samples** sections. For instance, if the contig length filter is set to >10 kbp, only contigs longer than this threshold will appear in the **Contigs** section, and only samples containing at least one such contig will appear in the **Samples** section. To consult the list of filters available have a look at [the filtering page](docs/FILTERS.md)
+- **Filtering**: Only pairs of contig/samples matching the selected filters are available in the **Contigs** and **Samples** sections. For instance, if the contig length filter is set to >10 kbp, only contigs longer than this threshold will appear in the **Contigs** section, and only samples containing at least one such contig will appear in the **Samples** section. To consult the list of filters available have a look at [the filtering page](docs/METRICS.md). The button **APPLY FILTERS** becomes available when adding filters: you can click it to update the available contig/samples pairs.
 
 - **Contigs**: Select the contig you want to explore. If annotations were provided when creating the database, a gene map can be plotted: users can choose which features to include on the map and customize their colors and labels using information stored in the database (the gene category for instance). In addition, if sequence data was provided when creating the database, genomic features can be selected for plotting: repeats within contigs (and within MAGs in MAG view), GC content, GC skew
 
@@ -316,7 +313,7 @@ You are initially in the **One Sample** mode, which allows exploration of all co
 
 - **Variables**: Select the features to plot. You can either use the checkboxes to select all features from a module or click individual features within a module
 
-- **Plotting parameters**: You can customize several aesthetic aspects of the plots: [adaptive resolution parameters](docs/README.md#adaptive-resolution-rendering), heights of the genomic feature tracks and mapping-derived plots, MAG and sample parameters to order the MAG contigs and sample plots
+- **Plotting parameters**: You can customize several aesthetic aspects of the plots: [adaptive resolution parameters](#adaptive-resolution-rendering), heights of the genomic feature tracks and mapping-derived plots, MAG and sample parameters to order the MAG contigs and sample plots
 
 Finally, click **APPLY** to visualize the requested features for the selected contig and sample. 
 
@@ -401,7 +398,7 @@ Default mapping uses minimap2 for short reads while keeping secondary and supple
 
 - **minimap2-no-preset**: minimap2 with no preset (advanced users, parameters can be provided using `--minimap2-params` instead)
 
-Additional parameters can be provided to minimap2 and bwa-mem2 using the `--minimap2-params` and  `--bwa-params` options. Those paramaters takes precedence over the presets parameters if different values for the same parameter are provided.
+Additional parameters can be provided to minimap2 and bwa-mem2 using the `--minimap2-params` and  `--bwa-params` options. Those parameters take precedence over the presets parameters if different values for the same parameter are provided.
 
 In addition, alignments can optionally be filtered to retain only reads meeting a minimum identity threshold with the reference (`--min-read-percent-identity`) and a minimum aligned coverage threshold (`--min-read-aligned-percent`).
 
@@ -433,7 +430,7 @@ All annotations provided through annotation files are stored in the database dur
 thebigbam add-contig-annotations -g tests/HK97/HK97_GCF_000848825.1_pharokka.gbk --csv new_qualifiers.csv --match-by feature_type,ID --prefix toolX_ -o annotations_enriched.gbk
 ```
 
-Where new_qualifiers.tsv contains:
+Where new_qualifiers.csv contains:
 
 - Columns specified in `--match-by`, used to identify the features to update
 - Additional columns corresponding to new qualifier–value pairs to add to matching features
@@ -521,13 +518,15 @@ If meeting any problem using theBIGbam, please open an issue with:
 - Your OS, Python version, and theBIGbam version (`thebigbam --version`)
 - Any relevant error messages or log output
 
-If a functionality is missing for your use case, open an issue to explain what you want to do and what features you envisioned to bridge the gap!
+If a functionality is missing for your use case, open an issue to explain what you want to do and what features you envisioned to bridge the gap! And if you are motivated to code it yourself, you can have a look at the [developer notes](docs/DEVELOPERS_NOTE.md).
 
 ---
 
 # Citing theBIGbam
 
-TO-DO
+If you use theBIGbam in your research, please cite this paper:
+
+> Boutroux, M., Thomas, E., Chin, W. H., & Peter, H. (2026). theBIGbam: Compression and interactive exploration of large-scale sequencing alignments with circular mapping support. *Bioinformatics*, *42*(Supplement_2), btag459. https://doi.org/10.1093/bioinformatics/btag459
 
 ---
 
@@ -547,6 +546,6 @@ TO-DO
 
 - [How to manipulate theBIGbam databases after their creation?](docs/DATABASE.md)
 
-- [More details about theBIGbam visualisation](docs/VISUALIZATION.md)
+- [More details about theBIGbam visualization](docs/VISUALIZATION.md)
 
 - [How can I contribute to theBIGbam?](docs/DEVELOPERS_NOTE.md)

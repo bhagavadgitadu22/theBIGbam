@@ -1,5 +1,6 @@
 import argparse
 import sys
+from importlib.metadata import PackageNotFoundError, version
 
 from thebigbam.analysis import (
     annotations_per_CDS_per_contig,
@@ -68,8 +69,16 @@ SCRIPTS = {
     'purge-mapping-data': 'Strip mapping-derived data from DB, keeping genome/annotation data for reprocessing with --extend',
 }
 
+
+def _get_version():
+    try:
+        return version("thebigbam")
+    except PackageNotFoundError:
+        return "unknown"
+
 def build_argparser():
     p = argparse.ArgumentParser(prog="thebigbam", description="theBIGbam command-line front-end")
+    p.add_argument('--version', action='version', version=f'%(prog)s {_get_version()}')
     sub = p.add_subparsers(dest="cmd", required=True, metavar="COMMAND")
 
     # main commands
@@ -185,11 +194,7 @@ def build_argparser():
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
     parser = build_argparser()
-    args, extras = parser.parse_known_args(argv)
-
-    # Warn about unused arguments
-    if extras:
-        print(f"Warning: Unknown/unused arguments provided: {' '.join(extras)}", file=sys.stderr, flush=True)
+    args = parser.parse_args(argv)
 
     # Dispatch to module run functions (shared-args approach)
     if args.cmd == 'mapping-per-sample':

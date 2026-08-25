@@ -1,6 +1,6 @@
 # Applying theBIGbam to real projects?
 
-## Use case 1: medium dataset, 1 contig, 252 saples
+## Use case 1: medium dataset, 1 contig, 252 samples
 
 The temporal dataset comes from a microbial evolution experiment in which *Escherichia coli* K-12 was grown on an agar megaplate with increasing concentrations of trimethoprim [(Baym et al. 2016)](https://www.science.org/doi/10.1126/science.aag0822).
 
@@ -33,7 +33,7 @@ To provide context to our read mapping, we annotate the bacterial chromosome usi
 bakta --db <path_to_bakta_db> --output bakta_Ecoli_K12_U00096.2 --prefix Ecoli_K12_U00096.2 --complete --threads 10  Ecoli_K12_U00096.2.fasta
 ```
 
-****Warning:** The `--keep-contig-headers` option is essential to prevent Bakta from renaming contigs. The reference names in your annotation files must exactly match those used in the BAM files.
+**Warning:** The `--keep-contig-headers` option is essential to prevent Bakta from renaming contigs. The reference names in your annotation files must exactly match those used in the BAM files.
 
 Then we provide the directory containing the alignment files we produced (bams_circular) and the Bakta .gbff file to the calculate command:
 
@@ -101,7 +101,7 @@ sbatch -q serial -N 1 -n 1 -c 20 -t 20:00:00 --wrap="pharokka.py --meta -d <path
 Then we provide the directory containing the alignment files we produced (bams_circular) and the pharokka .gbk file to the calculate command:
 
 ```shell
-sbatch -q serial -N 1 -n 1 -c 16 -t 60:00:00 --wrap="thebigbam calculate -t 16 -b bams_circular -g pharokka_viral_contigs_bigger_than_10kbp/pharokka.gbk --annotation_tool pharokka -o thebigbam_virus.db"
+sbatch -q serial -N 1 -n 1 -c 16 -t 60:00:00 --wrap="thebigbam calculate -t 16 -b bams_circular -g pharokka_viral_contigs_bigger_than_10kbp/pharokka.gbk -o thebigbam_virus.db"
 ```
 
 The command takes 1 hour 28 min and 27 GB of RAM to compute with 16 threads. The final DuckDB database takes 36 GB to compare with the initial 350 GB of alignment files and 3 GB of annotations (10x compression factor).
@@ -110,7 +110,7 @@ The command takes 1 hour 28 min and 27 GB of RAM to compute with 16 threads. The
 
 ## Use case 3: large dataset, 3000 MAGs, 192 samples
 
-We used the tool on the same **192 samples** as in [Use case 2](#use-case-2-large-dataset-50k-contigs-192-samples), but focusing on the bacterial MAGs. Binning of the MEGAHIT assemblies was done with Binny, MetaBAT2, MaxBin2. Results from the 3 tools were integrated with DAS Tool and qualitative bins were filtered using CheckM2 (see [Michoud et al. 2025](https://www.nature.com/articles/s41564-024-01874-9) for more details). This resulted in a final dataset of **2,837 bacterial MAGs** for 1,582,129 contigs.
+We used the tool on the same **192 samples** as in [Use case 2](#use-case-2-large-dataset-50k-contigs-192-samples), but focusing on the bacterial MAGs. Binning of the MEGAHIT assemblies was done with Binny, MetaBAT2, MaxBin2. Results from the 3 tools were integrated with DAS Tool and qualitative bins were filtered using CheckM2 (see [Michoud et al. 2025](https://www.nature.com/articles/s41564-024-01874-9) for more details). This resulted in a final dataset of **3,287 bacterial MAGs** for 1,582,129 contigs.
 
 ### Mapping
 
@@ -119,7 +119,7 @@ Mapping of each sample against all bacterial contigs was made with default minim
 ```shell
 mkdir bams_linear
 cat samples.tsv | while read -r sample r1 r2; do 
-    sbatch -q serial -N 1 -n 1 -c 8 -t 10:00:00 --wrap="thebigbam mapping-per-sample -t 8 --circular -r1 $r1 -r2 $r2 -a finalBins -o bams_linear/${sample}.bam";
+    sbatch -q serial -N 1 -n 1 -c 8 -t 10:00:00 --wrap="thebigbam mapping-per-sample -t 8 -r1 $r1 -r2 $r2 -a finalBins -o bams_linear/${sample}.bam";
 done
 ```
 
@@ -127,7 +127,7 @@ done
 
 To make the most of thebigbam database, it is very useful to provide context by including genomic annotations among the input files. Those annotations can be a mix of different tools assembled together before running calculate.
 
-Here we start by annotations the MAGs with Bakta:
+Here we start by annotating the MAGs with Bakta:
 
 ```bash
 mkdir bakta
@@ -137,13 +137,13 @@ for f in $(find finalBins -name "*.fa"); do
 done
 ```
 
-****Warning:** The `--keep-contig-headers` option is essential to prevent Bakta from renaming contigs. The reference names in your annotation files must exactly match those used in the BAM files.
+**Warning:** The `--keep-contig-headers` option is essential to prevent Bakta from renaming contigs. The reference names in your annotation files must exactly match those used in the BAM files.
 
 We copy the 3,287 Bakta files in a new directory annotations_on_mags:
 
 ```bash
 mkdir annotations_on_mags
-find bakta -name "*.gff3" -exec cp {} annotation_on_mags \;
+find bakta -name "*.gff3" -exec cp {} annotations_on_mags \;
 ```
 
 We also run defence-finder to identify defense and antidefense genes present in our MAGs. We first extract the list of proteins found by Bakta (ie by prodigal) and run [defense-finder](https://github.com/mdmparis/defense-finder) on this list:
@@ -198,7 +198,7 @@ A protein can be assigned multiple defense roles by DefenseFinder. Using `--keep
 We provide the directory containing the alignment files we produced (bams_linear) and the enriched annotation files file to the calculate command:
 
 ```shell
-sbatch -q serial -N 1 -n 1 -c 16 -t 30:00:00 --wrap="thebigbam calculate -t 16 -g annotations_on_mags_enriched -b mappings_on_mags --view mag -o thebigbam_bacteria_mag_view.db --min_aligned_fraction 10 --min_occurrences 5"
+sbatch -q serial -N 1 -n 1 -c 16 -t 30:00:00 --wrap="thebigbam calculate -t 16 -g annotations_on_mags_enriched -b bams_linear --view mag -o thebigbam_bacteria_mag_view.db --min_aligned_fraction 10 --min_occurrences 5"
 ```
 
 We used specific options for this use case: 
@@ -207,7 +207,7 @@ We used specific options for this use case:
 
 - `--min_aligned_fraction 10` to consider a MAG present in a sample when more than 10% of its nucleotides received at least one mapping. MAGs are way bigger than the viral genomes from [Use case 2](#use-case-2-large-dataset-50k-contigs-192-samples), so a lower aligned fraction typically is enough to consider something present
 
-- `--min_occurrences 5` to only keep events occuring more than 5 times. This means a mismatch will be recorded at a position if more than 5 reads harbor this mismatch there
+- `--min_occurrences 5` to only keep events occurring more than 5 times. This means a mismatch will be recorded at a position if more than 5 reads harbor this mismatch there
 
 Despite mapping files 10 times bigger (~ 3 Tb) than in [Use case 2](#use-case-2-large-dataset-50k-contigs-192-samples), the command still runs quite fast: it takes 23 hours and 37 GB of RAM to compute with 16 threads. The final DuckDB database takes 473 GB to compare with the initial 2.9 TB of alignment files and 23 GB of annotations (6.2x compression factor).
 
