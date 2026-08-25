@@ -25,6 +25,7 @@ def test_description_uses_stable_sequence_and_sorted_settings_paths():
                 "details": {"column": "Coverage_mean", "category": "Coverage"},
                 "status": "completed",
                 "duration_seconds": 1.25,
+                "memory": {"server_rss_mb": 2841, "browser_heap_mb": 291.5},
             },
             {
                 "sequence": 10,
@@ -39,7 +40,8 @@ def test_description_uses_stable_sequence_and_sorted_settings_paths():
     assert describe_scenario_document(document) == (
         '7. Change settings: filtering=[{"rows":[{"category":"Coverage","value":100}]}]; '
         'selection.sample="S2"',
-        "9. Look up filter values for Coverage.Coverage_mean [completed, 1.25 s]",
+        "9. Look up filter values for Coverage.Coverage_mean "
+        "[completed, 1.25 s, server 2841 MB, browser 291.5 MB]",
         "10. Apply filters [failed, 2 s]",
         "11. Apply plot",
     )

@@ -132,6 +132,41 @@ def _build_scenario_restore_carrier(settings_session, on_restored=None):
     return carrier, status
 
 
+def _build_scenario_action_carrier(handle_action):
+    """Build a hidden semantic-action boundary for deterministic replay."""
+    carrier = TextAreaInput(name="benchmark-scenario-action", value="", visible=False)
+    status = TextAreaInput(name="benchmark-scenario-action-status", value="", visible=False)
+
+    def dispatch_action(attr, old, new):
+        del attr, old
+        if not new:
+            return
+        try:
+            request = json.loads(new)
+            nonce = request.get("nonce") if isinstance(request, dict) else None
+            action = request.get("action") if isinstance(request, dict) else None
+            details = request.get("details") if isinstance(request, dict) else None
+            if not isinstance(action, str) or not isinstance(details, dict):
+                raise ValueError("scenario action requires an action and details object")
+            handle_action(action, details)
+
+            # Semantic actions may schedule their actual UI construction for
+            # the next tick. Queue acknowledgement behind that work.
+            curdoc().add_next_tick_callback(
+                lambda: setattr(
+                    status,
+                    "value",
+                    json.dumps({"nonce": nonce, "status": "completed"}),
+                )
+            )
+        except Exception as error:
+            status.value = json.dumps({"nonce": locals().get("nonce"), "status": "failed", "error": str(error)})
+            print(f"[benchmark] Scenario action failed: {error}", flush=True)
+
+    carrier.on_change("value", dispatch_action)
+    return carrier, status
+
+
 def _start_rss_watchdog(interval: int = 5) -> None:
     start_rss_watchdog(lambda: _current_op, interval)
 
@@ -729,7 +764,27 @@ def create_layout(
         settings_session,
         _complete_scenario_restore,
     )
-    buttons_row.objects = [*buttons_row.objects, scenario_restore_carrier, scenario_restore_status]
+
+    def _handle_scenario_action(action, details):
+        if action != "filter_lookup":
+            raise ValueError(f"unsupported scenario action: {action}")
+        filter_panel.set_distribution(
+            details.get("category"),
+            details.get("column"),
+            occurrence=details.get("occurrence", 1),
+            opening=details.get("opening", True),
+        )
+
+    scenario_action_carrier, scenario_action_status = _build_scenario_action_carrier(
+        _handle_scenario_action
+    )
+    buttons_row.objects = [
+        *buttons_row.objects,
+        scenario_restore_carrier,
+        scenario_restore_status,
+        scenario_action_carrier,
+        scenario_action_status,
+    ]
 
     # sample_section must exist before settings restoration runs, since restoring the
     # ALL SAMPLES scope fires on_view_change, which sets sample_section.visible.

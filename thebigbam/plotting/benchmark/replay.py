@@ -30,6 +30,7 @@ class StepResult:
     server_lines: list[str] = field(default_factory=list)
     error: str = ""
     artifacts: dict[str, str] = field(default_factory=dict)
+    memory: dict[str, float | None] = field(default_factory=dict)
 
 
 class Server:
@@ -101,6 +102,17 @@ class Server:
         with self._lock:
             return list(self.lines[mark:])
 
+    def rss_mb(self) -> float | None:
+        """Return the current server RSS without depending on timing log output."""
+        if self.process is None or self.process.poll() is not None:
+            return None
+        try:
+            status = Path(f"/proc/{self.process.pid}/status").read_text(encoding="utf-8")
+        except OSError:
+            return None
+        match = re.search(r"^VmRSS:\s+(\d+)\s+kB$", status, re.MULTILINE)
+        return int(match.group(1)) / 1024 if match else None
+
     def stop(self) -> None:
         if self.process is None or self.process.poll() is not None:
             return
@@ -118,14 +130,41 @@ def free_port() -> int:
         return int(sock.getsockname()[1])
 
 
+def install_safe_model_lookup(page: Page) -> None:
+    """Install a lookup which tolerates unnamed, detached Bokeh models."""
+    page.wait_for_function("() => window.Bokeh && Bokeh.documents.length")
+    page.evaluate(
+        r"""() => {
+            globalThis.__thebigbam_model_by_name = name => {
+                const document = Bokeh.documents[0];
+                const models = document && document._all_models;
+                const values = models && typeof models.values === 'function'
+                    ? models.values()
+                    : [];
+                for (const model of values) {
+                    let modelName;
+                    try {
+                        modelName = model.name;
+                    } catch (_error) {
+                        continue;
+                    }
+                    if (modelName === name) return model;
+                }
+                return null;
+            };
+        }"""
+    )
+
+
 def set_model(page: Page, name: str, attribute: str, value: Any) -> None:
+    install_safe_model_lookup(page)
     page.wait_for_function(
-        "name => window.Bokeh && Bokeh.documents.length && Bokeh.documents[0].get_model_by_name(name)",
+        "name => Boolean(globalThis.__thebigbam_model_by_name(name))",
         arg=name,
     )
     page.evaluate(
         """([name, attribute, value]) => {
-            const model = Bokeh.documents[0].get_model_by_name(name);
+            const model = globalThis.__thebigbam_model_by_name(name);
             model.setv({[attribute]: value});
         }""",
         [name, attribute, value],
@@ -133,9 +172,10 @@ def set_model(page: Page, name: str, attribute: str, value: Any) -> None:
 
 
 def get_model(page: Page, name: str, attribute: str) -> Any:
+    install_safe_model_lookup(page)
     return page.evaluate(
         """([name, attribute]) => {
-            const model = Bokeh.documents[0].get_model_by_name(name);
+            const model = globalThis.__thebigbam_model_by_name(name);
             return model ? model[attribute] : null;
         }""",
         [name, attribute],
@@ -245,7 +285,7 @@ def apply_state(page: Page, state: dict[str, Any], changed: dict[str, Any], time
     set_model(page, "benchmark-scenario-restore", "value", json.dumps(request, sort_keys=True))
     page.wait_for_function(
         """nonce => {
-            const model = Bokeh.documents[0].get_model_by_name('benchmark-scenario-restore-status');
+            const model = globalThis.__thebigbam_model_by_name('benchmark-scenario-restore-status');
             if (!model || !model.value) return false;
             const result = JSON.parse(model.value);
             if (result.nonce !== nonce) return false;
@@ -261,13 +301,13 @@ def apply_state(page: Page, state: dict[str, Any], changed: dict[str, Any], time
         # Bokeh model and its rendered button to agree before continuing.
         restore_result = page.evaluate(
             """() => JSON.parse(
-                Bokeh.documents[0].get_model_by_name('benchmark-scenario-restore-status').value
+                globalThis.__thebigbam_model_by_name('benchmark-scenario-restore-status').value
             )"""
         )
         filters_pending = bool(restore_result.get("filters_pending", False))
         page.wait_for_function(
             """pending => {
-                const button = Bokeh.documents[0].get_model_by_name('benchmark-apply-filters');
+                const button = globalThis.__thebigbam_model_by_name('benchmark-apply-filters');
                 return button && button.disabled === !pending;
             }""",
             arg=filters_pending,
@@ -284,54 +324,28 @@ def apply_state(page: Page, state: dict[str, Any], changed: dict[str, Any], time
             )
 
 
-def choose_filter_lookup_index(candidates: list[int], occurrence: int) -> int:
-    """Choose a live duplicate filter target using a one-based occurrence."""
-    if not isinstance(occurrence, int) or isinstance(occurrence, bool) or occurrence < 1:
-        raise ScenarioError("filter_lookup occurrence must be a positive integer")
-    ordered = sorted(set(candidates))
-    if occurrence > len(ordered):
-        raise ScenarioError(
-            f"filter_lookup occurrence {occurrence} does not exist; found {len(ordered)} matching live rows"
-        )
-    return ordered[occurrence - 1]
-
-
-def find_filter_lookup_index(page: Page, details: dict[str, Any]) -> int:
-    """Resolve a semantic filter target against live, monotonically named rows."""
-    live_indices = page.locator("[class*='benchmark-filter-'][class*='-lookup']").evaluate_all(
-        r"""elements => elements.flatMap(element => {
-            for (const className of element.classList) {
-                const match = /^benchmark-filter-(\d+)-lookup$/.exec(className);
-                if (match) return [Number(match[1])];
-            }
-            return [];
-        })"""
-    )
-    candidates = page.evaluate(
-        r"""({category, column, liveIndices}) => {
-            const document = Bokeh.documents[0];
-            const models = document._all_models;
-            const values = models && typeof models.values === 'function'
-                ? Array.from(models.values())
-                : Array.from((models && models.values ? models.values() : []) || []);
-            const indices = [];
-            for (const model of values) {
-                const match = /^benchmark-filter-(\d+)-category$/.exec(model.name || '');
-                if (!match || model.value !== category) continue;
-                const index = Number(match[1]);
-                if (!liveIndices.includes(index)) continue;
-                const metric = document.get_model_by_name(`benchmark-filter-${index}-metric`);
-                if (metric && metric.value === column) indices.push(index);
-            }
-            return indices;
+def perform_semantic_action(
+    page: Page,
+    action: str,
+    details: dict[str, Any],
+    timeout_ms: int,
+) -> None:
+    """Dispatch an action through the server's authoritative control state."""
+    nonce = str(time.time_ns())
+    request = {"nonce": nonce, "action": action, "details": details}
+    set_model(page, "benchmark-scenario-action", "value", json.dumps(request, sort_keys=True))
+    page.wait_for_function(
+        """nonce => {
+            const model = globalThis.__thebigbam_model_by_name('benchmark-scenario-action-status');
+            if (!model || !model.value) return false;
+            const result = JSON.parse(model.value);
+            if (result.nonce !== nonce) return false;
+            if (result.status === 'failed') throw new Error(result.error || 'scenario action failed');
+            return result.status === 'completed';
         }""",
-        {
-            "category": details.get("category"),
-            "column": details.get("column"),
-            "liveIndices": live_indices,
-        },
+        arg=nonce,
+        timeout=timeout_ms,
     )
-    return choose_filter_lookup_index(candidates, details.get("occurrence", 1))
 
 
 def replay_action(
@@ -345,9 +359,7 @@ def replay_action(
         state = merge_changes(state, step["changes"])
         apply_state(page, state, step["changes"], timeout_ms)
     elif action == "filter_lookup":
-        details = step["details"]
-        index = find_filter_lookup_index(page, details)
-        click_css(page, f".benchmark-filter-{index}-lookup")
+        perform_semantic_action(page, action, step["details"], timeout_ms)
     elif action == "apply_filters":
         click_css(page, ".benchmark-apply-filters")
     elif action == "apply_plot":
@@ -375,6 +387,7 @@ def run_step(
         ok = False
         error = f"{type(exc).__name__}: {exc}"
     elapsed = time.perf_counter() - started
+    memory = measure_memory(page, server)
     sequence = step["sequence"]
     action_name = step["action"]
     shot = output / f"{sequence:03d}-{re.sub(r'[^a-z0-9]+', '-', action_name.lower()).strip('-')}.png"
@@ -399,7 +412,67 @@ def run_step(
             error = f"{error}; {warning}" if error else warning
     status = "completed" if ok else "failed"
     print(f"[{run_name}] {sequence}. {action_name}: {elapsed:.3f}s {status.upper()}", flush=True)
-    return StepResult(sequence, action_name, status, elapsed, relevant, error, {"screenshot": str(shot)})
+    return StepResult(
+        sequence,
+        action_name,
+        status,
+        elapsed,
+        relevant,
+        error,
+        {"screenshot": str(shot)},
+        memory,
+    )
+
+
+def record_blocked_step(
+    page: Page,
+    server: Server | None,
+    run_name: str,
+    output: Path,
+    step: dict[str, Any],
+    reason: str,
+) -> StepResult:
+    """Record a dependency-blocked action without waiting for an unusable control."""
+    sequence = step["sequence"]
+    action_name = step["action"]
+    shot = output / f"{sequence:03d}-{re.sub(r'[^a-z0-9]+', '-', action_name.lower()).strip('-')}.png"
+    artifacts: dict[str, str] = {}
+    try:
+        page.screenshot(path=str(shot), full_page=True)
+        artifacts["screenshot"] = str(shot)
+    except Exception as error:
+        reason = f"{reason}; screenshot: {error}"
+    memory = measure_memory(page, server)
+    print(f"[{run_name}] {sequence}. {action_name}: BLOCKED ({reason})", flush=True)
+    return StepResult(
+        sequence,
+        action_name,
+        "blocked",
+        0.0,
+        error=reason,
+        artifacts=artifacts,
+        memory=memory,
+    )
+
+
+def measure_memory(page: Page, server: Server | None) -> dict[str, float | None]:
+    """Collect best-effort end-of-step memory without changing step status."""
+    server_rss = server.rss_mb() if server is not None else None
+    browser_heap = None
+    try:
+        heap_bytes = page.evaluate(
+            """() => {
+                const memory = globalThis.performance && globalThis.performance.memory;
+                return memory && Number.isFinite(memory.usedJSHeapSize)
+                    ? memory.usedJSHeapSize
+                    : null;
+            }"""
+        )
+        if isinstance(heap_bytes, (int, float)) and not isinstance(heap_bytes, bool):
+            browser_heap = heap_bytes / (1024 * 1024)
+    except Exception as error:
+        print(f"[benchmark] Memory probe unavailable: {error}", flush=True)
+    return {"server_rss_mb": server_rss, "browser_heap_mb": browser_heap}
 
 
 def workflow(
@@ -419,12 +492,29 @@ def workflow(
         warnings = [line for line in server.since(initial_mark) if line.startswith("[settings] Warning")]
         if warnings:
             raise ScenarioError("Initial state is incompatible with server controls: " + " | ".join(warnings))
+    failed_filter_restore: int | None = None
     for scenario_step in scenario["steps"]:
+
+        if scenario_step["action"] in {"filter_lookup", "apply_filters"} and failed_filter_restore is not None:
+            results.append(
+                record_blocked_step(
+                    page,
+                    server,
+                    run_name,
+                    output,
+                    scenario_step,
+                    f"filter restoration failed at step {failed_filter_restore}",
+                )
+            )
+            continue
 
         def action(scenario_step=scenario_step) -> None:
             nonlocal state
             state = replay_action(page, scenario_step, state, timeout_ms)
-        results.append(run_step(page, server, run_name, output, scenario_step, action, timeout_ms))
+        result = run_step(page, server, run_name, output, scenario_step, action, timeout_ms)
+        results.append(result)
+        if scenario_step["action"] == "state_change" and "filtering" in scenario_step.get("changes", {}):
+            failed_filter_restore = result.sequence if result.status == "failed" else None
     return results
 
 
@@ -454,13 +544,26 @@ def write_results(
     with (output / "results.tsv").open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(
             handle,
-            fieldnames=("run", "sequence", "action", "status", "duration_seconds", "error", "artifacts", "server_lines"),
+            fieldnames=(
+                "run",
+                "sequence",
+                "action",
+                "status",
+                "duration_seconds",
+                "server_rss_mb",
+                "browser_heap_mb",
+                "error",
+                "artifacts",
+                "server_lines",
+            ),
             delimiter="\t",
         )
         writer.writeheader()
         for run_name, results in runs.items():
             for result in results:
                 row = {"run": run_name, **asdict(result)}
+                memory = row.pop("memory")
+                row.update(memory)
                 row["server_lines"] = " | ".join(result.server_lines)
                 row["artifacts"] = json.dumps(result.artifacts, sort_keys=True)
                 writer.writerow(row)

@@ -58,12 +58,12 @@ class FilterRowFactory:
             self.refresh()
             return
 
-    def _toggle_distribution(self, row_data) -> None:
+    def _toggle_distribution(self, row_data, *, record_action: bool = True) -> None:
         container = row_data["hist_container"]
         row_data["loading_gen"] += 1
         category = row_data["category_select"].value
         column = row_data["subcategory_select"].value
-        if self.record_action is not None:
+        if record_action and self.record_action is not None:
             self.record_action(
                 "filter_lookup",
                 {"category": category, "column": column, "opening": not bool(container.objects)},
@@ -104,6 +104,36 @@ class FilterRowFactory:
                 container.objects = result
 
         curdoc().add_next_tick_callback(load_distribution)
+
+    def set_distribution(
+        self,
+        category: str,
+        column: str,
+        *,
+        occurrence: int = 1,
+        opening: bool = True,
+    ) -> None:
+        """Set a current row's distribution state using semantic identity."""
+        if not isinstance(occurrence, int) or isinstance(occurrence, bool) or occurrence < 1:
+            raise ValueError("filter lookup occurrence must be a positive integer")
+        if self.controller is None:
+            raise RuntimeError("filter row controller is not attached")
+        matches = [
+            row_data
+            for section in self.controller.sections
+            for row_data in section["rows"]
+            if row_data["category_select"].value == category
+            and row_data["subcategory_select"].value == column
+        ]
+        if occurrence > len(matches):
+            raise ValueError(
+                f"filter lookup target {category}.{column} occurrence {occurrence} does not exist; "
+                f"found {len(matches)} matching current rows"
+            )
+        row_data = matches[occurrence - 1]
+        is_open = bool(row_data["hist_container"].objects)
+        if is_open != opening:
+            self._toggle_distribution(row_data, record_action=False)
 
     def create_row(self, section_data, initial_category=None, initial_column=None, initial_operator=None):
         """Create a single query row with cascading selects, comparison, dynamic input and remove button.

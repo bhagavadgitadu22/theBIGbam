@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 
+import pytest
 from bokeh.models import InlineStyleSheet
 
 from thebigbam.plotting.controls.filter_rows import FilterRowFactory
@@ -76,6 +77,36 @@ def test_lookup_records_semantic_target(monkeypatch):
             {"category": "Coverage", "column": "Coverage_mean", "opening": True},
         ),
     ]
+
+
+def test_semantic_lookup_targets_current_duplicate_occurrence(monkeypatch):
+    callbacks = []
+    monkeypatch.setattr(
+        "thebigbam.plotting.controls.filter_rows.curdoc",
+        lambda: SimpleNamespace(add_next_tick_callback=callbacks.append),
+    )
+    metadata = {"Termini": {"columns": {"Packaging_mechanism": {"type": "text"}}}}
+    factory = FilterRowFactory(
+        metadata_service=SimpleNamespace(),
+        filtering_metadata=metadata,
+        columns={"Termini": [("Packaging_mechanism", "Packaging mechanism")]},
+        raw_columns={"Termini": ["Packaging_mechanism"]},
+        visualizations=Visualizations(),
+        refresh=lambda: None,
+        stylesheet=InlineStyleSheet(css=""),
+        enable_timing=False,
+    )
+    first = factory.create_row({}, initial_category="Termini", initial_column="Packaging_mechanism")
+    second = factory.create_row({}, initial_category="Termini", initial_column="Packaging_mechanism")
+    factory.attach_controller(SimpleNamespace(sections=[{"rows": [first, second]}]))
+
+    factory.set_distribution("Termini", "Packaging_mechanism", occurrence=2, opening=True)
+
+    assert first["loading_gen"] == 0
+    assert second["loading_gen"] == 1
+    assert len(callbacks) == 1
+    with pytest.raises(ValueError, match="occurrence 3 does not exist"):
+        factory.set_distribution("Termini", "Packaging_mechanism", occurrence=3)
 
 
 def test_category_change_updates_shared_metric_immediately_and_defers_one_refresh(monkeypatch):

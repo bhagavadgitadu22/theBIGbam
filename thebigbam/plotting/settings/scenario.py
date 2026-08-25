@@ -94,6 +94,20 @@ def describe_scenario_document(document: Any) -> tuple[str, ...]:
             if not isinstance(duration, (int, float)) or isinstance(duration, bool) or duration < 0:
                 raise ScenarioFormatError(f"step {sequence} has an invalid duration_seconds")
             annotations.append(f"{duration:g} s")
+        memory = step.get("memory")
+        if memory is not None:
+            if not isinstance(memory, dict):
+                raise ScenarioFormatError(f"step {sequence} has invalid memory")
+            for key, label in (
+                ("server_rss_mb", "server"),
+                ("browser_heap_mb", "browser"),
+            ):
+                value = memory.get(key)
+                if value is None:
+                    continue
+                if not isinstance(value, (int, float)) or isinstance(value, bool) or value < 0:
+                    raise ScenarioFormatError(f"step {sequence} has invalid memory.{key}")
+                annotations.append(f"{label} {value:g} MB")
         if annotations:
             description += f" [{', '.join(annotations)}]"
         lines.append(f"{sequence}. {description}")

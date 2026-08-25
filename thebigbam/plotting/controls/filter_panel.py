@@ -24,6 +24,7 @@ class FilterPanel:
     projection: FilterWidgetProjection
     options: ParameterOptionCatalog
     create_query_row: Callable[..., Any]
+    set_distribution: Callable[..., None]
 
 
 def build_filter_panel(
@@ -98,4 +99,12 @@ def build_filter_panel(
         set_operation=set_operation,
     )
     toggle.on_click(make_toggle_callback(toggle, controller.content))
-    return FilterPanel(header, controller.content, controller, projection, options, row_factory.create_row)
+    return FilterPanel(
+        header,
+        controller.content,
+        controller,
+        projection,
+        options,
+        row_factory.create_row,
+        row_factory.set_distribution,
+    )
