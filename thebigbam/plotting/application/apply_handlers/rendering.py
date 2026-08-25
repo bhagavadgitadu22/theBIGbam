@@ -18,6 +18,7 @@ from ..apply_pipeline import (
     PlotPresenter,
     PlotResult,
 )
+from ..subject import sample_order_category_for_view
 from .bindings import ApplyBindings
 
 
@@ -152,7 +153,7 @@ class ApplyRenderEngine:
                 _sort_sample_name = sample
 
         # Read sample order parameters
-        _sample_sort_cat = sample_order_category_select.value
+        _sample_sort_cat = sample_order_category_for_view(sample_order_category_select.value, mag_view=True)
         _sample_sort_metric = sample_order_metric_select.value
         _sample_sort_ascending = sample_order_direction.active == 0
         _sample_sort_source = _sample_sort_category_sources.get(_sample_sort_cat)
@@ -381,7 +382,7 @@ class ApplyRenderEngine:
 
             filtered_samples = _get_filtered_samples_for_contig(contig)
 
-            _sample_sort_cat = sample_order_category_select.value
+            _sample_sort_cat = sample_order_category_for_view(sample_order_category_select.value, mag_view=False)
             _sample_sort_metric = sample_order_metric_select.value
             _sample_sort_ascending = sample_order_direction.active == 0
             _sample_sort_source = _sample_sort_category_sources.get(_sample_sort_cat)

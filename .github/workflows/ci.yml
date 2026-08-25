@@ -19,7 +19,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install Python validation dependencies
-        run: python -m pip install pytest ruff duckdb bokeh panel biopython dna-features-viewer zstandard
+        run: python -m pip install pytest ruff duckdb "bokeh>=3.8,<3.10" "panel>=1.8,<1.10" "param>=2.3,<2.5" biopython dna-features-viewer zstandard
       - name: Lint new plotting boundaries
         run: >-
           ruff check
@@ -27,6 +27,7 @@ jobs:
           thebigbam/plotting/application/all_samples_pipeline.py
           thebigbam/plotting/application/genome_track_pipeline.py
           thebigbam/plotting/shared/diagnostics.py
+          thebigbam/plotting/shared/styles.py
           thebigbam/plotting/models/plots.py
           thebigbam/plotting/models/blobs.py
           thebigbam/plotting/repositories/all_samples.py
@@ -46,6 +47,9 @@ jobs:
           tests/test_feature_pipeline.py
           tests/test_blob_feature_pipeline.py
           tests/test_mag_track_renderer.py
+          tests/test_filtering_controls.py
+          tests/test_filter_row_factory.py
+          tests/test_color_controls.py
       - name: Check plotting boundary formatting
         run: >-
           ruff format --check
@@ -53,6 +57,7 @@ jobs:
           thebigbam/plotting/application/all_samples_pipeline.py
           thebigbam/plotting/application/genome_track_pipeline.py
           thebigbam/plotting/shared/diagnostics.py
+          thebigbam/plotting/shared/styles.py
           thebigbam/plotting/models/plots.py
           thebigbam/plotting/models/blobs.py
           thebigbam/plotting/repositories/all_samples.py
@@ -72,10 +77,23 @@ jobs:
           tests/test_feature_pipeline.py
           tests/test_blob_feature_pipeline.py
           tests/test_mag_track_renderer.py
+          tests/test_filtering_controls.py
+          tests/test_filter_row_factory.py
+          tests/test_color_controls.py
       - name: Test plotting state
         env:
           PYTHONPATH: ${{ github.workspace }}
-        run: python -m pytest -q tests/test_plotting_state.py tests/test_all_samples_pipeline.py tests/test_genome_tracks.py tests/test_feature_pipeline.py tests/test_blob_feature_pipeline.py tests/test_mag_track_renderer.py
+        run: >-
+          python -m pytest -q
+          tests/test_plotting_state.py
+          tests/test_all_samples_pipeline.py
+          tests/test_genome_tracks.py
+          tests/test_feature_pipeline.py
+          tests/test_blob_feature_pipeline.py
+          tests/test_mag_track_renderer.py
+          tests/test_filtering_controls.py
+          tests/test_filter_row_factory.py
+          tests/test_color_controls.py
 
   build-wheels:
     if: startsWith(github.ref, 'refs/tags/v')

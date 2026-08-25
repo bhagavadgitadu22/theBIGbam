@@ -23,7 +23,7 @@ def test_parameter_option_catalog_derives_stable_cached_options():
     assert catalog.sample_metrics["Coverage"] == catalog.columns["Coverage"]
     assert catalog.mag_metrics["Contig"] == [("Contig_length", "Contig length"), ("Topology", "Topology")]
     assert catalog.mag_categories == ["Contig", "Coverage"]
-    assert catalog.sample_contig_categories == ["Sample", "Coverage"]
+    assert catalog.sample_contig_categories == ["Sample", "Coverage", "MAG coverage"]
     assert catalog.sample_mag_categories == ["Sample", "MAG coverage"]
 
 

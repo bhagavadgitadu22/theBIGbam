@@ -58,8 +58,18 @@ html, body {
 
 .sidebar-busy,
 :host(.sidebar-busy) {
-  pointer-events: none;
   cursor: wait;
+}
+
+.sidebar-busy::after,
+:host(.sidebar-busy)::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 1000;
+  background: rgb(255 255 255 / 8%);
+  cursor: wait;
+  pointer-events: auto;
 }
 
 .action-row,

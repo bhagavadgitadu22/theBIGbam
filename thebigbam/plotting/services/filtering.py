@@ -25,10 +25,12 @@ class FilteringAvailabilityService:
             self._cache[revision_key] = load()
         return self._cache[revision_key]
 
-    def contigs_for_sample(self, sample_id: int, search_term: str = "", preserve: str = "") -> tuple[str, ...]:
+    def contigs_for_sample(
+        self, sample_id: int, search_term: str = "", preserve: str = "", mag_name: str | None = None
+    ) -> tuple[str, ...]:
         return self._cached(
-            ("contigs", sample_id, search_term, preserve),
-            lambda: self.repository.contigs_for_sample(sample_id, search_term, preserve),
+            ("contigs", sample_id, search_term, preserve, mag_name),
+            lambda: self.repository.contigs_for_sample(sample_id, search_term, preserve, mag_name),
         )
 
     def samples_for_contig(self, contig_id: int, search_term: str = "") -> tuple[str, ...]:
@@ -43,10 +45,10 @@ class FilteringAvailabilityService:
             lambda: self.repository.mags_for_sample(sample_id, search_term),
         )
 
-    def count_contigs_for_sample(self, sample_id: int) -> int:
+    def count_contigs_for_sample(self, sample_id: int, mag_name: str | None = None) -> int:
         return self._cached(
-            ("contig_count", sample_id),
-            lambda: self.repository.count_contigs_for_sample(sample_id),
+            ("contig_count", sample_id, mag_name),
+            lambda: self.repository.count_contigs_for_sample(sample_id, mag_name),
         )
 
     def count_samples_for_contig(self, contig_id: int) -> int:
@@ -59,20 +61,25 @@ class FilteringAvailabilityService:
         key = ("filtered_contigs", sql, tuple(parameters), *sorted(scope.items()))
         return self._cached(key, lambda: self.repository.filtered_contigs(sql, parameters, **scope))
 
+    def count_filtered_contigs(self, sql, parameters, **scope) -> int:
+        key = ("count_filtered_contigs", sql, tuple(parameters), *sorted(scope.items()))
+        return self._cached(key, lambda: self.repository.count_filtered_contigs(sql, parameters, **scope))
+
     def filtered_samples(self, sql, parameters, **scope) -> tuple[str, ...]:
         key = ("filtered_samples", sql, tuple(parameters), *sorted(scope.items()))
         return self._cached(key, lambda: self.repository.filtered_samples(sql, parameters, **scope))
+
+    def count_filtered_samples(self, sql, parameters, **scope) -> int:
+        key = ("count_filtered_samples", sql, tuple(parameters), *sorted(scope.items()))
+        return self._cached(key, lambda: self.repository.count_filtered_samples(sql, parameters, **scope))
 
     def filtered_mags(self, sql, parameters, **scope) -> tuple[str, ...]:
         key = ("filtered_mags", sql, tuple(parameters), *sorted(scope.items()))
         return self._cached(key, lambda: self.repository.filtered_mags(sql, parameters, **scope))
 
-    def filtered_mag_counts(self, sql: str, parameters: list, mag_name: str) -> tuple[int, int]:
-        return self._cached(
-            ("filtered_mag_counts", sql, tuple(parameters), mag_name),
-            lambda: self.repository.filtered_mag_counts(sql, parameters, mag_name),
-        )
-
+    def count_filtered_mags(self, sql, parameters, **scope) -> int:
+        key = ("count_filtered_mags", sql, tuple(parameters), *sorted(scope.items()))
+        return self._cached(key, lambda: self.repository.count_filtered_mags(sql, parameters, **scope))
 
 class FilterExpressionService:
     """Compile and evaluate an immutable expression once per revision."""

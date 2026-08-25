@@ -24,14 +24,76 @@ class FilteringRepository:
             return "", []
         return f" AND {alias}.{column} ILIKE '%' || ? || '%'", [search_term]
 
-    def contigs_for_sample(self, sample_id: int, search_term: str = "", preserve: str = "") -> tuple[str, ...]:
+    @staticmethod
+    def _filtered_contig_scope(parameters, *, sample_id=None, mag_name=None, search_term=""):
+        joins = ""
+        predicates: list[str] = []
+        query_parameters = list(parameters)
+        if mag_name is not None:
+            joins = (
+                " JOIN MAG_contigs_association mca ON mca.Contig_id = c.Contig_id"
+                " JOIN MAG mg ON mg.MAG_id = mca.MAG_id"
+            )
+            predicates.append("mg.MAG_name = ?")
+            query_parameters.append(mag_name)
+        if sample_id is not None:
+            predicates.append("(f.Sample_id = ? OR f.Sample_id IS NULL)")
+            query_parameters.append(sample_id)
+        if search_term:
+            predicates.append("c.Contig_name ILIKE '%' || ? || '%'")
+            query_parameters.append(search_term)
+        return joins, predicates, query_parameters
+
+    @staticmethod
+    def _filtered_sample_scope(parameters, *, contig_id=None, mag_name=None, search_term=""):
+        joins = ""
+        predicates: list[str] = []
+        query_parameters = list(parameters)
+        if mag_name is not None:
+            joins = (
+                " JOIN MAG_contigs_association mca ON mca.Contig_id = f.Contig_id"
+                " JOIN MAG mg ON mg.MAG_id = mca.MAG_id"
+            )
+            predicates.append("mg.MAG_name = ?")
+            query_parameters.append(mag_name)
+        if contig_id is not None:
+            predicates.append("f.Contig_id = ?")
+            query_parameters.append(contig_id)
+        if search_term:
+            predicates.append("s.Sample_name ILIKE '%' || ? || '%'")
+            query_parameters.append(search_term)
+        return joins, predicates, query_parameters
+
+    @staticmethod
+    def _filtered_mag_scope(parameters, *, sample_id=None, search_term=""):
+        predicates: list[str] = []
+        query_parameters = list(parameters)
+        if sample_id is not None:
+            predicates.append("(f.Sample_id = ? OR f.Sample_id IS NULL)")
+            query_parameters.append(sample_id)
+        if search_term:
+            predicates.append("mg.MAG_name ILIKE '%' || ? || '%'")
+            query_parameters.append(search_term)
+        return predicates, query_parameters
+
+    def contigs_for_sample(
+        self, sample_id: int, search_term: str = "", preserve: str = "", mag_name: str | None = None
+    ) -> tuple[str, ...]:
         search, parameters = self._search_clause("c", "Contig_name", search_term)
+        mag_joins = ""
+        mag_predicate = ""
+        if mag_name is not None:
+            mag_joins = (
+                " JOIN MAG_contigs_association mca ON mca.Contig_id = c.Contig_id"
+                " JOIN MAG mg ON mg.MAG_id = mca.MAG_id"
+            )
+            mag_predicate = " AND mg.MAG_name = ?"
         return self._values(
             "SELECT DISTINCT c.Contig_name FROM Coverage p "
             "JOIN Contig c ON c.Contig_id = p.Contig_id "
-            f"WHERE p.Sample_id = ?{search} "
+            f"{mag_joins} WHERE p.Sample_id = ?{mag_predicate}{search} "
             "ORDER BY (c.Contig_name = ?) DESC, c.Contig_name LIMIT 100",
-            [sample_id, *parameters, preserve],
+            [sample_id, *([mag_name] if mag_name is not None else []), *parameters, preserve],
         )
 
     def samples_for_contig(self, contig_id: int, search_term: str = "") -> tuple[str, ...]:
@@ -52,14 +114,6 @@ class FilteringRepository:
             [contig_id],
         )
 
-    def sample_names_for_filter(self, sql: str, parameters: list[Any]) -> tuple[str, ...]:
-        """Return sample names present in a compiled filter result."""
-        return self._values(
-            f"SELECT DISTINCT s.Sample_name FROM ({sql}) f "
-            "JOIN Sample s ON s.Sample_id = f.Sample_id ORDER BY s.Sample_name",
-            parameters,
-        )
-
     def filtered_contigs(
         self,
         sql: str,
@@ -70,21 +124,9 @@ class FilteringRepository:
         search_term: str = "",
         preserve: str = "",
     ) -> tuple[str, ...]:
-        joins = ""
-        predicates: list[str] = []
-        query_parameters = list(parameters)
-        if mag_name is not None:
-            joins = (
-                " JOIN MAG_contigs_association mca ON mca.Contig_id = c.Contig_id JOIN MAG mg ON mg.MAG_id = mca.MAG_id"
-            )
-            predicates.append("mg.MAG_name = ?")
-            query_parameters.append(mag_name)
-        if sample_id is not None:
-            predicates.append("(f.Sample_id = ? OR f.Sample_id IS NULL)")
-            query_parameters.append(sample_id)
-        if search_term:
-            predicates.append("c.Contig_name ILIKE '%' || ? || '%'")
-            query_parameters.append(search_term)
+        joins, predicates, query_parameters = self._filtered_contig_scope(
+            parameters, sample_id=sample_id, mag_name=mag_name, search_term=search_term
+        )
         where = f" WHERE {' AND '.join(predicates)}" if predicates else ""
         query_parameters.append(preserve)
         return self._values(
@@ -92,6 +134,27 @@ class FilteringRepository:
             f" JOIN Contig c ON c.Contig_id = f.Contig_id{joins}{where}"
             " ORDER BY (c.Contig_name = ?) DESC, c.Contig_name LIMIT 100",
             query_parameters,
+        )
+
+    def count_filtered_contigs(
+        self,
+        sql: str,
+        parameters: list[Any],
+        *,
+        sample_id: int | None = None,
+        mag_name: str | None = None,
+    ) -> int:
+        joins, predicates, query_parameters = self._filtered_contig_scope(
+            parameters, sample_id=sample_id, mag_name=mag_name
+        )
+        where = f" WHERE {' AND '.join(predicates)}" if predicates else ""
+        self.query_count += 1
+        return int(
+            self.connection.execute(
+                f"SELECT COUNT(DISTINCT c.Contig_name) FROM ({sql}) f"
+                f" JOIN Contig c ON c.Contig_id = f.Contig_id{joins}{where}",
+                query_parameters,
+            ).fetchone()[0]
         )
 
     def filtered_samples(
@@ -103,30 +166,42 @@ class FilteringRepository:
         mag_name: str | None = None,
         search_term: str = "",
         preserve: tuple[str, str] = ("", ""),
+        limit: int | None = 100,
     ) -> tuple[str, ...]:
-        joins = ""
-        predicates: list[str] = []
-        query_parameters = list(parameters)
-        if mag_name is not None:
-            joins = (
-                " JOIN MAG_contigs_association mca ON mca.Contig_id = f.Contig_id JOIN MAG mg ON mg.MAG_id = mca.MAG_id"
-            )
-            predicates.append("mg.MAG_name = ?")
-            query_parameters.append(mag_name)
-        if contig_id is not None:
-            predicates.append("f.Contig_id = ?")
-            query_parameters.append(contig_id)
-        if search_term:
-            predicates.append("s.Sample_name ILIKE '%' || ? || '%'")
-            query_parameters.append(search_term)
+        joins, predicates, query_parameters = self._filtered_sample_scope(
+            parameters, contig_id=contig_id, mag_name=mag_name, search_term=search_term
+        )
         where = f" WHERE {' AND '.join(predicates)}" if predicates else ""
         query_parameters.extend(preserve)
+        limit_clause = " LIMIT 100" if limit is not None else ""
         return self._values(
             f"SELECT DISTINCT s.Sample_name FROM ({sql}) f"
             " JOIN Sample s ON s.Sample_id = f.Sample_id"
             f"{joins}{where}"
-            " ORDER BY (s.Sample_name = ? OR s.Sample_name = ?) DESC, s.Sample_name LIMIT 100",
+            f" ORDER BY (s.Sample_name = ? OR s.Sample_name = ?) DESC, s.Sample_name{limit_clause}",
             query_parameters,
+        )
+
+    def count_filtered_samples(
+        self,
+        sql: str,
+        parameters: list[Any],
+        *,
+        contig_id: int | None = None,
+        mag_name: str | None = None,
+    ) -> int:
+        joins, predicates, query_parameters = self._filtered_sample_scope(
+            parameters, contig_id=contig_id, mag_name=mag_name
+        )
+        where = f" WHERE {' AND '.join(predicates)}" if predicates else ""
+        self.query_count += 1
+        return int(
+            self.connection.execute(
+                f"SELECT COUNT(DISTINCT s.Sample_name) FROM ({sql}) f"
+                " JOIN Sample s ON s.Sample_id = f.Sample_id"
+                f"{joins}{where}",
+                query_parameters,
+            ).fetchone()[0]
         )
 
     def filtered_mags(
@@ -137,14 +212,9 @@ class FilteringRepository:
         sample_id: int | None = None,
         search_term: str = "",
     ) -> tuple[str, ...]:
-        predicates: list[str] = []
-        query_parameters = list(parameters)
-        if sample_id is not None:
-            predicates.append("(f.Sample_id = ? OR f.Sample_id IS NULL)")
-            query_parameters.append(sample_id)
-        if search_term:
-            predicates.append("mg.MAG_name ILIKE '%' || ? || '%'")
-            query_parameters.append(search_term)
+        predicates, query_parameters = self._filtered_mag_scope(
+            parameters, sample_id=sample_id, search_term=search_term
+        )
         where = f" WHERE {' AND '.join(predicates)}" if predicates else ""
         return self._values(
             f"SELECT DISTINCT mg.MAG_name FROM ({sql}) f"
@@ -153,20 +223,20 @@ class FilteringRepository:
             query_parameters,
         )
 
-    def filtered_mag_counts(self, sql: str, parameters: list[Any], mag_name: str) -> tuple[int, int]:
+    def count_filtered_mags(
+        self, sql: str, parameters: list[Any], *, sample_id: int | None = None
+    ) -> int:
+        predicates, query_parameters = self._filtered_mag_scope(parameters, sample_id=sample_id)
+        where = f" WHERE {' AND '.join(predicates)}" if predicates else ""
         self.query_count += 1
-        row = (
-            self.connection
-            .execute(
-                f"WITH _f AS ({sql}) SELECT COUNT(DISTINCT _f.Contig_id),"
-                " COUNT(DISTINCT _f.Sample_id) FROM _f"
-                " JOIN MAG_contigs_association mca ON mca.Contig_id = _f.Contig_id"
-                " JOIN MAG mg ON mg.MAG_id = mca.MAG_id WHERE mg.MAG_name = ?",
-                [*parameters, mag_name],
-            )
-            .fetchone()
+        return int(
+            self.connection.execute(
+                f"SELECT COUNT(DISTINCT mg.MAG_name) FROM ({sql}) f"
+                " JOIN MAG_contigs_association mca ON mca.Contig_id = f.Contig_id"
+                f" JOIN MAG mg ON mg.MAG_id = mca.MAG_id{where}",
+                query_parameters,
+            ).fetchone()[0]
         )
-        return int(row[0]), int(row[1])
 
     def mags_for_sample(self, sample_id: int, search_term: str = "") -> tuple[str, ...]:
         search, parameters = self._search_clause("mg", "MAG_name", search_term)
@@ -178,8 +248,18 @@ class FilteringRepository:
             [sample_id, *parameters],
         )
 
-    def count_contigs_for_sample(self, sample_id: int) -> int:
+    def count_contigs_for_sample(self, sample_id: int, mag_name: str | None = None) -> int:
         self.query_count += 1
+        if mag_name is not None:
+            return int(
+                self.connection.execute(
+                    "SELECT COUNT(DISTINCT p.Contig_id) FROM Coverage p"
+                    " JOIN MAG_contigs_association mca ON mca.Contig_id = p.Contig_id"
+                    " JOIN MAG mg ON mg.MAG_id = mca.MAG_id"
+                    " WHERE p.Sample_id = ? AND mg.MAG_name = ?",
+                    [sample_id, mag_name],
+                ).fetchone()[0]
+            )
         return int(
             self.connection
             .execute("SELECT COUNT(DISTINCT Contig_id) FROM Coverage WHERE Sample_id = ?", [sample_id])

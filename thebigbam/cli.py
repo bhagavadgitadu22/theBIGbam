@@ -7,6 +7,7 @@ from thebigbam.analysis import (
 )
 from thebigbam.database import add_variable, calculating_data, database_getters, export_data, inspect_blob, purge_data
 from thebigbam.plotting import start_bokeh_server
+from thebigbam.plotting.benchmark.replay import add_replay_args, run_replay
 from thebigbam.plotting.settings.scenario import ScenarioFormatError, describe_scenario_file
 
 # Import command modules so we can share arg definitions and run functions
@@ -35,6 +36,8 @@ SCRIPTS = {
     'format-mapping': 'Reformat an existing mapping file (sort, filter, index)',
     'calculate': "Run feature calculations over alignment files",
     'serve': "Start interactive Bokeh server",
+    'replay-scenario': "(for developers) Replay a recorded plotting scenario and measure every step",
+    'describe-scenario': "(for developers) Describe each numbered step in a scenario or benchmark result",
 
     'export': 'Export a metric as contig x sample matrix (TSV)',
 
@@ -81,12 +84,6 @@ def build_argparser():
 
     sp = sub.add_parser('serve', help=SCRIPTS['serve'])
     start_bokeh_server.add_serve_args(sp)
-
-    sp = sub.add_parser('describe-scenario', help=argparse.SUPPRESS)
-    sp.add_argument('scenario', metavar='FILE', help=argparse.SUPPRESS)
-    # argparse has no public hidden-subcommand API. Suppressed choice actions
-    # are safe to omit from help while their parsers remain available.
-    sub._choices_actions.pop()
 
     # export command
     sp = sub.add_parser('export', help=SCRIPTS['export'])
@@ -176,6 +173,13 @@ def build_argparser():
                                       formatter_class=argparse.RawDescriptionHelpFormatter)
         module.add_args(asp)
 
+    # Developer utilities intentionally appear last in top-level help.
+    sp = sub.add_parser('replay-scenario', help=SCRIPTS['replay-scenario'])
+    add_replay_args(sp)
+
+    sp = sub.add_parser('describe-scenario', help=SCRIPTS['describe-scenario'])
+    sp.add_argument('scenario', metavar='FILE', help='Scenario or augmented benchmark-result JSON file')
+
     return p
 
 def main(argv=None):
@@ -207,6 +211,9 @@ def main(argv=None):
 
     if args.cmd == 'serve':
         return start_bokeh_server.run_serve(args)
+
+    if args.cmd == 'replay-scenario':
+        return run_replay(args)
 
     if args.cmd == 'describe-scenario':
         try:

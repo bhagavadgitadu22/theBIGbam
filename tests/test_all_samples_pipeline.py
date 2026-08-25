@@ -46,6 +46,8 @@ def repository_db(tmp_path):
     conn.execute(
         "CREATE TABLE Explicit_coverage (Contig_id INTEGER, Sample_id INTEGER, Coverage_class VARCHAR)"
     )
+    conn.execute("CREATE TABLE MAG_contigs_association (MAG_id INTEGER, Contig_id INTEGER)")
+    conn.execute("CREATE TABLE Explicit_coverage_per_MAG (MAG_id INTEGER, Sample_id INTEGER, Coverage_mean REAL)")
     conn.execute(
         'CREATE TABLE Variable (Variable_id INTEGER, Variable_name VARCHAR, Subplot VARCHAR, "Type" VARCHAR, '
         'Encoding VARCHAR, Color VARCHAR, Alpha REAL, Fill_alpha REAL, "Size" REAL, Title VARCHAR, '
@@ -64,6 +66,11 @@ def repository_db(tmp_path):
     conn.executemany(
         "INSERT INTO Explicit_coverage VALUES (1, ?, ?)",
         [(index, "high" if index % 2 else "low") for index in range(1, 151)],
+    )
+    conn.execute("INSERT INTO MAG_contigs_association VALUES (10, 1)")
+    conn.executemany(
+        "INSERT INTO Explicit_coverage_per_MAG VALUES (10, ?, ?)",
+        [(1, 100.0), (2, 200.0)],
     )
     conn.executemany(
         "INSERT INTO Feature_blob_chunk VALUES (1, ?, 1, 0, ?)",
@@ -99,6 +106,17 @@ def test_service_orders_samples_alphabetically_by_text_metric(repository_db):
     samples = repository.order_samples(1, [(2, "sample_002"), (1, "sample_001")], ordering)
 
     assert [name for _, name in samples] == ["sample_001", "sample_002"]
+
+
+def test_contig_view_can_order_samples_by_parent_mag_metric(repository_db):
+    repository = AllSamplesRepository(repository_db)
+    ordering = SampleOrdering(
+        source="Explicit_coverage_per_MAG", column="Coverage_mean", ascending=False
+    )
+
+    samples = repository.order_samples(1, [(1, "sample_001"), (2, "sample_002")], ordering)
+
+    assert [name for _, name in samples] == ["sample_002", "sample_001"]
 
 
 def test_repository_fetches_all_sample_chunks_in_one_query(repository_db):

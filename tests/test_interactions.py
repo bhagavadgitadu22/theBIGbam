@@ -3,7 +3,7 @@ from types import SimpleNamespace
 from thebigbam.plotting.application.interactions import InteractionCoordinator
 
 
-def test_interaction_coordinator_restores_each_control_state():
+def test_interaction_coordinator_blocks_once_without_mutating_controls():
     enabled = SimpleNamespace(disabled=False)
     already_disabled = SimpleNamespace(disabled=True)
     root = SimpleNamespace(
@@ -13,7 +13,7 @@ def test_interaction_coordinator_restores_each_control_state():
     coordinator.attach(root)
 
     assert coordinator.begin("plot")
-    assert enabled.disabled
+    assert not enabled.disabled
     assert already_disabled.disabled
     assert not coordinator.begin("controls")
     assert root.css_classes == ["left-col", "sidebar-busy"]

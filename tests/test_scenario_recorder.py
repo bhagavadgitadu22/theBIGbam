@@ -102,11 +102,15 @@ def test_semantic_action_preserves_json_safe_details(tmp_path):
     assert step["details"] == {"category": "Coverage", "column": "Coverage_mean"}
 
 
-def test_scenario_option_is_hidden_from_help():
+def test_scenario_option_is_documented_after_json_in_help():
     parser = argparse.ArgumentParser()
     add_serve_args(parser)
 
     args = parser.parse_args(["--db", "example.db", "--scenario", "workflow.json"])
 
     assert args.scenario == "workflow.json"
-    assert "--scenario" not in parser.format_help()
+    help_text = parser.format_help()
+    assert "--scenario" in help_text
+    assert "continuously recorded" in help_text
+    assert help_text.index("--json") < help_text.index("--no-browser") < help_text.index("--scenario")
+    assert "(for developers) Path where user actions" in help_text

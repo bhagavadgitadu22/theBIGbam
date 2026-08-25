@@ -3,8 +3,15 @@ from types import SimpleNamespace
 from thebigbam.plotting.application.subject import (
     SubjectBindings,
     SubjectController,
+    sample_order_category_for_view,
     translate_mag_window_to_contig,
 )
+
+
+def test_sample_order_category_is_normalized_for_subject_view():
+    assert sample_order_category_for_view("Coverage", mag_view=True) == "MAG coverage"
+    assert sample_order_category_for_view("MAG coverage", mag_view=False) == "MAG coverage"
+    assert sample_order_category_for_view("Sample", mag_view=True) == "Sample"
 
 
 def test_translate_mag_window_to_contig_preserves_and_shifts_nearby_window():
@@ -43,7 +50,7 @@ def test_mag_to_contig_scope_translates_nearby_selected_contig_window():
             from_position=start,
             to_position=end,
             sample_order_category=category,
-            sample_contig_categories=["Coverage"],
+            sample_contig_categories=["Coverage", "MAG coverage"],
             sample_mag_categories=["MAG coverage"],
             sample_current_categories=["MAG coverage"],
         )
@@ -52,7 +59,7 @@ def test_mag_to_contig_scope_translates_nearby_selected_contig_window():
     controller._subject_scope_changed_locked("active", 0, 1)
 
     assert (start.value, end.value) == ("1", "20")
-    assert category.value == "Coverage"
+    assert category.value == "MAG coverage"
 
 
 def test_subject_controller_projects_selected_contig_into_mag_coordinates():
@@ -197,7 +204,15 @@ def test_subject_scope_maps_equivalent_sample_order_categories_without_resetting
             from_position=SimpleNamespace(value=""),
             to_position=SimpleNamespace(value=""),
             sample_order_category=category,
-            sample_contig_categories=["Sample", "Coverage", "Misassembly", "Microdiversity"],
+            sample_contig_categories=[
+                "Sample",
+                "Coverage",
+                "Misassembly",
+                "Microdiversity",
+                "MAG coverage",
+                "MAG misassembly",
+                "MAG microdiversity",
+            ],
             sample_mag_categories=["Sample", "MAG coverage", "MAG misassembly", "MAG microdiversity"],
             sample_current_categories=["Sample", "Coverage", "Misassembly", "Microdiversity"],
         )
@@ -213,7 +228,7 @@ def test_subject_scope_maps_equivalent_sample_order_categories_without_resetting
         assert category.value == mag_category
 
         controller.subject_scope_changed("active", 0, 1)
-        assert category.value == contig_category
+        assert category.value == mag_category
 
 
 def test_subject_scope_preserves_shared_sample_order_category():

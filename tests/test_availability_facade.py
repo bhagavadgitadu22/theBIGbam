@@ -25,6 +25,22 @@ def test_search_projection_forces_options_event_even_for_same_values():
     assert events == ["options"]
 
 
+def test_scope_projection_replaces_equal_frontend_pool_and_clears_search():
+    widget = SimpleNamespace(
+        options=["only"],
+        value="only",
+        search_query="old query",
+        scope_nonce=4,
+    )
+
+    AvailabilityFacade.replace_widget(widget, ["only"])
+
+    assert widget.options == ["only"]
+    assert widget.value == "only"
+    assert widget.search_query == ""
+    assert widget.scope_nonce == 5
+
+
 def test_facade_requires_attachment_and_delegates_after_attachment():
     facade = AvailabilityFacade()
     with pytest.raises(RuntimeError, match="not been attached"):

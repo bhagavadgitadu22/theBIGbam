@@ -88,7 +88,7 @@ class PlotApplication:
     apply: Callable[[], None]
 
 
-def _build_scenario_restore_carrier(settings_session):
+def _build_scenario_restore_carrier(settings_session, on_restored=None):
     """Build the hidden, settings-shaped browser replay boundary."""
     carrier = TextAreaInput(name="benchmark-scenario-restore", value="", visible=False)
     status = TextAreaInput(name="benchmark-scenario-restore-status", value="", visible=False)
@@ -104,7 +104,26 @@ def _build_scenario_restore_carrier(settings_session):
             if not isinstance(settings, dict):
                 raise ValueError("scenario state must be a JSON object")
             settings_session.restore(settings)
-            status.value = json.dumps({"nonce": nonce, "status": "completed"})
+
+            # Restoration fires ordinary control callbacks, some of which are
+            # deliberately deferred to the next document tick.  Do not tell a
+            # replay client that restoration is complete until those callbacks
+            # have had a chance to rebuild dynamic rows and update derived UI
+            # state such as the APPLY FILTERS button.
+            def _complete_restore():
+                try:
+                    details = on_restored() if on_restored is not None else None
+                    result = {"nonce": nonce, "status": "completed"}
+                    if isinstance(details, dict):
+                        result.update(details)
+                    status.value = json.dumps(result)
+                except Exception as error:
+                    status.value = json.dumps(
+                        {"nonce": nonce, "status": "failed", "error": str(error)}
+                    )
+                    print(f"[benchmark] Scenario synchronization failed: {error}", flush=True)
+
+            curdoc().add_next_tick_callback(_complete_restore)
         except Exception as error:
             status.value = json.dumps({"nonce": locals().get("nonce"), "status": "failed", "error": str(error)})
             print(f"[benchmark] Scenario restoration failed: {error}", flush=True)
@@ -174,12 +193,12 @@ def create_layout(
         return filter_projection_ref["projection"].evaluate()
 
     availability_facade = AvailabilityFacade()
-    update_widget_completions = availability_facade.update_widget
+    replace_widget_completions = availability_facade.replace_widget
 
     def push_search_completions(widget, completions):
         """Update completions for a server-side search response.
 
-        Unlike update_widget_completions, always force-fires the 'options'
+        Always force-fire the 'options'
         watcher (via param.trigger) even when the resulting list happens to
         be identical to what's already loaded — the frontend's pending
         Tom Select load() callback is resolved from that event, and Param's
@@ -369,7 +388,7 @@ def create_layout(
             projection.restore(checkpoint)
             availability_service.invalidate()
             for control, options, value in choice_snapshot:
-                update_widget_completions(control, options)
+                replace_widget_completions(control, options)
                 if value in options:
                     control.value = value
             invalidate_section_titles()
@@ -419,12 +438,6 @@ def create_layout(
     )
     filter_ui.update({"apply": filter_apply_button})
 
-    def _set_availability_controls_disabled(disabled):
-        for key in ("contig_select", "sample_select", "mag_select"):
-            control = widgets.get(key)
-            if control is not None and hasattr(control, "disabled"):
-                control.disabled = disabled
-
     def _apply_filters_clicked():
         if not filter_panel.projection.has_pending_changes():
             mark_filters_dirty()
@@ -435,7 +448,6 @@ def create_layout(
         if recorder is not None:
             recorder.record_action("apply_filters", settings_session.collector.collect())
         filter_apply_button.disabled = True
-        _set_availability_controls_disabled(True)
 
         def _run():
             try:
@@ -446,7 +458,6 @@ def create_layout(
                 invalidate_section_titles()
                 raise
             finally:
-                _set_availability_controls_disabled(False)
                 interactions.end()
             mark_filters_dirty()
 
@@ -486,10 +497,16 @@ def create_layout(
         result = list(filtering_repository.samples_for_contig_unbounded(contig_id))
         filtering = get_filtering_filtered_pairs()
         if filtering is not None:
+            selected_mag = widgets["mag_select"].value if widgets["has_mags"] else None
+            if contig not in widgets["mag_to_contigs"].get(selected_mag, ()):
+                selected_mag = None
             allowed = set(
-                filtering_repository.sample_names_for_filter(
+                filtering_repository.filtered_samples(
                     filtering["sql"],
                     filtering["params"],
+                    contig_id=contig_id,
+                    mag_name=selected_mag,
+                    limit=None,
                 )
             )
             result = [sample for sample in result if sample in allowed]
@@ -505,6 +522,7 @@ def create_layout(
                     filtering["sql"],
                     filtering["params"],
                     mag_name=mag_name,
+                    limit=None,
                 )
             )
             result = [sample for sample in result if sample in allowed]
@@ -607,7 +625,7 @@ def create_layout(
             sample_scope=views,
             widgets=widgets,
             sort_sample_select=mag_params_sort_sample_select,
-            update_completions=update_widget_completions,
+            update_completions=replace_widget_completions,
             total_coverage_count=_total_coverage_count,
             filtering_title=filtering_title,
             contig_title=contig_title,
@@ -640,6 +658,12 @@ def create_layout(
     )
     session_callbacks.attach_subject(subject_controller)
     subject_controller.attach()
+
+    def transition_subject_scope(attr, old, new):
+        schedule_control_transition(lambda: subject_controller.subject_scope_changed(attr, old, new))
+
+    if widgets["has_mags"]:
+        widgets["view_radio"].on_change("active", transition_subject_scope)
 
     ## Create final Apply and Peruse data buttons
     apply_button = Button(
@@ -697,7 +721,14 @@ def create_layout(
     # state through the same tolerant restoration boundary as --json. Keeping
     # this as one semantic bridge avoids a second, brittle mapping for every
     # dynamic filtering row and annotation control.
-    scenario_restore_carrier, scenario_restore_status = _build_scenario_restore_carrier(settings_session)
+    def _complete_scenario_restore():
+        mark_filters_dirty()
+        return {"filters_pending": filter_panel.projection.has_pending_changes()}
+
+    scenario_restore_carrier, scenario_restore_status = _build_scenario_restore_carrier(
+        settings_session,
+        _complete_scenario_restore,
+    )
     buttons_row.objects = [*buttons_row.objects, scenario_restore_carrier, scenario_restore_status]
 
     # sample_section must exist before settings restoration runs, since restoring the
@@ -736,7 +767,7 @@ def create_layout(
             timing=_TIMING,
             send_timing_ping=_send_timing_ping,
             set_operation=_set_current_operation,
-            update_completions=update_widget_completions,
+            update_completions=replace_widget_completions,
             refresh_availability=refresh_scope_availability,
         )
     )
@@ -748,8 +779,6 @@ def create_layout(
         """Apply every consequence of ONE/ALL switching as one transaction."""
 
         def _transition():
-            if widgets["has_mags"]:
-                subject_controller.subject_scope_changed(attr, old, new)
             scope_transition.view_changed(attr, old, new)
 
         schedule_control_transition(_transition)

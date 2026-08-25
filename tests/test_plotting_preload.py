@@ -91,9 +91,11 @@ def test_filtered_availability_queries_are_repository_backed_and_cached(tmp_path
     assert service.filtered_contigs(filter_sql, parameters, mag_name="m1") == ("c1", "c2")
     assert service.filtered_samples(filter_sql, parameters, mag_name="m2") == ("s1",)
     assert service.filtered_mags(filter_sql, parameters, sample_id=1) == ("m1", "m2")
-    assert service.filtered_mag_counts(filter_sql, parameters, "m1") == (2, 1)
+    assert service.count_filtered_contigs(filter_sql, parameters, mag_name="m1") == 2
+    assert service.count_filtered_samples(filter_sql, parameters, mag_name="m1") == 1
     query_count = repository.query_count
-    assert service.filtered_mag_counts(filter_sql, parameters, "m1") == (2, 1)
+    assert service.count_filtered_contigs(filter_sql, parameters, mag_name="m1") == 2
+    assert service.count_filtered_samples(filter_sql, parameters, mag_name="m1") == 1
     assert repository.query_count == query_count
     connection.close()
 

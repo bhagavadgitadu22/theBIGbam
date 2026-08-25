@@ -2,15 +2,46 @@ import json
 
 import pytest
 
-from benchmarks.plotting.run_workflow import (
+from thebigbam import cli
+from thebigbam.plotting.application.composition_root import _build_scenario_restore_carrier
+from thebigbam.plotting.benchmark.replay import (
     ScenarioError,
     StepResult,
     augment_scenario,
     choose_filter_lookup_index,
+    find_filter_lookup_index,
     load_scenario,
     merge_changes,
+    set_model,
 )
-from thebigbam.plotting.application.composition_root import _build_scenario_restore_carrier
+
+
+def test_replay_scenario_cli_delegates_to_packaged_runner(monkeypatch):
+    captured = []
+    monkeypatch.setattr(cli, "run_replay", lambda args: captured.append(args) or 0)
+
+    result = cli.main(["replay-scenario", "--scenario", "workflow.json", "--db", "example.db"])
+
+    assert result == 0
+    assert captured[0].scenario.name == "workflow.json"
+    assert captured[0].db.name == "example.db"
+
+
+def test_set_model_uses_keyword_playwright_argument():
+    calls = []
+
+    class Page:
+        def wait_for_function(self, expression, *, arg=None, timeout=None):
+            calls.append(("wait", expression, arg, timeout))
+
+        def evaluate(self, expression, arg):
+            calls.append(("evaluate", expression, arg))
+
+    set_model(Page(), "target", "value", "new")
+
+    assert calls[0][0:1] == ("wait",)
+    assert calls[0][2:] == ("target", None)
+    assert calls[1][2] == ["target", "value", "new"]
 
 
 def _scenario():
@@ -163,7 +194,7 @@ def test_hidden_restore_carrier_uses_settings_restoration_boundary():
         def restore(self, settings):
             restored.append(settings)
 
-    carrier, status = _build_scenario_restore_carrier(Session())
+    carrier, status = _build_scenario_restore_carrier(Session(), lambda: {"filters_pending": True})
 
     assert carrier.name == "benchmark-scenario-restore"
     assert carrier.visible is False
@@ -171,7 +202,15 @@ def test_hidden_restore_carrier_uses_settings_restoration_boundary():
         {"nonce": "request-1", "settings": {"contig": {"coloring": {"custom_color_rows": []}}}}
     )
     assert restored == [{"contig": {"coloring": {"custom_color_rows": []}}}]
-    assert json.loads(status.value) == {"nonce": "request-1", "status": "completed"}
+    curdoc = __import__("bokeh.io", fromlist=["curdoc"]).curdoc()
+    callbacks = list(curdoc.session_callbacks)
+    assert status.value == ""
+    callbacks[-1].callback()
+    assert json.loads(status.value) == {
+        "nonce": "request-1",
+        "status": "completed",
+        "filters_pending": True,
+    }
 
 
 def test_filter_lookup_uses_live_monotonic_indices_and_explicit_occurrence():
@@ -182,3 +221,27 @@ def test_filter_lookup_uses_live_monotonic_indices_and_explicit_occurrence():
         choose_filter_lookup_index([3, 9], 4)
     with pytest.raises(ScenarioError, match="positive integer"):
         choose_filter_lookup_index([3], 0)
+
+
+def test_filter_lookup_ignores_semantically_matching_stale_rows():
+    calls = []
+
+    class Locator:
+        def evaluate_all(self, expression):
+            calls.append(("locator", expression))
+            return [19]
+
+    class Page:
+        def locator(self, selector):
+            calls.append(("selector", selector))
+            return Locator()
+
+        def evaluate(self, expression, arg):
+            calls.append(("evaluate", expression, arg))
+            # Model 7 is stale; only rendered row 19 may be returned.
+            assert arg["liveIndices"] == [19]
+            return [19]
+
+    index = find_filter_lookup_index(Page(), {"category": "MAG coverage", "column": "Coverage_mean"})
+
+    assert index == 19

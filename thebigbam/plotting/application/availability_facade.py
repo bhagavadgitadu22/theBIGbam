@@ -36,6 +36,17 @@ class AvailabilityFacade:
         cls.update_widget(widget, completions)
         widget.param.trigger("options")
 
+    @classmethod
+    def replace_widget(cls, widget: Any, completions: list[str]) -> None:
+        """Authoritatively replace a selector after its availability scope changes."""
+        cls.update_widget(widget, completions)
+        if hasattr(widget, "search_query"):
+            widget.search_query = ""
+        if hasattr(widget, "scope_nonce"):
+            widget.scope_nonce += 1
+        elif hasattr(widget, "param"):
+            widget.param.trigger("options")
+
     def compute_contigs(self, term: str = ""):
         return self.controller.compute_contigs(term)
 

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import argparse
 import os
 import time
 from pathlib import Path
@@ -22,6 +21,13 @@ def add_serve_args(parser) -> None:
     parser.add_argument("--db", required=True, help="Path to DuckDB database")
     parser.add_argument("--port", type=int, default=5006, help="Port to serve Panel app")
     parser.add_argument(
+        "--json",
+        dest="settings_json",
+        default=None,
+        help="Path to a settings JSON file (from SAVE SETTINGS) to restore on load. "
+        "Settings that don't fit this --db are skipped with a logged warning.",
+    )
+    parser.add_argument(
         "--no-browser",
         action="store_true",
         help="Do not open a browser automatically (useful for headless benchmarks and remote servers)",
@@ -36,19 +42,13 @@ def add_serve_args(parser) -> None:
         "--time",
         action="store_true",
         default=False,
-        help="Print timing and memory diagnostics to the terminal",
-    )
-    parser.add_argument(
-        "--json",
-        dest="settings_json",
-        default=None,
-        help="Path to a settings JSON file (from SAVE SETTINGS) to restore on load. "
-        "Settings that don't fit this --db are skipped with a logged warning.",
+        help="(for developers) Print timing and memory diagnostics to the terminal",
     )
     parser.add_argument(
         "--scenario",
         default=None,
-        help=argparse.SUPPRESS,
+        help="(for developers) Path where user actions and settings changes are continuously recorded as a "
+        "scenario JSON file. The file is kept valid while the server runs, including if the job is terminated.",
     )
 
 

@@ -8,7 +8,6 @@ import csv
 import json
 import os
 import re
-import shutil
 import socket
 import subprocess
 import sys
@@ -16,9 +15,10 @@ import threading
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
-from playwright.sync_api import Page, sync_playwright
+if TYPE_CHECKING:
+    from playwright.sync_api import Page
 
 
 @dataclass
@@ -44,11 +44,10 @@ class Server:
         self._reader: threading.Thread | None = None
 
     def start(self, timeout: float) -> None:
-        executable = shutil.which("thebigbam")
-        if not executable:
-            raise RuntimeError("thebigbam executable is not available in this environment")
         command = [
-            executable,
+            sys.executable,
+            "-m",
+            "thebigbam.cli",
             "serve",
             "--db",
             str(self.db),
@@ -65,7 +64,7 @@ class Server:
         log_handle = (self.output / "server.log").open("w", encoding="utf-8")
         self.process = subprocess.Popen(
             command,
-            cwd=Path(__file__).resolve().parents[2],
+            cwd=Path.cwd(),
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -122,7 +121,7 @@ def free_port() -> int:
 def set_model(page: Page, name: str, attribute: str, value: Any) -> None:
     page.wait_for_function(
         "name => window.Bokeh && Bokeh.documents.length && Bokeh.documents[0].get_model_by_name(name)",
-        name,
+        arg=name,
     )
     page.evaluate(
         """([name, attribute, value]) => {
@@ -253,9 +252,36 @@ def apply_state(page: Page, state: dict[str, Any], changed: dict[str, Any], time
             if (result.status === 'failed') throw new Error(result.error || 'scenario restoration failed');
             return result.status === 'completed';
         }""",
-        nonce,
+        arg=nonce,
         timeout=timeout_ms,
     )
+    if "filtering" in changed:
+        # The server reports the projection's authoritative dirty state only
+        # after deferred restoration callbacks have run.  Wait for both the
+        # Bokeh model and its rendered button to agree before continuing.
+        restore_result = page.evaluate(
+            """() => JSON.parse(
+                Bokeh.documents[0].get_model_by_name('benchmark-scenario-restore-status').value
+            )"""
+        )
+        filters_pending = bool(restore_result.get("filters_pending", False))
+        page.wait_for_function(
+            """pending => {
+                const button = Bokeh.documents[0].get_model_by_name('benchmark-apply-filters');
+                return button && button.disabled === !pending;
+            }""",
+            arg=filters_pending,
+            timeout=timeout_ms,
+        )
+        button = page.locator(".benchmark-apply-filters button").first
+        if filters_pending:
+            button.wait_for(state="visible", timeout=timeout_ms)
+            button_handle = button.element_handle(timeout=timeout_ms)
+            page.wait_for_function(
+                "button => button && !button.disabled",
+                arg=button_handle,
+                timeout=timeout_ms,
+            )
 
 
 def choose_filter_lookup_index(candidates: list[int], occurrence: int) -> int:
@@ -272,8 +298,17 @@ def choose_filter_lookup_index(candidates: list[int], occurrence: int) -> int:
 
 def find_filter_lookup_index(page: Page, details: dict[str, Any]) -> int:
     """Resolve a semantic filter target against live, monotonically named rows."""
+    live_indices = page.locator("[class*='benchmark-filter-'][class*='-lookup']").evaluate_all(
+        r"""elements => elements.flatMap(element => {
+            for (const className of element.classList) {
+                const match = /^benchmark-filter-(\d+)-lookup$/.exec(className);
+                if (match) return [Number(match[1])];
+            }
+            return [];
+        })"""
+    )
     candidates = page.evaluate(
-        r"""({category, column}) => {
+        r"""({category, column, liveIndices}) => {
             const document = Bokeh.documents[0];
             const models = document._all_models;
             const values = models && typeof models.values === 'function'
@@ -284,12 +319,17 @@ def find_filter_lookup_index(page: Page, details: dict[str, Any]) -> int:
                 const match = /^benchmark-filter-(\d+)-category$/.exec(model.name || '');
                 if (!match || model.value !== category) continue;
                 const index = Number(match[1]);
+                if (!liveIndices.includes(index)) continue;
                 const metric = document.get_model_by_name(`benchmark-filter-${index}-metric`);
                 if (metric && metric.value === column) indices.push(index);
             }
             return indices;
         }""",
-        {"category": details.get("category"), "column": details.get("column")},
+        {
+            "category": details.get("category"),
+            "column": details.get("column"),
+            "liveIndices": live_indices,
+        },
     )
     return choose_filter_lookup_index(candidates, details.get("occurrence", 1))
 
@@ -426,26 +466,41 @@ def write_results(
                 writer.writerow(row)
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=__doc__)
+def add_replay_args(parser: argparse.ArgumentParser) -> None:
+    """Add scenario-replay arguments to a CLI parser."""
     parser.add_argument("--scenario", required=True, type=Path, help="Recorded thebigbam scenario JSON")
     parser.add_argument("--db", type=Path, help="Database to serve (required unless --url is used)")
     parser.add_argument("--url", help="Use an existing server instead of starting one")
     parser.add_argument("--port", type=int, default=0)
     parser.add_argument("--output", type=Path, default=Path("benchmarks/plotting/results"))
-    parser.add_argument("--cold-and-warm", action="store_true")
-    parser.add_argument("--headed", action="store_true")
+    parser.add_argument(
+        "--cold-and-warm",
+        action="store_true",
+        help="Replay twice against the same server to compare cold and warm caches",
+    )
+    parser.add_argument("--headed", action="store_true", help="Show the browser while replaying")
     parser.add_argument("--timeout", type=float, default=180.0, help="Per-step and startup timeout in seconds")
-    return parser.parse_args()
 
 
-def main() -> int:
-    args = parse_args()
-    root = Path(__file__).resolve().parents[2]
-    scenario_path = (root / args.scenario).resolve() if not args.scenario.is_absolute() else args.scenario.resolve()
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    add_replay_args(parser)
+    return parser.parse_args(argv)
+
+
+def run_replay(args: argparse.Namespace) -> int:
+    try:
+        from playwright.sync_api import sync_playwright
+    except ModuleNotFoundError as error:
+        raise SystemExit(
+            'replay-scenario requires Playwright; install developer dependencies with pip install -e ".[dev]"'
+        ) from error
+
+    base = Path.cwd()
+    scenario_path = (base / args.scenario).resolve() if not args.scenario.is_absolute() else args.scenario.resolve()
     if not args.url and args.db is None:
         raise SystemExit("--db is required unless --url is used")
-    db = None if args.db is None else ((root / args.db).resolve() if not args.db.is_absolute() else args.db.resolve())
+    db = None if args.db is None else ((base / args.db).resolve() if not args.db.is_absolute() else args.db.resolve())
     if not args.url and db is not None and not db.exists():
         raise SystemExit(f"Database does not exist: {db}")
     output = args.output.resolve()
@@ -496,6 +551,10 @@ def main() -> int:
     failed = [result for result in all_results if result.status == "failed"]
     print(f"Wrote {len(all_results)} step results to {output}; failures={len(failed)}")
     return 1 if failed else 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    return run_replay(parse_args(argv))
 
 
 if __name__ == "__main__":

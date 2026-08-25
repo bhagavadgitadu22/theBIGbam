@@ -74,7 +74,12 @@ def add_calculate_args(parser):
     parser.add_argument('--variation_percentage', type=float, default=0, help='Adaptive smoothing for dense features (coverage, MAPQ, etc.): consecutive positions within this %% of each other are collapsed. 0 = disabled (exact base resolution). Good for reducing database size; OK for visualization; slightly lossy for precise analysis. Recommended: 5-10%%.')
     parser.add_argument('--extend', action='store_true', help='Extend an existing database with new samples (and optionally new contigs)')
     parser.add_argument('--blast', action='store_true', default=False, help='Enable BLAST-based repeat detection (autoblast for contig mode, per-MAG blast for MAG mode). Off by default.')
-    parser.add_argument('--time', action='store_true', default=False, help=argparse.SUPPRESS)
+    parser.add_argument(
+        '--time',
+        action='store_true',
+        default=False,
+        help='(for developers) Print timing diagnostics during feature calculation',
+    )
 
 GENBANK_EXTS = ('.gbk', '.gbff', '.gb', '.genbank', '.gff', '.gff3')
 FASTA_EXTS = ('.fa', '.fasta', '.fna')

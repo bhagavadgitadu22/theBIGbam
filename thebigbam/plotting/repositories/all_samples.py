@@ -15,10 +15,22 @@ class AllSamplesRepository(FeatureRepository):
     def __init__(self, conn) -> None:
         super().__init__(conn)
         self.conn = conn
+        self._source_columns: dict[str, frozenset[str]] = {}
 
     def _execute(self, sql, params=()):
         self.query_count += 1
         return self.conn.execute(sql, params)
+
+    def source_columns(self, source: str) -> frozenset[str]:
+        if source not in self._source_columns:
+            self._source_columns[source] = frozenset(
+                row[0]
+                for row in self._execute(
+                    "SELECT column_name FROM information_schema.columns WHERE table_name = ?",
+                    [source],
+                ).fetchall()
+            )
+        return self._source_columns[source]
 
     def resolve_contig(self, name: str) -> tuple[int, str, int]:
         row = self._execute(
@@ -58,11 +70,23 @@ class AllSamplesRepository(FeatureRepository):
             ).fetchall()
             ordered_ids = [int(row[0]) for row in ordered]
         else:
-            ordered = self._execute(
-                f'SELECT Sample_id FROM "{source}" WHERE Contig_id = ? '
-                f'AND Sample_id IN ({placeholders}) ORDER BY "{column}" {direction} NULLS LAST',
-                [contig_id, *ids],
-            ).fetchall()
+            source_columns = self.source_columns(source)
+            if "Contig_id" in source_columns:
+                ordered = self._execute(
+                    f'SELECT Sample_id FROM "{source}" WHERE Contig_id = ? '
+                    f'AND Sample_id IN ({placeholders}) ORDER BY "{column}" {direction} NULLS LAST',
+                    [contig_id, *ids],
+                ).fetchall()
+            elif "MAG_id" in source_columns:
+                ordered = self._execute(
+                    f'SELECT DISTINCT v.Sample_id, v."{column}" FROM "{source}" v '
+                    "JOIN MAG_contigs_association mca ON mca.MAG_id = v.MAG_id "
+                    f"WHERE mca.Contig_id = ? AND v.Sample_id IN ({placeholders}) "
+                    f'ORDER BY v."{column}" {direction} NULLS LAST',
+                    [contig_id, *ids],
+                ).fetchall()
+            else:
+                raise ValueError(f"Ordering source has no Contig_id or MAG_id: {source}")
             ordered_ids = [int(row[0]) for row in ordered]
             ordered_ids.extend(sid for sid in ids if sid not in set(ordered_ids))
         by_id = {sid: (sid, name) for sid, name in samples}

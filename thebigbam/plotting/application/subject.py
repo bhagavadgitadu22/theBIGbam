@@ -13,10 +13,11 @@ CONTIG_TO_MAG_SAMPLE_ORDER_CATEGORY = {
     "Misassembly": "MAG misassembly",
     "Microdiversity": "MAG microdiversity",
 }
-MAG_TO_CONTIG_SAMPLE_ORDER_CATEGORY = {
-    mag_category: contig_category
-    for contig_category, mag_category in CONTIG_TO_MAG_SAMPLE_ORDER_CATEGORY.items()
-}
+def sample_order_category_for_view(category: str, *, mag_view: bool) -> str:
+    """Map equivalent sample-order categories to the active subject view."""
+    if mag_view:
+        return CONTIG_TO_MAG_SAMPLE_ORDER_CATEGORY.get(category, category)
+    return category
 
 
 def translate_mag_window_to_contig(
@@ -199,9 +200,7 @@ class SubjectController:
                 bindings.from_position.value = "1"
                 bindings.to_position.value = str(total)
             bindings.sample_current_categories[:] = bindings.sample_mag_categories
-            desired_order_category = CONTIG_TO_MAG_SAMPLE_ORDER_CATEGORY.get(
-                current_order_category, current_order_category
-            )
+            desired_order_category = sample_order_category_for_view(current_order_category, mag_view=True)
         else:
             contig = widgets["contig_select"].value
             if contig and contig in widgets["contig_lengths"]:
@@ -221,14 +220,20 @@ class SubjectController:
                 bindings.from_position.value = str(local_start)
                 bindings.to_position.value = str(local_end)
             bindings.sample_current_categories[:] = bindings.sample_contig_categories
-            desired_order_category = MAG_TO_CONTIG_SAMPLE_ORDER_CATEGORY.get(
-                current_order_category, current_order_category
-            )
+            desired_order_category = sample_order_category_for_view(current_order_category, mag_view=False)
         bindings.sample_order_category.options = list(bindings.sample_current_categories)
         if desired_order_category not in bindings.sample_current_categories:
             desired_order_category = "Sample" if "Sample" in bindings.sample_current_categories else ""
         if bindings.sample_order_category.value != desired_order_category:
             bindings.sample_order_category.value = desired_order_category
+        # A subject-view transition changes the scope of all three selectors.
+        # Reproject them together so their option pools and title counts cannot
+        # describe different views.
+        bindings.refresh_mags()
+        bindings.refresh_contigs()
+        bindings.refresh_samples()
+        bindings.update_titles()
+
     @contextmanager
     def _held_document(self):
         document = curdoc()

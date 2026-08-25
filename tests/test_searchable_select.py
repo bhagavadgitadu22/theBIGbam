@@ -6,7 +6,9 @@ def test_filter_search_contract_is_configurable_and_encoded_in_frontend():
 
     assert widget.min_search_chars == 2
     assert widget.search_result_nonce == 0
+    assert widget.scope_nonce == 0
     assert "query.length >= model.min_search_chars" in widget._esm
     assert "Type at least ${model.min_search_chars} characters" in widget._esm
     assert "pendingFilterLoads" in widget._esm
     assert "if (previous) previous([])" in widget._esm
+    assert "model.on('scope_nonce'" in widget._esm

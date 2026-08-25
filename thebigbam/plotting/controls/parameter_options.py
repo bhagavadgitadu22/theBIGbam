@@ -62,7 +62,11 @@ class ParameterOptionCatalog:
             mag_categories=mag_categories,
             mag_sources={category: metadata[category]["source"] for category in mag_categories},
             sample_contig_categories=["Sample"]
-            + [category for category in metadata if category in sample_contig_allowed],
+            + [
+                category
+                for category in metadata
+                if category in sample_contig_allowed or category in sample_mag_allowed
+            ],
             sample_mag_categories=["Sample"] + [category for category in metadata if category in sample_mag_allowed],
             sample_sources={category: info["source"] for category, info in metadata.items()},
         )

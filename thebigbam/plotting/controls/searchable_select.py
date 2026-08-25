@@ -13,6 +13,7 @@ class SearchableSelect(JSComponent):
     search_nonce = param.Integer(default=0)
     search_result_nonce = param.Integer(default=0)
     search_result_query = param.String(default="")
+    scope_nonce = param.Integer(default=0)
     min_search_chars = param.Integer(default=0, bounds=(0, None))
     disabled = param.Boolean(default=False)
 
@@ -140,6 +141,27 @@ class SearchableSelect(JSComponent):
         const ts = new TomSelect(select, tsConfig);
         if (model.disabled) ts.disable();
 
+        function replaceOptions(newOptions) {
+            const newSet = new Set(newOptions);
+            Object.keys(ts.options).forEach((key) => {
+                if (!newSet.has(key)) ts.removeOption(key, true);
+            });
+            newOptions.forEach((opt) => {
+                if (!ts.options.hasOwnProperty(opt)) ts.addOption({value: opt, text: opt});
+            });
+            allOptions = newOptions.map(o => ({value: o, text: o}));
+            ts.refreshOptions(false);
+        }
+
+        function cancelPendingLoads() {
+            if (pendingLoadCallback) {
+                pendingLoadCallback([]);
+                pendingLoadCallback = null;
+            }
+            pendingFilterLoads.forEach((callback) => callback([]));
+            pendingFilterLoads.clear();
+        }
+
         model.on('disabled', () => {
             if (model.disabled) ts.disable();
             else ts.enable();
@@ -168,26 +190,7 @@ class SearchableSelect(JSComponent):
 
         model.on('options', () => {
             const newOptions = model.options;  // fresh array of strings from Python
-            allOptions = newOptions.map(o => ({value: o, text: o}));
-
-            // Surgically diff the option pool only — never touch selection
-            // here. model.on('value', ...) below is the sole owner of what's
-            // selected; Python already decided whether the value needs to
-            // change as part of the same update, so duplicating that
-            // decision here (via clear()/clearOptions()/setValue()) is both
-            // unnecessary and a source of subtle selection-clobbering bugs.
-            const newSet = new Set(newOptions);
-            Object.keys(ts.options).forEach((key) => {
-                if (!newSet.has(key)) {
-                    ts.removeOption(key, true);  // silent: never fires onChange
-                }
-            });
-            newOptions.forEach((opt) => {
-                if (!ts.options.hasOwnProperty(opt)) {
-                    ts.addOption({value: opt, text: opt});
-                }
-            });
-            ts.refreshOptions(false);  // false = don't open dropdown
+            replaceOptions(newOptions);
 
             // Resolve any in-flight server-side search: tells Tom Select the
             // load() for the current query has finished, so it renders these
@@ -211,13 +214,7 @@ class SearchableSelect(JSComponent):
                 return;
             }
             const newOptions = model.options;
-            const newSet = new Set(newOptions);
-            Object.keys(ts.options).forEach((key) => {
-                if (!newSet.has(key)) ts.removeOption(key, true);
-            });
-            newOptions.forEach((opt) => {
-                if (!ts.options.hasOwnProperty(opt)) ts.addOption({value: opt, text: opt});
-            });
+            replaceOptions(newOptions);
             callback(newOptions.map(o => ({value: o, text: o})));
             for (const [oldQuery, oldCallback] of pendingFilterLoads.entries()) {
                 if (oldQuery !== currentQuery) {
@@ -225,6 +222,14 @@ class SearchableSelect(JSComponent):
                     pendingFilterLoads.delete(oldQuery);
                 }
             }
+        });
+
+        model.on('scope_nonce', () => {
+            // A MAG/contig/filter/view change invalidates both the visible
+            // query and every pending response from the previous scope.
+            cancelPendingLoads();
+            ts.setTextboxValue('');
+            replaceOptions(model.options);
         });
 
         model.on('value', () => {

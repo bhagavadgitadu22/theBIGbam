@@ -85,5 +85,9 @@ def test_cli_prints_lines_and_reports_invalid_json(tmp_path, capsys):
     assert captured.err.startswith("Error describing scenario: invalid JSON at line 1, column 2")
 
 
-def test_describe_scenario_command_help_is_hidden():
-    assert "describe-scenario" not in cli.build_argparser().format_help()
+def test_developer_scenario_commands_are_explicit_and_last_in_help():
+    help_text = cli.build_argparser().format_help()
+    assert "(for developers) Replay" in help_text
+    assert "(for developers) Describe" in help_text
+    assert help_text.rindex("replay-scenario") < help_text.rindex("describe-scenario")
+    assert help_text.rindex("analysis") < help_text.rindex("replay-scenario")
