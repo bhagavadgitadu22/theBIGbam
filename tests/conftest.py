@@ -6,7 +6,9 @@ BAMs are generated once and cached in the tests/ directory.
 """
 
 import os
+import shutil
 import subprocess
+import sys
 
 import pytest
 
@@ -14,17 +16,44 @@ import pytest
 TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
 REFERENCE = os.path.join(TESTS_DIR, "fasta", "test_10000bp.fasta")
 
+
+def thebigbam_command(*args: str) -> list[str]:
+    """Build a CLI command from the environment running pytest.
+
+    Restricting the lookup to the active interpreter's scripts directory
+    prevents a different Conda environment's entry point from leaking in
+    through PATH.
+    """
+    scripts_dir = os.path.dirname(sys.executable)
+    executable = shutil.which("thebigbam", path=scripts_dir)
+    if executable is None:
+        pytest.fail(
+            f"thebigbam is not installed in the active test environment ({scripts_dir}); "
+            "install the project there with `python -m pip install -e .`"
+        )
+    return [executable, *args]
+
+
 # FASTQ files and their mapper presets
 # Format: (r1_file, r2_file or None, mapper)
 FASTQ_FILES = [
     # Paired-end short reads
     ("50_read_pairs_for_test_10kbp_R1.fastq", "50_read_pairs_for_test_10kbp_R2.fastq", "minimap2-sr-secondary"),
-    ("50_read_pairs_for_test_10kbp_inverted_R1.fastq", "50_read_pairs_for_test_10kbp_inverted_R2.fastq", "minimap2-sr-secondary"),
-    ("5000_read_pairs_for_test_10kbp_concatenated_100_times_R1.fastq", "5000_read_pairs_for_test_10kbp_concatenated_100_times_R2.fastq", "minimap2-sr-secondary"),
+    (
+        "50_read_pairs_for_test_10kbp_inverted_R1.fastq",
+        "50_read_pairs_for_test_10kbp_inverted_R2.fastq",
+        "minimap2-sr-secondary",
+    ),
+    (
+        "5000_read_pairs_for_test_10kbp_concatenated_100_times_R1.fastq",
+        "5000_read_pairs_for_test_10kbp_concatenated_100_times_R2.fastq",
+        "minimap2-sr-secondary",
+    ),
     # Long reads (single file)
     ("1000_long_reads_for_test_10kbp.fastq", None, "minimap2-ont"),
     ("100_long_reads_for_test_10kbp_concatenated_100_times.fastq", None, "minimap2-ont"),
 ]
+
 
 def get_bam_name(fastq_name: str, circular: bool) -> str:
     """Generate BAM filename from FASTQ name."""
@@ -36,15 +65,20 @@ def get_bam_name(fastq_name: str, circular: bool) -> str:
     suffix = "_circular" if circular else ""
     return f"{base}{suffix}.bam"
 
+
 def generate_bam(r1_path: str, r2_path: str | None, mapper: str, circular: bool, output_bam: str) -> None:
     """Generate a BAM file using thebigbam mapping-per-sample command."""
-    cmd = [
-        "thebigbam", "mapping-per-sample",
-        "-r1", r1_path,
-        "-a", REFERENCE,
-        "--mapper", mapper,
-        "-o", output_bam,
-    ]
+    cmd = thebigbam_command(
+        "mapping-per-sample",
+        "-r1",
+        r1_path,
+        "-a",
+        REFERENCE,
+        "--mapper",
+        mapper,
+        "-o",
+        output_bam,
+    )
     if r2_path:
         cmd.extend(["-r2", r2_path])
     if circular:
@@ -55,6 +89,7 @@ def generate_bam(r1_path: str, r2_path: str | None, mapper: str, circular: bool,
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
         raise RuntimeError(f"BAM generation failed: {result.stderr}")
+
 
 @pytest.fixture(scope="session")
 def test_bams():
@@ -99,15 +134,18 @@ def test_bams():
 
     return bam_files
 
+
 @pytest.fixture(scope="session")
 def tests_dir():
     """Return the tests directory path."""
     return TESTS_DIR
 
+
 @pytest.fixture(scope="session")
 def reference_fasta():
     """Return the reference FASTA path."""
     return REFERENCE
+
 
 @pytest.fixture(scope="session")
 def linear_db(tests_dir, test_bams):
@@ -116,19 +154,26 @@ def linear_db(tests_dir, test_bams):
     if os.path.exists(db_path):
         os.remove(db_path)
     linear_dir = os.path.join(tests_dir, "linear_bams")
-    cmd = [
-        "thebigbam", "calculate",
-        "-b", linear_dir,
-        "-a", REFERENCE,
-        "-m", "coverage,phagetermini",
-        "-o", db_path,
-        "-t", "4",
-        "--coverage_percentage", "0",
-    ]
+    cmd = thebigbam_command(
+        "calculate",
+        "-b",
+        linear_dir,
+        "-a",
+        REFERENCE,
+        "-m",
+        "coverage,phagetermini",
+        "-o",
+        db_path,
+        "-t",
+        "4",
+        "--coverage_percentage",
+        "0",
+    )
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
         pytest.fail(f"Calculate failed:\nSTDOUT: {result.stdout}\nSTDERR: {result.stderr}")
     return db_path
+
 
 @pytest.fixture(scope="session")
 def circular_db(tests_dir, test_bams):
@@ -137,19 +182,26 @@ def circular_db(tests_dir, test_bams):
     if os.path.exists(db_path):
         os.remove(db_path)
     circular_dir = os.path.join(tests_dir, "circular_bams")
-    cmd = [
-        "thebigbam", "calculate",
-        "-b", circular_dir,
-        "-a", REFERENCE,
-        "-m", "coverage,phagetermini",
-        "-o", db_path,
-        "-t", "4",
-        "--coverage_percentage", "0",
-    ]
+    cmd = thebigbam_command(
+        "calculate",
+        "-b",
+        circular_dir,
+        "-a",
+        REFERENCE,
+        "-m",
+        "coverage,phagetermini",
+        "-o",
+        db_path,
+        "-t",
+        "4",
+        "--coverage_percentage",
+        "0",
+    )
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
         pytest.fail(f"Calculate failed:\nSTDOUT: {result.stdout}\nSTDERR: {result.stderr}")
     return db_path
+
 
 @pytest.fixture(scope="session")
 def linear_db_simple(tests_dir, test_bams):
@@ -158,18 +210,24 @@ def linear_db_simple(tests_dir, test_bams):
     if os.path.exists(db_path):
         os.remove(db_path)
     linear_dir = os.path.join(tests_dir, "linear_bams")
-    cmd = [
-        "thebigbam", "calculate",
-        "-b", linear_dir,
-        "-a", REFERENCE,
-        "-m", "coverage,phagetermini",
-        "-o", db_path,
-        "-t", "4",
-    ]
+    cmd = thebigbam_command(
+        "calculate",
+        "-b",
+        linear_dir,
+        "-a",
+        REFERENCE,
+        "-m",
+        "coverage,phagetermini",
+        "-o",
+        db_path,
+        "-t",
+        "4",
+    )
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
         pytest.fail(f"Calculate failed:\nSTDOUT: {result.stdout}\nSTDERR: {result.stderr}")
     return db_path
+
 
 @pytest.fixture(scope="session")
 def circular_db_simple(tests_dir, test_bams):
@@ -178,14 +236,19 @@ def circular_db_simple(tests_dir, test_bams):
     if os.path.exists(db_path):
         os.remove(db_path)
     circular_dir = os.path.join(tests_dir, "circular_bams")
-    cmd = [
-        "thebigbam", "calculate",
-        "-b", circular_dir,
-        "-a", REFERENCE,
-        "-m", "coverage,phagetermini",
-        "-o", db_path,
-        "-t", "4",
-    ]
+    cmd = thebigbam_command(
+        "calculate",
+        "-b",
+        circular_dir,
+        "-a",
+        REFERENCE,
+        "-m",
+        "coverage,phagetermini",
+        "-o",
+        db_path,
+        "-t",
+        "4",
+    )
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
         pytest.fail(f"Calculate failed:\nSTDOUT: {result.stdout}\nSTDERR: {result.stderr}")

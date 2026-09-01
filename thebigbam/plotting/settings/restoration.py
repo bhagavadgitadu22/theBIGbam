@@ -210,7 +210,12 @@ def restore_settings(settings: Mapping[str, Any], bindings: SettingsRestoreBindi
 
     # 5. Filtering query builder
     saved_filtering = settings.get("filtering") or []
-    if saved_filtering:
+    if "filtering" in settings and not saved_filtering:
+        empty_section = create_or_section()
+        or_sections.clear()
+        or_sections.append(empty_section)
+        rebuild_filtering_content()
+    elif saved_filtering:
         new_sections = []
         for section_i, saved_section in enumerate(saved_filtering):
             section_data = create_or_section()

@@ -25,6 +25,7 @@ class FilterPanel:
     options: ParameterOptionCatalog
     create_query_row: Callable[..., Any]
     set_distribution: Callable[..., None]
+    set_distribution_scale: Callable[..., None]
 
 
 def build_filter_panel(
@@ -76,6 +77,7 @@ def build_filter_panel(
         refresh,
         preloaded.filter_encode,
         set_operation,
+        record_action,
     )
     row_factory = FilterRowFactory(
         metadata_service=metadata_service,
@@ -107,4 +109,5 @@ def build_filter_panel(
         options,
         row_factory.create_row,
         row_factory.set_distribution,
+        row_factory.set_distribution_scale,
     )

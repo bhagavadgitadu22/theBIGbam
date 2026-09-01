@@ -8,6 +8,7 @@ from thebigbam.plotting.downloads.callbacks import make_contig_metrics_callback,
 from thebigbam.plotting.settings.controls import SettingsSaveControls
 from thebigbam.plotting.settings.persistence import (
     load_settings_document,
+    save_session_document,
     save_settings_document,
     serialize_color_rows,
     serialize_filter_sections,
@@ -72,9 +73,21 @@ def test_settings_document_round_trip(tmp_path):
         fixed_time,
     )
 
-    assert path.name == "example_20260818_123456.json"
+    assert path.name == "example_settings_20260818_123456.json"
     assert load_settings_document(path) == {"view_mode": {"one_or_all_samples": 1}}
     assert json.loads(path.read_text(encoding="utf-8"))["view_mode"]
+
+
+def test_session_document_uses_explicit_timestamped_name(tmp_path):
+    path = save_session_document(
+        {"format": "thebigbam-session-history"},
+        "example.db",
+        tmp_path,
+        lambda: dt.datetime(2026, 8, 18, 12, 34, 56),
+    )
+
+    assert path.name == "example_session_20260818_123456.json"
+    assert json.loads(path.read_text(encoding="utf-8"))["format"] == "thebigbam-session-history"
 
 
 def test_settings_document_rejects_non_object(tmp_path):
@@ -103,6 +116,25 @@ def test_settings_save_controls_persist_collected_document(monkeypatch, tmp_path
 
     assert saved == [({"selection": {"contig": "c1"}}, "example.db")]
     assert controls.confirmation.text == "1"
+
+
+def test_settings_save_records_explicit_scenario_action(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        "thebigbam.plotting.settings.controls.save_settings_document",
+        lambda *_args: tmp_path / "saved.json",
+    )
+    actions = []
+    controls = SettingsSaveControls(
+        "example.db",
+        dict,
+        "",
+        lambda action, details: actions.append((action, details)),
+    )
+
+    controls._save()
+    controls.button.clicks += 1
+
+    assert actions == [("save_settings", {})]
 
 
 class Value:

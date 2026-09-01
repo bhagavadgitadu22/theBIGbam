@@ -48,8 +48,29 @@ def test_color_controls_expose_independent_annotation_and_mag_rule_lists():
     assert controls.custom_rows == []
     assert controls.mag_rows == []
     assert controls.custom_rows is not controls.mag_rows
-    assert controls.custom_column.objects[-1].name == "+ Add coloring rule"
-    assert controls.custom_column.objects[-1].stylesheets == [stylesheet.css]
+    assert controls.custom_column.objects[0].name == "+ Add coloring rule"
+    assert controls.custom_column.objects[0].stylesheets == [stylesheet.css]
+    assert controls.custom_column.objects[1].css_classes == ["color-rule-list"]
+    assert controls.custom_title.text == "Customise genomic annotations (0 rules)"
+    assert controls.mag_title.text == "Customise MAG track (0 rules)"
+
+
+def test_color_rule_count_updates_without_moving_add_button():
+    controls = build_color_rule_controls(
+        MetadataService(),
+        {"Annotations": {"columns": {"Start": {"type": "numeric"}}}},
+        {},
+        InlineStyleSheet(css=""),
+        False,
+    )
+
+    add_button, rows = controls.custom_column.objects
+    add_button.clicks += 1
+    add_button.clicks += 1
+
+    assert controls.custom_column.objects[0] is add_button
+    assert len(rows.objects) == 2
+    assert controls.custom_title.text == "Customise genomic annotations (2 rules)"
 
 
 def test_color_rule_switches_from_numeric_to_text_qualifier_values():

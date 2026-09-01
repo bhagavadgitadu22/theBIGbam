@@ -79,6 +79,10 @@ class FilterWidgetProjection:
         """Return the immutable applied expression for transactional rollback."""
         return self._applied_expression
 
+    def applied_expression(self) -> FilterExpression:
+        """Return the authoritative filter state used by queries and plots."""
+        return self._applied_expression
+
     def restore(self, expression: FilterExpression) -> None:
         """Restore a previously checkpointed applied expression."""
         self._applied_expression = expression

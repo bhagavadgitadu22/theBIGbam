@@ -20,9 +20,14 @@ class SettingsSession:
     confirmation: Any
     collector: SettingsCollector
     restore_bindings: Any
+    filter_projection: Any
+    save_controls: Any
 
     def restore(self, settings: dict[str, Any]) -> None:
         restore_settings(settings, self.restore_bindings)
+
+    def collect_applied(self) -> dict[str, Any]:
+        return self.collector.collect_applied(self.filter_projection.applied_expression())
 
 
 def build_settings_session(
@@ -36,16 +41,19 @@ def build_settings_session(
     filtering_metadata: Any,
     create_query_row: Any,
     apply_button: Any,
+    filter_projection: Any,
     stylesheet: Any,
+    record_action: Any | None = None,
 ) -> SettingsSession:
     collector = SettingsCollector(
         make_settings_collector_bindings(db_path, widgets, sample_scope, genome, parameters, filtering)
     )
-    save_controls = SettingsSaveControls(db_path, collector.collect, stylesheet)
+    # SAVE SETTINGS preserves the complete workspace, including filter edits
+    # which have not yet been committed with APPLY FILTERS. Action history uses
+    # collect_applied() below because it represents work that actually ran.
+    save_controls = SettingsSaveControls(db_path, collector.collect, stylesheet, record_action)
     buttons = pn.Row(
         apply_button,
-        save_controls.button,
-        save_controls.confirmation,
         align="center",
         css_classes=["action-row", "sidebar-actions"],
         stylesheets=[panel_stylesheet(stylesheet)],
@@ -59,4 +67,4 @@ def build_settings_session(
         filtering_metadata=filtering_metadata,
         create_query_row=create_query_row,
     )
-    return SettingsSession(buttons, save_controls.confirmation, collector, restore_bindings)
+    return SettingsSession(buttons, save_controls.confirmation, collector, restore_bindings, filter_projection, save_controls)

@@ -42,6 +42,17 @@ class FilterRowFactory:
 
     def attach_controller(self, controller: Any) -> None:
         self.controller = controller
+        self.visualizations.occurrence_for = self._occurrence_for
+
+    def _occurrence_for(self, target: Any) -> int:
+        matches = [
+            row_data
+            for section in self.controller.sections
+            for row_data in section["rows"]
+            if row_data["category_select"].value == target["category_select"].value
+            and row_data["subcategory_select"].value == target["subcategory_select"].value
+        ]
+        return matches.index(target) + 1
 
     def _remove_row(self, row_data) -> None:
         row_data["loading_gen"] += 1
@@ -134,6 +145,29 @@ class FilterRowFactory:
         is_open = bool(row_data["hist_container"].objects)
         if is_open != opening:
             self._toggle_distribution(row_data, record_action=False)
+
+    def set_distribution_scale(
+        self,
+        category: str,
+        column: str,
+        *,
+        occurrence: int,
+        axis: str,
+        enabled: bool,
+    ) -> None:
+        matches = [
+            row_data
+            for section in self.controller.sections
+            for row_data in section["rows"]
+            if row_data["category_select"].value == category
+            and row_data["subcategory_select"].value == column
+        ]
+        if occurrence < 1 or occurrence > len(matches):
+            raise ValueError("filter distribution scale target does not exist")
+        setter = matches[occurrence - 1].get("set_histogram_scale")
+        if setter is None:
+            raise ValueError("filter distribution is not open")
+        setter(axis, enabled)
 
     def create_row(self, section_data, initial_category=None, initial_column=None, initial_operator=None):
         """Create a single query row with cascading selects, comparison, dynamic input and remove button.

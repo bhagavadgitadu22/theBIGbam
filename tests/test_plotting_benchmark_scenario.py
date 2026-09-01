@@ -301,7 +301,7 @@ def test_hidden_restore_carrier_uses_settings_restoration_boundary():
 def test_semantic_action_carrier_dispatches_before_acknowledgement():
     handled = []
     carrier, status = _build_scenario_action_carrier(
-        lambda action, details: handled.append((action, details))
+        lambda action, details, _complete: handled.append((action, details))
     )
 
     carrier.value = json.dumps(
@@ -322,3 +322,18 @@ def test_semantic_action_carrier_dispatches_before_acknowledgement():
     curdoc = __import__("bokeh.io", fromlist=["curdoc"]).curdoc()
     list(curdoc.session_callbacks)[-1].callback()
     assert json.loads(status.value) == {"nonce": "action-1", "status": "completed"}
+
+
+def test_semantic_action_carrier_reports_asynchronous_failure():
+    def handle(_action, _details, complete):
+        complete(RuntimeError("restore failed"))
+        return True
+
+    carrier, status = _build_scenario_action_carrier(handle)
+    carrier.value = json.dumps({"nonce": "action-2", "action": "restore_history", "details": {}})
+
+    assert json.loads(status.value) == {
+        "nonce": "action-2",
+        "status": "failed",
+        "error": "restore failed",
+    }

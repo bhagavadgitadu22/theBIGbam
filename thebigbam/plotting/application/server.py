@@ -14,7 +14,7 @@ from ..settings.scenario import ScenarioPathAllocator
 from ..shared.paths import static_directory
 from ..shared.timing import TimingPhase
 from . import composition_root as application
-from .apply_render_handlers import warm_plot_pipeline_imports
+from .apply_handlers import warm_plot_pipeline_imports
 
 
 def add_serve_args(parser) -> None:

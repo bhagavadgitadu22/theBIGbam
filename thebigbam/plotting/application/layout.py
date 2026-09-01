@@ -8,12 +8,16 @@ from typing import Any
 import panel as pn
 from bokeh.models import Div
 
+from ..controls.panel_resizer import PanelResizer
+from ..shared.styles import panel_stylesheet
+
 
 def separator() -> Div:
     return Div(
         text="",
         height=2,
         sizing_mode="stretch_width",
+        margin=0,
         styles={"background-color": "#333", "margin-top": "10px", "margin-bottom": "10px"},
     )
 
@@ -45,6 +49,13 @@ class AssembledLayout:
     layout: Any
     placeholder: Any
     controls: Any
+    history: Any
+    left_toggle: Any
+    right_toggle: Any
+    left_resizer: Any
+    right_resizer: Any
+    left_rail: Any
+    right_rail: Any
 
 
 def assemble_layout(
@@ -53,6 +64,7 @@ def assemble_layout(
     has_samples: bool,
     summary_carrier: Any,
     stylesheet: Any,
+    history_drawer: Any,
     timing_models: tuple[Any, ...] = (),
 ) -> AssembledLayout:
     filtering_separator = separator()
@@ -106,17 +118,120 @@ def assemble_layout(
         ]
         placeholder_text = "<i>No plot yet. Select one contig and click Apply to view the genome annotation.</i>"
     children.extend(timing_models)
+    children.append(pn.Spacer(height=20, sizing_mode="fixed", css_classes=["sidebar-bottom-space"]))
     sidebar_content = pn.Column(*children, sizing_mode="stretch_width", css_classes=["sidebar-content"])
     controls = pn.Column(sidebar_content, sizing_mode="stretch_height", width=400, css_classes=["left-col"])
     sidebar_content.stylesheets = [stylesheet]
     controls.stylesheets = [stylesheet]
     placeholder = pn.Column(pn.pane.HTML(placeholder_text), sizing_mode="stretch_both", css_classes=["main-right"])
+    left_toggle = pn.widgets.Button(
+        name="◀",
+        width=28,
+        height=38,
+        css_classes=["drawer-toggle", "drawer-toggle-left"],
+        margin=0,
+        stylesheets=[panel_stylesheet(stylesheet)],
+    )
+    history = history_drawer
+    history.visible = False
+    right_toggle = pn.widgets.Button(
+        name="◀",
+        width=28,
+        height=38,
+        css_classes=["drawer-toggle", "drawer-toggle-right"],
+        margin=0,
+        stylesheets=[panel_stylesheet(stylesheet)],
+    )
+
+    def toggle_left() -> None:
+        controls.visible = not controls.visible
+        left_resizer.enabled = controls.visible
+        left_toggle.name = "◀" if controls.visible else "▶"
+
+    def toggle_right() -> None:
+        history.visible = not history.visible
+        right_resizer.enabled = history.visible
+        right_toggle.name = "▶" if history.visible else "◀"
+
+    left_toggle.on_click(lambda _event: toggle_left())
+    right_toggle.on_click(lambda _event: toggle_right())
+    left_resizer = PanelResizer(
+        side="left",
+        storage_key="thebigbam-left-panel-width",
+        minimum=100,
+        maximum=700,
+        default_width=400,
+        value=400,
+        width=8,
+        sizing_mode="stretch_height",
+        align="center",
+        margin=0,
+    )
+    right_resizer = PanelResizer(
+        side="right",
+        storage_key="thebigbam-right-panel-width",
+        minimum=100,
+        maximum=700,
+        default_width=250,
+        value=250,
+        enabled=False,
+        width=8,
+        sizing_mode="stretch_height",
+        align="center",
+        margin=0,
+    )
+
+    def resize_left(event) -> None:
+        controls.width = event.new
+
+    def resize_right(event) -> None:
+        history.width = event.new
+
+    left_resizer.param.watch(resize_left, "value")
+    right_resizer.param.watch(resize_right, "value")
+    left_rail = pn.Column(
+        left_resizer,
+        left_toggle,
+        width=8,
+        sizing_mode="stretch_height",
+        align="center",
+        margin=0,
+        css_classes=["panel-resize-rail", "panel-resize-rail-left"],
+    )
+    right_rail = pn.Column(
+        right_resizer,
+        right_toggle,
+        width=8,
+        sizing_mode="stretch_height",
+        align="center",
+        margin=0,
+        css_classes=["panel-resize-rail", "panel-resize-rail-right"],
+    )
+    plot_area = pn.Column(
+        placeholder,
+        sizing_mode="stretch_both",
+        css_classes=["plot-area"],
+    )
     layout = pn.Row(
         controls,
-        placeholder,
+        left_rail,
+        plot_area,
         pn.pane.Bokeh(summary_carrier),
+        right_rail,
+        history,
         sizing_mode="stretch_both",
         css_classes=["main-layout"],
     )
     layout.stylesheets = [stylesheet]
-    return AssembledLayout(layout, placeholder, controls)
+    return AssembledLayout(
+        layout,
+        placeholder,
+        controls,
+        history,
+        left_toggle,
+        right_toggle,
+        left_resizer,
+        right_resizer,
+        left_rail,
+        right_rail,
+    )

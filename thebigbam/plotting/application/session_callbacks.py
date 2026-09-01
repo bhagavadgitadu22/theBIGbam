@@ -16,6 +16,9 @@ class SessionCallbacks:
         self.interactions = interactions
         self._scenario_recorder: Any | None = None
         self._collect_settings: Callable[[], Any] | None = None
+        self._collect_applied_settings: Callable[[], Any] | None = None
+        self._plot_succeeded: Callable[[Any], None] | None = None
+        self._pending_history_settings: Any | None = None
 
     def attach_scenario(self, recorder: Any, collect_settings: Callable[[], Any]) -> None:
         self._scenario_recorder = recorder
@@ -23,6 +26,12 @@ class SessionCallbacks:
 
     def attach_apply(self, controller: Any) -> None:
         self._apply = controller
+
+    def attach_history(
+        self, collect_applied_settings: Callable[[], Any], plot_succeeded: Callable[[Any], None]
+    ) -> None:
+        self._collect_applied_settings = collect_applied_settings
+        self._plot_succeeded = plot_succeeded
 
     def attach_summary(self, controller: Any) -> None:
         self._summary = controller
@@ -42,20 +51,48 @@ class SessionCallbacks:
             raise RuntimeError(f"{name} controller has not been attached")
         return controller
 
-    def apply_clicked(self, _event: Any = None) -> None:
+    def apply_clicked(
+        self,
+        _event: Any = None,
+    ) -> bool:
         if self.interactions is not None and not self.interactions.begin("plot"):
-            return
-        self._required(self.main_placeholder, "Main placeholder").loading = True
-        if self._scenario_recorder is not None:
-            self._scenario_recorder.record_action("apply_plot", self._collect_settings())
-        self.schedule(self.do_apply)
+            return False
+        placeholder = self._required(self.main_placeholder, "Main placeholder")
+        placeholder.loading = True
+        try:
+            if self._scenario_recorder is not None:
+                self._scenario_recorder.record_action("apply_plot", self._collect_settings())
+            self._pending_history_settings = (
+                self._collect_applied_settings()
+                if self._collect_applied_settings is not None
+                else None
+            )
+            self.schedule(self.do_apply)
+        except Exception:
+            self._pending_history_settings = None
+            placeholder.loading = False
+            if self.interactions is not None:
+                self.interactions.end()
+            raise
+        return True
 
     def do_apply(self) -> None:
         try:
-            self._required(self._apply, "Apply").apply()
+            succeeded = self._required(self._apply, "Apply").apply()
+            if succeeded is not False and self._pending_history_settings is not None and self._plot_succeeded is not None:
+                self._plot_succeeded(self._pending_history_settings)
         finally:
+            self._pending_history_settings = None
+            self._required(self.main_placeholder, "Main placeholder").loading = False
             if self.interactions is not None:
                 self.interactions.end()
+
+    def apply_restored_now(self) -> bool:
+        """Apply an already validated restored state inside its owning transaction."""
+        return self._required(self._apply, "Apply").apply()
+
+    def set_plot_loading(self, loading: bool) -> None:
+        self._required(self.main_placeholder, "Main placeholder").loading = loading
 
     def show_summary(self, _event: Any = None) -> None:
         self._required(self._summary, "Summary").show()

@@ -171,17 +171,6 @@ def set_model(page: Page, name: str, attribute: str, value: Any) -> None:
     )
 
 
-def get_model(page: Page, name: str, attribute: str) -> Any:
-    install_safe_model_lookup(page)
-    return page.evaluate(
-        """([name, attribute]) => {
-            const model = globalThis.__thebigbam_model_by_name(name);
-            return model ? model[attribute] : null;
-        }""",
-        [name, attribute],
-    )
-
-
 def click_css(page: Page, selector: str) -> None:
     page.locator(selector).locator("button").first.click()
 
@@ -230,7 +219,22 @@ def load_scenario(path: Path, db: Path | None = None) -> dict[str, Any]:
         raise ScenarioError("Scenario must contain at least one step")
     sequences: set[int] = set()
     previous_sequence = 0
-    supported = {"state_change", "filter_lookup", "apply_filters", "apply_plot"}
+    supported = {
+        "state_change",
+        "filter_lookup",
+        "apply_filters",
+        "apply_plot",
+        "restore_history",
+        "remove_history",
+        "show_summary",
+        "download_contig_metrics",
+        "download_mag_metrics",
+        "show_download_command",
+        "save_settings",
+        "save_session",
+        "reset_position",
+        "filter_distribution_scale",
+    }
     for position, step in enumerate(steps, 1):
         if not isinstance(step, dict):
             raise ScenarioError(f"Step {position} must be a JSON object")
@@ -246,6 +250,9 @@ def load_scenario(path: Path, db: Path | None = None) -> dict[str, Any]:
         action = step.get("action")
         if action not in supported:
             raise ScenarioError(f"Step {sequence} has unsupported action {action!r}")
+        semantic_actions = supported - {"state_change", "apply_filters", "apply_plot"}
+        if action in semantic_actions and not isinstance(step.get("details"), dict):
+            raise ScenarioError(f"Step {sequence} {action} requires an object-valued details field")
         if action == "state_change" and not isinstance(step.get("changes"), dict):
             raise ScenarioError(f"Step {sequence} state_change requires an object-valued changes field")
         if action == "state_change":
@@ -256,6 +263,23 @@ def load_scenario(path: Path, db: Path | None = None) -> dict[str, Any]:
             occurrence = step["details"]["occurrence"]
             if not isinstance(occurrence, int) or isinstance(occurrence, bool) or occurrence < 1:
                 raise ScenarioError(f"Step {sequence} filter_lookup occurrence must be a positive integer")
+        if action in {"restore_history", "remove_history"}:
+            details = step.get("details")
+            if not isinstance(details, dict):
+                raise ScenarioError(f"Step {sequence} {action} requires an object-valued details field")
+            history_sequence = details.get("history_sequence")
+            if not isinstance(history_sequence, int) or isinstance(history_sequence, bool) or history_sequence < 1:
+                raise ScenarioError(f"Step {sequence} {action} requires a positive history_sequence")
+            if details.get("history_action") not in {"apply_filters", "apply_plot"}:
+                raise ScenarioError(f"Step {sequence} {action} has invalid history_action")
+            if action == "restore_history" and not isinstance(details.get("settings"), dict):
+                raise ScenarioError(f"Step {sequence} restore_history requires object-valued settings")
+        if action == "filter_distribution_scale":
+            details = step.get("details")
+            if not isinstance(details, dict):
+                raise ScenarioError(f"Step {sequence} filter_distribution_scale requires details")
+            if details.get("axis") not in {"x", "y"} or not isinstance(details.get("enabled"), bool):
+                raise ScenarioError(f"Step {sequence} filter_distribution_scale has invalid scale state")
     source_db = metadata.get("source_db")
     if db is not None and source_db and source_db != db.name:
         raise ScenarioError(f"Scenario expects database {source_db!r}, got {db.name!r}")
@@ -358,7 +382,7 @@ def replay_action(
     if action == "state_change":
         state = merge_changes(state, step["changes"])
         apply_state(page, state, step["changes"], timeout_ms)
-    elif action == "filter_lookup":
+    elif action not in {"apply_filters", "apply_plot"}:
         perform_semantic_action(page, action, step["details"], timeout_ms)
     elif action == "apply_filters":
         click_css(page, ".benchmark-apply-filters")

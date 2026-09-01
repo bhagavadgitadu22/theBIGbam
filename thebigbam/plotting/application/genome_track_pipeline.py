@@ -14,10 +14,6 @@ class GenomeTrackPipeline:
         self.repository = GenomeTrackRepository(conn)
         self.service = GenomeTrackService(self.repository)
 
-    def contig_members(self, contig_name):
-        contig_id, length = self.repository.contig_identity(contig_name)
-        return ((contig_id, contig_name, length, 0),)
-
     def mag_members(self, members):
         identities = self.repository.contig_identities([name for name, _length, _offset in members])
         return tuple(

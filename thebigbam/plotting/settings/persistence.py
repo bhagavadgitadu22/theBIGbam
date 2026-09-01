@@ -7,6 +7,8 @@ import json
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
+from ..models.filters import FilterExpression
+
 
 def serialize_variable_selection(widgets: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
     """Return variable selections keyed by stable module names."""
@@ -46,6 +48,30 @@ def serialize_filter_sections(
     return result
 
 
+def serialize_filter_expression(expression: FilterExpression) -> list[dict[str, Any]]:
+    """Serialize the committed filter expression in the settings schema."""
+    result = []
+    for section_index, section in enumerate(expression.sections):
+        rows = []
+        for row_index, predicate in enumerate(section.predicates):
+            rows.append(
+                {
+                    "category": predicate.category,
+                    "column": predicate.column,
+                    "operator": predicate.operator,
+                    "value": predicate.value,
+                    "row_and_or": section.connectors[row_index - 1] if row_index else None,
+                }
+            )
+        result.append(
+            {
+                "section_and_or": expression.connectors[section_index - 1] if section_index else None,
+                "rows": rows,
+            }
+        )
+    return result
+
+
 def serialize_color_rows(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     """Serialize annotation coloring rules."""
     return [
@@ -66,12 +92,33 @@ def save_settings_document(
     now: Callable[[], dt.datetime] = dt.datetime.now,
 ) -> Path:
     """Write a settings document and return its generated path."""
+    return _save_json_document(settings, db_path, "settings", directory, now)
+
+
+def _save_json_document(
+    document: Mapping[str, Any],
+    db_path: str | Path,
+    kind: str,
+    directory: str | Path | None,
+    now: Callable[[], dt.datetime],
+) -> Path:
+    """Write one timestamped JSON document beside its source database."""
     output_directory = Path.cwd() if directory is None else Path(directory)
     timestamp = now().strftime("%Y%m%d_%H%M%S")
-    output_path = output_directory / f"{Path(db_path).stem}_{timestamp}.json"
+    output_path = output_directory / f"{Path(db_path).stem}_{kind}_{timestamp}.json"
     with output_path.open("w", encoding="utf-8") as stream:
-        json.dump(settings, stream, indent=2)
+        json.dump(document, stream, indent=2)
     return output_path
+
+
+def save_session_document(
+    session: Mapping[str, Any],
+    db_path: str | Path,
+    directory: str | Path | None = None,
+    now: Callable[[], dt.datetime] = dt.datetime.now,
+) -> Path:
+    """Write a session-history document beside saved settings."""
+    return _save_json_document(session, db_path, "session", directory, now)
 
 
 def load_settings_document(path: str | Path) -> dict[str, Any]:

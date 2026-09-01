@@ -13,7 +13,7 @@ def test_apply_is_scheduled_and_uses_attached_controller():
     callbacks.attach_placeholder(placeholder)
     callbacks.attach_apply(SimpleNamespace(apply=lambda: calls.append("apply")))
 
-    callbacks.apply_clicked()
+    assert callbacks.apply_clicked() is True
 
     assert placeholder.loading is True
     assert scheduled == [callbacks.do_apply]
@@ -64,6 +64,34 @@ def test_plot_apply_holds_interaction_scope_until_controller_finishes():
     assert events == [("begin", "plot"), ("apply", None), ("end", None)]
 
 
+def test_rejected_plot_apply_reports_that_it_did_not_start():
+    placeholder = SimpleNamespace(loading=False)
+    callbacks = SessionCallbacks(
+        lambda _callback: None,
+        interactions=SimpleNamespace(begin=lambda _scope: False, end=lambda: None),
+    )
+    callbacks.attach_placeholder(placeholder)
+
+    assert callbacks.apply_clicked() is False
+    assert placeholder.loading is False
+
+
+def test_apply_failure_always_clears_loading():
+    scheduled = []
+    placeholder = SimpleNamespace(loading=False)
+    callbacks = SessionCallbacks(scheduled.append)
+    callbacks.attach_placeholder(placeholder)
+    callbacks.attach_apply(
+        SimpleNamespace(apply=lambda: (_ for _ in ()).throw(RuntimeError("failed before presentation")))
+    )
+
+    callbacks.apply_clicked()
+    with pytest.raises(RuntimeError, match="failed before presentation"):
+        scheduled.pop(0)()
+
+    assert placeholder.loading is False
+
+
 def test_plot_apply_records_semantic_action():
     scheduled = []
     events = []
@@ -96,3 +124,56 @@ def test_failed_plot_apply_is_recorded_and_reraised():
         scheduled[0]()
 
     assert recorded == [("apply_plot", {})]
+
+
+def test_successful_plot_appends_click_time_applied_settings():
+    scheduled = []
+    settings = {"selection": {"contig": "c1"}}
+    appended = []
+    callbacks = SessionCallbacks(scheduled.append)
+    callbacks.attach_placeholder(SimpleNamespace(loading=False))
+    callbacks.attach_apply(SimpleNamespace(apply=lambda: True))
+    callbacks.attach_history(lambda: {"selection": dict(settings["selection"])}, appended.append)
+
+    callbacks.apply_clicked()
+    settings["selection"]["contig"] = "c2"
+    scheduled[0]()
+
+    assert appended == [{"selection": {"contig": "c1"}}]
+
+
+def test_failed_plot_does_not_append_history():
+    scheduled = []
+    appended = []
+    callbacks = SessionCallbacks(scheduled.append)
+    callbacks.attach_placeholder(SimpleNamespace(loading=False))
+    callbacks.attach_apply(SimpleNamespace(apply=lambda: False))
+    callbacks.attach_history(lambda: {"selection": {}}, appended.append)
+
+    callbacks.apply_clicked()
+    scheduled.pop(0)()
+
+    assert appended == []
+
+
+def test_atomic_restored_apply_uses_outer_loading_and_interaction_transaction():
+    events = []
+    placeholder = SimpleNamespace(loading=False)
+    callbacks = SessionCallbacks(
+        lambda _callback: None,
+        interactions=SimpleNamespace(
+            begin=lambda _scope: events.append("unexpected begin"),
+            end=lambda: events.append("unexpected end"),
+        ),
+    )
+    callbacks.attach_placeholder(placeholder)
+    callbacks.attach_apply(SimpleNamespace(apply=lambda: events.append("apply") or True))
+
+    assert callbacks.apply_restored_now() is True
+    assert placeholder.loading is False
+    assert events == ["apply"]
+
+    callbacks.set_plot_loading(True)
+    assert placeholder.loading is True
+    callbacks.set_plot_loading(False)
+    assert placeholder.loading is False

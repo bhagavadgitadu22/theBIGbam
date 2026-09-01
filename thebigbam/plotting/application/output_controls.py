@@ -42,6 +42,7 @@ def build_output_controls(
     timing: Any,
     report_timing: Callable[[str, float], None] | None,
     show_summary: Callable[..., None],
+    record_action: Callable[[str, dict[str, Any]], None] | None = None,
 ) -> OutputControls:
     peruse = pn.widgets.Button(
         name="SHOW SUMMARY",
@@ -50,7 +51,12 @@ def build_output_controls(
         css_classes=["apply-btn"],
         visible=False,
     )
-    peruse.on_click(show_summary)
+    def show_summary_recorded(event=None):
+        if record_action is not None:
+            record_action("show_summary", {})
+        show_summary(event)
+
+    peruse.on_click(show_summary_recorded)
     carrier = Div(text="", visible=False)
     carrier.js_on_change(
         "text",
@@ -71,10 +77,21 @@ def build_output_controls(
         SummaryBindings(connection, widgets, sample_scope, filtered_samples, carrier, enable_timing, timing)
     )
     downloads: dict[str, Any] = {"contig_metrics": None, "mag_metrics": None, "data": None}
+    contig_callback = make_contig_metrics_callback(
+        db_path, widgets, sample_scope, filtered_samples, downloads, report_timing
+    )
+    mag_callback = make_mag_metrics_callback(db_path, widgets, downloads, report_timing)
+
+    def recorded_download(action, callback):
+        def run():
+            if record_action is not None:
+                record_action(action, {})
+            return callback()
+
+        return run
+
     contig_button = pn.widgets.FileDownload(
-        callback=make_contig_metrics_callback(
-            db_path, widgets, sample_scope, filtered_samples, downloads, report_timing
-        ),
+        callback=recorded_download("download_contig_metrics", contig_callback),
         filename="contig_metrics.csv",
         label="DOWNLOAD CONTIG METRICS",
         button_type="primary",
@@ -83,7 +100,7 @@ def build_output_controls(
     )
     downloads["contig_metrics"] = contig_button
     mag_button = pn.widgets.FileDownload(
-        callback=make_mag_metrics_callback(db_path, widgets, downloads, report_timing),
+        callback=recorded_download("download_mag_metrics", mag_callback),
         filename="mag_metrics.csv",
         label="DOWNLOAD MAG METRICS",
         button_type="primary",
@@ -103,6 +120,8 @@ def build_output_controls(
             filtered_samples,
         )
     )
+    if record_action is not None:
+        inspect.button.on_click(lambda _event: record_action("show_download_command", {}))
     downloads["data"] = inspect.button
     return OutputControls(
         peruse,

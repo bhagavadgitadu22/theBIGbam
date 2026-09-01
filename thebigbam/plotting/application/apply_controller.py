@@ -8,8 +8,7 @@ import traceback
 from bokeh.io import curdoc
 
 from ..shared.timing import rss_mb
-from .apply_pipeline import ApplyDispatcher, ApplyMode, ApplyRequestBuilder, PlotPresenter
-from .apply_render_handlers import (
+from .apply_handlers import (
     ApplyBindings,
     ApplyRenderEngine,
     ContigAllHandler,
@@ -17,6 +16,7 @@ from .apply_render_handlers import (
     MagAllHandler,
     MagOneHandler,
 )
+from .apply_pipeline import ApplyDispatcher, ApplyMode, ApplyRequestBuilder, PlotPresenter
 
 __all__ = ["ApplyBindings", "ApplyController"]
 
@@ -37,7 +37,7 @@ class ApplyController:
         }
         self.dispatcher = ApplyDispatcher({mode: handler.render for mode, handler in self.handlers.items()})
 
-    def apply(self) -> None:
+    def apply(self) -> bool:
         bindings = self.bindings
         doc = curdoc()
         doc.hold("combine")
@@ -53,18 +53,19 @@ class ApplyController:
             build_result = self.request_builder.from_widgets()
             if build_result.failure is not None:
                 self.plot_presenter.show_validation(build_result.failure)
-                return
+                return False
             result = self.dispatcher.render(build_result.request, started_at)
             self.plot_presenter.replace(result, started_at)
+            return True
         except Exception:
             traceback_text = traceback.format_exc()
             print(f"[start_bokeh_server] Exception: {traceback_text}", flush=True)
             self.plot_presenter.show_exception(traceback_text)
+            return False
         finally:
             bindings.set_operation("idle")
             if bindings.enable_timing:
                 print(f"[timing] Memory (current RSS) at APPLY end: {rss_mb():.0f} MB", flush=True)
                 bindings.timing.summary("APPLY")
                 bindings._send_timing_ping("APPLY", started_at)
-            bindings.main_placeholder.loading = False
             doc.unhold()

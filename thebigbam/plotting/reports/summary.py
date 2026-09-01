@@ -49,14 +49,6 @@ def _render_metrics(sections):
     return content
 
 
-def build_summary_data(service, contig_name, sample_names):
-    return _render_metrics(service.metric_sections("Contig", contig_name, sample_names))
-
-
-def build_mag_summary_data(service, mag_name, sample_names):
-    return _render_metrics(service.metric_sections("MAG", mag_name, sample_names))
-
-
 def generate_peruse_html(report, decode=None):
     """Render an already-prepared summary report as standalone HTML."""
     decode = decode or {}
@@ -98,7 +90,3 @@ def generate_peruse_html(report, decode=None):
     parts.extend(_render_metrics(report.metrics))
     parts.append("</body></html>")
     return "\n".join(parts)
-
-
-def round_to_n_sigfigs(value, n=2):
-    return round_significant(value, n)

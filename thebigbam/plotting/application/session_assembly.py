@@ -16,6 +16,7 @@ class FinalizedSession:
     layout: Any
     placeholder: Any
     controls: Any
+    history: Any
     apply_controller: ApplyController
 
 
@@ -27,6 +28,7 @@ def finalize_session(
     stylesheet: Any,
     timing_models: tuple[Any, ...],
     apply_arguments: dict[str, Any],
+    history_drawer: Any,
 ) -> FinalizedSession:
     assembled = assemble_layout(
         parts,
@@ -34,10 +36,11 @@ def finalize_session(
         summary_carrier=summary_carrier,
         stylesheet=stylesheet,
         timing_models=timing_models,
+        history_drawer=history_drawer,
     )
     apply_arguments = {**apply_arguments, "placeholder": assembled.placeholder}
     controller = ApplyController(make_apply_bindings(**apply_arguments))
-    return FinalizedSession(assembled.layout, assembled.placeholder, assembled.controls, controller)
+    return FinalizedSession(assembled.layout, assembled.placeholder, assembled.controls, assembled.history, controller)
 
 
 def inspectable_application(

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Mapping
+from typing import Mapping
 
 
 @dataclass(frozen=True)
@@ -47,11 +47,3 @@ class MagFeatureLoadRequest:
     max_base_resolution: int = 10_000
     minimum_relative_value: float = 0.0
     encoding_by_feature: Mapping[str, str] | None = None
-
-
-@dataclass(frozen=True)
-class DecodedFeatureData:
-    x: tuple[float, ...]
-    y: tuple[float, ...]
-    metadata: Mapping[str, tuple[Any, ...]]
-    sparse: bool = False

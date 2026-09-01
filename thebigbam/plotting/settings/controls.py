@@ -4,15 +4,19 @@ from __future__ import annotations
 
 from typing import Any, Callable, Mapping
 
+import panel as pn
 from bokeh.models import Div
 from bokeh.models.callbacks import CustomJS
-from bokeh.models.widgets import Button
 
+from ..shared.styles import right_panel_tooltip
 from .persistence import save_settings_document
 
-_SAVE_CONFIRM_JS = """
+
+def save_confirmation_js(button_class: str) -> str:
+    """Return the shared browser confirmation behavior for server-side saves."""
+    script = """
 if (!cb_obj.text) return;
-var btn = document.querySelector('.save-settings-btn');
+var btn = document.querySelector('.__BUTTON_CLASS__');
 if (btn) {
     var rect = btn.getBoundingClientRect();
     var tip = document.createElement('div');
@@ -30,6 +34,7 @@ if (btn) {
 }
 cb_obj.text = '';
 """
+    return script.replace("__BUTTON_CLASS__", button_class)
 
 
 class SettingsSaveControls:
@@ -40,20 +45,26 @@ class SettingsSaveControls:
         db_path: str,
         collect: Callable[[], Mapping[str, Any]],
         stylesheet: Any,
+        record_action: Callable[[str, Mapping[str, Any]], Any] | None = None,
     ) -> None:
         self.db_path = db_path
         self.collect = collect
         self.confirmation = Div(text="", visible=False)
-        self.confirmation.js_on_change("text", CustomJS(code=_SAVE_CONFIRM_JS))
-        self.button = Button(
-            label="SAVE SETTINGS",
+        self.confirmation.js_on_change("text", CustomJS(code=save_confirmation_js("save-settings-btn")))
+        self.button = pn.widgets.Button(
+            name="SAVE SETTINGS",
+            description=right_panel_tooltip(
+                "Save current settings only, including unapplied ones"
+            ),
             align="center",
             button_type="primary",
             stylesheets=[stylesheet],
             css_classes=["action-primary", "apply-btn", "save-settings-btn"],
-            margin=(5, 0, 0, 5),
+            margin=(5, 0, 0, 0),
         )
         self.button.on_click(self._save)
+        if record_action is not None:
+            self.button.on_click(lambda _event: record_action("save_settings", {}))
 
     def _save(self, event: Any = None) -> None:
         path = save_settings_document(self.collect(), self.db_path)

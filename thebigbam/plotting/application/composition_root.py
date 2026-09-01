@@ -34,6 +34,7 @@ from ..repositories.preload import PreloadRepository
 from ..services.filter_metadata import FilterMetadataService
 from ..services.filter_query import FilterQueryBuilder
 from ..services.filtering import FilterExpressionService, FilteringAvailabilityService
+from ..settings.history import HistoryEntry
 from ..settings.scenario import ScenarioRecorder
 from ..shared.data_cache import SessionDataCache
 
@@ -42,9 +43,12 @@ from ..shared.diagnostics import PlotDiagnostics
 from ..shared.histogram_cache import SERVER_HISTOGRAM_CACHE
 from ..shared.lifecycle import PlotLifecycle
 from ..shared.paths import static_directory
+from ..shared.styles import section_header
 from ..shared.timing import BrowserTimingRelay, estimate_grid_data_size, rss_mb, start_rss_watchdog
 from .availability import AvailabilityBindings, AvailabilityController
 from .availability_facade import AvailabilityFacade
+from .history_restore import HistoryRestoreBindings, HistoryRestoreCoordinator
+from .history_session import build_history_session
 from .interactions import InteractionCoordinator
 from .layout import LayoutParts, separator
 from .output_controls import build_output_controls
@@ -148,17 +152,18 @@ def _build_scenario_action_carrier(handle_action):
             details = request.get("details") if isinstance(request, dict) else None
             if not isinstance(action, str) or not isinstance(details, dict):
                 raise ValueError("scenario action requires an action and details object")
-            handle_action(action, details)
+            def complete(error=None):
+                if error is None:
+                    status.value = json.dumps({"nonce": nonce, "status": "completed"})
+                else:
+                    status.value = json.dumps({"nonce": nonce, "status": "failed", "error": str(error)})
+
+            asynchronous = bool(handle_action(action, details, complete))
 
             # Semantic actions may schedule their actual UI construction for
             # the next tick. Queue acknowledgement behind that work.
-            curdoc().add_next_tick_callback(
-                lambda: setattr(
-                    status,
-                    "value",
-                    json.dumps({"nonce": nonce, "status": "completed"}),
-                )
-            )
+            if not asynchronous:
+                curdoc().add_next_tick_callback(complete)
         except Exception as error:
             status.value = json.dumps({"nonce": locals().get("nonce"), "status": "failed", "error": str(error)})
             print(f"[benchmark] Scenario action failed: {error}", flush=True)
@@ -200,6 +205,7 @@ def create_layout(
     diagnostics = PlotDiagnostics(enabled=enable_timing)
     data_cache = SessionDataCache()
     scenario_recorder_ref = {}
+    history_session_ref = {}
 
     def _record_scenario_action(action, details):
         recorder = scenario_recorder_ref.get("recorder")
@@ -476,9 +482,9 @@ def create_layout(
     def _apply_filters_clicked():
         if not filter_panel.projection.has_pending_changes():
             mark_filters_dirty()
-            return
+            return False
         if not interactions.begin("controls"):
-            return
+            return False
         recorder = scenario_recorder_ref.get("recorder")
         if recorder is not None:
             recorder.record_action("apply_filters", settings_session.collector.collect())
@@ -487,6 +493,9 @@ def create_layout(
         def _run():
             try:
                 apply_filter_changes()
+                history_session = history_session_ref.get("session")
+                if history_session is not None:
+                    history_session.append("apply_filters", settings_session.collect_applied())
             except Exception:
                 # apply_filter_changes rolled back the applied expression and
                 # choices, so the unchanged draft remains directly retryable.
@@ -494,9 +503,10 @@ def create_layout(
                 raise
             finally:
                 interactions.end()
-            mark_filters_dirty()
+                mark_filters_dirty()
 
         curdoc().add_next_tick_callback(_run)
+        return True
 
     filter_apply_button.on_click(lambda _event: _apply_filters_clicked())
     filter_apply_row = pn.Row(
@@ -584,7 +594,7 @@ def create_layout(
     # "Genomic annotations" and "Other genomic features" subsections each
     # have their own toggle below.
     contig_title = Div(text="<b>Contigs</b>", align="center")
-    contig_header = row(contig_title, sizing_mode="stretch_width", align="center", margin=(0, 0, 0, 0))
+    contig_header = section_header(contig_title, margin=(0, 0, 0, 0))
 
     if enable_timing:
         _step = time.perf_counter() - t_section
@@ -610,6 +620,7 @@ def create_layout(
         make_toggle_callback=make_toggle_callback,
         enable_timing=enable_timing,
         interaction_lock=global_toggle_lock,
+        record_action=_record_scenario_action,
     )
     below_contig_content = genome_controls.content
     combined_features_cbg = genome_controls.combined_features
@@ -728,6 +739,7 @@ def create_layout(
         timing=_TIMING,
         report_timing=_report_download_timing if enable_timing else None,
         show_summary=peruse_clicked,
+        record_action=_record_scenario_action,
     )
     peruse_button = output_controls.peruse_button
 
@@ -748,9 +760,58 @@ def create_layout(
         filtering_metadata=filtering_metadata,
         create_query_row=create_query_row,
         apply_button=apply_button,
+        filter_projection=filter_panel.projection,
         stylesheet=stylesheet,
+        record_action=_record_scenario_action,
     )
     buttons_row = settings_session.buttons_row
+
+    def install_history_settings(settings):
+        """Install one snapshot in dependency order with reciprocal callbacks suppressed."""
+        global_toggle_lock["locked"] = True
+        try:
+            for key in ("sample_select", "contig_select", "mag_select"):
+                if key in widgets:
+                    widgets[key].value = ""
+            independent = {key: value for key, value in settings.items() if key != "selection"}
+            settings_session.restore(independent)
+        finally:
+            global_toggle_lock["locked"] = False
+        apply_filter_changes()
+        global_toggle_lock["locked"] = True
+        try:
+            settings_session.restore({"selection": settings.get("selection", {})})
+        finally:
+            global_toggle_lock["locked"] = False
+        mark_filters_dirty()
+        update_section_titles()
+
+    history_restore = HistoryRestoreCoordinator(
+        HistoryRestoreBindings(
+            begin=lambda: interactions.begin("controls"),
+            end=interactions.end,
+            set_loading=session_callbacks.set_plot_loading,
+            schedule=curdoc().add_next_tick_callback,
+            snapshot=settings_session.collect_applied,
+            install=install_history_settings,
+            apply_plot=session_callbacks.apply_restored_now,
+        )
+    )
+
+    history_session = build_history_session(
+        db_path=db_path,
+        restore_entry=history_restore.restore,
+        can_mutate=lambda: not interactions.busy,
+        record_action=_record_scenario_action,
+        stylesheet=stylesheet,
+        toggle_stylesheet=toggle_stylesheet,
+        settings_save_controls=settings_session.save_controls,
+    )
+    history_session_ref["session"] = history_session
+    session_callbacks.attach_history(
+        settings_session.collect_applied,
+        lambda settings: history_session.append("apply_plot", settings),
+    )
 
     # Hidden benchmark bridge: scenario replay sends a complete settings-shaped
     # state through the same tolerant restoration boundary as --json. Keeping
@@ -765,15 +826,63 @@ def create_layout(
         _complete_scenario_restore,
     )
 
-    def _handle_scenario_action(action, details):
-        if action != "filter_lookup":
-            raise ValueError(f"unsupported scenario action: {action}")
-        filter_panel.set_distribution(
-            details.get("category"),
-            details.get("column"),
-            occurrence=details.get("occurrence", 1),
-            opening=details.get("opening", True),
-        )
+    def _handle_scenario_action(action, details, complete):
+        if action == "filter_lookup":
+            filter_panel.set_distribution(
+                details.get("category"),
+                details.get("column"),
+                occurrence=details.get("occurrence", 1),
+                opening=details.get("opening", True),
+            )
+            return False
+        if action == "restore_history":
+            entry = HistoryEntry(
+                id=f"scenario-{details['history_sequence']}",
+                sequence=details["history_sequence"],
+                action=details["history_action"],
+                created_at="scenario-replay",
+                settings=details["settings"],
+            )
+            if not history_restore.restore(entry, on_complete=complete, on_error=complete):
+                raise RuntimeError("history restore could not acquire the interaction lock")
+            return True
+        if action == "remove_history":
+            if not history_session.remove_sequence(
+                details["history_sequence"], details["history_action"]
+            ):
+                raise ValueError("history entry to remove was not found")
+            return False
+        if action == "show_summary":
+            output_controls.summary_controller.show()
+            return False
+        if action == "download_contig_metrics":
+            output_controls.contig_metrics_button.callback()
+            return False
+        if action == "download_mag_metrics":
+            output_controls.mag_metrics_button.callback()
+            return False
+        if action == "show_download_command":
+            output_controls.data_button.clicks += 1
+            return False
+        if action == "save_settings":
+            settings_session.save_controls._save()
+            return False
+        if action == "save_session":
+            history_session.save(record=False)
+            return False
+        if action == "reset_position":
+            genome_controls.reset_position()
+            return False
+        if action == "filter_distribution_scale":
+            filter_panel.set_distribution_scale(
+                details["category"],
+                details["column"],
+                occurrence=details.get("occurrence", 1),
+                axis=details["axis"],
+                enabled=details["enabled"],
+            )
+            return False
+        raise ValueError(f"unsupported scenario action: {action}")
 
     scenario_action_carrier, scenario_action_status = _build_scenario_action_carrier(
         _handle_scenario_action
@@ -877,6 +986,7 @@ def create_layout(
         summary_carrier=summary_carrier,
         stylesheet=stylesheet,
         timing_models=(timing_relay.ping, timing_relay.ack) if enable_timing else (),
+        history_drawer=history_session.drawer,
         apply_arguments=dict(
             db_path=db_path,
             connection=conn,
@@ -900,7 +1010,7 @@ def create_layout(
             set_operation=_set_current_operation,
         ),
     )
-    interactions.attach(finalized.controls)
+    interactions.attach(finalized.layout)
     session_callbacks.attach_placeholder(finalized.placeholder)
     session_callbacks.attach_apply(finalized.apply_controller)
     layout = finalized.layout

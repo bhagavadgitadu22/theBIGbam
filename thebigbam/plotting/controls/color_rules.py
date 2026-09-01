@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any, Mapping
 
 import panel as pn
+from bokeh.models import Div
 from bokeh.models.widgets import ColorPicker, Select, Spinner, TextInput
 
 from ..shared.styles import panel_stylesheet
@@ -19,8 +20,10 @@ class ColorRuleControls:
     qualifier_options: list[str]
     custom_rows: list[dict[str, Any]]
     custom_column: Any
+    custom_title: Any
     mag_rows: list[dict[str, Any]]
     mag_column: Any
+    mag_title: Any
     feature_label_select: Any | None
     create_row: Any
     rebuild_custom: Any
@@ -50,6 +53,7 @@ def build_color_rule_controls(
 
     # Custom color row system (Panel widgets, same pattern as filtering rows)
     custom_color_rows = []
+    custom_title = Div(text="Customise genomic annotations (0 rules)", align="center")
     add_color_btn = pn.widgets.Button(
         name="+ Add coloring rule",
         margin=(2, 0, 2, 0),
@@ -57,8 +61,14 @@ def build_color_rule_controls(
         stylesheets=[panel_stylesheet(stylesheet)],
         css_classes=["action-add", "benchmark-add-annotation-rule"],
     )
+    custom_rows_column = pn.Column(
+        sizing_mode="stretch_width",
+        css_classes=["color-rule-list"],
+        stylesheets=[panel_stylesheet(stylesheet)],
+    )
     custom_color_column = pn.Column(
         add_color_btn,
+        custom_rows_column,
         sizing_mode="stretch_width",
         css_classes=["nested-section"],
         stylesheets=[panel_stylesheet(stylesheet)],
@@ -253,8 +263,9 @@ def build_color_rule_controls(
 
     def rebuild_color_rows():
         children = [rd["row_widget"] for rd in custom_color_rows]
-        children.append(add_color_btn)
-        custom_color_column.objects = children
+        custom_rows_column.objects = children
+        count = len(children)
+        custom_title.text = f"Customise genomic annotations ({count} rule{'s' if count != 1 else ''})"
 
     def add_color_callback(event):
         new_row = create_color_row()
@@ -265,6 +276,7 @@ def build_color_rule_controls(
 
     # --- MAG track coloring rules (same widget pattern, separate list) ---
     mag_track_color_rows = []
+    mag_title = Div(text="Customise MAG track (0 rules)", align="center")
     add_mag_track_btn = pn.widgets.Button(
         name="+ Add coloring rule",
         margin=(2, 0, 2, 0),
@@ -272,8 +284,14 @@ def build_color_rule_controls(
         stylesheets=[panel_stylesheet(stylesheet)],
         css_classes=["action-add", "benchmark-add-mag-rule"],
     )
+    mag_rows_column = pn.Column(
+        sizing_mode="stretch_width",
+        css_classes=["color-rule-list"],
+        stylesheets=[panel_stylesheet(stylesheet)],
+    )
     mag_track_color_column = pn.Column(
         add_mag_track_btn,
+        mag_rows_column,
         sizing_mode="stretch_width",
         css_classes=["nested-section"],
         stylesheets=[panel_stylesheet(stylesheet)],
@@ -281,8 +299,9 @@ def build_color_rule_controls(
 
     def rebuild_mag_track_color_rows():
         children = [rd["row_widget"] for rd in mag_track_color_rows]
-        children.append(add_mag_track_btn)
-        mag_track_color_column.objects = children
+        mag_rows_column.objects = children
+        count = len(children)
+        mag_title.text = f"Customise MAG track ({count} rule{'s' if count != 1 else ''})"
 
     def add_mag_track_color_callback(event):
         new_row = create_color_row(mag_track_color_rows, rebuild_mag_track_color_rows)
@@ -339,8 +358,10 @@ def build_color_rule_controls(
         qualifier_options=color_qualifier_options,
         custom_rows=custom_color_rows,
         custom_column=custom_color_column,
+        custom_title=custom_title,
         mag_rows=mag_track_color_rows,
         mag_column=mag_track_color_column,
+        mag_title=mag_title,
         feature_label_select=feature_label_select,
         create_row=create_color_row,
         rebuild_custom=rebuild_color_rows,

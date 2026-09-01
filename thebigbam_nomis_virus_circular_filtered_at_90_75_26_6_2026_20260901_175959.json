@@ -1,0 +1,111 @@
+{
+  "_meta": {
+    "source_db": "thebigbam_nomis_virus_circular_filtered_at_90_75_26_6_2026.db",
+    "saved_at": "2026-09-01T17:59:59"
+  },
+  "view_mode": {
+    "mag_or_contig": 1,
+    "one_or_all_samples": 0
+  },
+  "selection": {
+    "sample": "GL140_3",
+    "contig": "336R_NODE_1041316_length_9235_cov_27.4758_ID_2082631_extended_partial",
+    "mag": ""
+  },
+  "contig": {
+    "position_range": {
+      "from": "1",
+      "to": "17512"
+    },
+    "feature_widgets": {
+      "feature_types": [
+        "CDS"
+      ],
+      "plot_isoforms": null,
+      "combined_features": [],
+      "sequence": false,
+      "translated_sequence": false,
+      "genome_master": false,
+      "feature_label": "product"
+    },
+    "coloring": {
+      "custom_color_rows": [],
+      "mag_track_color_rows": [],
+      "apply_annotation_rules_to_mag_track": null
+    }
+  },
+  "variables": {
+    "Genome": {
+      "module_enabled": false,
+      "selected_one": [],
+      "selected_all": []
+    },
+    "Coverage": {
+      "module_enabled": true,
+      "selected_one": [
+        "Primary alignments",
+        "Alignments by strand",
+        "Other alignments",
+        "MAPQ"
+      ],
+      "selected_all": []
+    },
+    "Misalignment": {
+      "module_enabled": true,
+      "selected_one": [
+        "Clippings",
+        "Indels",
+        "Mismatches"
+      ],
+      "selected_all": []
+    },
+    "Paired-reads": {
+      "module_enabled": false,
+      "selected_one": [],
+      "selected_all": []
+    },
+    "Phage termini": {
+      "module_enabled": false,
+      "selected_one": [],
+      "selected_all": []
+    }
+  },
+  "filtering": [
+    {
+      "section_and_or": null,
+      "rows": [
+        {
+          "category": "Contig",
+          "column": "Contig_name",
+          "operator": "=",
+          "value": "",
+          "row_and_or": null
+        }
+      ]
+    }
+  ],
+  "plotting_params": {
+    "min_coverage_freq": 0.0,
+    "max_genemap_window": 100000,
+    "max_sequence_window": 1000,
+    "max_binning_window": 10000,
+    "genemap_height": 100,
+    "sequence_height": 50,
+    "translated_sequence_height": 50,
+    "subplot_height": 100,
+    "mag_params": {
+      "category": "Contig",
+      "metric": "Contig_length",
+      "direction": 1,
+      "sort_sample": "Alaska_GL156_DN_MG",
+      "max_dots": 1000
+    },
+    "sample_params": {
+      "max_samples": 20,
+      "order_category": "Sample",
+      "order_metric": "Sample_name",
+      "order_direction": 0,
+      "same_y_scale": false
+    }
+  }
+}

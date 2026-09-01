@@ -34,6 +34,20 @@ def test_description_uses_stable_sequence_and_sorted_settings_paths():
                 "duration_seconds": 2,
             },
             {"sequence": 11, "action": "apply_plot"},
+            {
+                "sequence": 12,
+                "action": "restore_history",
+                "details": {
+                    "history_sequence": 3,
+                    "history_action": "apply_plot",
+                    "settings": {},
+                },
+            },
+            {
+                "sequence": 13,
+                "action": "remove_history",
+                "details": {"history_sequence": 2, "history_action": "apply_filters"},
+            },
         ]
     )
 
@@ -44,6 +58,8 @@ def test_description_uses_stable_sequence_and_sorted_settings_paths():
         "[completed, 1.25 s, server 2841 MB, browser 291.5 MB]",
         "10. Apply filters [failed, 2 s]",
         "11. Apply plot",
+        "12. Restore apply plot history entry 3",
+        "13. Remove apply filters history entry 2",
     )
 
 

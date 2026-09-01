@@ -7,7 +7,12 @@ import os
 from dataclasses import dataclass
 from typing import Any
 
-from .persistence import serialize_color_rows, serialize_filter_sections, serialize_variable_selection
+from .persistence import (
+    serialize_color_rows,
+    serialize_filter_expression,
+    serialize_filter_sections,
+    serialize_variable_selection,
+)
 
 
 @dataclass(frozen=True)
@@ -160,4 +165,12 @@ class SettingsCollector:
                 },
             },
         }
+        return settings
+
+    def collect_applied(self, filter_expression: Any) -> dict[str, Any]:
+        """Collect reproducible settings using committed rather than draft filters."""
+        # collect() already constructs a fresh JSON-shaped object. Replacing
+        # its filtering branch does not mutate live widgets or another owner.
+        settings = self.collect()
+        settings["filtering"] = serialize_filter_expression(filter_expression)
         return settings

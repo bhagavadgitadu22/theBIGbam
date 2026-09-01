@@ -43,6 +43,28 @@ def _action_label(step: Mapping[str, Any]) -> str:
         return "Apply filters"
     if action == "apply_plot":
         return "Apply plot"
+    if action == "restore_history":
+        details = step.get("details", {})
+        history_action = str(details.get("history_action", "history")).replace("_", " ")
+        sequence = details.get("history_sequence")
+        return f"Restore {history_action} history entry {sequence}"
+    if action == "remove_history":
+        details = step.get("details", {})
+        history_action = str(details.get("history_action", "history")).replace("_", " ")
+        sequence = details.get("history_sequence")
+        return f"Remove {history_action} history entry {sequence}"
+    labels = {
+        "show_summary": "Show summary",
+        "download_contig_metrics": "Download contig metrics",
+        "download_mag_metrics": "Download MAG metrics",
+        "show_download_command": "Show download command",
+        "save_settings": "Save settings",
+        "save_session": "Save session",
+        "reset_position": "Reset genomic position",
+        "filter_distribution_scale": "Change filter distribution scale",
+    }
+    if action in labels:
+        return labels[action]
     if action == "state_change":
         return "Change settings"
     return str(action).replace("_", " ").capitalize()

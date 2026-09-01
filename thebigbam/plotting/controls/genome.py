@@ -17,6 +17,7 @@ from bokeh.models.widgets import (
     TextInput,
 )
 
+from ..shared.styles import bokeh_control_row
 from .color_rules import build_color_rule_controls
 
 
@@ -39,10 +40,12 @@ class GenomeControls:
     create_color_row: Any
     rebuild_color_rows: Any
     rebuild_mag_color_rows: Any
+    reset_position: Any
 
 
 def _build_collapsible(title, children, toggle_stylesheet, make_toggle_callback, *, margin=(0, 0, 5, 0)):
-    benchmark_slug = title.lower().replace(" ", "-")
+    title_text = title.text if isinstance(title, Div) else title
+    benchmark_slug = title_text.split(" (")[0].lower().replace(" ", "-")
     toggle = Button(
         label="▶",
         width=20,
@@ -54,7 +57,8 @@ def _build_collapsible(title, children, toggle_stylesheet, make_toggle_callback,
         css_classes=[f"benchmark-toggle-{benchmark_slug}"],
     )
     toggle.styles = {"padding": "0px", "line-height": "20px"}
-    header = row(toggle, Div(text=title, align="center"), sizing_mode="stretch_width", align="center")
+    title_model = title if isinstance(title, Div) else Div(text=title, align="center")
+    header = row(toggle, title_model, sizing_mode="stretch_width", align="center")
     content = pn.Column(*children, visible=False, sizing_mode="stretch_width", margin=margin)
     toggle.on_click(make_toggle_callback(toggle, content))
     return header, content
@@ -98,6 +102,7 @@ def build_genome_controls(
     make_toggle_callback: Callable[[Any, Any], Callable[..., None]],
     enable_timing: bool,
     interaction_lock: Mapping[str, bool],
+    record_action: Callable[[str, Mapping[str, Any]], Any] | None = None,
 ) -> GenomeControls:
     genome_cbg_one = genome_checkbox
     genome_index_one = genome_index
@@ -194,9 +199,15 @@ def build_genome_controls(
         else:
             to_position_input.value = ""
 
-    position_reset_button.on_click(lambda event: reset_position_inputs())
+    def reset_position_clicked(event=None):
+        del event
+        reset_position_inputs()
+        if record_action is not None:
+            record_action("reset_position", {})
 
-    position_row = row(
+    position_reset_button.on_click(reset_position_clicked)
+
+    position_row = bokeh_control_row(
         position_label_from,
         from_position_input,
         position_label_to,
@@ -262,7 +273,7 @@ def build_genome_controls(
             if color_qualifier_options:
                 customise_children.append(custom_color_column)
             customise_header, customise_content = _build_collapsible(
-                "Customise genomic annotations",
+                color_controls.custom_title,
                 customise_children,
                 toggle_stylesheet,
                 make_toggle_callback,
@@ -280,7 +291,7 @@ def build_genome_controls(
                 margin=(4, 0, 4, 0),
             )
             mag_track_section_header, mag_track_section_content = _build_collapsible(
-                "Customise MAG track",
+                color_controls.mag_title,
                 [Div(text="Color annotations on MAG track with:"), mag_track_color_column, apply_annotation_rules_cbg],
                 toggle_stylesheet,
                 make_toggle_callback,
@@ -390,4 +401,5 @@ def build_genome_controls(
         create_color_row=create_color_row,
         rebuild_color_rows=rebuild_color_rows,
         rebuild_mag_color_rows=rebuild_mag_track_color_rows,
+        reset_position=reset_position_clicked,
     )

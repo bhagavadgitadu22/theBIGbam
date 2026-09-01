@@ -24,6 +24,8 @@ class FilterVisualizations:
         refresh_on_filter_change: Callable[[], None],
         filter_encode: Mapping[str, float] | None = None,
         set_operation: Callable[[str], None] | None = None,
+        record_action: Callable[[str, Mapping[str, Any]], Any] | None = None,
+        occurrence_for: Callable[[Any], int] | None = None,
     ) -> None:
         self.metadata_service = metadata_service
         self.filtering_metadata = filtering_metadata
@@ -32,6 +34,8 @@ class FilterVisualizations:
         self.refresh_on_filter_change = refresh_on_filter_change
         self.filter_encode = filter_encode or {}
         self.set_operation = set_operation or (lambda _operation: None)
+        self.record_action = record_action
+        self.occurrence_for = occurrence_for or (lambda _row: 1)
 
     def build_numeric_histogram(self, row_data, category, col_name, spinner, log_mode=False, log_y=False):
         """Build a histogram with draggable threshold bar for a numeric column."""
@@ -224,14 +228,40 @@ class FilterVisualizations:
 
         def _on_log_x(event):
             new_log = not row_data.get("log_mode", False)
+            if self.record_action is not None:
+                self.record_action(
+                    "filter_distribution_scale",
+                    {
+                        "category": category,
+                        "column": col_name,
+                        "occurrence": self.occurrence_for(row_data),
+                        "axis": "x",
+                        "enabled": new_log,
+                    },
+                )
             _rebuild_histogram(new_log, row_data.get("log_y", False))
 
         def _on_log_y(event):
             new_log_y = not row_data.get("log_y", False)
+            if self.record_action is not None:
+                self.record_action(
+                    "filter_distribution_scale",
+                    {
+                        "category": category,
+                        "column": col_name,
+                        "occurrence": self.occurrence_for(row_data),
+                        "axis": "y",
+                        "enabled": new_log_y,
+                    },
+                )
             _rebuild_histogram(row_data.get("log_mode", False), new_log_y)
 
         log_x_btn.on_click(_on_log_x)
         log_y_btn.on_click(_on_log_y)
+        row_data["set_histogram_scale"] = lambda axis, enabled: _rebuild_histogram(
+            enabled if axis == "x" else row_data.get("log_mode", False),
+            enabled if axis == "y" else row_data.get("log_y", False),
+        )
 
         pane = pn.Column(
             pn.Row(log_x_btn, log_y_btn, margin=0),
