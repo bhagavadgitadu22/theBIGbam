@@ -218,6 +218,7 @@ def load_scenario(path: Path, db: Path | None = None) -> dict[str, Any]:
     if not isinstance(steps, list) or not steps:
         raise ScenarioError("Scenario must contain at least one step")
     sequences: set[int] = set()
+    actions_by_sequence: dict[int, str] = {}
     previous_sequence = 0
     supported = {
         "state_change",
@@ -250,6 +251,7 @@ def load_scenario(path: Path, db: Path | None = None) -> dict[str, Any]:
         action = step.get("action")
         if action not in supported:
             raise ScenarioError(f"Step {sequence} has unsupported action {action!r}")
+        actions_by_sequence[sequence] = action
         semantic_actions = supported - {"state_change", "apply_filters", "apply_plot"}
         if action in semantic_actions and not isinstance(step.get("details"), dict):
             raise ScenarioError(f"Step {sequence} {action} requires an object-valued details field")
@@ -270,8 +272,22 @@ def load_scenario(path: Path, db: Path | None = None) -> dict[str, Any]:
             history_sequence = details.get("history_sequence")
             if not isinstance(history_sequence, int) or isinstance(history_sequence, bool) or history_sequence < 1:
                 raise ScenarioError(f"Step {sequence} {action} requires a positive history_sequence")
-            if details.get("history_action") not in {"apply_filters", "apply_plot"}:
+            history_action = details.get("history_action")
+            if history_action not in {"apply_filters", "apply_plot"}:
                 raise ScenarioError(f"Step {sequence} {action} has invalid history_action")
+            apply_step = details.get("apply_step")
+            if apply_step is not None and (
+                not isinstance(apply_step, int)
+                or isinstance(apply_step, bool)
+                or apply_step < 1
+            ):
+                raise ScenarioError(f"Step {sequence} {action} has an invalid apply_step")
+            if apply_step is not None and (
+                apply_step >= sequence or actions_by_sequence.get(apply_step) != history_action
+            ):
+                raise ScenarioError(
+                    f"Step {sequence} {action} apply_step must reference an earlier {history_action} step"
+                )
             if action == "restore_history" and not isinstance(details.get("settings"), dict):
                 raise ScenarioError(f"Step {sequence} restore_history requires object-valued settings")
         if action == "filter_distribution_scale":

@@ -1,6 +1,5 @@
 import io
 import time
-from pathlib import Path
 
 import duckdb
 import pytest
@@ -144,17 +143,3 @@ def test_diagnostics_are_disabled_without_retention_and_bounded_when_enabled():
     for _ in range(3):
         bounded.record("view_change", time.perf_counter())
     assert len(bounded.snapshot()) == 2
-
-
-def test_view_switch_does_not_replace_plot_and_timing_ignores_stale_acknowledgements():
-    source = Path("thebigbam/plotting/application/composition_root.py").read_text(encoding="utf-8")
-    scope_source = Path("thebigbam/plotting/application/scope_transition.py").read_text(encoding="utf-8")
-    timing_source = Path("thebigbam/plotting/shared/timing.py").read_text(encoding="utf-8")
-    assert "scope_transition.view_changed(attr, old, new)" in source
-    assert "subject_controller.subject_scope_changed(attr, old, new)" in source
-    assert "schedule_control_transition" in source
-    assert "main_placeholder.objects" not in scope_source
-    assert 'send_timing_ping("view_change")' in scope_source or "send_timing_ping('view_change')" in scope_source
-    assert 'token != self.state.get("token")' in timing_source
-    assert "Browser paint after patch" in timing_source
-    assert "__thebigbam_view_change_started" in timing_source

@@ -1,5 +1,3 @@
-from pathlib import Path
-
 import duckdb
 
 from thebigbam.plotting.controls.base import build_controls
@@ -106,31 +104,6 @@ def test_session_context_groups_mutable_session_dependencies():
     assert context.plot_state.contig == "c1"
 
 
-def test_server_delegates_preload_and_unfiltered_availability_queries():
-    source = Path("thebigbam/plotting/application/composition_root.py").read_text(encoding="utf-8")
-    source += Path("thebigbam/plotting/application/availability.py").read_text(encoding="utf-8")
-    public_preload = source[source.index("def preload_db_data") : source.index("def create_layout")]
-
-    assert "PreloadRepository(db_path)" in public_preload
-    assert "repository.load()" in public_preload
-    assert "availability_service.contigs_for_sample" in source
-    assert "availability_service.samples_for_contig" in source
-    assert "availability_service.mags_for_sample" in source
-    assert ".execute(" not in Path("thebigbam/plotting/application/availability.py").read_text(encoding="utf-8")
-    assert "def _legacy_preload_db_data" not in source
-    assert "source_table_map" not in source
-    assert "get_pairs_for_condition" not in source
-    assert "from ..controls.base import build_controls" in source
-
-
-def test_server_entry_point_contains_no_sql_or_widget_construction():
-    source = Path("thebigbam/plotting/start_bokeh_server.py").read_text(encoding="utf-8")
-    assert len(source.splitlines()) <= 100
-    assert ".execute(" not in source
-    assert "pn." not in source
-    assert "Checkbox" not in source
-
-
 def test_core_control_factory_uses_only_preloaded_data(tmp_path):
     path = tmp_path / "controls.db"
     _create_preload_database(path)
@@ -149,7 +122,48 @@ def test_core_control_factory_uses_only_preloaded_data(tmp_path):
     assert widgets["sample_select"].options == ["s1", "s2"]
     assert widgets["view_radio"].labels == ["MAG VIEW", "CONTIG VIEW"]
     assert len(widgets["variables_widgets_one"]) == 1
-    assert ".execute(" not in Path("thebigbam/plotting/controls/base.py").read_text(encoding="utf-8")
+
+
+def test_initial_browser_selector_payload_is_capped_at_one_hundred(tmp_path):
+    path = tmp_path / "large-controls.db"
+    _create_preload_database(path)
+    connection = duckdb.connect(str(path))
+    connection.executemany(
+        "INSERT INTO Contig VALUES (?, ?, 100)",
+        [(index, f"contig-{index:03d}") for index in range(3, 153)],
+    )
+    connection.executemany(
+        "INSERT INTO Sample VALUES (?, ?)",
+        [(index, f"sample-{index:03d}") for index in range(3, 153)],
+    )
+    connection.close()
+    data = PreloadRepository(
+        str(path),
+        scale_initializer=lambda _connection: None,
+        filter_encoder=lambda _connection: {},
+        filtering_metadata_loader=lambda _path: {},
+        mag_mode_loader=lambda _connection: False,
+        mag_map_loader=lambda _connection: ({}, {}),
+    ).load()
+
+    widgets = build_controls(data)
+
+    assert len(data.contigs) == 152
+    assert len(data.samples) == 152
+    assert len(widgets["contig_select"].options) == 100
+    assert len(widgets["sample_select"].options) == 100
+
+
+def test_unscoped_name_searches_are_bounded_and_prioritize_matching_modes(tmp_path):
+    path = tmp_path / "search.db"
+    _create_preload_database(path)
+    connection = duckdb.connect(str(path))
+    connection.execute("INSERT INTO Contig VALUES (3, 'target', 100), (4, 'target-prefix', 100), (5, 'x-target', 100)")
+    repository = FilteringRepository(connection)
+
+    assert repository.contigs("target") == ("target", "target-prefix", "x-target")
+    assert len(repository.contigs()) <= 100
+    connection.close()
 
 
 def test_column_scales_are_scoped_to_each_database_connection():

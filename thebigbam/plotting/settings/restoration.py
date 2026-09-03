@@ -154,10 +154,18 @@ def restore_settings(settings: Mapping[str, Any], bindings: SettingsRestoreBindi
 
     # 2. Sample/contig/MAG selection
     selection = settings.get("selection") or {}
-    for key, widget in (
-        ("sample", widgets["sample_select"]),
-        ("contig", widgets["contig_select"]),
-        ("mag", widgets["mag_select"]),
+    for key, widget, known_values in (
+        (
+            "sample",
+            widgets["sample_select"],
+            widgets.get("sample_name_to_id", widgets["sample_select"].options),
+        ),
+        (
+            "contig",
+            widgets["contig_select"],
+            widgets.get("contig_name_to_id", widgets["contig_select"].options),
+        ),
+        ("mag", widgets["mag_select"], widgets.get("mag_to_contigs", widgets["mag_select"].options)),
     ):
         if key not in selection:
             continue
@@ -165,8 +173,15 @@ def restore_settings(settings: Mapping[str, Any], bindings: SettingsRestoreBindi
         if not val:
             _restore(f"selection.{key}", lambda widget=widget: setattr(widget, "value", ""))
             continue
-        if val in widget.options:
-            _restore(f"selection.{key}", lambda widget=widget, val=val: setattr(widget, "value", val))
+        if val in known_values:
+            def _set_selected_value(widget=widget, val=val):
+                if val not in widget.options:
+                    widget.options = [val, *widget.options]
+                widget.value = val
+                if hasattr(widget, "search_query"):
+                    widget.search_query = val
+
+            _restore(f"selection.{key}", _set_selected_value)
         else:
             _warn(f"selection.{key}", f"'{val}' not found in this database")
 
@@ -242,8 +257,8 @@ def restore_settings(settings: Mapping[str, Any], bindings: SettingsRestoreBindi
                 widget = row_data["input_ref"]["widget"]
 
                 def _set_row_value(widget=widget, value=value, row_data=row_data):
-                    if isinstance(widget, SearchableSelect) and value and value not in widget.options:
-                        widget.options = list(widget.options) + [value]
+                    if isinstance(widget, SearchableSelect) and value:
+                        widget.search_query = str(value)
                     widget.value = value
 
                 _restore(f"filtering[{section_i}] row value", _set_row_value)
@@ -290,8 +305,8 @@ def restore_settings(settings: Mapping[str, Any], bindings: SettingsRestoreBindi
                 value = saved_rule.get("value")
 
                 def _set_color_value(widget=widget, value=value):
-                    if isinstance(widget, SearchableSelect) and value and value not in widget.options:
-                        widget.options = list(widget.options) + [value]
+                    if isinstance(widget, SearchableSelect) and value:
+                        widget.search_query = str(value)
                     widget.value = value
 
                 _restore(f"{label} value", _set_color_value)

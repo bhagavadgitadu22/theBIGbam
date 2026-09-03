@@ -1,3 +1,4 @@
+import json
 from types import SimpleNamespace
 
 from thebigbam.plotting.application.subject import (
@@ -12,6 +13,39 @@ def test_sample_order_category_is_normalized_for_subject_view():
     assert sample_order_category_for_view("Coverage", mag_view=True) == "MAG coverage"
     assert sample_order_category_for_view("MAG coverage", mag_view=False) == "MAG coverage"
     assert sample_order_category_for_view("Sample", mag_view=True) == "Sample"
+
+
+def test_subject_search_uses_query_from_atomic_request():
+    widget = SimpleNamespace(search_result_query="", search_result_nonce=0)
+    queries = []
+    projected = []
+    controller = SubjectController(
+        SubjectBindings(
+            widgets={"mag_select": widget},
+            interaction_lock={"locked": False},
+            compute_contigs=lambda search: [],
+            compute_samples=lambda search: [],
+            compute_mags=lambda search: queries.append(search) or [f"match-{search}"],
+            push_completions=lambda target, values: projected.extend(values),
+            refresh_contigs=lambda: None,
+            refresh_samples=lambda: None,
+            refresh_mags=lambda: None,
+            update_titles=lambda: None,
+            from_position=SimpleNamespace(value=""),
+            to_position=SimpleNamespace(value=""),
+            sample_order_category=SimpleNamespace(options=[], value=""),
+            sample_contig_categories=[],
+            sample_mag_categories=[],
+            sample_current_categories=[],
+        )
+    )
+
+    controller.mag_search(SimpleNamespace(new=json.dumps({"nonce": 9, "query": "337R"})))
+
+    assert queries == ["337R"]
+    assert projected == ["match-337R"]
+    assert widget.search_result_query == "337R"
+    assert widget.search_result_nonce == 9
 
 
 def test_translate_mag_window_to_contig_preserves_and_shifts_nearby_window():

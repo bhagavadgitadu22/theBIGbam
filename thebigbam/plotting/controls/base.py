@@ -5,6 +5,7 @@ from __future__ import annotations
 from bokeh.models import CheckboxButtonGroup, CheckboxGroup, RadioButtonGroup, Tooltip
 
 from ..models.preload import PreloadedPlotData
+from ..shared.defaults import AUTOCOMPLETE_LIMIT
 from .searchable_select import SearchableSelect
 
 
@@ -16,7 +17,7 @@ def build_controls(preloaded: PreloadedPlotData):
     mag_select = SearchableSelect(
         name="benchmark-mag-select",
         value=mags[0] if len(mags) == 1 else "",
-        options=list(mags),
+        options=list(mags[:AUTOCOMPLETE_LIMIT]),
         placeholder="Type to search MAGs...",
         server_search=True,
         css_classes=["benchmark-mag-select"],
@@ -35,7 +36,7 @@ def build_controls(preloaded: PreloadedPlotData):
     contig_select = SearchableSelect(
         name="benchmark-contig-select",
         value=contigs[0] if len(contigs) == 1 else "",
-        options=list(contigs),
+        options=list(contigs[:AUTOCOMPLETE_LIMIT]),
         placeholder="Type to search contigs...",
         server_search=True,
         css_classes=["benchmark-contig-select"],
@@ -45,7 +46,7 @@ def build_controls(preloaded: PreloadedPlotData):
     sample_select = SearchableSelect(
         name="benchmark-sample-select",
         value=samples[0] if len(samples) == 1 else "",
-        options=list(samples),
+        options=list(samples[:AUTOCOMPLETE_LIMIT]),
         placeholder="Type to search samples...",
         server_search=True,
         css_classes=["benchmark-sample-select"],

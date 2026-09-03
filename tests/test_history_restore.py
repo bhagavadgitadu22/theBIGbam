@@ -9,7 +9,20 @@ def _entry(action="apply_plot"):
     return HistoryEntry("id", 1, action, "time", {"selection": {"contig": "restored"}})
 
 
-def _coordinator(queue, events, *, apply_plot=lambda: True, install=None, snapshot=None):
+def _run_all(queue):
+    while queue:
+        queue.pop(0)()
+
+
+def _coordinator(
+    queue,
+    events,
+    *,
+    apply_plot=lambda: True,
+    install=None,
+    install_filters=None,
+    snapshot=None,
+):
     return HistoryRestoreCoordinator(
         HistoryRestoreBindings(
             begin=lambda: events.append("begin") or True,
@@ -19,6 +32,7 @@ def _coordinator(queue, events, *, apply_plot=lambda: True, install=None, snapsh
             snapshot=snapshot or (lambda: {"selection": {"contig": "current"}}),
             install=install or (lambda settings: events.append(("install", settings))),
             apply_plot=apply_plot,
+            install_filters=install_filters,
         )
     )
 
@@ -30,11 +44,20 @@ def test_plot_restore_installs_snapshot_regenerates_plot_and_then_completes():
 
     assert coordinator.restore(_entry(), lambda: events.append("complete")) is True
     queue.pop(0)()
+    assert events == [
+        "begin",
+        ("loading", True),
+        ("install", {"selection": {"contig": "restored"}}),
+        "end",
+    ]
+    _run_all(queue)
 
     assert events == [
         "begin",
         ("loading", True),
         ("install", {"selection": {"contig": "restored"}}),
+        "end",
+        "begin",
         "apply_plot",
         ("loading", False),
         "end",
@@ -52,8 +75,82 @@ def test_filter_restore_installs_snapshot_without_regenerating_plot():
     coordinator.restore(_entry("apply_filters"))
     queue.pop(0)()
 
+    assert events == [
+        "begin",
+        ("install", {"selection": {"contig": "restored"}}),
+        "end",
+    ]
+
+
+def test_filter_restore_passes_current_state_to_filter_specific_installer():
+    queue = []
+    events = []
+    current = {"selection": {"mag": "current-mag", "contig": "current-contig"}}
+    coordinator = _coordinator(
+        queue,
+        events,
+        snapshot=lambda: current,
+        install_filters=lambda settings, live: events.append(("install_filters", settings, live)),
+    )
+
+    coordinator.restore(_entry("apply_filters"))
+    _run_all(queue)
+
+    assert events == [
+        "begin",
+        (
+            "install_filters",
+            {"selection": {"contig": "restored"}},
+            current,
+        ),
+        "end",
+    ]
+
+
+def test_plot_restore_does_not_use_filter_specific_installer():
+    queue = []
+    events = []
+    coordinator = _coordinator(
+        queue,
+        events,
+        apply_plot=lambda: True,
+        install_filters=lambda _settings, _live: events.append("unexpected filter install"),
+    )
+
+    coordinator.restore(_entry("apply_plot"))
+    _run_all(queue)
+
+    assert "unexpected filter install" not in events
     assert ("install", {"selection": {"contig": "restored"}}) in events
-    assert "unexpected apply" not in events
+
+
+def test_failed_filter_restore_rolls_back_without_plot_or_loading():
+    queue = []
+    events = []
+    failures = []
+
+    def install(settings):
+        events.append(("install", settings))
+        if settings["selection"]["contig"] == "restored":
+            raise RuntimeError("filter restore failed")
+
+    coordinator = _coordinator(
+        queue,
+        events,
+        install=install,
+        apply_plot=lambda: events.append("unexpected apply") or True,
+    )
+
+    coordinator.restore(_entry("apply_filters"), on_error=failures.append)
+    queue.pop(0)()
+
+    assert events == [
+        "begin",
+        ("install", {"selection": {"contig": "restored"}}),
+        ("install", {"selection": {"contig": "current"}}),
+        "end",
+    ]
+    assert [str(error) for error in failures] == ["filter restore failed"]
 
 
 def test_failed_plot_restore_rolls_back_state_and_plot_before_releasing_lock():
@@ -68,14 +165,18 @@ def test_failed_plot_restore_rolls_back_state_and_plot_before_releasing_lock():
     )
 
     coordinator.restore(_entry(), lambda: events.append("complete"), failures.append)
-    queue.pop(0)()
+    _run_all(queue)
 
     assert events == [
         "begin",
         ("loading", True),
         ("install", {"selection": {"contig": "restored"}}),
+        "end",
+        "begin",
         "apply_plot",
         ("install", {"selection": {"contig": "current"}}),
+        "end",
+        "begin",
         "apply_plot",
         ("loading", False),
         "end",

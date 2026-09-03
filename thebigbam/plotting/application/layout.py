@@ -16,9 +16,12 @@ def separator() -> Div:
     return Div(
         text="",
         height=2,
+        min_height=2,
+        max_height=2,
         sizing_mode="stretch_width",
-        margin=0,
-        styles={"background-color": "#333", "margin-top": "10px", "margin-bottom": "10px"},
+        margin=(10, 0),
+        styles={"background-color": "#333", "box-sizing": "border-box"},
+        css_classes=["section-separator"],
     )
 
 
@@ -56,6 +59,8 @@ class AssembledLayout:
     right_resizer: Any
     left_rail: Any
     right_rail: Any
+    left_shell: Any
+    right_shell: Any
 
 
 def assemble_layout(
@@ -146,11 +151,13 @@ def assemble_layout(
     def toggle_left() -> None:
         controls.visible = not controls.visible
         left_resizer.enabled = controls.visible
+        left_shell.width = left_resizer.value if controls.visible else 0
         left_toggle.name = "◀" if controls.visible else "▶"
 
     def toggle_right() -> None:
         history.visible = not history.visible
         right_resizer.enabled = history.visible
+        right_shell.width = right_resizer.value if history.visible else 0
         right_toggle.name = "▶" if history.visible else "◀"
 
     left_toggle.on_click(lambda _event: toggle_left())
@@ -183,9 +190,13 @@ def assemble_layout(
 
     def resize_left(event) -> None:
         controls.width = event.new
+        if controls.visible:
+            left_shell.width = event.new
 
     def resize_right(event) -> None:
         history.width = event.new
+        if history.visible:
+            right_shell.width = event.new
 
     left_resizer.param.watch(resize_left, "value")
     right_resizer.param.watch(resize_right, "value")
@@ -197,6 +208,7 @@ def assemble_layout(
         align="center",
         margin=0,
         css_classes=["panel-resize-rail", "panel-resize-rail-left"],
+        styles={"bottom": "0", "position": "absolute", "right": "-8px", "top": "0"},
     )
     right_rail = pn.Column(
         right_resizer,
@@ -206,19 +218,36 @@ def assemble_layout(
         align="center",
         margin=0,
         css_classes=["panel-resize-rail", "panel-resize-rail-right"],
+        styles={"bottom": "0", "left": "-8px", "position": "absolute", "top": "0"},
     )
     plot_area = pn.Column(
         placeholder,
         sizing_mode="stretch_both",
         css_classes=["plot-area"],
     )
-    layout = pn.Row(
+    left_shell = pn.Column(
         controls,
         left_rail,
+        width=400,
+        sizing_mode="stretch_height",
+        margin=0,
+        css_classes=["panel-shell", "panel-shell-left"],
+        stylesheets=[stylesheet],
+    )
+    right_shell = pn.Column(
+        history,
+        right_rail,
+        width=0,
+        sizing_mode="stretch_height",
+        margin=0,
+        css_classes=["panel-shell", "panel-shell-right"],
+        stylesheets=[stylesheet],
+    )
+    layout = pn.Row(
+        left_shell,
         plot_area,
         pn.pane.Bokeh(summary_carrier),
-        right_rail,
-        history,
+        right_shell,
         sizing_mode="stretch_both",
         css_classes=["main-layout"],
     )
@@ -234,4 +263,6 @@ def assemble_layout(
         right_resizer,
         left_rail,
         right_rail,
+        left_shell,
+        right_shell,
     )

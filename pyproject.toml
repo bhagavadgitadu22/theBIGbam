@@ -50,6 +50,14 @@ line-length = 120
 [tool.ruff.lint]
 select = ["E4", "E7", "E9", "F", "I"]
 
+[tool.pytest.ini_options]
+addopts = "-m fast"
+markers = [
+    "fast: deterministic tests that need no external executables or browser",
+    "integration: exercises installed CLI tools and generated mapping/database artifacts",
+    "browser: launches a real browser against a running Panel application",
+]
+
 [project.scripts]
 thebigbam = "thebigbam.cli:main"
 

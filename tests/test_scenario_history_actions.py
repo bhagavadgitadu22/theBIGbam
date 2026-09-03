@@ -19,11 +19,20 @@ def test_history_scenario_actions_validate_and_replay_semantically(tmp_path, mon
     details = {
         "history_sequence": 2,
         "history_action": "apply_plot",
+        "apply_step": 1,
         "settings": {"selection": {"contig": "c1"}},
     }
     path = tmp_path / "scenario.json"
     path.write_text(
-        json.dumps(_document({"sequence": 1, "action": "restore_history", "details": details})),
+        json.dumps(
+            {
+                **_document({"sequence": 2, "action": "restore_history", "details": details}),
+                "steps": [
+                    {"sequence": 1, "action": "apply_plot"},
+                    {"sequence": 2, "action": "restore_history", "details": details},
+                ],
+            }
+        ),
         encoding="utf-8",
     )
     actions = []
@@ -33,7 +42,7 @@ def test_history_scenario_actions_validate_and_replay_semantically(tmp_path, mon
         lambda page, action, action_details, timeout: actions.append((action, action_details)),
     )
 
-    step = replay.load_scenario(path)["steps"][0]
+    step = replay.load_scenario(path)["steps"][1]
     replay.replay_action(object(), step, {}, 1000)
 
     assert actions == [("restore_history", details)]
@@ -45,6 +54,12 @@ def test_history_scenario_actions_validate_and_replay_semantically(tmp_path, mon
         {"history_sequence": 0, "history_action": "apply_plot", "settings": {}},
         {"history_sequence": 1, "history_action": "unknown", "settings": {}},
         {"history_sequence": 1, "history_action": "apply_plot", "settings": []},
+        {
+            "history_sequence": 1,
+            "history_action": "apply_plot",
+            "apply_step": 99,
+            "settings": {},
+        },
     ],
 )
 def test_restore_history_scenario_rejects_invalid_details(tmp_path, details):
@@ -73,18 +88,42 @@ def test_async_semantic_action_acknowledges_only_after_completion():
 
 
 def test_history_scenario_actions_have_explicit_descriptions():
-    document = _document(
+    document = _document({"sequence": 1, "action": "apply_filters"})
+    document["steps"].append(
         {
-            "sequence": 1,
+            "sequence": 2,
             "action": "remove_history",
-            "details": {"history_sequence": 4, "history_action": "apply_filters"},
+            "details": {
+                "history_sequence": 4,
+                "history_action": "apply_filters",
+                "apply_step": 1,
+            },
         }
     )
 
     assert describe_scenario_document(document) == (
-        "1. Remove apply filters history entry 4",
+        "1. Apply filters",
+        "2. Remove apply filters from step 1",
     )
 
+
+def test_saved_session_history_action_needs_no_synthetic_apply_step(tmp_path):
+    details = {
+        "history_sequence": 4,
+        "history_action": "apply_plot",
+        "apply_step": None,
+        "settings": {"selection": {"contig": "c1"}},
+    }
+    document = _document(
+        {"sequence": 1, "action": "restore_history", "details": details}
+    )
+    path = tmp_path / "saved-session-restore.json"
+    path.write_text(json.dumps(document), encoding="utf-8")
+
+    assert replay.load_scenario(path)["steps"][0]["details"] == details
+    assert describe_scenario_document(document) == (
+        "1. Restore saved-session apply plot",
+    )
 
 @pytest.mark.parametrize(
     ("action", "label"),

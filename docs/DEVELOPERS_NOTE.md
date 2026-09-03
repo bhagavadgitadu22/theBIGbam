@@ -53,7 +53,10 @@ The second command installs the Chromium browser used by plotting performance an
 After making your changes to the code, you will need to:
 
 - [Compile the tool](#compiling-with-maturin) with maturin and test everything works
-- Run tests: `pytest tests/`
+- Run fast tests (the default): `pytest tests/` or `pytest -m fast tests/`
+- Run mapping/database integration tests: `pytest -m integration tests/`
+- Run real-browser tests: `pytest -m browser tests/`
+- Run every test category: `pytest -o addopts="" tests/`
 - [Monitor the time performance](#monitor-the-performance) after your changes 
 
 Finally when happy with your code, you can submit a pull request from your fork to the main GitHub repository with a clear description of your changes.

@@ -5,14 +5,19 @@ from __future__ import annotations
 import html
 import os
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any, Callable, Iterable
 
 import panel as pn
 from bokeh.models import Button as BokehButton
 from bokeh.models import CustomJS, Div
 
 from ..settings.controls import save_confirmation_js
-from ..settings.history import HistoryEntry, SessionHistory, describe_history_entry
+from ..settings.history import (
+    HistoryEntry,
+    SessionHistory,
+    history_description_lines,
+    history_diff_lines,
+)
 from ..settings.persistence import save_session_document
 from ..shared.styles import (
     panel_control_row,
@@ -31,26 +36,49 @@ class HistorySession:
     plot_entries: Any
     filter_toggle: Any
     plot_toggle: Any
+    filter_short_descriptions: Any
+    plot_short_descriptions: Any
     restore_entry: Callable[[HistoryEntry], None]
     can_mutate: Callable[[], bool]
     record_action: Callable[[str, dict[str, Any]], None]
     save: Callable[..., Any]
     rows_by_id: dict[str, Any]
     actions_by_id: dict[str, str]
+    apply_steps_by_id: dict[str, int]
 
-    def append(self, action: str, settings: dict[str, Any]) -> HistoryEntry:
+    def append(
+        self, action: str, settings: dict[str, Any], *, apply_step: int | None = None
+    ) -> HistoryEntry:
         previous_ids = {item.id for item in self.history.entries}
         entry = self.history.append(action, settings)
         retained_ids = {item.id for item in self.history.entries}
-        for expired_id in previous_ids - retained_ids:
-            self._remove_row(expired_id)
+        expired = previous_ids - retained_ids
+        for expired_id in expired:
+            self._remove_row(expired_id, refresh=False)
         row = self._entry_row(entry)
         self.rows_by_id[entry.id] = row
         self.actions_by_id[entry.id] = action
-        content = self._content_for(action)
-        existing = [] if self._is_empty(content) else list(content.objects)
-        content.objects = [row, *existing]
+        if apply_step is not None:
+            self.apply_steps_by_id[entry.id] = apply_step
+        last_index = len(self.history.for_action(action)) - 1
+        changed = {last_index}
+        if expired:
+            changed.add(0)
+        self._refresh_action(action, changed)
         return entry
+
+    def restore(self, entries: Iterable[HistoryEntry]) -> None:
+        """Install saved entries without recording them as new actions."""
+        self.history.restore(entries)
+        self.rows_by_id.clear()
+        self.actions_by_id.clear()
+        self.apply_steps_by_id.clear()
+        for entry in self.history.entries:
+            row = self._entry_row(entry)
+            self.rows_by_id[entry.id] = row
+            self.actions_by_id[entry.id] = entry.action
+        self._refresh_action("apply_filters")
+        self._refresh_action("apply_plot")
 
     @staticmethod
     def _empty_row() -> Any:
@@ -64,16 +92,7 @@ class HistorySession:
         return self.filter_entries if action == "apply_filters" else self.plot_entries
 
     def _entry_row(self, entry: HistoryEntry) -> Any:
-        description = describe_history_entry(entry)
-        time = pn.widgets.Button(
-            name=html.escape(entry.created_at[11:19]),
-            description=right_panel_tooltip(description),
-            sizing_mode="stretch_width",
-            height=30,
-            margin=0,
-            css_classes=["history-time"],
-            stylesheets=list(self.drawer.stylesheets),
-        )
+        description = self._description_cell(entry, None)
         button_stylesheets = list(self.drawer.stylesheets)
         restore = pn.widgets.Button(
             name="←",
@@ -96,7 +115,7 @@ class HistorySession:
         )
         remove.on_click(lambda _event, entry_id=entry.id: self._remove(entry_id))
         return panel_control_row(
-            time,
+            description,
             restore,
             remove,
             css_classes=["history-entry"],
@@ -104,16 +123,77 @@ class HistorySession:
             margin=0,
         )
 
+    def _short_descriptions(self, action: str) -> bool:
+        checkbox = (
+            self.filter_short_descriptions
+            if action == "apply_filters"
+            else self.plot_short_descriptions
+        )
+        return bool(checkbox.value)
+
+    def _description_cell(self, entry: HistoryEntry, previous: HistoryEntry | None) -> Any:
+        lines = (
+            history_diff_lines(previous, entry)
+            if self._short_descriptions(entry.action)
+            else history_description_lines(entry)
+        )
+        panes = []
+        for line in lines:
+            escaped = html.escape(line.text)
+            displayed = f"<s>{escaped}</s>" if line.removed else escaped
+            panes.append(
+                pn.pane.HTML(
+                    f'<div class="history-description-line" title="{html.escape(line.text, quote=True)}">'
+                    f"{displayed}</div>",
+                    sizing_mode="stretch_width",
+                    margin=0,
+                    css_classes=["history-description-item"],
+                    stylesheets=list(self.drawer.stylesheets),
+                )
+            )
+        return pn.Column(
+            *panes,
+            sizing_mode="stretch_width",
+            margin=0,
+            css_classes=["history-description"],
+            stylesheets=list(self.drawer.stylesheets),
+        )
+
+    def _refresh_action(self, action: str, changed_indices: set[int] | None = None) -> None:
+        entries = list(self.history.for_action(action))
+        previous = None
+        rows = []
+        for entry in entries:
+            row = self.rows_by_id.get(entry.id)
+            if row is None:
+                row = self._entry_row(entry)
+                self.rows_by_id[entry.id] = row
+                self.actions_by_id[entry.id] = action
+            if changed_indices is None or len(rows) in changed_indices:
+                row.objects = [self._description_cell(entry, previous), *row.objects[1:]]
+            rows.append(row)
+            previous = entry
+        self._content_for(action).objects = rows or [self._empty_row()]
+
     def _remove(self, entry_id: str, *, record: bool = True) -> None:
         if not self.can_mutate():
             return
         entry = next((item for item in self.history.entries if item.id == entry_id), None)
+        action_entries = list(self.history.for_action(entry.action)) if entry is not None else []
+        removed_index = action_entries.index(entry) if entry is not None else -1
+        apply_step = self.apply_steps_by_id.get(entry_id)
         if entry is not None and self.history.remove(entry_id):
-            self._remove_row(entry_id)
+            self._remove_row(entry_id, refresh=False)
+            changed = {removed_index} if removed_index < len(self.history.for_action(entry.action)) else set()
+            self._refresh_action(entry.action, changed)
             if record:
                 self.record_action(
                     "remove_history",
-                    {"history_sequence": entry.sequence, "history_action": entry.action},
+                    {
+                        "history_sequence": entry.sequence,
+                        "history_action": entry.action,
+                        "apply_step": apply_step,
+                    },
                 )
 
     def _restore(self, entry: HistoryEntry) -> None:
@@ -124,6 +204,7 @@ class HistorySession:
             {
                 "history_sequence": entry.sequence,
                 "history_action": entry.action,
+                "apply_step": self.apply_steps_by_id.get(entry.id),
                 "settings": entry.settings,
             },
         )
@@ -139,14 +220,14 @@ class HistorySession:
         self._remove(entry.id, record=False)
         return entry.id not in self.rows_by_id
 
-    def _remove_row(self, entry_id: str) -> None:
+    def _remove_row(self, entry_id: str, *, refresh: bool = True) -> None:
         row = self.rows_by_id.pop(entry_id, None)
         action = self.actions_by_id.pop(entry_id, None)
+        self.apply_steps_by_id.pop(entry_id, None)
         if row is None or action is None:
             return
-        content = self._content_for(action)
-        retained = [item for item in content.objects if item is not row]
-        content.objects = retained or [self._empty_row()]
+        if refresh:
+            self._refresh_action(action)
 
 def build_history_session(
     *,
@@ -157,6 +238,7 @@ def build_history_session(
     stylesheet: Any,
     toggle_stylesheet: Any | None = None,
     settings_save_controls: Any | None = None,
+    initial_entries: Iterable[HistoryEntry] = (),
 ) -> HistorySession:
     history = SessionHistory(os.path.basename(db_path))
     filter_entries = pn.Column(
@@ -170,6 +252,18 @@ def build_history_session(
         sizing_mode="stretch_width",
         css_classes=["history-entry-list"],
         stylesheets=[stylesheet],
+    )
+    filter_short_descriptions = pn.widgets.Checkbox(
+        name="Use git-like short descriptions",
+        value=True,
+        margin=(0, 5, 4, 5),
+        css_classes=["history-description-mode"],
+    )
+    plot_short_descriptions = pn.widgets.Checkbox(
+        name="Use git-like short descriptions",
+        value=True,
+        margin=(0, 5, 4, 5),
+        css_classes=["history-description-mode"],
     )
 
     confirmation = Div(text="", visible=False)
@@ -231,7 +325,7 @@ def build_history_session(
         margin=0,
     )
 
-    def collapsible_section(title: str, content: Any) -> tuple[Any, BokehButton]:
+    def collapsible_section(title: str, mode: Any, content: Any) -> tuple[Any, BokehButton]:
         toggle = BokehButton(
             label="▼",
             width=20,
@@ -245,13 +339,18 @@ def build_history_session(
 
         def toggle_content() -> None:
             content.visible = not content.visible
+            mode.visible = content.visible
             toggle.label = "▼" if content.visible else "▶"
 
         toggle.on_click(lambda _event: toggle_content())
-        return pn.Column(header, content, sizing_mode="stretch_width"), toggle
+        return pn.Column(header, mode, content, sizing_mode="stretch_width"), toggle
 
-    filter_section, filter_toggle = collapsible_section("Filter applications", filter_entries)
-    plot_section, plot_toggle = collapsible_section("Plot applications", plot_entries)
+    filter_section, filter_toggle = collapsible_section(
+        "Filter applications", filter_short_descriptions, filter_entries
+    )
+    plot_section, plot_toggle = collapsible_section(
+        "Plot applications", plot_short_descriptions, plot_entries
+    )
     drawer = pn.Column(
         pn.pane.Markdown("## History", margin=(5, 8)),
         filter_section,
@@ -272,11 +371,21 @@ def build_history_session(
         plot_entries,
         filter_toggle,
         plot_toggle,
+        filter_short_descriptions,
+        plot_short_descriptions,
         restore_entry,
         can_mutate,
         record_action,
         save_session,
         {},
         {},
+        {},
     )
+    filter_short_descriptions.param.watch(
+        lambda _event: session._refresh_action("apply_filters"), "value"
+    )
+    plot_short_descriptions.param.watch(
+        lambda _event: session._refresh_action("apply_plot"), "value"
+    )
+    session.restore(initial_entries)
     return session

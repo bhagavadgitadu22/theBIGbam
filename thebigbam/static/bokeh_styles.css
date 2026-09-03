@@ -14,6 +14,7 @@ html, body {
   --space-md: 10px;
   --section-gap: 10px;
   --control-gap: 4px;
+  --control-row-end-inset: 5px;
   --color-pink: #fc62b8;
   --color-pink-active: #cc2b84;
   --color-green: #00f5ab;
@@ -63,13 +64,19 @@ html, body {
   height: 100vh;
   justify-content: flex-end;
   overflow: visible;
-  margin-left: -4px;
-  margin-right: -4px;
   max-width: 8px;
   min-width: 8px;
   position: relative;
   width: 8px;
   z-index: 20;
+}
+
+.panel-shell,
+:host(.panel-shell) {
+  height: 100vh;
+  min-width: 0;
+  overflow: visible;
+  position: relative;
 }
 
 :host(.drawer-toggle) .bk-btn {
@@ -88,7 +95,7 @@ html, body {
 }
 
 :host(.drawer-toggle-left) {
-  transform: translateX(4px);
+  transform: translateX(0);
 }
 
 :host(.drawer-toggle-right) .bk-btn {
@@ -97,7 +104,7 @@ html, body {
 }
 
 :host(.drawer-toggle-right) {
-  transform: translateX(calc(4px - var(--drawer-tab-width)));
+  transform: translateX(calc(8px - var(--drawer-tab-width)));
 }
 
 :host(.drawer-toggle) .bk-btn:hover,
@@ -122,6 +129,7 @@ html, body {
 
 .history-entry,
 :host(.history-entry) {
+  align-items: flex-start;
   background: white;
   border: 1px solid #ccc;
   border-radius: 5px;
@@ -141,27 +149,40 @@ html, body {
   gap: var(--control-gap);
 }
 
-.history-time,
-:host(.history-time) {
+.history-description,
+:host(.history-description) {
   box-sizing: border-box;
-  height: 30px;
+  gap: 0;
+  min-width: 0;
+  overflow: hidden;
   padding: 0;
   width: 100%;
-  font-variant-numeric: tabular-nums;
-  cursor: help;
 }
 
-:host(.history-time) .bk-btn {
-  align-items: center;
-  background: transparent !important;
-  border: 0 !important;
-  box-shadow: none !important;
-  color: inherit !important;
-  font-weight: bold;
-  height: 30px;
-  justify-content: flex-start;
-  padding: 0 !important;
-  text-align: left;
+.history-description-item,
+:host(.history-description-item) {
+  box-sizing: border-box;
+  min-width: 0;
+  overflow: hidden;
+  width: 100%;
+}
+
+.history-description-line,
+:host(.history-description-item) .history-description-line {
+  box-sizing: border-box;
+  line-height: 18px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  width: 100%;
+}
+
+.history-description-mode,
+:host(.history-description-mode) {
+  box-sizing: border-box;
+  font-size: 11px;
+  width: 100%;
 }
 
 .section-title,
@@ -248,8 +269,142 @@ html, body {
 
 .control-row,
 :host(.control-row) {
+  box-sizing: border-box;
   gap: var(--control-gap);
   width: 100%;
+}
+
+.sidebar-field,
+:host(.sidebar-field) {
+  box-sizing: border-box;
+  max-width: 100%;
+  min-width: 0;
+  width: 100%;
+}
+
+.responsive-control-row,
+:host(.responsive-control-row) {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+}
+
+:host(.responsive-control-row) .bk-Row {
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+/* Bokeh's FlexBoxView lays out a Row on :host itself. Override that host
+   directly; targeting a descendant leaves flex-wrap active and moves the
+   final action onto a second line. */
+.filtering-row,
+:host(.filtering-row) {
+  align-items: center;
+  box-sizing: border-box;
+  display: grid !important;
+  flex-wrap: nowrap !important;
+  gap: var(--control-gap);
+  grid-template-columns:
+    minmax(0, 2fr) minmax(0, 3fr) minmax(0, 1.2fr)
+    minmax(0, 2.5fr) 42px;
+  max-width: 100%;
+  min-width: 0;
+  overflow: visible;
+  padding-right: var(--control-row-end-inset);
+  width: 100%;
+}
+
+.coloring-row,
+:host(.coloring-row) {
+  align-items: center;
+  box-sizing: border-box;
+  display: grid !important;
+  flex-wrap: nowrap !important;
+  gap: var(--control-gap);
+  grid-template-columns:
+    minmax(0, 3fr) minmax(0, 2fr) minmax(0, 2.5fr) 42px 30px;
+  max-width: 100%;
+  min-width: 0;
+  overflow: visible;
+  padding-right: var(--control-row-end-inset);
+  width: 100%;
+}
+
+/* Grid items default to min-width:auto, which lets a Bokeh widget's intrinsic
+   width enlarge its track and consume the sidebar's right gutter. */
+:host(.filtering-row) > *,
+:host(.coloring-row) > * {
+  box-sizing: border-box;
+  max-width: 100%;
+  min-width: 0;
+}
+
+.filter-lookup,
+:host(.filter-lookup) {
+  box-sizing: border-box;
+  max-width: 42px !important;
+  min-width: 42px !important;
+  width: 42px !important;
+}
+
+:host(.filter-lookup) .bk-btn {
+  box-sizing: border-box;
+  max-width: 100% !important;
+  min-width: 0 !important;
+  width: 100% !important;
+}
+
+.responsive-field,
+:host(.responsive-field) {
+  box-sizing: border-box;
+  min-width: 0;
+}
+
+.filter-category,
+:host(.filter-category) {
+  flex: 2 1 70px !important;
+  min-width: 0;
+}
+
+.filter-metric,
+:host(.filter-metric) {
+  flex: 3 1 95px !important;
+  min-width: 0;
+}
+
+.filter-operator,
+:host(.filter-operator) {
+  flex: 1.2 1 55px !important;
+  min-width: 0;
+}
+
+.filter-value,
+:host(.filter-value) {
+  flex: 2.5 1 75px !important;
+  min-width: 0;
+}
+
+.color-qualifier,
+:host(.color-qualifier) {
+  flex: 3 1 95px !important;
+  min-width: 0;
+}
+
+.color-operator,
+:host(.color-operator) {
+  flex: 2 1 80px !important;
+  min-width: 0;
+}
+
+.color-value,
+:host(.color-value) {
+  flex: 2.5 1 80px !important;
+  min-width: 0;
+}
+
+.responsive-action,
+:host(.responsive-action) {
+  flex: 0 0 auto !important;
 }
 
 .section-header,
@@ -268,6 +423,53 @@ html, body {
   border-left: 3px solid var(--color-green-active);
   padding-left: var(--space-md);
   margin-left: var(--space-sm);
+  max-width: calc(100% - var(--space-sm));
+  min-width: 0;
+  width: calc(100% - var(--space-sm));
+}
+
+.nested-control-row,
+:host(.nested-control-row) {
+  box-sizing: border-box;
+  max-width: 100%;
+  min-width: 0;
+  width: 100%;
+}
+
+.filter-action-row,
+:host(.filter-action-row) {
+  align-items: center;
+  min-height: 30px;
+}
+
+:host(.filter-action-row) > * {
+  align-self: center;
+  box-sizing: border-box;
+  margin-bottom: 0 !important;
+  margin-top: 0 !important;
+}
+
+.color-picker-field,
+:host(.color-picker-field) {
+  align-self: center;
+  box-sizing: border-box;
+  height: 30px !important;
+  margin: 0 !important;
+}
+
+:host(.color-picker-field) input[type="color"] {
+  box-sizing: border-box;
+  height: 30px !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  width: 100% !important;
+}
+
+:host(.nested-section) .bk-Column,
+:host(.nested-section) .bk-Row {
+  box-sizing: border-box;
+  max-width: 100%;
+  min-width: 0;
 }
 
 .color-rule-list,

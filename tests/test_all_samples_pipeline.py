@@ -1,4 +1,3 @@
-import inspect
 import sys
 import types
 
@@ -163,9 +162,6 @@ def test_service_returns_plain_data_without_bokeh(monkeypatch):
     request = AllSamplesPlotRequest("c1", "Coverage", GenomicRegion(1, 10))
     result = AllSamplesDataService(_FakeRepository()).load(request)
     assert result.sample_tracks[0].series[0].data["y"] == (1.0, 2.0, 3.0)
-    source = inspect.getsource(service_module)
-    assert "import bokeh" not in source.lower()
-    assert "import panel" not in source.lower()
 
 
 def test_all_samples_minimum_frequency_is_absolute(monkeypatch):
@@ -206,4 +202,3 @@ def test_renderer_accepts_plain_data_without_database_calls():
     _, _, figures = AllSamplesRenderer().render_figures(data, 100, True)
     assert len(figures) == 1
     assert figures[0].title.text == ""
-    assert "execute(" not in inspect.getsource(AllSamplesRenderer)

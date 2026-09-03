@@ -1,3 +1,5 @@
+import json
+
 from bokeh.models import InlineStyleSheet, Spinner
 
 from thebigbam.plotting.controls.color_rules import build_color_rule_controls
@@ -59,7 +61,7 @@ def test_color_rule_count_updates_without_moving_add_button():
     controls = build_color_rule_controls(
         MetadataService(),
         {"Annotations": {"columns": {"Start": {"type": "numeric"}}}},
-        {},
+        {"preset": []},
         InlineStyleSheet(css=""),
         False,
     )
@@ -96,10 +98,55 @@ def test_color_rule_switches_from_numeric_to_text_qualifier_values():
 
     value_widget = row["input_ref"]["widget"]
     assert isinstance(value_widget, SearchableSelect)
-    assert value_widget.options == []
+    assert value_widget.options == ["Defense"]
     assert value_widget.server_search
-    assert value_widget.min_search_chars == 2
+    assert value_widget.min_search_chars == 0
 
     value_widget.search_query = "De"
-    value_widget.search_nonce += 1
+    value_widget.search_request = json.dumps({"nonce": 1, "query": "De"})
     assert value_widget.options == ["Defense"]
+
+
+def test_color_rule_fields_use_shared_proportional_layout():
+    controls = build_color_rule_controls(
+        MetadataService(),
+        {"Annotations": {"columns": {"Start": {"type": "numeric"}}}},
+        {"preset": []},
+        InlineStyleSheet(css=""),
+        False,
+    )
+
+    row = controls.create_row()
+
+    assert row["qualifier_select"].css_classes == ["responsive-field", "color-qualifier"]
+    assert row["operator_select"].css_classes == ["responsive-field", "color-operator"]
+    assert row["input_ref"]["widget"].css_classes == ["responsive-field", "color-value"]
+    assert row["color_picker"].css_classes == ["responsive-action", "color-picker-field"]
+    assert row["minus_btn"].css_classes == ["responsive-action", "color-remove"]
+    assert row["row_widget"].css_classes == [
+        "control-row",
+        "responsive-control-row",
+        "coloring-row",
+    ]
+    assert controls.template_select.css_classes == ["sidebar-field"]
+    assert controls.template_select.margin == 0
+    assert controls.feature_label_select.css_classes == ["sidebar-field"]
+    assert controls.feature_label_select.margin == 0
+
+
+def test_color_has_rule_uses_free_text_autocomplete_with_suggestions():
+    controls = build_color_rule_controls(
+        MetadataService(),
+        {"Annotations": {"columns": {"activity": {"type": "text"}}}},
+        {},
+        InlineStyleSheet(css=""),
+        False,
+    )
+    row = controls.create_row()
+
+    row["operator_select"].value = "has"
+    widget = row["input_ref"]["widget"]
+
+    assert isinstance(widget, SearchableSelect)
+    assert widget.allow_custom
+    assert widget.options == ["Defense"]

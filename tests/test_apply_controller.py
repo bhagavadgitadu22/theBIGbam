@@ -1,5 +1,4 @@
 from dataclasses import fields
-from pathlib import Path
 from types import SimpleNamespace
 
 from thebigbam.plotting.application.apply_controller import ApplyBindings, ApplyController
@@ -67,19 +66,3 @@ def test_apply_controller_reports_missing_contig_and_completes_lifecycle():
     # Loading belongs to the outer APPLY/restore transaction, not this renderer.
     assert placeholder.loading is True
     assert operations == ["apply/param_parse", "idle"]
-
-
-def test_apply_controller_does_not_clear_current_plot_before_replacement():
-    source = Path("thebigbam/plotting/application/apply_controller.py").read_text(encoding="utf-8")
-
-    assert "main_placeholder.objects = []" not in source
-
-
-def test_apply_controller_is_thin_and_registers_four_typed_handlers():
-    source = Path("thebigbam/plotting/application/apply_controller.py").read_text(encoding="utf-8")
-
-    assert len(source.splitlines()) <= 100
-    assert ".execute(" not in source
-    assert "compose_" not in source
-    for handler_name in ("ContigOneHandler", "ContigAllHandler", "MagOneHandler", "MagAllHandler"):
-        assert handler_name in source

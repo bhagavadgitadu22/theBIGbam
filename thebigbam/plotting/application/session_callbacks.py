@@ -17,8 +17,9 @@ class SessionCallbacks:
         self._scenario_recorder: Any | None = None
         self._collect_settings: Callable[[], Any] | None = None
         self._collect_applied_settings: Callable[[], Any] | None = None
-        self._plot_succeeded: Callable[[Any], None] | None = None
+        self._plot_succeeded: Callable[[Any, int | None], None] | None = None
         self._pending_history_settings: Any | None = None
+        self._pending_history_apply_step: int | None = None
 
     def attach_scenario(self, recorder: Any, collect_settings: Callable[[], Any]) -> None:
         self._scenario_recorder = recorder
@@ -28,7 +29,9 @@ class SessionCallbacks:
         self._apply = controller
 
     def attach_history(
-        self, collect_applied_settings: Callable[[], Any], plot_succeeded: Callable[[Any], None]
+        self,
+        collect_applied_settings: Callable[[], Any],
+        plot_succeeded: Callable[[Any, int | None], None],
     ) -> None:
         self._collect_applied_settings = collect_applied_settings
         self._plot_succeeded = plot_succeeded
@@ -61,7 +64,9 @@ class SessionCallbacks:
         placeholder.loading = True
         try:
             if self._scenario_recorder is not None:
-                self._scenario_recorder.record_action("apply_plot", self._collect_settings())
+                self._pending_history_apply_step = self._scenario_recorder.record_action(
+                    "apply_plot", self._collect_settings()
+                )
             self._pending_history_settings = (
                 self._collect_applied_settings()
                 if self._collect_applied_settings is not None
@@ -70,6 +75,7 @@ class SessionCallbacks:
             self.schedule(self.do_apply)
         except Exception:
             self._pending_history_settings = None
+            self._pending_history_apply_step = None
             placeholder.loading = False
             if self.interactions is not None:
                 self.interactions.end()
@@ -80,9 +86,12 @@ class SessionCallbacks:
         try:
             succeeded = self._required(self._apply, "Apply").apply()
             if succeeded is not False and self._pending_history_settings is not None and self._plot_succeeded is not None:
-                self._plot_succeeded(self._pending_history_settings)
+                self._plot_succeeded(
+                    self._pending_history_settings, self._pending_history_apply_step
+                )
         finally:
             self._pending_history_settings = None
+            self._pending_history_apply_step = None
             self._required(self.main_placeholder, "Main placeholder").loading = False
             if self.interactions is not None:
                 self.interactions.end()

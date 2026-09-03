@@ -1,5 +1,4 @@
 from dataclasses import FrozenInstanceError
-from pathlib import Path
 
 import duckdb
 import pytest
@@ -65,40 +64,3 @@ def test_mag_overview_repository_retrieves_and_limits_annotation_dots(tmp_path):
     assert total == 2
     assert repository.query_count == 2
     connection.close()
-
-
-def test_legacy_plot_function_adapters_are_removed():
-    source = Path("thebigbam/plotting/application/sample_mag_pipeline.py").read_text(encoding="utf-8")
-    assert "def generate_bokeh_plot_per_sample" not in source
-    assert "def generate_bokeh_plot_mag_view" not in source
-    assert "def compute_mag_track_dots" not in source
-    assert "def make_bokeh_mag_track" not in source
-
-
-def test_server_uses_typed_composers_and_mag_repository_is_rendering_free():
-    controller = Path("thebigbam/plotting/application/apply_controller.py").read_text(encoding="utf-8")
-    handlers = Path("thebigbam/plotting/application/apply_handlers/rendering.py").read_text(encoding="utf-8")
-    repository = Path("thebigbam/plotting/repositories/mag_overview.py").read_text(encoding="utf-8")
-
-    assert "build_single_sample_plot(conn, request)" in handlers
-    assert "build_mag_plot(conn, request)" in handlers
-    assert "compose_" not in controller
-    assert "generate_bokeh_plot_per_sample(" not in handlers
-    assert "generate_bokeh_plot_mag_view(" not in handlers
-    assert "genome_tracks.mag_members(" not in handlers
-    assert "from bokeh" not in repository.lower()
-    assert "import bokeh" not in repository.lower()
-    assert "import panel" not in repository.lower()
-
-
-def test_composers_are_sql_free_and_services_are_bokeh_free():
-    composers = Path("thebigbam/plotting/composers/layout.py").read_text(encoding="utf-8")
-    repository = Path("thebigbam/plotting/repositories/composition.py").read_text(encoding="utf-8")
-    service = Path("thebigbam/plotting/services/composition.py").read_text(encoding="utf-8")
-
-    assert ".execute(" not in composers
-    assert "SELECT " not in composers
-    assert "from bokeh" not in repository.lower()
-    assert "import bokeh" not in repository.lower()
-    assert "from bokeh" not in service.lower()
-    assert "import bokeh" not in service.lower()

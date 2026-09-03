@@ -25,6 +25,19 @@ def test_search_projection_forces_options_event_even_for_same_values():
     assert events == ["options"]
 
 
+def test_search_window_keeps_active_value_without_clearing_it():
+    widget = SimpleNamespace(
+        options=["selected"],
+        value="selected",
+        param=SimpleNamespace(trigger=lambda _name: None),
+    )
+
+    AvailabilityFacade.push_search(widget, ["another"])
+
+    assert widget.value == "selected"
+    assert widget.options == ["another"]
+
+
 def test_scope_projection_replaces_equal_frontend_pool_and_clears_search():
     widget = SimpleNamespace(
         options=["only"],

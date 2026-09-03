@@ -21,19 +21,19 @@ class AvailabilityFacade:
         return self._controller
 
     @staticmethod
-    def update_widget(widget: Any, completions: list[str]) -> None:
+    def update_widget(widget: Any, completions: list[str], *, preserve_current: bool = False) -> None:
+        current_value = widget.value
         if widget.options == completions:
             return
-        current_value = widget.value
         widget.options = completions
         if current_value and current_value in completions and not widget.value:
             widget.value = current_value
-        elif widget.value and widget.value not in completions:
+        elif not preserve_current and widget.value and widget.value not in completions:
             widget.value = ""
 
     @classmethod
     def push_search(cls, widget: Any, completions: list[str]) -> None:
-        cls.update_widget(widget, completions)
+        cls.update_widget(widget, completions, preserve_current=True)
         widget.param.trigger("options")
 
     @classmethod

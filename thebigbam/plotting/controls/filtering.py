@@ -52,7 +52,7 @@ class FilterSectionController:
                 following = rows[index + 1]
                 connector = following["and_div"]
                 if connector is None:
-                    connector = Select(options=["AND", "OR"], value="AND", height=30, margin=(2, 0, 2, 0))
+                    connector = Select(options=["AND", "OR"], value="AND", height=30, margin=0)
                     connector.on_change("value", lambda attr, old, new: self._on_change())
                     following["and_div"] = connector
                 connector_items.append(connector)
@@ -64,7 +64,7 @@ class FilterSectionController:
                     sizing_mode="stretch_width",
                     height=30,
                     margin=(3, 0, 6, 0),
-                    css_classes=["control-row"],
+                    css_classes=["control-row", "nested-control-row", "filter-action-row"],
                     stylesheets=[panel_stylesheet(self._stylesheet)],
                 )
             )
@@ -73,7 +73,7 @@ class FilterSectionController:
     def _append_row(self, section: dict[str, Any], row: dict[str, Any]) -> None:
         """Append one row while preserving the existing Panel model subtree."""
         previous = section["rows"][-1]
-        connector = Select(options=["AND", "OR"], value="AND", height=30, margin=(2, 0, 2, 0))
+        connector = Select(options=["AND", "OR"], value="AND", height=30, margin=0)
         connector.on_change("value", lambda attr, old, new: self._on_change())
         row["and_div"] = connector
         section["rows"].append(row)
@@ -88,7 +88,7 @@ class FilterSectionController:
                     sizing_mode="stretch_width",
                     height=30,
                     margin=(3, 0, 6, 0),
-                    css_classes=["control-row"],
+                    css_classes=["control-row", "nested-control-row", "filter-action-row"],
                     stylesheets=[panel_stylesheet(self._stylesheet)],
                 ),
                 row["row_wrapper"],
@@ -98,7 +98,7 @@ class FilterSectionController:
                     sizing_mode="stretch_width",
                     height=30,
                     margin=(3, 0, 6, 0),
-                    css_classes=["control-row"],
+                    css_classes=["control-row", "nested-control-row", "filter-action-row"],
                     stylesheets=[panel_stylesheet(self._stylesheet)],
                 ),
             ]
@@ -116,7 +116,7 @@ class FilterSectionController:
             "add_and_btn": pn.widgets.Button(
                 name="+ Add AND/OR",
                 height=30,
-                margin=(2, 0, 2, 0),
+                margin=0,
                 button_type="success",
                 stylesheets=[panel_stylesheet(self._stylesheet)],
                 css_classes=["action-add"],
@@ -139,7 +139,7 @@ class FilterSectionController:
         for index, section in enumerate(self.sections):
             if index:
                 value = old_values[index - 1] if index - 1 < len(old_values) else "AND"
-                connector = Select(options=["AND", "OR"], value=value, margin=(2, 0, 2, 0))
+                connector = Select(options=["AND", "OR"], value=value, height=30, margin=0)
                 connector.on_change("value", lambda attr, old, new: self._on_change())
                 self.inter_section_selects.append(connector)
                 children.append(connector)

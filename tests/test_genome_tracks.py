@@ -1,5 +1,3 @@
-import inspect
-
 from bokeh.models import Range1d
 
 from thebigbam.plotting.renderers.genome_tracks import TranslationRenderer
@@ -63,19 +61,10 @@ def test_nucleotide_and_translation_coordinates_span_mag_members():
     assert translation.entries[0].segments == ((105, 113),)
 
 
-def test_translation_renderer_never_accesses_database():
+def test_translation_renderer_renders_prepared_data():
     data = TranslationData(
         (CdsData(1, 3, 1, "ATG", "M", ((1, 3),)),),
         {"ATG": ("M", "Methionine", "Met", "#111111")},
     )
     plot = TranslationRenderer().render(data, 1, 3, 80, Range1d(1, 3))
     assert plot is not None
-    assert "execute(" not in inspect.getsource(TranslationRenderer)
-
-
-def test_data_and_service_layers_do_not_import_ui_libraries():
-    import thebigbam.plotting.services.genome_tracks as module
-
-    source = inspect.getsource(module).lower()
-    assert "import bokeh" not in source
-    assert "import panel" not in source

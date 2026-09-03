@@ -8,6 +8,8 @@ from typing import Any, Callable
 
 from bokeh.io import curdoc
 
+from ..controls.searchable_select import decode_search_request
+
 CONTIG_TO_MAG_SAMPLE_ORDER_CATEGORY = {
     "Coverage": "MAG coverage",
     "Misassembly": "MAG misassembly",
@@ -69,9 +71,9 @@ class SubjectController:
 
     def attach(self) -> None:
         widgets = self.bindings.widgets
-        widgets["mag_select"].param.watch(self.mag_search, "search_nonce")
-        widgets["contig_select"].param.watch(self.contig_search, "search_nonce")
-        widgets["sample_select"].param.watch(self.sample_search, "search_nonce")
+        widgets["mag_select"].param.watch(self.mag_search, "search_request")
+        widgets["contig_select"].param.watch(self.contig_search, "search_request")
+        widgets["sample_select"].param.watch(self.sample_search, "search_request")
         widgets["sample_select"].param.watch(self.sample_changed, "value")
         widgets["contig_select"].param.watch(self.contig_changed, "value")
         if widgets["has_mags"]:
@@ -79,17 +81,20 @@ class SubjectController:
             widgets["contig_select"].param.watch(self.contig_sync_mag, "value")
 
     def mag_search(self, event: Any) -> None:
-        self._search(self.bindings.widgets["mag_select"], self.bindings.compute_mags)
+        self._search(self.bindings.widgets["mag_select"], self.bindings.compute_mags, event)
 
     def contig_search(self, event: Any) -> None:
-        self._search(self.bindings.widgets["contig_select"], self.bindings.compute_contigs)
+        self._search(self.bindings.widgets["contig_select"], self.bindings.compute_contigs, event)
 
     def sample_search(self, event: Any) -> None:
-        self._search(self.bindings.widgets["sample_select"], self.bindings.compute_samples)
+        self._search(self.bindings.widgets["sample_select"], self.bindings.compute_samples, event)
 
-    def _search(self, widget: Any, compute: Callable[[str], list[str]]) -> None:
+    def _search(self, widget: Any, compute: Callable[[str], list[str]], event: Any) -> None:
         if not self.bindings.interaction_lock["locked"]:
-            self.bindings.push_completions(widget, compute(widget.search_query))
+            request_nonce, query = decode_search_request(event.new)
+            self.bindings.push_completions(widget, compute(query))
+            widget.search_result_query = query
+            widget.search_result_nonce = request_nonce
 
     def sample_changed(self, event: Any) -> None:
         if self.bindings.interaction_lock["locked"]:

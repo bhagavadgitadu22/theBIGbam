@@ -1,7 +1,13 @@
 import pytest
 
 from thebigbam.plotting.models.filters import FilterExpression, FilterPredicate, FilterSection
-from thebigbam.plotting.settings.history import HistoryEntry, SessionHistory, describe_history_entry
+from thebigbam.plotting.settings.history import (
+    HistoryEntry,
+    SessionHistory,
+    entries_from_session_document,
+    history_description_lines,
+    history_diff_lines,
+)
 from thebigbam.plotting.settings.persistence import serialize_filter_expression
 
 
@@ -57,6 +63,45 @@ def test_history_rejects_unknown_actions():
         SessionHistory("example.db").append("widget_change", {})
 
 
+def test_git_like_description_reports_changes_and_struck_removals():
+    first = HistoryEntry(
+        "first",
+        1,
+        "apply_plot",
+        "time",
+        {"selection": {"contig": "c1", "sample": "s1"}},
+    )
+    second = HistoryEntry(
+        "second",
+        2,
+        "apply_plot",
+        "time",
+        {"selection": {"contig": "c2"}},
+    )
+
+    lines = history_diff_lines(first, second)
+
+    assert [line.text for line in lines] == [
+        "Selection · Contig: c1 → c2",
+        "Selection · Sample: s1",
+    ]
+    assert [line.removed for line in lines] == [False, True]
+
+
+def test_complete_description_uses_canonical_settings_and_ignores_metadata():
+    entry = HistoryEntry(
+        "id",
+        1,
+        "apply_plot",
+        "time",
+        {"_meta": {"saved_at": "volatile"}, "selection": {"mag": "MAG-1"}},
+    )
+
+    assert [line.text for line in history_description_lines(entry)] == [
+        "Selection · MAG: MAG-1"
+    ]
+
+
 def test_removing_history_entry_preserves_other_entries_and_sequence():
     history = SessionHistory("example.db")
     removed = history.append("apply_filters", {"filtering": []})
@@ -69,76 +114,28 @@ def test_removing_history_entry_preserves_other_entries_and_sequence():
     assert [entry["id"] for entry in history.document()["entries"]] == [retained.id]
 
 
-def test_filter_history_description_lists_only_useful_condition_details():
-    entry = HistoryEntry(
-        "id",
-        1,
-        "apply_filters",
-        "2026-09-01T14:32:08+00:00",
-        {
-            "filtering": [
-                {
-                    "rows": [
-                        {
-                            "category": "Contig",
-                            "column": "Length",
-                            "operator": ">",
-                            "value": 10000,
-                        }
-                    ]
-                }
-            ]
-        },
-    )
+def test_saved_session_entries_can_be_loaded_with_identity_and_order_preserved():
+    history = SessionHistory("example.db")
+    first = history.append("apply_filters", {"filtering": []})
+    second = history.append("apply_plot", {"selection": {"contig": "c1"}})
 
-    assert describe_history_entry(entry) == (
-        "1 condition:\n"
-        "• Contig · Length > 10000"
-    )
+    assert entries_from_session_document(history.document()) == (first, second)
 
 
-def test_plot_history_description_uses_scope_subject_variables_and_filters():
-    entry = HistoryEntry(
-        "id",
-        2,
-        "apply_plot",
-        "2026-09-01T14:32:08+00:00",
-        {
-            "view_mode": {"mag_or_contig": 1, "one_or_all_samples": 0},
-            "selection": {"contig": "NODE_42", "sample": "sample-A"},
-            "contig": {"position_range": {"from": 1, "to": 50000}},
-            "variables": {
-                "Coverage": {"selected_one": ["Coverage", "GC content"]},
-            },
-            "filtering": [],
-        },
-    )
+@pytest.mark.parametrize(
+    "change, message",
+    [
+        (lambda document: document["_meta"].update(version=999), "version"),
+        (lambda document: document.update(entries={}), "must be a list"),
+        (lambda document: document["entries"][0].update(action="unknown"), "unsupported action"),
+        (lambda document: document["entries"][0].update(settings=[]), "invalid settings"),
+    ],
+)
+def test_invalid_saved_sessions_are_rejected(change, message):
+    history = SessionHistory("example.db")
+    history.append("apply_filters", {"filtering": []})
+    document = history.document()
+    change(document)
 
-    description = describe_history_entry(entry)
-    assert "Mode: One sample" in description
-    assert "Contig: NODE_42" in description
-    assert "Sample: sample-A" in description
-    assert "Range: 1–50000" in description
-    assert "Variables: Coverage, GC content" in description
-    assert "Filters: No active filters" in description
-    assert "Generated plot" not in description
-    assert "Time:" not in description
-
-
-def test_description_truncates_long_variable_lists():
-    entry = HistoryEntry(
-        "id",
-        3,
-        "apply_plot",
-        "2026-09-01T14:32:08+00:00",
-        {
-            "view_mode": {"mag_or_contig": 0, "one_or_all_samples": 1},
-            "selection": {"mag": "MAG-12"},
-            "variables": {"module": {"selected_all": [f"v{i}" for i in range(7)]}},
-        },
-    )
-
-    description = describe_history_entry(entry)
-    assert "Mode: All samples" in description
-    assert "MAG: MAG-12" in description
-    assert "Variables: v0, v1, v2, v3, v4 (+2 more)" in description
+    with pytest.raises(ValueError, match=message):
+        entries_from_session_document(document)

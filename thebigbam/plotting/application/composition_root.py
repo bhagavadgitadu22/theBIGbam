@@ -43,7 +43,7 @@ from ..shared.diagnostics import PlotDiagnostics
 from ..shared.histogram_cache import SERVER_HISTOGRAM_CACHE
 from ..shared.lifecycle import PlotLifecycle
 from ..shared.paths import static_directory
-from ..shared.styles import section_header
+from ..shared.styles import bokeh_control_row, section_header
 from ..shared.timing import BrowserTimingRelay, estimate_grid_data_size, rss_mb, start_rss_watchdog
 from .availability import AvailabilityBindings, AvailabilityController
 from .availability_facade import AvailabilityFacade
@@ -196,6 +196,7 @@ def create_layout(
     preloaded: PreloadedPlotData,
     enable_timing=False,
     initial_settings=None,
+    initial_history=(),
     scenario_path=None,
     _return_application=False,
 ):
@@ -353,7 +354,7 @@ def create_layout(
     filtering_toggle_btn = Button(
         label="▼", width=20, height=20, button_type="primary", align="center", margin=0, stylesheets=[toggle_stylesheet]
     )
-    filtering_title = Div(text="<b>Filtering</b>", align="center")
+    filtering_title = Div(text="<b>Filtering</b>", align="center", sizing_mode="stretch_width")
     _filter_help_tooltip = Tooltip(
         content=(
             "Filtering rows are independent from each other. "
@@ -370,8 +371,13 @@ def create_layout(
         button_type="light",
         stylesheets=[toggle_stylesheet],
     )
-    filtering_header = row(
-        filtering_toggle_btn, filtering_title, _filter_help_btn, sizing_mode="stretch_width", align="center"
+    filtering_header = bokeh_control_row(
+        filtering_toggle_btn,
+        filtering_title,
+        _filter_help_btn,
+        sizing_mode="stretch_width",
+        align="center",
+        css_classes=["section-header"],
     )
 
     filtering_metadata = preloaded["filtering_metadata"]
@@ -486,8 +492,9 @@ def create_layout(
         if not interactions.begin("controls"):
             return False
         recorder = scenario_recorder_ref.get("recorder")
+        apply_step = None
         if recorder is not None:
-            recorder.record_action("apply_filters", settings_session.collector.collect())
+            apply_step = recorder.record_action("apply_filters", settings_session.collector.collect())
         filter_apply_button.disabled = True
 
         def _run():
@@ -495,7 +502,11 @@ def create_layout(
                 apply_filter_changes()
                 history_session = history_session_ref.get("session")
                 if history_session is not None:
-                    history_session.append("apply_filters", settings_session.collect_applied())
+                    history_session.append(
+                        "apply_filters",
+                        settings_session.collect_applied(),
+                        apply_step=apply_step,
+                    )
             except Exception:
                 # apply_filter_changes rolled back the applied expression and
                 # choices, so the unchanged draft remains directly retryable.
@@ -766,7 +777,7 @@ def create_layout(
     )
     buttons_row = settings_session.buttons_row
 
-    def install_history_settings(settings):
+    def install_history_settings(settings, *, selection_override=None):
         """Install one snapshot in dependency order with reciprocal callbacks suppressed."""
         global_toggle_lock["locked"] = True
         try:
@@ -778,13 +789,36 @@ def create_layout(
         finally:
             global_toggle_lock["locked"] = False
         apply_filter_changes()
+        selection = dict(
+            selection_override
+            if selection_override is not None
+            else (settings.get("selection") or {})
+        )
+        # Validate upstream-to-downstream so an invalid contig cannot
+        # incorrectly disqualify an otherwise-valid sample or MAG. Each
+        # bounded query prioritizes its selected candidate but omits it when
+        # it is genuinely invalid under the restored filters.
         global_toggle_lock["locked"] = True
         try:
-            settings_session.restore({"selection": settings.get("selection", {})})
+            settings_session.restore({"selection": {"sample": selection.get("sample", "")}})
+            refresh_sample_options_unlocked()
+            settings_session.restore({"selection": {"mag": selection.get("mag", "")}})
+            refresh_mag_options_unlocked()
+            settings_session.restore({"selection": {"contig": selection.get("contig", "")}})
+            refresh_contig_options_unlocked()
+            # Converge once with only the candidates that survived their
+            # authoritative scope queries.
+            refresh_sample_options_unlocked()
+            refresh_mag_options_unlocked()
+            refresh_contig_options_unlocked()
         finally:
             global_toggle_lock["locked"] = False
         mark_filters_dirty()
         update_section_titles()
+
+    def install_filter_history_settings(settings, current):
+        """Restore filters while retaining only still-valid live selections."""
+        install_history_settings(settings, selection_override=current.get("selection") or {})
 
     history_restore = HistoryRestoreCoordinator(
         HistoryRestoreBindings(
@@ -795,6 +829,7 @@ def create_layout(
             snapshot=settings_session.collect_applied,
             install=install_history_settings,
             apply_plot=session_callbacks.apply_restored_now,
+            install_filters=install_filter_history_settings,
         )
     )
 
@@ -806,11 +841,14 @@ def create_layout(
         stylesheet=stylesheet,
         toggle_stylesheet=toggle_stylesheet,
         settings_save_controls=settings_session.save_controls,
+        initial_entries=initial_history,
     )
     history_session_ref["session"] = history_session
     session_callbacks.attach_history(
         settings_session.collect_applied,
-        lambda settings: history_session.append("apply_plot", settings),
+        lambda settings, apply_step: history_session.append(
+            "apply_plot", settings, apply_step=apply_step
+        ),
     )
 
     # Hidden benchmark bridge: scenario replay sends a complete settings-shaped
@@ -847,9 +885,13 @@ def create_layout(
                 raise RuntimeError("history restore could not acquire the interaction lock")
             return True
         if action == "remove_history":
-            if not history_session.remove_sequence(
+            removed = history_session.remove_sequence(
                 details["history_sequence"], details["history_action"]
-            ):
+            )
+            # Rows loaded from SAVE SESSION predate scenario recording and are
+            # consequently absent during standalone replay. Their desired
+            # postcondition is already satisfied when no matching row exists.
+            if not removed and details.get("apply_step") is not None:
                 raise ValueError("history entry to remove was not found")
             return False
         if action == "show_summary":
@@ -950,8 +992,7 @@ def create_layout(
     views.on_change("active", transition_sample_scope)
 
     if initial_settings:
-        settings_session.restore(initial_settings)
-        apply_filter_changes()
+        install_history_settings(initial_settings)
 
     ## Initialize section titles with counts
     update_section_titles()
@@ -1061,13 +1102,21 @@ def create_layout(
     return layout
 
 
-def create_application(db_path, preloaded, enable_timing=False, initial_settings=None, scenario_path=None):
+def create_application(
+    db_path,
+    preloaded,
+    enable_timing=False,
+    initial_settings=None,
+    initial_history=(),
+    scenario_path=None,
+):
     """Build an inspectable application object for tests and diagnostics."""
     return create_layout(
         db_path,
         preloaded,
         enable_timing=enable_timing,
         initial_settings=initial_settings,
+        initial_history=initial_history,
         scenario_path=scenario_path,
         _return_application=True,
     )

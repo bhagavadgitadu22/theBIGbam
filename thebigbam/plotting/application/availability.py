@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable
 
+from ..shared.defaults import AUTOCOMPLETE_LIMIT
 from .availability_titles import AvailabilityCounts, title_html
 
 
@@ -61,6 +62,24 @@ class AvailabilityController:
 
         _resolution_cache: dict[tuple[Any, ...], AvailabilityResult] = {}
 
+        def _bounded(values, search_term="", preserve=""):
+            term = (search_term or "").strip().casefold()
+            matches = [value for value in values if not term or term in value.casefold()]
+            if preserve in matches:
+                matches.remove(preserve)
+                matches.insert(0, preserve)
+            return matches[:AUTOCOMPLETE_LIMIT]
+
+        def _search(entity: str, fallback, search_term="", preserve=""):
+            if not fallback:
+                return []
+            resolver = getattr(availability_service, entity, None)
+            return (
+                list(resolver(search_term, preserve))
+                if resolver is not None
+                else _bounded(fallback, search_term, preserve)
+            )
+
         def _scope() -> AvailabilityScope:
             has_mags = widgets["has_mags"]
             mag_name = widgets["mag_select"].value if has_mags else None
@@ -107,20 +126,16 @@ class AvailabilityController:
                     )
                 )
             elif scope.mag_name:
-                completions = list(widgets["mag_to_contigs"][scope.mag_name])
-                if search_term:
-                    lowered = search_term.lower()
-                    completions = [contig for contig in completions if lowered in contig.lower()]
+                completions = _bounded(
+                    widgets["mag_to_contigs"][scope.mag_name], search_term, preserve_contig
+                )
             else:
-                completions = list(orig_contigs)
-                if search_term:
-                    lowered = search_term.lower()
-                    completions = [contig for contig in completions if lowered in contig.lower()]
+                completions = _search("contigs", orig_contigs, search_term, preserve_contig)
 
             filtered = get_filtering_filtered_pairs()
             if filtered is not None:
                 fsql, fparams = filtered["sql"], filtered["params"]
-                filter_allowed = set(
+                completions = list(
                     availability_service.filtered_contigs(
                         fsql,
                         fparams,
@@ -130,7 +145,6 @@ class AvailabilityController:
                         preserve=preserve_contig,
                     )
                 )
-                completions = [contig for contig in completions if contig in filter_allowed]
                 if sample_id is None and scope.mag_name is None:
                     total_count = filtered.get("count_contigs", 0)
                 else:
@@ -169,7 +183,9 @@ class AvailabilityController:
             contig_id = scope.contig_id if scope.one_sample else None
             scoped_mag = scope.mag_name if contig_id is None else None
             if contig_id is not None:
-                completions = list(availability_service.samples_for_contig(contig_id, search_term))
+                completions = list(
+                    availability_service.samples_for_contig(contig_id, search_term, preserve_sample)
+                )
             elif scope.one_sample and scope.mag_name:
                 allowed_sids = widgets["mag_to_sample_ids"][scope.mag_name]
                 completions = [
@@ -177,14 +193,9 @@ class AvailabilityController:
                     for sample in orig_samples
                     if widgets["sample_name_to_id"].get(sample) in allowed_sids
                 ]
-                if search_term:
-                    lowered = search_term.lower()
-                    completions = [sample for sample in completions if lowered in sample.lower()]
+                completions = _bounded(completions, search_term, preserve_sample)
             else:
-                completions = list(orig_samples)
-                if search_term:
-                    lowered = search_term.lower()
-                    completions = [sample for sample in completions if lowered in sample.lower()]
+                completions = _search("samples", orig_samples, search_term, preserve_sample)
 
             filtered = get_filtering_filtered_pairs()
             if filtered is not None:
@@ -193,7 +204,7 @@ class AvailabilityController:
                 # mode as well, even though the Samples selector is hidden.
                 if contig_id is None:
                     scoped_mag = scope.mag_name
-                filter_allowed = set(
+                completions = list(
                     availability_service.filtered_samples(
                         fsql,
                         fparams,
@@ -203,7 +214,6 @@ class AvailabilityController:
                         preserve=(preserve_sample, preserve_sort_sample),
                     )
                 )
-                completions = [sample for sample in completions if sample in filter_allowed]
                 if contig_id is None and scoped_mag is None:
                     total_count = filtered.get("count_samples", 0)
                 else:
@@ -254,13 +264,13 @@ class AvailabilityController:
             if cache_key in _resolution_cache:
                 return _resolution_cache[cache_key]
             mag_to_contigs = widgets["mag_to_contigs"]
+            preserve_mag = widgets["mag_select"].value
             if scope.one_sample and scope.sample_id is not None:
-                completions = list(availability_service.mags_for_sample(scope.sample_id, search_term))
+                completions = list(
+                    availability_service.mags_for_sample(scope.sample_id, search_term, preserve_mag)
+                )
             else:
-                completions = sorted(mag_to_contigs.keys())
-                if search_term:
-                    _st = search_term.lower()
-                    completions = [m for m in completions if _st in m.lower()]
+                completions = _search("mags", mag_to_contigs, search_term, preserve_mag)
 
             # Apply Filtering query builder filters: keep a MAG only if at least
             # one of its member contigs survives the filter.
@@ -268,10 +278,16 @@ class AvailabilityController:
             if filtered is not None:
                 fsql, fparams = filtered["sql"], filtered["params"]
                 sample_id = scope.sample_id if scope.one_sample else None
-                filter_allowed = set(
-                    availability_service.filtered_mags(fsql, fparams, sample_id=sample_id, search_term=search_term)
+                completions = list(
+                    availability_service.filtered_mags(
+                        fsql,
+                        fparams,
+                        sample_id=sample_id,
+                        search_term=search_term,
+                        preserve=preserve_mag,
+                    )
                 )
-                completions = [m for m in completions if m in filter_allowed]
+                completions = completions[:AUTOCOMPLETE_LIMIT]
             if filtered is not None:
                 total_count = availability_service.count_filtered_mags(fsql, fparams, sample_id=sample_id)
             elif scope.one_sample and scope.sample_id is not None:

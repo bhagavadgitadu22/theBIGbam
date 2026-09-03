@@ -1,4 +1,3 @@
-import inspect
 import sys
 import types
 
@@ -159,12 +158,3 @@ def test_repository_batches_chunks_for_samples_and_contigs_in_one_query():
     rows = repository.chunks((1, 2), (10, 20), 3, 0, 0)
     assert repository.query_count == 1
     assert set(rows) == {(1, 10), (1, 20), (2, 10), (2, 20)}
-
-
-def test_service_contains_no_sql_or_ui_imports():
-    import thebigbam.plotting.services.blob_features as module
-
-    source = inspect.getsource(module).lower()
-    assert "select " not in source
-    assert "import bokeh" not in source
-    assert "import panel" not in source

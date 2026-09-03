@@ -11,12 +11,13 @@ from bokeh.models import Div
 from bokeh.models.widgets import Button, CheckboxGroup, RadioButtonGroup, Select, Spinner
 
 from ..shared.defaults import (
+    AUTOCOMPLETE_LIMIT,
     DEFAULT_GENEMAP_WINDOW,
     DEFAULT_MAX_BASE_RESOLUTION,
     DEFAULT_SEQUENCE_WINDOW,
 )
 from .parameter_options import ParameterOptionCatalog
-from .searchable_select import SearchableSelect
+from .searchable_select import SearchableSelect, decode_search_request
 
 
 @dataclass(frozen=True)
@@ -221,7 +222,7 @@ def build_plot_parameter_controls(
     mag_params_sort_sample_label = Div(text="Using values from sample", margin=(5, 5, 5, 5))
     mag_params_sort_sample_select = SearchableSelect(
         value=original_samples[0] if original_samples else "",
-        options=list(original_samples),
+        options=list(original_samples[:AUTOCOMPLETE_LIMIT]),
         placeholder="Type to search samples...",
         server_search=True,
         sizing_mode="stretch_width",
@@ -238,10 +239,13 @@ def build_plot_parameter_controls(
     def _on_sort_sample_search(event):
         if interaction_lock["locked"]:
             return
-        base = compute_sample_completions(mag_params_sort_sample_select.search_query)
+        request_nonce, query = decode_search_request(event.new)
+        base = compute_sample_completions(query)
         push_search_completions(mag_params_sort_sample_select, sort_sample_completions(base))
+        mag_params_sort_sample_select.search_result_query = query
+        mag_params_sort_sample_select.search_result_nonce = request_nonce
 
-    mag_params_sort_sample_select.param.watch(_on_sort_sample_search, "search_nonce")
+    mag_params_sort_sample_select.param.watch(_on_sort_sample_search, "search_request")
 
     mag_track_max_dots_input = Spinner(value=1000, low=1, step=100, width=100, margin=(0, 2, 0, 0))
     mag_track_max_dots_label = Div(text="Maximum number of points on MAG track", margin=(5, 0, 5, 5))

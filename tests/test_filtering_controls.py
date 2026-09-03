@@ -51,3 +51,19 @@ def test_filter_section_converts_bokeh_stylesheets_for_panel_widgets():
     assert controller.sections[0]["add_and_btn"].button_type == "success"
     assert controller._global_add.css_classes == ["action-add"]
     assert controller.sections[0]["column"].css_classes == ["nested-section"]
+
+
+def test_filter_action_controls_share_vertical_geometry():
+    controller = FilterSectionController(_row, lambda: None, "", "")
+    section = controller.sections[0]
+    action_row = section["column"].objects[1]
+
+    assert action_row.css_classes == ["control-row", "nested-control-row", "filter-action-row"]
+    assert action_row.height == 30
+    assert section["add_and_btn"].height == 30
+    assert section["add_and_btn"].margin == 0
+
+    section["add_and_btn"].param.trigger("clicks")
+    connector = section["rows"][1]["and_div"]
+    assert connector.height == 30
+    assert connector.margin == 0

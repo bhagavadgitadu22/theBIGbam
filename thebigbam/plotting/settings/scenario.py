@@ -46,13 +46,21 @@ def _action_label(step: Mapping[str, Any]) -> str:
     if action == "restore_history":
         details = step.get("details", {})
         history_action = str(details.get("history_action", "history")).replace("_", " ")
-        sequence = details.get("history_sequence")
-        return f"Restore {history_action} history entry {sequence}"
+        apply_step = details.get("apply_step")
+        return (
+            f"Restore {history_action} from step {apply_step}"
+            if apply_step is not None
+            else f"Restore saved-session {history_action}"
+        )
     if action == "remove_history":
         details = step.get("details", {})
         history_action = str(details.get("history_action", "history")).replace("_", " ")
-        sequence = details.get("history_sequence")
-        return f"Remove {history_action} history entry {sequence}"
+        apply_step = details.get("apply_step")
+        return (
+            f"Remove {history_action} from step {apply_step}"
+            if apply_step is not None
+            else f"Remove saved-session {history_action}"
+        )
     labels = {
         "show_summary": "Show summary",
         "download_contig_metrics": "Download contig metrics",
@@ -83,6 +91,7 @@ def describe_scenario_document(document: Any) -> tuple[str, ...]:
 
     lines = []
     seen_sequences = set()
+    actions_by_sequence: dict[int, str] = {}
     for index, step in enumerate(steps, start=1):
         if not isinstance(step, dict):
             raise ScenarioFormatError(f"step {index} must be a JSON object")
@@ -95,6 +104,23 @@ def describe_scenario_document(document: Any) -> tuple[str, ...]:
         action = step.get("action")
         if not isinstance(action, str) or not action:
             raise ScenarioFormatError(f"step {sequence} has an invalid action")
+        if action in {"restore_history", "remove_history"}:
+            details = step.get("details")
+            if not isinstance(details, dict):
+                raise ScenarioFormatError(f"step {sequence} {action} requires details")
+            history_action = details.get("history_action")
+            apply_step = details.get("apply_step")
+            if history_action not in {"apply_filters", "apply_plot"}:
+                raise ScenarioFormatError(f"step {sequence} {action} has invalid history_action")
+            if apply_step is not None and (
+                not isinstance(apply_step, int)
+                or isinstance(apply_step, bool)
+                or actions_by_sequence.get(apply_step) != history_action
+            ):
+                raise ScenarioFormatError(
+                    f"step {sequence} {action} apply_step must reference an earlier {history_action} step"
+                )
+        actions_by_sequence[sequence] = action
 
         description = _action_label(step)
         changes = step.get("changes")
@@ -264,14 +290,15 @@ class ScenarioRecorder:
         settings: Mapping[str, Any] | None = None,
         *,
         details: Mapping[str, Any] | None = None,
-    ) -> bool:
+    ) -> int | None:
         """Record a semantic user action, including any state not observed yet."""
         current = self._state if settings is None else _settings_state(settings)
         with self._lock:
             if self._closed:
-                return False
+                return None
+            sequence = len(self._document["steps"]) + 1
             step = {
-                "sequence": len(self._document["steps"]) + 1,
+                "sequence": sequence,
                 "action": action,
             }
             if details is not None:
@@ -283,7 +310,7 @@ class ScenarioRecorder:
                 self._document["final_state"] = copy.deepcopy(current)
             self._document["steps"].append(step)
             self._publish()
-        return True
+        return sequence
 
     def flush(self) -> None:
         self._writes.join()

@@ -67,11 +67,12 @@ def test_action_is_recorded_even_when_settings_do_not_change(tmp_path):
     path = tmp_path / "scenario.json"
     recorder = ScenarioRecorder(path, "example.db", _settings())
 
-    recorder.record_action("apply_plot", _settings())
+    apply_step = recorder.record_action("apply_plot", _settings())
     recorder.close()
 
     document = json.loads(path.read_text(encoding="utf-8"))
     assert document["steps"][0]["action"] == "apply_plot"
+    assert apply_step == document["steps"][0]["sequence"]
     assert "changes" not in document["steps"][0]
 
 

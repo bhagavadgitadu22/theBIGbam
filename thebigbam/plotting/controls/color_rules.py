@@ -7,7 +7,7 @@ from typing import Any, Mapping
 
 import panel as pn
 from bokeh.models import Div
-from bokeh.models.widgets import ColorPicker, Select, Spinner, TextInput
+from bokeh.models.widgets import ColorPicker, Select, Spinner
 
 from ..shared.styles import panel_stylesheet
 from .distinct_value_select import build_distinct_value_select
@@ -44,6 +44,8 @@ def build_color_rule_controls(
             value="(none)",
             options=["(none)", *color_templates],
             sizing_mode="stretch_width",
+            margin=0,
+            css_classes=["sidebar-field"],
         )
 
     # Build qualifier key options for custom color rows — reuse the exact same
@@ -85,24 +87,26 @@ def build_color_rule_controls(
         that separates it from the color picker.
         """
         if is_text:
-            if operator in ("has", "has not"):
-                return TextInput(
-                    name=name,
-                    value="", placeholder="Search...", sizing_mode="stretch_width", margin=(0, 2, 0, 0)
-                ), False
-            # = / != / Use random colors → SearchableSelect (kept even in random
-            # mode so the widget shape is consistent when user flips back).
+            # Substring operators retain server suggestions while accepting a
+            # literal value that isn't one of the complete distinct values.
             return build_distinct_value_select(
                 metadata_service,
                 category,
                 column,
                 name=name,
+                allow_custom=operator in ("has", "has not"),
                 sizing_mode="stretch_width",
-                margin=(0, 2, 0, 0),
+                margin=0,
+                css_classes=["responsive-field", "color-value"],
             ), True
         # Numeric columns always get a Spinner regardless of operator.
         return Spinner(
-            name=name, value=0, placeholder="Value...", sizing_mode="stretch_width", margin=(0, 2, 0, 0)
+            name=name,
+            value=0,
+            placeholder="Value...",
+            sizing_mode="stretch_width",
+            margin=0,
+            css_classes=["responsive-field", "color-value"],
         ), False
 
     def create_color_row(target_rows=None, rebuild_fn=None):
@@ -112,8 +116,8 @@ def build_color_rule_controls(
         remove button. Default to custom_color_rows / rebuild_color_rows so
         existing callers that omit these args continue to work.
 
-        Mirrors create_query_row(): text columns get SearchableSelect (or
-        TextInput under has/has not), numeric columns get Spinner. Both types
+        Mirrors create_query_row(): text columns get SearchableSelect and
+        numeric columns get Spinner. Both types
         gain a 'Use random colors' operator that hides the value container and
         the color picker.
         """
@@ -128,16 +132,18 @@ def build_color_rule_controls(
             name=f"benchmark-{rule_kind}-rule-{rule_index}-qualifier",
             options=[(k, k.replace("_", " ").replace("percentage", "(%)")) for k in color_qualifier_options],
             value=initial_key,
-            width=100,
-            margin=(0, 2, 0, 0),
+            sizing_mode="stretch_width",
+            margin=0,
+            css_classes=["responsive-field", "color-qualifier"],
         )
 
         operator_select = Select(
             name=f"benchmark-{rule_kind}-rule-{rule_index}-operator",
             options=TEXT_OPS if initial_is_text else NUMERIC_OPS,
             value="=",
-            width=50,
-            margin=(0, 2, 0, 0),
+            sizing_mode="stretch_width",
+            margin=0,
+            css_classes=["responsive-field", "color-operator"],
         )
 
         # Dynamic value widget sits directly at index 2 of the Row — swapped
@@ -150,14 +156,21 @@ def build_color_rule_controls(
         )
         current_input_ref = {"widget": initial_input, "is_panel": initial_is_panel}
 
-        color_picker = ColorPicker(color="#cccccc", width=60, height=30, margin=(0, 2, 0, 0))
+        color_picker = ColorPicker(
+            color="#cccccc",
+            width=42,
+            height=30,
+            margin=0,
+            css_classes=["responsive-action", "color-picker-field"],
+        )
 
         minus_btn = pn.widgets.Button(
             name="\u2212",
             width=30,
             height=30,
-            margin=(0, 10, 0, 0),
+            margin=0,
             stylesheets=[panel_stylesheet(stylesheet)],
+            css_classes=["responsive-action", "color-remove"],
         )
 
         row_widget = pn.Row(
@@ -168,6 +181,12 @@ def build_color_rule_controls(
             minus_btn,
             sizing_mode="stretch_width",
             margin=(2, 0, 2, 0),
+            css_classes=[
+                "control-row",
+                "responsive-control-row",
+                "coloring-row",
+            ],
+            stylesheets=[panel_stylesheet(stylesheet)],
         )
 
         VALUE_IDX = 2  # position of the value widget inside row_widget
@@ -190,14 +209,8 @@ def build_color_rule_controls(
             use_random = operator_select.value == "Use random colors"
             current_input_ref["widget"].visible = not use_random
             color_picker.visible = not use_random
-            # In random mode, the value widget and color picker are hidden;
-            # let the operator Select grow to fill the freed space. Revert to
-            # a fixed 50 px when any other operator is picked.
-            if use_random:
-                operator_select.sizing_mode = "stretch_width"
-            else:
-                operator_select.sizing_mode = "fixed"
-                operator_select.width = 50
+            # Responsive flex sizing lets the remaining fields absorb the
+            # space released by hidden random-color controls.
 
         def update_color_input_widget(col_name):
             """Rebuild operator options and the value widget for the new column type."""
@@ -229,21 +242,16 @@ def build_color_rule_controls(
             is_text = col_info.get("type") == "text"
             use_random = new == "Use random colors"
 
-            # For text columns, has/has not uses TextInput; everything else
-            # uses SearchableSelect. Only swap when the current widget doesn't
-            # already match, so user-typed values aren't clobbered needlessly.
+            # Rebuild only when the selection/free-text mode changes, and keep
+            # the current value across that mode transition.
             if is_text and not use_random:
-                want_text_input = new in ("has", "has not")
+                allow_custom = new in ("has", "has not")
                 cur = current_input_ref["widget"]
-                if want_text_input and not isinstance(cur, TextInput):
+                if not isinstance(cur, SearchableSelect) or cur.allow_custom != allow_custom:
                     new_input, is_panel = _build_color_value_widget(
                         True, new, column=qualifier_select.value, name=input_name
                     )
-                    _swap_value_widget(new_input, is_panel)
-                elif not want_text_input and not isinstance(cur, SearchableSelect):
-                    new_input, is_panel = _build_color_value_widget(
-                        True, new, column=qualifier_select.value, name=input_name
-                    )
+                    new_input.value = cur.value or ""
                     _swap_value_widget(new_input, is_panel)
 
             _apply_random_visibility()
@@ -319,7 +327,7 @@ def build_color_rule_controls(
                 for rule in color_templates[new]:
                     row_data = create_color_row()
                     # Order matters: qualifier first (triggers widget rebuild),
-                    # then operator (may swap SearchableSelect ↔ TextInput),
+                    # then operator (may switch autocomplete free-text mode),
                     # then the value on whichever widget is now current.
                     row_data["qualifier_select"].value = rule["qualifier_name"]
                     row_data["operator_select"].value = rule["operator"]
@@ -350,7 +358,8 @@ def build_color_rule_controls(
             value="product" if "product" in label_keys else label_keys[0],
             options=label_keys,
             sizing_mode="stretch_width",
-            margin=(5, 5, 5, 5),
+            margin=0,
+            css_classes=["sidebar-field"],
         )
 
     return ColorRuleControls(

@@ -7,6 +7,7 @@ from typing import Any
 import duckdb
 
 from ..models.filters import CompiledFilter, FilterResult
+from ..shared.defaults import AUTOCOMPLETE_LIMIT
 
 
 class FilteringRepository:
@@ -17,6 +18,49 @@ class FilteringRepository:
     def _values(self, sql, parameters=()):
         self.query_count += 1
         return tuple(row[0] for row in self.connection.execute(sql, parameters).fetchall())
+
+    def _bounded_names(
+        self, table: str, column: str, search_term: str = "", preserve: str = ""
+    ) -> tuple[str, ...]:
+        """Return exact, prefix, then contains matches without a global sort."""
+        term = (search_term or "").strip()
+        base = f'SELECT "{column}" FROM "{table}"'
+        if not term:
+            return self._values(
+                f'{base} ORDER BY (CAST("{column}" AS VARCHAR) = ?) DESC, "{column}" '
+                f"LIMIT {AUTOCOMPLETE_LIMIT}",
+                [preserve],
+            )
+        results: list[str] = []
+        seen: set[str] = set()
+        predicates = (
+            (f'CAST("{column}" AS VARCHAR) = ?', term),
+            (f'CAST("{column}" AS VARCHAR) ILIKE ? || \'%\'', term),
+            (f'CAST("{column}" AS VARCHAR) ILIKE \'%\' || ? || \'%\'', term),
+        )
+        for predicate, parameter in predicates:
+            if len(results) >= AUTOCOMPLETE_LIMIT:
+                break
+            for value in self._values(
+                f'{base} WHERE {predicate} ORDER BY (CAST("{column}" AS VARCHAR) = ?) DESC, "{column}" '
+                f"LIMIT {AUTOCOMPLETE_LIMIT}",
+                [parameter, preserve],
+            ):
+                if value not in seen:
+                    seen.add(value)
+                    results.append(value)
+                    if len(results) == AUTOCOMPLETE_LIMIT:
+                        break
+        return tuple(sorted(results, key=str.casefold))
+
+    def contigs(self, search_term: str = "", preserve: str = "") -> tuple[str, ...]:
+        return self._bounded_names("Contig", "Contig_name", search_term, preserve)
+
+    def samples(self, search_term: str = "", preserve: str = "") -> tuple[str, ...]:
+        return self._bounded_names("Sample", "Sample_name", search_term, preserve)
+
+    def mags(self, search_term: str = "", preserve: str = "") -> tuple[str, ...]:
+        return self._bounded_names("MAG", "MAG_name", search_term, preserve)
 
     @staticmethod
     def _search_clause(alias: str, column: str, search_term: str) -> tuple[str, list[str]]:
@@ -96,13 +140,16 @@ class FilteringRepository:
             [sample_id, *([mag_name] if mag_name is not None else []), *parameters, preserve],
         )
 
-    def samples_for_contig(self, contig_id: int, search_term: str = "") -> tuple[str, ...]:
+    def samples_for_contig(
+        self, contig_id: int, search_term: str = "", preserve: str = ""
+    ) -> tuple[str, ...]:
         search, parameters = self._search_clause("s", "Sample_name", search_term)
         return self._values(
             "SELECT DISTINCT s.Sample_name FROM Coverage p "
             "JOIN Sample s ON s.Sample_id = p.Sample_id "
-            f"WHERE p.Contig_id = ?{search} ORDER BY s.Sample_name LIMIT 100",
-            [contig_id, *parameters],
+            f"WHERE p.Contig_id = ?{search} "
+            "ORDER BY (s.Sample_name = ?) DESC, s.Sample_name LIMIT 100",
+            [contig_id, *parameters, preserve],
         )
 
     def samples_for_contig_unbounded(self, contig_id: int) -> tuple[str, ...]:
@@ -211,15 +258,18 @@ class FilteringRepository:
         *,
         sample_id: int | None = None,
         search_term: str = "",
+        preserve: str = "",
     ) -> tuple[str, ...]:
         predicates, query_parameters = self._filtered_mag_scope(
             parameters, sample_id=sample_id, search_term=search_term
         )
         where = f" WHERE {' AND '.join(predicates)}" if predicates else ""
+        query_parameters.append(preserve)
         return self._values(
-            f"SELECT DISTINCT mg.MAG_name FROM ({sql}) f"
+            f"SELECT DISTINCT mg.MAG_name AS MAG_name FROM ({sql}) f"
             " JOIN MAG_contigs_association mca ON mca.Contig_id = f.Contig_id"
-            f" JOIN MAG mg ON mg.MAG_id = mca.MAG_id{where} ORDER BY mg.MAG_name",
+            f" JOIN MAG mg ON mg.MAG_id = mca.MAG_id{where}"
+            f" ORDER BY (mg.MAG_name = ?) DESC, mg.MAG_name LIMIT {AUTOCOMPLETE_LIMIT}",
             query_parameters,
         )
 
@@ -238,14 +288,17 @@ class FilteringRepository:
             ).fetchone()[0]
         )
 
-    def mags_for_sample(self, sample_id: int, search_term: str = "") -> tuple[str, ...]:
+    def mags_for_sample(
+        self, sample_id: int, search_term: str = "", preserve: str = ""
+    ) -> tuple[str, ...]:
         search, parameters = self._search_clause("mg", "MAG_name", search_term)
         return self._values(
             "SELECT DISTINCT mg.MAG_name FROM MAG mg "
             "JOIN MAG_contigs_association mca ON mca.MAG_id = mg.MAG_id "
             "JOIN Coverage p ON p.Contig_id = mca.Contig_id "
-            f"WHERE p.Sample_id = ?{search} ORDER BY mg.MAG_name LIMIT 100",
-            [sample_id, *parameters],
+            f"WHERE p.Sample_id = ?{search} "
+            "ORDER BY (mg.MAG_name = ?) DESC, mg.MAG_name LIMIT 100",
+            [sample_id, *parameters, preserve],
         )
 
     def count_contigs_for_sample(self, sample_id: int, mag_name: str | None = None) -> int:

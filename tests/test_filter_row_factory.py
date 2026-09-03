@@ -1,3 +1,4 @@
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -13,6 +14,12 @@ class Visualizations:
 
     def build_text_treemap(self, *args, **kwargs):
         return None
+
+
+class TextMetadataService:
+    def search_distinct_values(self, category, column, query, limit=100):
+        values = ["kinase", "protein kinase", "transport protein"]
+        return [value for value in values if query.casefold() in value.casefold()][:limit]
 
 
 def test_filter_row_factory_builds_row_from_cached_column_options():
@@ -40,6 +47,49 @@ def test_filter_row_factory_builds_row_from_cached_column_options():
     assert result["comparison_select"].value == ">"
     assert result["input_ref"]["widget"].value is None
     assert result["minus_btn"].stylesheets == [":host { color: red; }"]
+    assert result["category_select"].css_classes == ["responsive-field", "filter-category"]
+    assert result["subcategory_select"].css_classes == ["responsive-field", "filter-metric"]
+    assert result["comparison_select"].css_classes == ["responsive-field", "filter-operator"]
+    assert result["query_row"].css_classes == [
+        "control-row",
+        "responsive-control-row",
+        "filtering-row",
+    ]
+    assert result["query_row"].objects[3].css_classes == ["responsive-field", "filter-value"]
+    assert result["dist_toggle"].width == 42
+    assert result["dist_toggle"].css_classes[:2] == ["responsive-action", "filter-lookup"]
+    assert result["minus_btn"].margin == 0
+    assert result["minus_btn"].css_classes == ["responsive-action", "filter-remove"]
+    assert result["query_row"].objects[-1] is result["dist_toggle"]
+    assert result["minus_btn"] not in result["query_row"].objects
+
+
+def test_has_filter_keeps_bounded_suggestions_and_accepts_free_text():
+    metadata = {"Annotations": {"columns": {"product": {"type": "text"}}}}
+    factory = FilterRowFactory(
+        metadata_service=TextMetadataService(),
+        filtering_metadata=metadata,
+        columns={"Annotations": [("product", "product")]},
+        raw_columns={"Annotations": ["product"]},
+        visualizations=Visualizations(),
+        refresh=lambda: None,
+        stylesheet=InlineStyleSheet(css=""),
+        enable_timing=False,
+    )
+    factory.attach_controller(SimpleNamespace(count_rows=lambda: 1, sections=[]))
+
+    row = factory.create_row(
+        {}, initial_category="Annotations", initial_column="product", initial_operator="has"
+    )
+    widget = row["input_ref"]["widget"]
+
+    assert isinstance(widget, SearchableSelect)
+    assert widget.allow_custom
+    assert widget.options == ["kinase", "protein kinase", "transport protein"]
+
+    widget.search_request = json.dumps({"nonce": 1, "query": "kin"})
+    assert widget.options == ["kinase", "protein kinase"]
+    assert widget.search_result_query == "kin"
 
 
 def test_lookup_records_semantic_target(monkeypatch):
@@ -142,8 +192,8 @@ def test_category_change_updates_shared_metric_immediately_and_defers_one_refres
     assert isinstance(row["input_ref"]["widget"], SearchableSelect)
     assert row["input_ref"]["widget"].placeholder == "Search..."
     assert row["input_ref"]["widget"].server_search
-    assert row["input_ref"]["widget"].min_search_chars == 2
-    assert row["input_ref"]["widget"].options == []
+    assert row["input_ref"]["widget"].min_search_chars == 0
+    assert row["input_ref"]["widget"].options == ["high", "low"]
     assert refreshes == []
 
     while callbacks:
@@ -151,8 +201,8 @@ def test_category_change_updates_shared_metric_immediately_and_defers_one_refres
 
     assert refreshes == [True]
     row["input_ref"]["widget"].search_query = "h"
-    row["input_ref"]["widget"].search_nonce += 1
-    assert row["input_ref"]["widget"].options == []
+    row["input_ref"]["widget"].search_request = json.dumps({"nonce": 1, "query": "h"})
+    assert row["input_ref"]["widget"].options == ["high", "low"]
     row["input_ref"]["widget"].search_query = "hi"
-    row["input_ref"]["widget"].search_nonce += 1
+    row["input_ref"]["widget"].search_request = json.dumps({"nonce": 2, "query": "hi"})
     assert row["input_ref"]["widget"].options == ["high", "low"]

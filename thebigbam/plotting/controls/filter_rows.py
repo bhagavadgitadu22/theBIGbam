@@ -6,11 +6,12 @@ from typing import Any, Callable, Mapping
 
 import panel as pn
 from bokeh.io import curdoc
-from bokeh.models.widgets import Select, Spinner, TextInput
+from bokeh.models.widgets import Select, Spinner
 
 from ..renderers.filter_distributions import FilterVisualizations
 from ..shared.styles import panel_stylesheet
 from .distinct_value_select import build_distinct_value_select
+from .searchable_select import SearchableSelect
 
 
 class FilterRowFactory:
@@ -200,12 +201,23 @@ class FilterRowFactory:
         initial_is_text = initial_col_info.get("type") == "text"
 
         # First level select (categories)
-        category_select = Select(name=f"benchmark-filter-{row_index}-category", options=categories, value=initial_category, width=70, margin=0)
+        category_select = Select(
+            name=f"benchmark-filter-{row_index}-category",
+            options=categories,
+            value=initial_category,
+            sizing_mode="stretch_width",
+            margin=0,
+            css_classes=["responsive-field", "filter-category"],
+        )
 
         # Second level select (columns)
         subcategory_select = Select(
             name=f"benchmark-filter-{row_index}-metric",
-            options=initial_columns, value=initial_column, sizing_mode="stretch_width", margin=0
+            options=initial_columns,
+            value=initial_column,
+            sizing_mode="stretch_width",
+            margin=0,
+            css_classes=["responsive-field", "filter-metric"],
         )
 
         # Comparison operator select - "=" and "!=" for text, all operators for numeric
@@ -213,35 +225,54 @@ class FilterRowFactory:
         _initial_ops = ["=", "!=", "has", "has not"] if initial_is_text else ["=", ">", "<", "!="]
         if initial_operator is not None and initial_operator in _initial_ops:
             _default_operator = initial_operator
-        comparison_select = Select(name=f"benchmark-filter-{row_index}-operator", options=_initial_ops, value=_default_operator, width=50, margin=0)
+        comparison_select = Select(
+            name=f"benchmark-filter-{row_index}-operator",
+            options=_initial_ops,
+            value=_default_operator,
+            sizing_mode="stretch_width",
+            margin=0,
+            css_classes=["responsive-field", "filter-operator"],
+        )
 
         # Container for the dynamic input widget
-        input_container = pn.Column(width=90, margin=0)
+        input_container = pn.Column(
+            sizing_mode="stretch_width",
+            margin=0,
+            css_classes=["responsive-field", "filter-value"],
+        )
 
-        def make_searchable_input(category, column, *, placeholder="Search..."):
+        def make_searchable_input(category, column, *, allow_custom=False):
             return build_distinct_value_select(
                 self.metadata_service,
                 category,
                 column,
                 name=f"benchmark-filter-{row_index}-value",
                 on_value=self.refresh,
-                width=90,
+                allow_custom=allow_custom,
+                sizing_mode="stretch_width",
+                margin=0,
             )
 
         # Create initial input widget based on column type
-        if initial_is_text and _default_operator in ("has", "has not"):
-            initial_input = TextInput(value="", placeholder="Search...", width=90, margin=(0, 2, 0, 0))
-            input_container.objects = [initial_input]
-            initial_input.on_change("value", lambda attr, old, new: self.refresh())
-            initial_is_panel = False
-        elif initial_is_text:
-            initial_input = make_searchable_input(initial_category, initial_column)
+        if initial_is_text:
+            initial_input = make_searchable_input(
+                initial_category,
+                initial_column,
+                allow_custom=_default_operator in ("has", "has not"),
+            )
             input_container.objects = [initial_input]
             initial_is_panel = True
         else:
             _enc_scale = self.filter_encode.get(initial_column)
             _step = 1.0 / _enc_scale if _enc_scale else 1
-            initial_input = Spinner(name=f"benchmark-filter-{row_index}-value", value=None, step=_step, placeholder="Value...", width=90, margin=(0, 2, 0, 0))
+            initial_input = Spinner(
+                name=f"benchmark-filter-{row_index}-value",
+                value=None,
+                step=_step,
+                placeholder="Value...",
+                sizing_mode="stretch_width",
+                margin=0,
+            )
             input_container.objects = [initial_input]
 
             # Add callback for Bokeh Spinner (also syncs histogram threshold)
@@ -303,21 +334,25 @@ class FilterRowFactory:
 
             if is_text:
                 current_op = comparison_select.value
-                if current_op in ("has", "has not"):
-                    new_input = TextInput(name=f"benchmark-filter-{row_index}-value", value="", placeholder="Search...", width=90, margin=(0, 2, 0, 0))
-                    input_container.objects = [new_input]
-                    current_input_ref["widget"] = new_input
-                    current_input_ref["is_panel"] = False
-                    new_input.on_change("value", lambda attr, old, new: self.refresh())
-                else:
-                    searchable_input = make_searchable_input(category, col_name)
-                    input_container.objects = [searchable_input]
-                    current_input_ref["widget"] = searchable_input
-                    current_input_ref["is_panel"] = True
+                searchable_input = make_searchable_input(
+                    category,
+                    col_name,
+                    allow_custom=current_op in ("has", "has not"),
+                )
+                input_container.objects = [searchable_input]
+                current_input_ref["widget"] = searchable_input
+                current_input_ref["is_panel"] = True
             else:
                 _enc_scale = self.filter_encode.get(col_name)
                 _step = 1.0 / _enc_scale if _enc_scale else 1
-                new_input = Spinner(name=f"benchmark-filter-{row_index}-value", value=None, step=_step, placeholder="Value...", width=90, margin=(0, 2, 0, 0))
+                new_input = Spinner(
+                    name=f"benchmark-filter-{row_index}-value",
+                    value=None,
+                    step=_step,
+                    placeholder="Value...",
+                    sizing_mode="stretch_width",
+                    margin=0,
+                )
                 input_container.objects = [new_input]
                 current_input_ref["widget"] = new_input
                 current_input_ref["is_panel"] = False
@@ -418,7 +453,7 @@ class FilterRowFactory:
             update_input_widget(new)
 
         def update_input_on_operator_change(attr, old, new):
-            """Swap input widget between TextInput and SearchableSelect based on operator."""
+            """Switch categorical autocomplete between selection and free-text modes."""
 
             if input_update_state["active"]:
                 return
@@ -429,14 +464,14 @@ class FilterRowFactory:
             is_text = col_info.get("type") == "text"
 
             if is_text:
-                if new in ("has", "has not"):
-                    new_input = TextInput(name=f"benchmark-filter-{row_index}-value", value="", placeholder="Search...", width=90, margin=(0, 2, 0, 0))
-                    input_container.objects = [new_input]
-                    current_input_ref["widget"] = new_input
-                    current_input_ref["is_panel"] = False
-                    new_input.on_change("value", lambda attr, old, new: self.refresh())
-                else:
-                    searchable_input = make_searchable_input(category, col_name)
+                current = current_input_ref["widget"]
+                allow_custom = new in ("has", "has not")
+                if not isinstance(current, SearchableSelect) or current.allow_custom != allow_custom:
+                    previous_value = current.value
+                    searchable_input = make_searchable_input(
+                        category, col_name, allow_custom=allow_custom
+                    )
+                    searchable_input.value = previous_value or ""
                     input_container.objects = [searchable_input]
                     current_input_ref["widget"] = searchable_input
                     current_input_ref["is_panel"] = True
@@ -449,12 +484,12 @@ class FilterRowFactory:
 
         dist_toggle = pn.widgets.Button(
             name="\U0001f50d",
-            width=40,
+            width=42,
             height=30,
-            margin=(0, 10, 0, 0),
+            margin=0,
             description="See distribution of values",
             stylesheets=[panel_stylesheet(self.stylesheet)],
-            css_classes=[f"benchmark-filter-{row_index}-lookup"],
+            css_classes=["responsive-action", "filter-lookup", f"benchmark-filter-{row_index}-lookup"],
         )
 
         # Remove button (Panel button for proper dynamic event handling)
@@ -462,8 +497,9 @@ class FilterRowFactory:
             name="−",
             width=30,
             height=30,
-            margin=(2, 5, 0, 0),
+            margin=0,
             stylesheets=[panel_stylesheet(self.stylesheet)],
+            css_classes=["responsive-action", "filter-remove"],
         )
 
         query_row = pn.Row(
@@ -474,7 +510,11 @@ class FilterRowFactory:
             dist_toggle,
             sizing_mode="stretch_width",
             margin=(3, 0, 3, 0),
-            css_classes=["control-row"],
+            css_classes=[
+                "control-row",
+                "responsive-control-row",
+                "filtering-row",
+            ],
             stylesheets=[panel_stylesheet(self.stylesheet)],
         )
 

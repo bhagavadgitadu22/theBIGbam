@@ -35,3 +35,31 @@ def test_unbounded_filtered_samples_is_not_limited_to_autocomplete_payload():
 
     assert len(repository.filtered_samples(sql, [], contig_id=1)) == 100
     assert len(repository.filtered_samples(sql, [], contig_id=1, limit=None)) == 150
+
+
+def test_broader_mag_search_contains_narrower_matches_below_limit():
+    connection = duckdb.connect(":memory:")
+    connection.execute("CREATE TABLE MAG (MAG_id INTEGER, MAG_name VARCHAR)")
+    names = ["337_alpha", "x337R_one", "x337R_two", "337R_three", "z337R_four", "337R_five"]
+    connection.executemany("INSERT INTO MAG VALUES (?, ?)", list(enumerate(names)))
+    repository = FilteringRepository(connection)
+
+    broad = set(repository.mags("337"))
+    narrow = set(repository.mags("337R"))
+
+    assert len(broad) < 100
+    assert narrow <= broad
+
+
+def test_selected_mag_is_prioritized_inside_bounded_window():
+    connection = duckdb.connect(":memory:")
+    connection.execute(
+        "CREATE TABLE MAG AS SELECT i AS MAG_id, 'mag_' || lpad(i::VARCHAR, 3, '0') AS MAG_name "
+        "FROM range(150) t(i)"
+    )
+    repository = FilteringRepository(connection)
+
+    results = repository.mags("", preserve="mag_149")
+
+    assert len(results) == 100
+    assert results[0] == "mag_149"

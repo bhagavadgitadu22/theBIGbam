@@ -23,6 +23,7 @@ def download_contig_metrics_csv(db_path, contig_name, sample_names):
 
     import duckdb
 
+    conn = None
     try:
         conn = duckdb.connect(db_path, read_only=True)
 
@@ -167,8 +168,6 @@ def download_contig_metrics_csv(db_path, contig_name, sample_names):
                 ) TO '{temp_path}' (HEADER, DELIMITER ',')
             """
             conn.execute(query)
-            conn.close()
-
             with open(temp_path, "r", encoding="utf-8") as f:
                 csv_content = f.read()
 
@@ -184,6 +183,9 @@ def download_contig_metrics_csv(db_path, contig_name, sample_names):
 
         print(f"[downloading_data] Download contig metrics exception: {traceback.format_exc()}", flush=True)
         return None
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 def download_mag_metrics_csv(db_path, mag_name, sample_names):
@@ -205,6 +207,7 @@ def download_mag_metrics_csv(db_path, mag_name, sample_names):
 
     import duckdb
 
+    conn = None
     try:
         conn = duckdb.connect(db_path, read_only=True)
 
@@ -308,8 +311,6 @@ def download_mag_metrics_csv(db_path, mag_name, sample_names):
                 ) TO '{temp_path}' (HEADER, DELIMITER ',')
             """
             conn.execute(query)
-            conn.close()
-
             with open(temp_path, "r", encoding="utf-8") as f:
                 csv_content = f.read()
 
@@ -325,3 +326,6 @@ def download_mag_metrics_csv(db_path, mag_name, sample_names):
 
         print(f"[downloading_data] Download MAG metrics exception: {traceback.format_exc()}", flush=True)
         return None
+    finally:
+        if conn is not None:
+            conn.close()

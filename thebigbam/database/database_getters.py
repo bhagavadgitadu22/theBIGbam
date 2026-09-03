@@ -545,27 +545,48 @@ def search_distinct_values(
     conn = duckdb.connect(db_path, read_only=True)
     try:
         if qualifier_key and source_override in {'Contig_qualifier', 'Annotation_qualifier'}:
-            rows = conn.execute(
-                f'SELECT DISTINCT "Value" FROM {source_override} '
-                'WHERE "Key" = ? AND "Value" IS NOT NULL '
-                'AND CAST("Value" AS VARCHAR) ILIKE \'%\' || ? || \'%\' '
-                'ORDER BY (CAST("Value" AS VARCHAR) = ?) DESC, '
-                '(CAST("Value" AS VARCHAR) ILIKE ? || \'%\') DESC, "Value" LIMIT ?',
-                [qualifier_key, term, term, term, limit],
-            ).fetchall()
+            source = source_override
+            value_sql = 'CAST("Value" AS VARCHAR)'
+            base_sql = f'SELECT DISTINCT "Value" FROM {source} WHERE "Key" = ? AND "Value" IS NOT NULL'
+            base_params = [qualifier_key]
         else:
             source = source_override or cat_meta.get('source', '')
             if not source:
                 return []
+            value_sql = f'CAST("{col_name}" AS VARCHAR)'
+            base_sql = f'SELECT DISTINCT "{col_name}" FROM {source} WHERE "{col_name}" IS NOT NULL'
+            base_params = []
+
+        if not term:
+            rows = conn.execute(f'{base_sql} LIMIT ?', [*base_params, limit]).fetchall()
+            return sorted((row[0] for row in rows), key=lambda value: str(value).casefold())
+
+        # Run increasingly broad bounded searches. Exact and prefix matches
+        # normally fill a useful result window without scanning all contains
+        # matches or globally sorting a high-cardinality column.
+        results = []
+        seen = set()
+        searches = (
+            (f'{value_sql} = ?', term),
+            (f'{value_sql} ILIKE ? || \'%\'', term),
+            (f'{value_sql} ILIKE \'%\' || ? || \'%\'', term),
+        )
+        for predicate, parameter in searches:
+            if len(results) >= limit:
+                break
             rows = conn.execute(
-                f'SELECT DISTINCT "{col_name}" FROM {source} '
-                f'WHERE "{col_name}" IS NOT NULL '
-                f'AND CAST("{col_name}" AS VARCHAR) ILIKE \'%\' || ? || \'%\' '
-                f'ORDER BY (CAST("{col_name}" AS VARCHAR) = ?) DESC, '
-                f'(CAST("{col_name}" AS VARCHAR) ILIKE ? || \'%\') DESC, "{col_name}" LIMIT ?',
-                [term, term, term, limit],
+                f'{base_sql} AND {predicate} LIMIT ?',
+                [*base_params, parameter, limit],
             ).fetchall()
-        return [row[0] for row in rows]
+            for row in rows:
+                value = row[0]
+                identity = str(value)
+                if identity not in seen:
+                    seen.add(identity)
+                    results.append(value)
+                    if len(results) == limit:
+                        break
+        return sorted(results, key=lambda value: str(value).casefold())
     except duckdb.Error:
         return []
     finally:

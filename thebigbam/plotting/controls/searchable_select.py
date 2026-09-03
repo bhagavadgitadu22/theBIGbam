@@ -1,5 +1,18 @@
+import json
+
 import param
 from panel.custom import JSComponent
+
+
+def decode_search_request(payload: str) -> tuple[int, str]:
+    """Decode the browser's atomic autocomplete request."""
+    try:
+        request = json.loads(payload)
+        nonce = int(request["nonce"])
+        query = str(request["query"])
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+        raise ValueError("invalid autocomplete request") from error
+    return nonce, query
 
 
 class SearchableSelect(JSComponent):
@@ -9,8 +22,11 @@ class SearchableSelect(JSComponent):
     options = param.List(default=[])
     placeholder = param.String(default="")
     server_search = param.Boolean(default=False)
+    allow_custom = param.Boolean(default=False)
     search_query = param.String(default="")
-    search_nonce = param.Integer(default=0)
+    # Query and sequence travel in one property update so the server can never
+    # observe the nonce from one request with the text from another.
+    search_request = param.String(default="")
     search_result_nonce = param.Integer(default=0)
     search_result_query = param.String(default="")
     scope_nonce = param.Integer(default=0)
@@ -74,6 +90,31 @@ class SearchableSelect(JSComponent):
     }
 
     export function render({ model }) {
+        if (!document.getElementById('thebigbam-tom-select-css')) {
+            const link = document.createElement('link');
+            link.id = 'thebigbam-tom-select-css';
+            link.rel = 'stylesheet';
+            link.href = 'https://cdn.jsdelivr.net/npm/tom-select@2.4.1/dist/css/tom-select.css';
+            document.head.appendChild(link);
+        }
+        if (!document.getElementById('thebigbam-tom-select-overlay-css')) {
+            const style = document.createElement('style');
+            style.id = 'thebigbam-tom-select-overlay-css';
+            style.textContent = `
+                body > .ts-dropdown { z-index: 10000; }
+                body > .ts-dropdown .ts-dropdown-content { max-height: 350px; }
+                .thebigbam-autocomplete-loading {
+                    align-items: center; color: #666; display: flex; gap: 8px; padding: 8px;
+                }
+                .thebigbam-autocomplete-spinner {
+                    animation: thebigbam-autocomplete-spin .7s linear infinite;
+                    border: 2px solid #ddd; border-radius: 50%; border-top-color: #fc62b8;
+                    display: inline-block; height: 12px; width: 12px;
+                }
+                @keyframes thebigbam-autocomplete-spin { to { transform: rotate(360deg); } }
+            `;
+            document.head.appendChild(style);
+        }
         const container = document.createElement('div');
         container.style.width = '100%';
         const select = document.createElement('select');
@@ -92,79 +133,110 @@ class SearchableSelect(JSComponent):
         // model.search_query) instead of being filtered purely client-side —
         // the 'options' handler below resolves the pending load() callback
         // once Python pushes back the matching results.
-        let pendingLoadCallback = null;
         const pendingFilterLoads = new Map();
+        const queryResults = new Map();
+        let requestSequence = model.search_result_nonce;
+        let pendingInputQuery = null;
+        queryResults.set(model.search_query || '', model.options.slice());
         const tsConfig = {
-            create: false,
+            create: model.allow_custom,
+            persist: false,
             maxOptions: 100,
             placeholder: model.placeholder,
             options: allOptions,
             items: model.value ? [model.value] : [],
-            onChange: (val) => { model.value = val; }
+            onChange: (val) => { model.value = val; },
+            // The coloring-rule list is deliberately scrollable. Portalling
+            // the menu to body prevents that ancestor from clipping it.
+            dropdownParent: 'body'
         };
         if (model.server_search) {
             tsConfig.loadThrottle = 300;
             tsConfig.shouldLoad = (query) => query.length >= model.min_search_chars;
             tsConfig.load = (query, callback) => {
-                if (model.min_search_chars > 0) {
-                    const previous = pendingFilterLoads.get(query);
-                    if (previous) previous([]);
-                    pendingFilterLoads.set(query, callback);
+                const cached = queryResults.get(query);
+                if (cached) {
+                    pendingInputQuery = null;
+                    replaceOptions(cached);
+                    callback(cached.map(o => ({value: o, text: o})));
+                    return;
                 }
-                else pendingLoadCallback = callback;
+                const previous = pendingFilterLoads.get(query);
+                if (previous) previous.callback([]);
                 model.search_query = query;
-                // search_nonce always changes, so Python's watcher fires even
-                // when the same text is searched twice in a row (Param skips
-                // no-op assignments to search_query itself).
-                model.search_nonce = model.search_nonce + 1;
+                requestSequence += 1;
+                pendingFilterLoads.set(query, {callback, nonce: requestSequence});
+                model.search_request = JSON.stringify({nonce: requestSequence, query});
             };
             tsConfig.onType = (query) => {
-                if (query.length >= model.min_search_chars) return;
-                pendingFilterLoads.forEach((callback) => callback([]));
-                pendingFilterLoads.clear();
-                ts.clearOptions();
-                ts.refreshOptions(false);
+                // Substring operators filter by the literal text, whether or
+                // not the user chooses one of the suggested complete values.
+                if (model.allow_custom) model.value = query;
+                if (query.length >= model.min_search_chars) {
+                    const cached = queryResults.get(query);
+                    if (cached) {
+                        pendingInputQuery = null;
+                        replaceOptions(cached);
+                    } else {
+                        pendingInputQuery = query;
+                        replaceOptions([], false);
+                        ts.refreshOptions(true);
+                    }
+                    return;
+                }
+                pendingInputQuery = null;
+                cancelPendingLoads();
+                replaceOptions([], false);
             };
-            if (model.min_search_chars > 0) {
-                tsConfig.render = {
-                    no_results: (data, escape) => {
-                        const query = data.input || '';
-                        const message = query.length < model.min_search_chars
-                            ? `Type at least ${model.min_search_chars} characters`
-                            : 'No results found';
-                        return `<div class="no-results">${escape(message)}</div>`;
-                    },
-                };
-            }
+            tsConfig.render = {
+                no_results: (data, escape) => {
+                    const query = data.input || '';
+                    if (pendingInputQuery === query) {
+                        return '<div class="thebigbam-autocomplete-loading">' +
+                            '<span class="thebigbam-autocomplete-spinner"></span>Loading…</div>';
+                    }
+                    const message = query.length < model.min_search_chars
+                        ? `Type at least ${model.min_search_chars} characters`
+                        : 'No results found';
+                    return `<div class="no-results">${escape(message)}</div>`;
+                },
+            };
         }
 
         const ts = new TomSelect(select, tsConfig);
         if (model.disabled) ts.disable();
 
-        function replaceOptions(newOptions) {
+        function replaceOptions(newOptions, includeValue = true) {
             const newSet = new Set(newOptions);
+            // The active value is model state, not part of the bounded search
+            // result window. Keep it renderable without growing model.options
+            // beyond the server's result limit.
+            if (includeValue && model.value) newSet.add(model.value);
             Object.keys(ts.options).forEach((key) => {
                 if (!newSet.has(key)) ts.removeOption(key, true);
             });
             newOptions.forEach((opt) => {
                 if (!ts.options.hasOwnProperty(opt)) ts.addOption({value: opt, text: opt});
             });
+            if (includeValue && model.value && !ts.options.hasOwnProperty(model.value)) {
+                ts.addOption({value: model.value, text: model.value});
+            }
             allOptions = newOptions.map(o => ({value: o, text: o}));
             ts.refreshOptions(false);
         }
 
         function cancelPendingLoads() {
-            if (pendingLoadCallback) {
-                pendingLoadCallback([]);
-                pendingLoadCallback = null;
-            }
-            pendingFilterLoads.forEach((callback) => callback([]));
+            pendingFilterLoads.forEach((request) => request.callback([]));
             pendingFilterLoads.clear();
         }
 
         model.on('disabled', () => {
             if (model.disabled) ts.disable();
             else ts.enable();
+        });
+
+        model.on('allow_custom', () => {
+            ts.settings.create = model.allow_custom;
         });
 
         let lastClickTime = 0;
@@ -189,36 +261,32 @@ class SearchableSelect(JSComponent):
         });
 
         model.on('options', () => {
-            const newOptions = model.options;  // fresh array of strings from Python
-            replaceOptions(newOptions);
-
-            // Resolve any in-flight server-side search: tells Tom Select the
-            // load() for the current query has finished, so it renders these
-            // results (and clears its loading indicator).
-            if (model.min_search_chars <= 0 && pendingLoadCallback) {
-                const cb = pendingLoadCallback;
-                pendingLoadCallback = null;
-                cb(allOptions);
+            // Search responses are associated with their exact query by the
+            // nonce event below. Scope/programmatic replacements have no
+            // pending load and can be projected immediately.
+            if (!model.server_search || pendingFilterLoads.size === 0) {
+                replaceOptions(model.options);
             }
         });
 
         model.on('search_result_nonce', () => {
-            if (model.min_search_chars <= 0) return;
             const query = model.search_result_query;
             const currentQuery = ts.control_input.value;
-            const callback = pendingFilterLoads.get(query);
-            pendingFilterLoads.delete(query);
-            if (!callback) return;
+            const request = pendingFilterLoads.get(query);
+            if (request && request.nonce === model.search_result_nonce) pendingFilterLoads.delete(query);
+            const newOptions = model.options.slice();
+            if (!request || request.nonce !== model.search_result_nonce) return;
+            queryResults.set(query, newOptions);
             if (query !== currentQuery || query.length < model.min_search_chars) {
-                callback([]);
+                request.callback([]);
                 return;
             }
-            const newOptions = model.options;
+            pendingInputQuery = null;
             replaceOptions(newOptions);
-            callback(newOptions.map(o => ({value: o, text: o})));
-            for (const [oldQuery, oldCallback] of pendingFilterLoads.entries()) {
+            request.callback(newOptions.map(o => ({value: o, text: o})));
+            for (const [oldQuery, oldRequest] of pendingFilterLoads.entries()) {
                 if (oldQuery !== currentQuery) {
-                    oldCallback([]);
+                    oldRequest.callback([]);
                     pendingFilterLoads.delete(oldQuery);
                 }
             }
@@ -228,11 +296,17 @@ class SearchableSelect(JSComponent):
             // A MAG/contig/filter/view change invalidates both the visible
             // query and every pending response from the previous scope.
             cancelPendingLoads();
+            queryResults.clear();
+            if (typeof ts.clearCache === 'function') ts.clearCache();
             ts.setTextboxValue('');
             replaceOptions(model.options);
+            queryResults.set('', model.options.slice());
         });
 
         model.on('value', () => {
+            // Echoing each free-text keystroke back through setValue would
+            // turn it into a selected item and collapse the text editor.
+            if (model.allow_custom && ts.control_input.matches(':focus')) return;
             // Ensure the option exists before setting value
             if (model.value && !ts.options[model.value]) {
                 ts.addOption({value: model.value, text: model.value});

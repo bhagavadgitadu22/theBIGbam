@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
-from .searchable_select import SearchableSelect
+from ..shared.defaults import AUTOCOMPLETE_LIMIT
+from .searchable_select import SearchableSelect, decode_search_request
 
 
 def build_distinct_value_select(
@@ -16,30 +17,37 @@ def build_distinct_value_select(
     on_value: Callable[[], None] | None = None,
     **kwargs: Any,
 ) -> SearchableSelect:
-    """Build the canonical two-character, live database autocomplete."""
+    """Build the canonical bounded, live database autocomplete."""
+    search_values = getattr(metadata_service, "search_distinct_values", None)
+    initial_values = (
+        list(search_values(category, column, "", limit=AUTOCOMPLETE_LIMIT))
+        if search_values is not None
+        else []
+    )
     widget = SearchableSelect(
         name=name,
         value="",
-        options=[],
+        options=initial_values,
         placeholder="Search...",
         server_search=True,
-        min_search_chars=2,
+        min_search_chars=0,
         **kwargs,
     )
 
     def search(_event: Any) -> None:
-        request_nonce = widget.search_nonce
-        query = widget.search_query
+        request_nonce, query = decode_search_request(widget.search_request)
         values: list[str] = []
         if len(query) >= widget.min_search_chars:
-            values = list(metadata_service.search_distinct_values(category, column, query, limit=100))
-            if widget.value and widget.value not in values:
-                values.insert(0, widget.value)
+            values = (
+                list(search_values(category, column, query, limit=AUTOCOMPLETE_LIMIT))
+                if search_values is not None
+                else []
+            )
         widget.options = values
         widget.search_result_query = query
         widget.search_result_nonce = request_nonce
 
-    widget.param.watch(search, "search_nonce")
+    widget.param.watch(search, "search_request")
     if on_value is not None:
         widget.param.watch(lambda _event: on_value(), "value")
     return widget

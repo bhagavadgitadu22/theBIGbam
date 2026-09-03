@@ -10,6 +10,8 @@ import os
 import duckdb
 import pytest
 
+pytestmark = pytest.mark.integration
+
 
 def get_contig_length(conn, contig_id):
     """Get contig length from database."""

@@ -6,6 +6,7 @@ def test_titles_are_formatted_from_plain_counts():
     assert "12 available" in titles["contig"]
     assert "3 available" in titles["sample"]
     assert "25 contig/sample pairs, 7 MAG/sample pairs" in titles["filtering"]
+    assert "<br>" not in titles["filtering"]
     assert "4 available" in titles["mag"]
 
 

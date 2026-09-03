@@ -5,16 +5,31 @@ from __future__ import annotations
 import os
 import time
 from pathlib import Path
+from typing import Any, Mapping
 
 import panel as pn
 
 from ..repositories.database_metadata import DatabaseMetadataRepository
+from ..settings.history import HISTORY_FORMAT, HistoryEntry, entries_from_session_document
 from ..settings.persistence import load_settings_document
 from ..settings.scenario import ScenarioPathAllocator
 from ..shared.paths import static_directory
 from ..shared.timing import TimingPhase
 from . import composition_root as application
 from .apply_handlers import warm_plot_pipeline_imports
+
+
+def restore_payload(
+    document: dict[str, Any] | None,
+) -> tuple[dict[str, Any] | None, tuple[HistoryEntry, ...]]:
+    """Split either supported --json document into settings and history."""
+    if document is None:
+        return None, ()
+    meta = document.get("_meta")
+    if not isinstance(meta, Mapping) or meta.get("format") != HISTORY_FORMAT:
+        return document, ()
+    entries = entries_from_session_document(document)
+    return (entries[-1].settings if entries else None), entries
 
 
 def add_serve_args(parser) -> None:
@@ -24,7 +39,8 @@ def add_serve_args(parser) -> None:
         "--json",
         dest="settings_json",
         default=None,
-        help="Path to a settings JSON file (from SAVE SETTINGS) to restore on load. "
+        help="Path to a JSON file from SAVE SETTINGS or SAVE SESSION to restore on load. "
+        "A session restores its complete application history and the latest entry's settings. "
         "Settings that don't fit this --db are skipped with a logged warning.",
     )
     parser.add_argument(
@@ -86,7 +102,8 @@ def run_serve(args) -> int:
     _print_database_metadata(args.db)
 
     settings_path = getattr(args, "settings_json", None)
-    initial_settings = load_settings_document(settings_path) if settings_path else None
+    initial_document = load_settings_document(settings_path) if settings_path else None
+    initial_settings, initial_history = restore_payload(initial_document)
     scenario_path = getattr(args, "scenario", None)
     scenario_paths = None
     if scenario_path:
@@ -112,6 +129,7 @@ def run_serve(args) -> int:
             preloaded,
             enable_timing=enable_timing,
             initial_settings=initial_settings,
+            initial_history=initial_history,
             scenario_path=allocated_scenario_path,
         )
 

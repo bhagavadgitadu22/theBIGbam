@@ -17,6 +17,14 @@ TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
 REFERENCE = os.path.join(TESTS_DIR, "fasta", "test_10000bp.fasta")
 
 
+def pytest_collection_modifyitems(items):
+    """Classify every test into one explicit execution tier."""
+    for item in items:
+        if item.get_closest_marker("integration") or item.get_closest_marker("browser"):
+            continue
+        item.add_marker(pytest.mark.fast)
+
+
 def thebigbam_command(*args: str) -> list[str]:
     """Build a CLI command from the environment running pytest.
 
@@ -92,17 +100,18 @@ def generate_bam(r1_path: str, r2_path: str | None, mapper: str, circular: bool,
 
 
 @pytest.fixture(scope="session")
-def test_bams():
+def test_bams(tmp_path_factory):
     """
     Fixture that ensures all test BAM files exist.
 
     Generates BAMs from FASTQ files if they don't exist.
-    BAMs are stored in linear_bams/ and circular_bams/ subdirectories.
+    BAMs are stored in a session-temporary build directory.
     Returns a dict with 'circular' and 'linear' BAM file lists.
     """
     # Create output directories
-    linear_dir = os.path.join(TESTS_DIR, "linear_bams")
-    circular_dir = os.path.join(TESTS_DIR, "circular_bams")
+    build_dir = str(tmp_path_factory.mktemp("mapping-artifacts"))
+    linear_dir = os.path.join(build_dir, "linear_bams")
+    circular_dir = os.path.join(build_dir, "circular_bams")
     os.makedirs(linear_dir, exist_ok=True)
     os.makedirs(circular_dir, exist_ok=True)
 
@@ -132,7 +141,7 @@ def test_bams():
                 key = "circular" if circular else "linear"
                 bam_files[key].append(bam_path)
 
-    return bam_files
+    return {**bam_files, "linear_dir": linear_dir, "circular_dir": circular_dir}
 
 
 @pytest.fixture(scope="session")
@@ -148,12 +157,10 @@ def reference_fasta():
 
 
 @pytest.fixture(scope="session")
-def linear_db(tests_dir, test_bams):
+def linear_db(tmp_path_factory, test_bams):
     """Create linear database from linear BAMs. Returns DB path."""
-    db_path = os.path.join(tests_dir, "test_10kbp_linear.db")
-    if os.path.exists(db_path):
-        os.remove(db_path)
-    linear_dir = os.path.join(tests_dir, "linear_bams")
+    db_path = str(tmp_path_factory.mktemp("databases") / "test_10kbp_linear.db")
+    linear_dir = test_bams["linear_dir"]
     cmd = thebigbam_command(
         "calculate",
         "-b",
@@ -176,12 +183,10 @@ def linear_db(tests_dir, test_bams):
 
 
 @pytest.fixture(scope="session")
-def circular_db(tests_dir, test_bams):
+def circular_db(tmp_path_factory, test_bams):
     """Create circular database from circular BAMs. Returns DB path."""
-    db_path = os.path.join(tests_dir, "test_10kbp_circular.db")
-    if os.path.exists(db_path):
-        os.remove(db_path)
-    circular_dir = os.path.join(tests_dir, "circular_bams")
+    db_path = str(tmp_path_factory.mktemp("databases") / "test_10kbp_circular.db")
+    circular_dir = test_bams["circular_dir"]
     cmd = thebigbam_command(
         "calculate",
         "-b",
@@ -204,12 +209,10 @@ def circular_db(tests_dir, test_bams):
 
 
 @pytest.fixture(scope="session")
-def linear_db_simple(tests_dir, test_bams):
+def linear_db_simple(tmp_path_factory, test_bams):
     """Create linear database without percentage options. Returns DB path."""
-    db_path = os.path.join(tests_dir, "test_10kbp_linear_simple.db")
-    if os.path.exists(db_path):
-        os.remove(db_path)
-    linear_dir = os.path.join(tests_dir, "linear_bams")
+    db_path = str(tmp_path_factory.mktemp("databases") / "test_10kbp_linear_simple.db")
+    linear_dir = test_bams["linear_dir"]
     cmd = thebigbam_command(
         "calculate",
         "-b",
@@ -230,12 +233,10 @@ def linear_db_simple(tests_dir, test_bams):
 
 
 @pytest.fixture(scope="session")
-def circular_db_simple(tests_dir, test_bams):
+def circular_db_simple(tmp_path_factory, test_bams):
     """Create circular database without percentage options. Returns DB path."""
-    db_path = os.path.join(tests_dir, "test_10kbp_circular_simple.db")
-    if os.path.exists(db_path):
-        os.remove(db_path)
-    circular_dir = os.path.join(tests_dir, "circular_bams")
+    db_path = str(tmp_path_factory.mktemp("databases") / "test_10kbp_circular_simple.db")
+    circular_dir = test_bams["circular_dir"]
     cmd = thebigbam_command(
         "calculate",
         "-b",

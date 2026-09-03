@@ -133,13 +133,37 @@ def test_successful_plot_appends_click_time_applied_settings():
     callbacks = SessionCallbacks(scheduled.append)
     callbacks.attach_placeholder(SimpleNamespace(loading=False))
     callbacks.attach_apply(SimpleNamespace(apply=lambda: True))
-    callbacks.attach_history(lambda: {"selection": dict(settings["selection"])}, appended.append)
+    callbacks.attach_history(
+        lambda: {"selection": dict(settings["selection"])},
+        lambda snapshot, _apply_step: appended.append(snapshot),
+    )
 
     callbacks.apply_clicked()
     settings["selection"]["contig"] = "c2"
     scheduled[0]()
 
     assert appended == [{"selection": {"contig": "c1"}}]
+
+
+def test_successful_plot_history_retains_originating_scenario_step():
+    scheduled = []
+    appended = []
+    callbacks = SessionCallbacks(scheduled.append)
+    callbacks.attach_placeholder(SimpleNamespace(loading=False))
+    callbacks.attach_apply(SimpleNamespace(apply=lambda: True))
+    callbacks.attach_scenario(
+        SimpleNamespace(record_action=lambda _action, _settings: 17),
+        lambda: {"selection": {"contig": "c1"}},
+    )
+    callbacks.attach_history(
+        lambda: {"selection": {"contig": "c1"}},
+        lambda settings, apply_step: appended.append((settings, apply_step)),
+    )
+
+    callbacks.apply_clicked()
+    scheduled[0]()
+
+    assert appended == [({"selection": {"contig": "c1"}}, 17)]
 
 
 def test_failed_plot_does_not_append_history():

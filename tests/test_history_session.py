@@ -5,6 +5,7 @@ from bokeh.events import ButtonClick
 from bokeh.models import Div
 
 from thebigbam.plotting.application.history_session import build_history_session
+from thebigbam.plotting.settings.history import HistoryEntry
 
 
 def test_history_row_has_restore_and_coloring_style_minus_actions():
@@ -14,12 +15,14 @@ def test_history_row_has_restore_and_coloring_style_minus_actions():
         restore_entry=restored.append,
         stylesheet="",
     )
-    entry = session.append("apply_plot", {"selection": {"contig": "c1"}})
+    entry = session.append(
+        "apply_plot", {"selection": {"contig": "c1"}}, apply_step=23
+    )
 
     history_row = session.plot_entries.objects[0]
-    time_cell = history_row.objects[0]
-    assert time_cell.margin == 0
-    assert time_cell.description.position == "left"
+    description_cell = history_row.objects[0]
+    assert description_cell.margin == 0
+    assert description_cell.css_classes == ["history-description"]
     assert [button.name for button in history_row.objects[1:]] == ["←", "\u2212"]
     assert [button.width for button in history_row.objects[1:]] == [None, 30]
     assert [button.sizing_mode for button in history_row.objects[1:]] == [None, "fixed"]
@@ -81,6 +84,8 @@ def test_history_save_style_and_collapsible_sections_match_sidebars():
     assert session.plot_entries.stylesheets == [""]
     assert session.filter_toggle.label == "▼"
     assert session.plot_toggle.label == "▼"
+    assert session.filter_short_descriptions.value is True
+    assert session.plot_short_descriptions.value is True
 
     filter_section = session.drawer.objects[1]
     divider = session.drawer.objects[2]
@@ -91,6 +96,8 @@ def test_history_save_style_and_collapsible_sections_match_sidebars():
         assert "section-header" in header.css_classes
         assert "section-title" in header.children[1].css_classes
         assert header.children[0].width == header.children[2].width
+        assert section.objects[1].name == "Use git-like short descriptions"
+        assert section.objects[1].css_classes == ["history-description-mode"]
     assert session.drawer.objects[4].height == 10
     assert session.drawer.objects[4].css_classes == ["history-save-top-space"]
     assert session.drawer.objects[6].height == 20
@@ -139,18 +146,19 @@ def test_history_sections_fold_independently_and_stay_folded_on_refresh():
     session.append("apply_filters", {"filtering": []})
 
     assert session.filter_entries.visible is False
+    assert session.filter_short_descriptions.visible is False
     assert session.filter_toggle.label == "▶"
     assert session.plot_entries.visible is True
     assert session.plot_toggle.label == "▼"
 
 
-def test_history_tooltip_covers_the_full_information_cell_without_html_injection():
+def test_history_description_uses_safe_full_text_title_without_html_injection():
     session = build_history_session(
         db_path="example.db",
         restore_entry=lambda _entry: None,
         stylesheet="",
     )
-    entry = session.append(
+    session.append(
         "apply_plot",
         {
             "view_mode": {"mag_or_contig": 1, "one_or_all_samples": 0},
@@ -158,13 +166,10 @@ def test_history_tooltip_covers_the_full_information_cell_without_html_injection
         },
     )
 
-    time_cell = session.plot_entries.objects[0].objects[0]
-    assert time_cell.name == entry.created_at[11:19]
-    assert time_cell.description.position == "left"
-    assert time_cell.description.content.startswith("Mode: One sample")
-    assert "Contig: <script>alert(1)</script>" in time_cell.description.content
-    assert "Generated plot" not in time_cell.description.content
-    assert "Time:" not in time_cell.description.content
+    line_html = session.plot_entries.objects[0].objects[0].objects[2].object
+    assert 'class="history-description-line"' in line_html
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in line_html
+    assert "<script>" not in line_html
 
 
 def test_append_updates_only_affected_section_and_preserves_row_identity():
@@ -183,8 +188,60 @@ def test_append_updates_only_affected_section_and_preserves_row_identity():
     assert session.plot_entries.objects is plot_objects
 
     second_plot = session.append("apply_plot", {"selection": {"contig": "c2"}})
-    assert session.plot_entries.objects == [session.rows_by_id[second_plot.id], first_plot_row]
+    assert session.plot_entries.objects == [first_plot_row, session.rows_by_id[second_plot.id]]
     assert session.rows_by_id[first_plot.id] is first_plot_row
+
+
+def test_description_mode_switches_between_diff_and_complete_and_remove_recomputes():
+    session = build_history_session(
+        db_path="example.db",
+        restore_entry=lambda _entry: None,
+        stylesheet="",
+    )
+    first = session.append("apply_plot", {"selection": {"contig": "c1"}})
+    second = session.append("apply_plot", {"selection": {"contig": "c2"}})
+
+    second_line = session.rows_by_id[second.id].objects[0].objects[0].object
+    assert "c1 → c2" in second_line
+
+    session.plot_short_descriptions.value = False
+    second_line = session.rows_by_id[second.id].objects[0].objects[0].object
+    assert "c1 → c2" not in second_line
+    assert "c2" in second_line
+
+    session.plot_short_descriptions.value = True
+    session._remove(first.id)
+    second_line = session.rows_by_id[second.id].objects[0].objects[0].object
+    assert "c1 → c2" not in second_line
+    assert "c2" in second_line
+
+
+def test_initial_history_is_rebuilt_oldest_first_without_creating_new_entries():
+    entries = (
+        HistoryEntry("filters", 1, "apply_filters", "2026-09-01T10:00:00+00:00", {"filtering": []}),
+        HistoryEntry(
+            "plot-old", 2, "apply_plot", "2026-09-01T10:01:00+00:00", {"selection": {"contig": "c1"}}
+        ),
+        HistoryEntry(
+            "plot-new", 3, "apply_plot", "2026-09-01T10:02:00+00:00", {"selection": {"contig": "c2"}}
+        ),
+    )
+
+    session = build_history_session(
+        db_path="example.db",
+        restore_entry=lambda _entry: None,
+        stylesheet="",
+        initial_entries=entries,
+    )
+
+    assert session.history.entries == entries
+    assert session.filter_entries.objects == [session.rows_by_id["filters"]]
+    assert session.plot_entries.objects == [
+        session.rows_by_id["plot-old"],
+        session.rows_by_id["plot-new"],
+    ]
+    appended = session.append("apply_filters", {"filtering": []})
+    assert appended.sequence == 4
 
 
 def test_retention_removes_only_expired_row_and_keeps_models_bounded():
@@ -201,7 +258,7 @@ def test_retention_removes_only_expired_row_and_keeps_models_bounded():
 
     assert first.id not in session.rows_by_id
     assert session.rows_by_id[second.id] is second_row
-    assert session.plot_entries.objects == [session.rows_by_id[third.id], second_row]
+    assert session.plot_entries.objects == [second_row, session.rows_by_id[third.id]]
     assert len(session.history.for_action("apply_plot")) == 2
 
 
@@ -214,7 +271,9 @@ def test_restore_and_remove_emit_explicit_scenario_actions():
         record_action=lambda action, details: actions.append((action, details)),
         stylesheet="",
     )
-    entry = session.append("apply_plot", {"selection": {"contig": "c1"}})
+    entry = session.append(
+        "apply_plot", {"selection": {"contig": "c1"}}, apply_step=23
+    )
 
     session._restore(entry)
     session._remove(entry.id)
@@ -226,14 +285,42 @@ def test_restore_and_remove_emit_explicit_scenario_actions():
             {
                 "history_sequence": entry.sequence,
                 "history_action": "apply_plot",
+                "apply_step": 23,
                 "settings": entry.settings,
             },
         ),
         (
             "remove_history",
-            {"history_sequence": entry.sequence, "history_action": "apply_plot"},
+            {
+                "history_sequence": entry.sequence,
+                "history_action": "apply_plot",
+                "apply_step": 23,
+            },
         ),
     ]
+
+
+def test_saved_session_history_actions_keep_explicit_pre_scenario_origin():
+    actions = []
+    entry = HistoryEntry(
+        "saved-plot",
+        4,
+        "apply_plot",
+        "2026-09-01T10:00:00+00:00",
+        {"selection": {"contig": "c1"}},
+    )
+    session = build_history_session(
+        db_path="example.db",
+        restore_entry=lambda _entry: None,
+        record_action=lambda action, details: actions.append((action, details)),
+        stylesheet="",
+        initial_entries=(entry,),
+    )
+
+    session._restore(entry)
+    session._remove(entry.id)
+
+    assert [details["apply_step"] for _action, details in actions] == [None, None]
 
 
 def test_save_session_persists_and_records_explicit_action_only_when_clicked(monkeypatch, tmp_path):

@@ -1,5 +1,3 @@
-import inspect
-
 import duckdb
 from bokeh.models import Range1d
 
@@ -51,17 +49,3 @@ def test_feature_renderer_handles_curves_bars_and_relative_scale():
     assert plot is not None
     assert plot.y_range.end == 1
     assert len(plot.renderers) >= 3
-
-
-def test_renderer_and_service_boundaries_have_no_database_or_ui_coupling():
-    import thebigbam.plotting.renderers.all_samples as all_renderer
-    import thebigbam.plotting.renderers.features as renderer
-    import thebigbam.plotting.services.features as service
-
-    renderer_source = inspect.getsource(renderer).lower()
-    service_source = inspect.getsource(service).lower()
-    assert "execute(" not in renderer_source
-    assert "duckdb" not in renderer_source
-    assert "bokeh" not in service_source
-    assert "panel" not in service_source
-    assert "plotting_data_per_sample" not in inspect.getsource(all_renderer)

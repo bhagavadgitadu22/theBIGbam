@@ -21,7 +21,7 @@ def title_html(counts: AvailabilityCounts, *, has_mags: bool) -> dict[str, str]:
     result = {
         "filtering": (
             "<span style='font-size: 1.2em;'><b>Filtering</b></span>"
-            f"<br><span style='font-size: 0.85em;'>{pair_text}</span>"
+            f" <span style='font-size: 0.85em;'>{pair_text}</span>"
         ),
         "contig": (
             "<span style='font-size: 1.2em;'><b>Contigs</b></span> "

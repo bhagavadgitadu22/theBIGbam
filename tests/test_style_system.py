@@ -24,6 +24,7 @@ def test_sidebar_design_tokens_and_semantic_classes_share_one_stylesheet():
         ".sidebar-content",
         ".sidebar-busy",
         ".control-row",
+        ".sidebar-field",
         ".nested-section",
         ".action-row",
         ".sidebar-actions",
@@ -59,9 +60,53 @@ def test_sidebar_design_tokens_and_semantic_classes_share_one_stylesheet():
     rail_rule = css.split(":host(.panel-resize-rail) {", 1)[1].split("}", 1)[0]
     assert "width: 8px" in rail_rule
     assert "min-width: 8px" in rail_rule
-    assert "margin-left: -4px" in rail_rule
-    assert "margin-right: -4px" in rail_rule
     assert "z-index: 20" in rail_rule
+    shell_rule = css.split(":host(.panel-shell) {", 1)[1].split("}", 1)[0]
+    assert "position: relative" in shell_rule
+    assert "overflow: visible" in shell_rule
+    responsive_rule = css.split(":host(.responsive-control-row) {", 1)[1].split("}", 1)[0]
+    assert "flex-wrap: wrap" in responsive_rule
+    assert ":host(.filtering-row) {" in css
+    assert ":host(.coloring-row) {" in css
+    assert ":host(.filtering-row) .bk-Row" not in css
+    assert ":host(.coloring-row) .bk-Row" not in css
+    filtering_rule = css.split(":host(.filtering-row) {", 1)[1].split("}", 1)[0]
+    coloring_rule = css.split(":host(.coloring-row) {", 1)[1].split("}", 1)[0]
+    assert "minmax(0, 2.5fr) 42px" in filtering_rule
+    assert "padding-right: var(--control-row-end-inset)" in filtering_rule
+    assert "padding-right: var(--control-row-end-inset)" in coloring_rule
+    assert ":host(.filtering-row) > *" in css
+    assert ":host(.coloring-row) > *" in css
+    lookup_rule = css.split(":host(.filter-lookup) {", 1)[1].split("}", 1)[0]
+    lookup_button_rule = css.split(":host(.filter-lookup) .bk-btn {", 1)[1].split("}", 1)[0]
+    assert "width: 42px !important" in lookup_rule
+    assert "width: 100% !important" in lookup_button_rule
+    assert "min-width: 0 !important" in lookup_button_rule
+    filter_action_rule = css.split(":host(.filter-action-row) {", 1)[1].split("}", 1)[0]
+    color_picker_rule = css.split(":host(.color-picker-field) {", 1)[1].split("}", 1)[0]
+    color_input_rule = css.split(':host(.color-picker-field) input[type="color"] {', 1)[1].split("}", 1)[0]
+    assert "align-items: center" in filter_action_rule
+    assert "min-height: 30px" in filter_action_rule
+    assert "height: 30px !important" in color_picker_rule
+    assert "height: 30px !important" in color_input_rule
+    assert "padding: 0 !important" in color_input_rule
+    for field_class in (
+        "filter-category",
+        "filter-metric",
+        "filter-operator",
+        "filter-value",
+        "color-qualifier",
+        "color-operator",
+        "color-value",
+    ):
+        field_rule = css.split(f":host(.{field_class}) {{", 1)[1].split("}", 1)[0]
+        assert "flex:" in field_rule
+        assert "min-width: 0" in field_rule
+    nested_rule = css.split(":host(.nested-section) {", 1)[1].split("}", 1)[0]
+    assert "width: calc(100% - var(--space-sm))" in nested_rule
+    assert "max-width: calc(100% - var(--space-sm))" in nested_rule
+    color_list_rule = css.split(":host(.color-rule-list) {", 1)[1].split("}", 1)[0]
+    assert "overflow-x: hidden" in color_list_rule
     assert ":host(.history-entry-list)" in css
     assert "max-height: 252px" in css
     history_drawer_rule = css.split(":host(.history-drawer) {", 1)[1].split("}", 1)[0]
@@ -73,13 +118,11 @@ def test_sidebar_design_tokens_and_semantic_classes_share_one_stylesheet():
     assert "border: 1px solid #ccc" in history_rule
     assert "border-radius: 5px" in history_rule
     assert "padding: 5px" in history_rule
-    history_time_rule = css.split(":host(.history-time) {", 1)[1].split("}", 1)[0]
-    assert "height: 30px" in history_time_rule
-    assert "padding: 0" in history_time_rule
-    assert "width: 100%" in history_time_rule
-    history_button_rule = css.split(":host(.history-time) .bk-btn {", 1)[1].split("}", 1)[0]
-    assert "align-items: center" in history_button_rule
-    assert "font-weight: bold" in history_button_rule
+    description_rule = css.split(":host(.history-description) {", 1)[1].split("}", 1)[0]
+    description_line_rule = css.split(":host(.history-description-item) .history-description-line {", 1)[1].split("}", 1)[0]
+    assert "overflow: hidden" in description_rule
+    assert "text-overflow: ellipsis" in description_line_rule
+    assert "white-space: nowrap" in description_line_rule
 
 
 def test_control_row_constructors_apply_the_shared_spacing_contract():

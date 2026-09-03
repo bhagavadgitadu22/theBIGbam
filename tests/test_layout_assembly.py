@@ -68,12 +68,14 @@ def test_drawer_toggles_stay_on_real_layout_rails():
     assert "drawer-toggle-right" in right_toggle.css_classes
     assert left_toggle.margin == 0
     assert right_toggle.margin == 0
-    assert assembled.layout.objects[1] is assembled.left_rail
-    assert assembled.layout.objects[4] is assembled.right_rail
+    assert assembled.layout.objects[0] is assembled.left_shell
+    assert assembled.layout.objects[3] is assembled.right_shell
+    assert assembled.left_shell.objects[-1] is assembled.left_rail
+    assert assembled.right_shell.objects[-1] is assembled.right_rail
     assert assembled.left_rail.objects[-1] is left_toggle
     assert assembled.right_rail.objects[-1] is right_toggle
     assert assembled.placeholder not in assembled.layout.objects
-    assert assembled.placeholder in assembled.layout.objects[2].objects
+    assert assembled.placeholder in assembled.layout.objects[1].objects
 
     left_toggle.clicks += 1
     right_toggle.clicks += 1
@@ -82,6 +84,8 @@ def test_drawer_toggles_stay_on_real_layout_rails():
     assert assembled.history.visible is True
     assert assembled.left_resizer.enabled is False
     assert assembled.right_resizer.enabled is True
+    assert assembled.left_shell.width == 0
+    assert assembled.right_shell.width == 250
 
 
 def test_drawer_resizers_are_client_side_bounded_and_persistent():
@@ -97,6 +101,10 @@ def test_drawer_resizers_are_client_side_bounded_and_persistent():
     assert assembled.history.width == 250
     assert assembled.left_rail.width == 8
     assert assembled.right_rail.width == 8
+    assert assembled.left_rail.styles["right"] == "-8px"
+    assert assembled.right_rail.styles["left"] == "-8px"
+    assert assembled.left_shell.width == 400
+    assert assembled.right_shell.width == 0
     assert "localStorage.setItem" in assembled.left_resizer._esm
     assert "dblclick" in assembled.left_resizer._esm
 
@@ -104,11 +112,15 @@ def test_drawer_resizers_are_client_side_bounded_and_persistent():
     assembled.right_resizer.value = 310
     assert assembled.controls.width == 510
     assert assembled.history.width == 310
+    assert assembled.left_shell.width == 510
+    assert assembled.right_shell.width == 0
 
 
-def test_shared_separator_has_no_implicit_model_margin():
+def test_shared_separator_has_fixed_thickness_and_explicit_spacing():
     divider = separator()
-    assert divider.margin == 0
+    assert divider.margin == (10, 0)
     assert divider.height == 2
-    assert divider.styles["margin-top"] == "10px"
-    assert divider.styles["margin-bottom"] == "10px"
+    assert divider.min_height == 2
+    assert divider.max_height == 2
+    assert divider.css_classes == ["section-separator"]
+    assert divider.styles == {"background-color": "#333", "box-sizing": "border-box"}

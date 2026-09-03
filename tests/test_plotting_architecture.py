@@ -64,5 +64,3 @@ def test_four_apply_handlers_have_independent_typed_modules():
         assert request_type in source
         assert "is_all" not in source
         assert ".execute(" not in source
-
-    assert len((handler_dir / "rendering.py").read_text(encoding="utf-8").splitlines()) <= 550

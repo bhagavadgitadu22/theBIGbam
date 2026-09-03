@@ -19,6 +19,21 @@ class FilteringAvailabilityService:
         self.revision += 1
         self._cache.clear()
 
+    def contigs(self, search_term: str = "", preserve: str = "") -> tuple[str, ...]:
+        return self._cached(
+            ("all_contigs", search_term, preserve), lambda: self.repository.contigs(search_term, preserve)
+        )
+
+    def samples(self, search_term: str = "", preserve: str = "") -> tuple[str, ...]:
+        return self._cached(
+            ("all_samples", search_term, preserve), lambda: self.repository.samples(search_term, preserve)
+        )
+
+    def mags(self, search_term: str = "", preserve: str = "") -> tuple[str, ...]:
+        return self._cached(
+            ("all_mags", search_term, preserve), lambda: self.repository.mags(search_term, preserve)
+        )
+
     def _cached(self, key: tuple[Hashable, ...], load: Callable[[], object]):
         revision_key = (self.revision, *key)
         if revision_key not in self._cache:
@@ -33,16 +48,20 @@ class FilteringAvailabilityService:
             lambda: self.repository.contigs_for_sample(sample_id, search_term, preserve, mag_name),
         )
 
-    def samples_for_contig(self, contig_id: int, search_term: str = "") -> tuple[str, ...]:
+    def samples_for_contig(
+        self, contig_id: int, search_term: str = "", preserve: str = ""
+    ) -> tuple[str, ...]:
         return self._cached(
-            ("samples", contig_id, search_term),
-            lambda: self.repository.samples_for_contig(contig_id, search_term),
+            ("samples", contig_id, search_term, preserve),
+            lambda: self.repository.samples_for_contig(contig_id, search_term, preserve),
         )
 
-    def mags_for_sample(self, sample_id: int, search_term: str = "") -> tuple[str, ...]:
+    def mags_for_sample(
+        self, sample_id: int, search_term: str = "", preserve: str = ""
+    ) -> tuple[str, ...]:
         return self._cached(
-            ("mags", sample_id, search_term),
-            lambda: self.repository.mags_for_sample(sample_id, search_term),
+            ("mags", sample_id, search_term, preserve),
+            lambda: self.repository.mags_for_sample(sample_id, search_term, preserve),
         )
 
     def count_contigs_for_sample(self, sample_id: int, mag_name: str | None = None) -> int:

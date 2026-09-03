@@ -9,7 +9,7 @@ class AvailabilityService:
     def contigs_for_sample(self, sample_id, search, preserve, mag_name=None):
         return ("c2",)
 
-    def samples_for_contig(self, contig_id, search):
+    def samples_for_contig(self, contig_id, search, preserve=""):
         return ("s2",)
 
     def count_contigs_for_sample(self, sample_id, mag_name=None):
@@ -39,8 +39,47 @@ class FilteredMagAvailabilityService(AvailabilityService):
         return 1
 
 
+class PreservingMagAvailabilityService(AvailabilityService):
+    def mags(self, search, preserve):
+        return (preserve, *[f"m{i}" for i in range(99)])
+
+
 def _select(value="", options=()):
     return SimpleNamespace(value=value, options=list(options))
+
+
+def test_mag_resolution_prioritizes_current_selection_outside_normal_window():
+    selected = "m149"
+    widgets = {
+        "has_mags": True,
+        "view_radio": SimpleNamespace(active=0),
+        "contig_select": _select(""),
+        "sample_select": _select(""),
+        "mag_select": _select(selected),
+        "sample_name_to_id": {},
+        "contig_name_to_id": {},
+        "mag_to_contigs": {selected: ["c149"], **{f"m{i}": [f"c{i}"] for i in range(149)}},
+        "mag_to_sample_ids": {selected: set(), **{f"m{i}": set() for i in range(149)}},
+    }
+    controller = AvailabilityController(
+        AvailabilityBindings(
+            availability_service=PreservingMagAvailabilityService(),
+            filtering_pairs=lambda: None,
+            original_contigs=[],
+            original_samples=[],
+            sample_scope=SimpleNamespace(active=1),
+            widgets=widgets,
+            sort_sample_select=_select(),
+            update_completions=lambda widget, values: setattr(widget, "options", list(values)),
+            total_coverage_count=0,
+            filtering_title=SimpleNamespace(text=""),
+            contig_title=SimpleNamespace(text=""),
+            sample_title=SimpleNamespace(text=""),
+            mag_title=SimpleNamespace(text=""),
+        )
+    )
+
+    assert controller.compute_mags()[0] == selected
 
 
 def test_availability_controller_uses_service_for_one_sample_subject_constraints():
