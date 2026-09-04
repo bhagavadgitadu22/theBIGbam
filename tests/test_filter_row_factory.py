@@ -79,9 +79,7 @@ def test_has_filter_keeps_bounded_suggestions_and_accepts_free_text():
     )
     factory.attach_controller(SimpleNamespace(count_rows=lambda: 1, sections=[]))
 
-    row = factory.create_row(
-        {}, initial_category="Annotations", initial_column="product", initial_operator="has"
-    )
+    row = factory.create_row({}, initial_category="Annotations", initial_column="product", initial_operator="has")
     widget = row["input_ref"]["widget"]
 
     assert isinstance(widget, SearchableSelect)
