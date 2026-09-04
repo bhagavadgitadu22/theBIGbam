@@ -1,5 +1,13 @@
 # theBIGbam visualisation
 
+## History
+
+A right-hand panel, hidden by default, can be expanded from the web interface. It records each **APPLY FILTERS** and **APPLY** action performed during the session. You can restore the state corresponding to any recorded action at any time.
+
+To save the complete history of actions performed during a session, click **SAVE SESSION**. This creates a JSON file in the directory from which the database is being served. You can later restore the session with: `thebigbam serve --db <db> --json <session>`. 
+
+Alternatively, click **SAVE SETTINGS** to save the current settings to a JSON file in the directory from which the database is being served. Unlike **SAVE SESSION**, **SAVE SETTINGS** also records settings that have been modified but not yet applied. You can later restart with the same history using: `thebigbam serve --db <db> --json <settings>`.
+
 ## Hidden rules
 
 When multiple isoforms share the same locus tag, only the **longest isoform** has its nucleotide sequence computed and is included in the CDS index for codon analysis. All isoforms are still displayed in the gene map, but codon/amino acid annotations are derived from the longest one only. This simplifies visualization by avoiding conflicting or redundant annotations at overlapping positions.

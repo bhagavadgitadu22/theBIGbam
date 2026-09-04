@@ -317,8 +317,6 @@ You are initially in the **One Sample** mode, which allows exploration of all co
 
 Finally, click **APPLY** to visualize the requested features for the selected contig and sample. 
 
-Alternatively, click **SAVE SETTINGS** to save a JSON file containing your current settings in the directory from which you are serving the database. You can later restart with the same panel configuration using: `thebigbam serve --db <db> --json <settings>`.
-
 #### All Samples mode
 
 **All Samples** mode enables comparison of a specific feature across multiple samples. Compared to the **One Sample** mode, the **Samples** section is omitted, and only a single feature can be selected in the **Variables** section (e.g. mismatches on the figure above).
@@ -527,6 +525,8 @@ If a functionality is missing for your use case, open an issue to explain what y
 If you use theBIGbam in your research, please cite this paper:
 
 > Boutroux, M., Thomas, E., Chin, W. H., & Peter, H. (2026). theBIGbam: Compression and interactive exploration of large-scale sequencing alignments with circular mapping support. *Bioinformatics*, *42*(Supplement_2), btag459. https://doi.org/10.1093/bioinformatics/btag459
+
+In addition, if you use the gene map visualization, do not forget to cite the amazing tool [DNA Features Viewer]([DNA Features Viewer &mdash; DnaFeaturesViewer 3.1.5 documentation](https://edinburgh-genome-foundry.github.io/DnaFeaturesViewer/)).
 
 ---
 
