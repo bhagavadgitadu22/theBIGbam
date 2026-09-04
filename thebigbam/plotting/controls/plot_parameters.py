@@ -12,10 +12,20 @@ from bokeh.models.widgets import Button, CheckboxGroup, RadioButtonGroup, Select
 
 from ..shared.defaults import (
     AUTOCOMPLETE_LIMIT,
+    DEFAULT_GENEMAP_HEIGHT,
     DEFAULT_GENEMAP_WINDOW,
+    DEFAULT_MAG_MAX_DOTS,
+    DEFAULT_MAG_ORDER_DIRECTION,
     DEFAULT_MAX_BASE_RESOLUTION,
+    DEFAULT_MAX_SAMPLES,
+    DEFAULT_MIN_COVERAGE_FREQUENCY,
+    DEFAULT_SAMPLE_ORDER_DIRECTION,
+    DEFAULT_SEQUENCE_HEIGHT,
     DEFAULT_SEQUENCE_WINDOW,
+    DEFAULT_SUBPLOT_HEIGHT,
+    DEFAULT_TRANSLATED_SEQUENCE_HEIGHT,
 )
+from ..shared.styles import panel_control_row
 from .parameter_options import ParameterOptionCatalog
 from .searchable_select import SearchableSelect, decode_search_request
 
@@ -98,7 +108,14 @@ def build_plot_parameter_controls(
     plotting_params_header = row(plotting_params_title, sizing_mode="stretch_width", align="center")
 
     ## Plotting parameters useful in both views
-    min_coverage_freq_input = Spinner(value=0.0, low=0.0, high=1.0, step=0.01, width=100, margin=(0, 2, 0, 0))
+    min_coverage_freq_input = Spinner(
+        value=DEFAULT_MIN_COVERAGE_FREQUENCY,
+        low=0.0,
+        high=1.0,
+        step=0.01,
+        width=100,
+        margin=(0, 2, 0, 0),
+    )
     min_coverage_freq_label = Div(text="Minimum frequency for coverage-related features", margin=(5, 0, 5, 5))
     min_coverage_freq_row = row(
         min_coverage_freq_input, min_coverage_freq_label, sizing_mode="stretch_width", margin=(0, 0, 5, 0)
@@ -142,19 +159,30 @@ def build_plot_parameter_controls(
     )
 
     # Subsection: Plot heights
-    genemap_height_input = Spinner(value=100, low=10, high=1000, step=10, width=100, margin=(0, 2, 0, 0))
+    genemap_height_input = Spinner(
+        value=DEFAULT_GENEMAP_HEIGHT, low=10, high=1000, step=10, width=100, margin=(0, 2, 0, 0)
+    )
     genemap_height_label = Div(text="Of gene map (px)", margin=(5, 0, 5, 5))
     genemap_height_row = row(
         genemap_height_input, genemap_height_label, sizing_mode="stretch_width", margin=(0, 0, 5, 0)
     )
 
-    sequence_height_input = Spinner(value=50, low=10, high=1000, step=10, width=100, margin=(0, 2, 0, 0))
+    sequence_height_input = Spinner(
+        value=DEFAULT_SEQUENCE_HEIGHT, low=10, high=1000, step=10, width=100, margin=(0, 2, 0, 0)
+    )
     sequence_height_label = Div(text="Of nucleotide sequence (px)", margin=(5, 0, 5, 5))
     sequence_height_row = row(
         sequence_height_input, sequence_height_label, sizing_mode="stretch_width", margin=(0, 0, 5, 0)
     )
 
-    translated_sequence_height_input = Spinner(value=50, low=10, high=1000, step=10, width=100, margin=(0, 2, 0, 0))
+    translated_sequence_height_input = Spinner(
+        value=DEFAULT_TRANSLATED_SEQUENCE_HEIGHT,
+        low=10,
+        high=1000,
+        step=10,
+        width=100,
+        margin=(0, 2, 0, 0),
+    )
     translated_sequence_height_label = Div(text="Of translated sequence (px)", margin=(5, 0, 5, 5))
     translated_sequence_height_row = row(
         translated_sequence_height_input,
@@ -163,7 +191,9 @@ def build_plot_parameter_controls(
         margin=(0, 0, 5, 0),
     )
 
-    subplot_height_input = Spinner(value=100, low=10, high=1000, step=10, width=100, margin=(0, 2, 0, 0))
+    subplot_height_input = Spinner(
+        value=DEFAULT_SUBPLOT_HEIGHT, low=10, high=1000, step=10, width=100, margin=(0, 2, 0, 0)
+    )
     subplot_height_label = Div(text="Per feature plot (px)", margin=(5, 0, 5, 5))
     subplot_height_row = row(subplot_height_input, subplot_height_label, sizing_mode="stretch_width")
 
@@ -210,7 +240,9 @@ def build_plot_parameter_controls(
         sizing_mode="stretch_width",
         margin=(0, 2, 0, 2),
     )
-    mag_params_direction = RadioButtonGroup(labels=["↑", "↓"], active=1, width=60, margin=(0, 0, 0, 2))
+    mag_params_direction = RadioButtonGroup(
+        labels=["↑", "↓"], active=DEFAULT_MAG_ORDER_DIRECTION, width=60, margin=(0, 0, 0, 2)
+    )
     mag_params_controls_row = row(
         mag_params_category_select,
         mag_params_metric_select,
@@ -231,7 +263,7 @@ def build_plot_parameter_controls(
     # A Panel component can't be a child of bokeh's native row() (it expects
     # Bokeh model children), so this uses pn.Row instead — same pattern as
     # sample_section above, which mixes bokeh Divs with a SearchableSelect.
-    mag_params_sort_sample_row = pn.Row(
+    mag_params_sort_sample_row = panel_control_row(
         mag_params_sort_sample_label, mag_params_sort_sample_select, sizing_mode="stretch_width", margin=(5, 10, 0, 0)
     )
     mag_params_sort_sample_row.visible = False
@@ -247,7 +279,9 @@ def build_plot_parameter_controls(
 
     mag_params_sort_sample_select.param.watch(_on_sort_sample_search, "search_request")
 
-    mag_track_max_dots_input = Spinner(value=1000, low=1, step=100, width=100, margin=(0, 2, 0, 0))
+    mag_track_max_dots_input = Spinner(
+        value=DEFAULT_MAG_MAX_DOTS, low=1, step=100, width=100, margin=(0, 2, 0, 0)
+    )
     mag_track_max_dots_label = Div(text="Maximum number of points on MAG track", margin=(5, 0, 5, 5))
     mag_track_max_dots_row = row(
         mag_track_max_dots_input, mag_track_max_dots_label, sizing_mode="stretch_width", margin=(5, 10, 0, 0)
@@ -290,7 +324,9 @@ def build_plot_parameter_controls(
     )
     sample_params_header.visible = False  # Only shown in All Samples mode
 
-    max_samples_input = Spinner(value=20, low=1, high=500, step=5, width=100, margin=(0, 2, 0, 0))
+    max_samples_input = Spinner(
+        value=DEFAULT_MAX_SAMPLES, low=1, high=500, step=5, width=100, margin=(0, 2, 0, 0)
+    )
     max_samples_input.name = "benchmark-max-samples"
     max_samples_label = Div(text="Max number of samples plotted", margin=(5, 0, 5, 5))
     max_samples_row = row(max_samples_input, max_samples_label, sizing_mode="stretch_width", margin=(5, 0, 0, 0))
@@ -324,7 +360,9 @@ def build_plot_parameter_controls(
         sizing_mode="stretch_width",
         margin=(0, 2, 0, 2),
     )
-    sample_order_direction = RadioButtonGroup(labels=["↑", "↓"], active=0, width=60, margin=(0, 0, 0, 2))
+    sample_order_direction = RadioButtonGroup(
+        labels=["↑", "↓"], active=DEFAULT_SAMPLE_ORDER_DIRECTION, width=60, margin=(0, 0, 0, 2)
+    )
     sample_order_controls_row = row(
         sample_order_category_select,
         sample_order_metric_select,

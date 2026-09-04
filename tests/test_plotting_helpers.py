@@ -182,8 +182,9 @@ def test_mag_download_callback_resolves_mag_from_contig(monkeypatch):
     assert downloads["mag_metrics"].filename == "m_from_contig_in_s1_mag_metrics.csv"
 
 
-def test_browser_timing_relay_is_inert_when_disabled():
+def test_browser_timing_relay_still_exposes_paint_boundary_when_disabled():
     relay = BrowserTimingRelay(False)
     relay.send("view_change")
-    assert relay.state == {}
-    assert relay.ping.value == ""
+    assert relay.ping.name == "benchmark-render-ping"
+    assert relay.ack.name == "benchmark-render-ack"
+    assert relay.ping.value.startswith("view_change_")

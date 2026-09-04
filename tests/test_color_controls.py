@@ -124,10 +124,11 @@ def test_color_rule_fields_use_shared_proportional_layout():
     assert row["color_picker"].css_classes == ["responsive-action", "color-picker-field"]
     assert row["minus_btn"].css_classes == ["responsive-action", "color-remove"]
     assert row["row_widget"].css_classes == [
-        "control-row",
         "responsive-control-row",
         "coloring-row",
+        "control-row",
     ]
+    assert row["row_widget"].styles["gap"] == "4px"
     assert controls.template_select.css_classes == ["sidebar-field"]
     assert controls.template_select.margin == 0
     assert controls.feature_label_select.css_classes == ["sidebar-field"]

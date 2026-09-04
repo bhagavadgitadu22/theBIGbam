@@ -11,7 +11,7 @@ from bokeh.models import ColumnDataSource, CustomJSTickFormatter, HoverTool, Ran
 from bokeh.models.callbacks import CustomJS
 from bokeh.plotting import figure as bk_figure
 
-from ..shared.styles import panel_stylesheet
+from ..shared.styles import panel_control_row, panel_stylesheet
 
 
 class FilterVisualizations:
@@ -264,7 +264,7 @@ class FilterVisualizations:
         )
 
         pane = pn.Column(
-            pn.Row(log_x_btn, log_y_btn, margin=0),
+            panel_control_row(log_x_btn, log_y_btn, margin=0),
             hist_pane,
             sizing_mode="stretch_width",
             margin=0,

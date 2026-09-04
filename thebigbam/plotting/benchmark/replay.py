@@ -175,6 +175,30 @@ def click_css(page: Page, selector: str) -> None:
     page.locator(selector).locator("button").first.click()
 
 
+def render_ack(page: Page) -> str:
+    """Return the last browser-paint acknowledgement, if the app exposes one."""
+    install_safe_model_lookup(page)
+    return page.evaluate(
+        """() => {
+            const model = globalThis.__thebigbam_model_by_name('benchmark-render-ack');
+            return model ? model.value : '';
+        }"""
+    )
+
+
+def wait_for_render_ack(page: Page, previous: str, timeout_ms: int) -> str:
+    """Wait until the browser has painted a patch produced after ``previous``."""
+    page.wait_for_function(
+        """previous => {
+            const model = globalThis.__thebigbam_model_by_name('benchmark-render-ack');
+            return model && model.value && model.value !== previous;
+        }""",
+        arg=previous,
+        timeout=timeout_ms,
+    )
+    return render_ack(page)
+
+
 def wait_sidebar(page: Page, timeout_ms: int) -> None:
     # Let the browser send the event, then wait until any serialized transition
     # has completed. The final quiet window also covers very fast operations for
@@ -401,9 +425,18 @@ def replay_action(
     elif action not in {"apply_filters", "apply_plot"}:
         perform_semantic_action(page, action, step["details"], timeout_ms)
     elif action == "apply_filters":
+        previous_ack = render_ack(page)
         click_css(page, ".benchmark-apply-filters")
+        wait_for_render_ack(page, previous_ack, timeout_ms)
     elif action == "apply_plot":
+        previous_ack = render_ack(page)
         click_css(page, ".benchmark-apply-plot")
+        wait_for_render_ack(page, previous_ack, timeout_ms)
+        # Panel may construct nested Bokeh views after the acknowledgement's
+        # animation frames. Give those views a short bounded settling window;
+        # correctness comes from the server-labelled acknowledgement rather
+        # than brittle DOM details hidden inside component shadow roots.
+        page.wait_for_timeout(750)
     return state
 
 

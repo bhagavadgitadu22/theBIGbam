@@ -74,8 +74,8 @@ def test_drawer_toggles_stay_on_real_layout_rails():
     assert assembled.right_shell.objects[-1] is assembled.right_rail
     assert assembled.left_rail.objects[-1] is left_toggle
     assert assembled.right_rail.objects[-1] is right_toggle
-    assert assembled.placeholder not in assembled.layout.objects
-    assert assembled.placeholder in assembled.layout.objects[1].objects
+    assert assembled.placeholder is assembled.layout.objects[1]
+    assert assembled.placeholder.css_classes == ["main-right", "plot-area"]
 
     left_toggle.clicks += 1
     right_toggle.clicks += 1

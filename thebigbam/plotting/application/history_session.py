@@ -12,11 +12,12 @@ from bokeh.models import Button as BokehButton
 from bokeh.models import CustomJS, Div
 
 from ..settings.controls import save_confirmation_js
-from ..settings.history import (
-    HistoryEntry,
-    SessionHistory,
-    history_description_lines,
-    history_diff_lines,
+from ..settings.history import HistoryEntry, SessionHistory
+from ..settings.history_descriptions import (
+    HistoryDescriptionContext,
+    HistoryDescriptionLine,
+    canonical_history_description_lines,
+    diff_description_lines,
 )
 from ..settings.persistence import save_session_document
 from ..shared.styles import (
@@ -45,12 +46,17 @@ class HistorySession:
     rows_by_id: dict[str, Any]
     actions_by_id: dict[str, str]
     apply_steps_by_id: dict[str, int]
+    description_lines_by_id: dict[str, tuple[HistoryDescriptionLine, ...]]
+    description_context: HistoryDescriptionContext
 
     def append(
         self, action: str, settings: dict[str, Any], *, apply_step: int | None = None
     ) -> HistoryEntry:
         previous_ids = {item.id for item in self.history.entries}
         entry = self.history.append(action, settings)
+        self.description_lines_by_id[entry.id] = canonical_history_description_lines(
+            entry, self.description_context
+        )
         retained_ids = {item.id for item in self.history.entries}
         expired = previous_ids - retained_ids
         for expired_id in expired:
@@ -73,7 +79,11 @@ class HistorySession:
         self.rows_by_id.clear()
         self.actions_by_id.clear()
         self.apply_steps_by_id.clear()
+        self.description_lines_by_id.clear()
         for entry in self.history.entries:
+            self.description_lines_by_id[entry.id] = canonical_history_description_lines(
+                entry, self.description_context
+            )
             row = self._entry_row(entry)
             self.rows_by_id[entry.id] = row
             self.actions_by_id[entry.id] = entry.action
@@ -83,10 +93,6 @@ class HistorySession:
     @staticmethod
     def _empty_row() -> Any:
         return pn.pane.Markdown("_No entries yet._", margin=(0, 5))
-
-    @staticmethod
-    def _is_empty(content: Any) -> bool:
-        return len(content.objects) == 1 and getattr(content.objects[0], "object", None) == "_No entries yet._"
 
     def _content_for(self, action: str) -> Any:
         return self.filter_entries if action == "apply_filters" else self.plot_entries
@@ -131,28 +137,33 @@ class HistorySession:
         )
         return bool(checkbox.value)
 
+    def _description_lines(self, entry: HistoryEntry) -> tuple[HistoryDescriptionLine, ...]:
+        lines = self.description_lines_by_id.get(entry.id)
+        if lines is None:
+            lines = canonical_history_description_lines(entry, self.description_context)
+            self.description_lines_by_id[entry.id] = lines
+        return lines
+
     def _description_cell(self, entry: HistoryEntry, previous: HistoryEntry | None) -> Any:
+        current_lines = self._description_lines(entry)
         lines = (
-            history_diff_lines(previous, entry)
+            diff_description_lines(
+                self._description_lines(previous) if previous is not None else (),
+                current_lines,
+            )
             if self._short_descriptions(entry.action)
-            else history_description_lines(entry)
+            else tuple(line for line in current_lines if not line.default)
         )
-        panes = []
+        rendered_lines = []
         for line in lines:
             escaped = html.escape(line.text)
             displayed = f"<s>{escaped}</s>" if line.removed else escaped
-            panes.append(
-                pn.pane.HTML(
-                    f'<div class="history-description-line" title="{html.escape(line.text, quote=True)}">'
-                    f"{displayed}</div>",
-                    sizing_mode="stretch_width",
-                    margin=0,
-                    css_classes=["history-description-item"],
-                    stylesheets=list(self.drawer.stylesheets),
-                )
+            rendered_lines.append(
+                f'<div class="history-description-line" title="{html.escape(line.text, quote=True)}">'
+                f"{displayed}</div>"
             )
-        return pn.Column(
-            *panes,
+        return pn.pane.HTML(
+            "".join(rendered_lines),
             sizing_mode="stretch_width",
             margin=0,
             css_classes=["history-description"],
@@ -224,6 +235,7 @@ class HistorySession:
         row = self.rows_by_id.pop(entry_id, None)
         action = self.actions_by_id.pop(entry_id, None)
         self.apply_steps_by_id.pop(entry_id, None)
+        self.description_lines_by_id.pop(entry_id, None)
         if row is None or action is None:
             return
         if refresh:
@@ -239,6 +251,7 @@ def build_history_session(
     toggle_stylesheet: Any | None = None,
     settings_save_controls: Any | None = None,
     initial_entries: Iterable[HistoryEntry] = (),
+    description_context: HistoryDescriptionContext | None = None,
 ) -> HistorySession:
     history = SessionHistory(os.path.basename(db_path))
     filter_entries = pn.Column(
@@ -380,6 +393,8 @@ def build_history_session(
         {},
         {},
         {},
+        {},
+        description_context or HistoryDescriptionContext(),
     )
     filter_short_descriptions.param.watch(
         lambda _event: session._refresh_action("apply_filters"), "value"

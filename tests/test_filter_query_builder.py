@@ -89,13 +89,54 @@ def test_expression_service_caches_compilation_and_count_queries():
     assert first == second
     assert first is not None
     assert (first.pair_count, first.contig_count, first.sample_count) == (2, 1, 2)
-    assert first.compiled.sql == "SELECT Contig_id, Sample_id FROM _thebigbam_filter_result"
+    assert first.compiled.sql.startswith('SELECT Contig_id, Sample_id FROM "_thebigbam_filter_')
     assert first.compiled.parameters == ()
     assert repository.query_count == 1
     service.invalidate()
     service.evaluate(expression)
+    assert repository.query_count == 1
+    connection.close()
+
+
+def test_expression_service_reuses_an_older_filter_snapshot():
+    connection = _database()
+    repository = FilteringRepository(connection)
+    service = FilterExpressionService(repository, _builder(), has_mags=False)
+    narrow = FilterExpression(
+        (FilterSection((FilterPredicate("Contig", "Contig_length", ">", 100),)),)
+    )
+    broad = FilterExpression(
+        (FilterSection((FilterPredicate("Contig", "Contig_length", ">", 50),)),)
+    )
+
+    first = service.evaluate(narrow)
+    service.invalidate()
+    service.evaluate(broad)
+    service.invalidate()
+    restored = service.evaluate(narrow)
+
+    assert restored == first
     assert repository.query_count == 2
     connection.close()
+
+
+def test_scaled_metric_filter_uses_compact_raw_table():
+    builder = FilterQueryBuilder(
+        {"Coverage": {"columns": {"Coverage_mean": {"type": "numeric"}}}},
+        {"Coverage_mean": 10000},
+        has_samples=True,
+    )
+
+    compiled = builder.compile(
+        FilterExpression(
+            (FilterSection((FilterPredicate("Coverage", "Coverage_mean", ">", 12.5),)),)
+        )
+    )
+
+    assert compiled is not None
+    assert "FROM Coverage v" in compiled.sql
+    assert "Explicit_coverage" not in compiled.sql
+    assert compiled.parameters == (125000,)
 
 
 @pytest.mark.parametrize(
@@ -103,7 +144,7 @@ def test_expression_service_caches_compilation_and_count_queries():
     (
         ("Sample", "Sample_name", {"type": "text"}, "FROM Sample s"),
         ("MAG", "MAG_name", {"type": "text"}, "FROM MAG mg"),
-        ("Coverage", "Mean_coverage", {"type": "numeric"}, "FROM Explicit_coverage v"),
+        ("Coverage", "Coverage_mean", {"type": "numeric"}, "FROM Coverage v"),
         ("MAG coverage", "Mean_coverage", {"type": "numeric"}, "FROM Explicit_coverage_per_MAG v"),
         (
             "Annotations",

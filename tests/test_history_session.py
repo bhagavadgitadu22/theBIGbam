@@ -6,6 +6,7 @@ from bokeh.models import Div
 
 from thebigbam.plotting.application.history_session import build_history_session
 from thebigbam.plotting.settings.history import HistoryEntry
+from thebigbam.plotting.settings.history_descriptions import HistoryDescriptionLine
 
 
 def test_history_row_has_restore_and_coloring_style_minus_actions():
@@ -166,7 +167,7 @@ def test_history_description_uses_safe_full_text_title_without_html_injection():
         },
     )
 
-    line_html = session.plot_entries.objects[0].objects[0].objects[2].object
+    line_html = session.plot_entries.objects[0].objects[0].object
     assert 'class="history-description-line"' in line_html
     assert "&lt;script&gt;alert(1)&lt;/script&gt;" in line_html
     assert "<script>" not in line_html
@@ -192,6 +193,30 @@ def test_append_updates_only_affected_section_and_preserves_row_identity():
     assert session.rows_by_id[first_plot.id] is first_plot_row
 
 
+def test_description_mode_refresh_reuses_cached_canonical_lines(monkeypatch):
+    calls = []
+
+    def describe(entry, _context):
+        calls.append(entry.id)
+        return (HistoryDescriptionLine("selection.contig", "Selection · Contig: c1"),)
+
+    monkeypatch.setattr(
+        "thebigbam.plotting.application.history_session.canonical_history_description_lines",
+        describe,
+    )
+    session = build_history_session(
+        db_path="example.db",
+        restore_entry=lambda _entry: None,
+        stylesheet="",
+    )
+    entry = session.append("apply_plot", {"selection": {"contig": "c1"}})
+
+    session.plot_short_descriptions.value = False
+    session.plot_short_descriptions.value = True
+
+    assert calls == [entry.id]
+
+
 def test_description_mode_switches_between_diff_and_complete_and_remove_recomputes():
     session = build_history_session(
         db_path="example.db",
@@ -201,17 +226,18 @@ def test_description_mode_switches_between_diff_and_complete_and_remove_recomput
     first = session.append("apply_plot", {"selection": {"contig": "c1"}})
     second = session.append("apply_plot", {"selection": {"contig": "c2"}})
 
-    second_line = session.rows_by_id[second.id].objects[0].objects[0].object
-    assert "c1 → c2" in second_line
+    second_line = session.rows_by_id[second.id].objects[0].object
+    assert "c2" in second_line
+    assert "c1 → c2" not in second_line
 
     session.plot_short_descriptions.value = False
-    second_line = session.rows_by_id[second.id].objects[0].objects[0].object
+    second_line = session.rows_by_id[second.id].objects[0].object
     assert "c1 → c2" not in second_line
     assert "c2" in second_line
 
     session.plot_short_descriptions.value = True
     session._remove(first.id)
-    second_line = session.rows_by_id[second.id].objects[0].objects[0].object
+    second_line = session.rows_by_id[second.id].objects[0].object
     assert "c1 → c2" not in second_line
     assert "c2" in second_line
 

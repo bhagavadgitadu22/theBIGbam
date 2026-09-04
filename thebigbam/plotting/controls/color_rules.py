@@ -9,7 +9,7 @@ import panel as pn
 from bokeh.models import Div
 from bokeh.models.widgets import ColorPicker, Select, Spinner
 
-from ..shared.styles import panel_stylesheet
+from ..shared.styles import panel_control_row, panel_stylesheet
 from .distinct_value_select import build_distinct_value_select
 from .searchable_select import SearchableSelect
 
@@ -173,7 +173,7 @@ def build_color_rule_controls(
             css_classes=["responsive-action", "color-remove"],
         )
 
-        row_widget = pn.Row(
+        row_widget = panel_control_row(
             qualifier_select,
             operator_select,
             initial_input,
@@ -182,7 +182,6 @@ def build_color_rule_controls(
             sizing_mode="stretch_width",
             margin=(2, 0, 2, 0),
             css_classes=[
-                "control-row",
                 "responsive-control-row",
                 "coloring-row",
             ],

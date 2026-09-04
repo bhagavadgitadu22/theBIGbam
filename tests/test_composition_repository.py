@@ -6,6 +6,7 @@ import pytest
 from thebigbam.plotting.models.composition import MagCompositionRequest, MagOrdering
 from thebigbam.plotting.repositories.composition import CompositionRepository, MagContext
 from thebigbam.plotting.services.composition import CompositionDataService
+from thebigbam.plotting.shared.data_cache import SessionDataCache
 
 
 def test_repository_validates_contigs_and_optional_samples():
@@ -46,6 +47,35 @@ def test_repository_filters_orders_and_limits_mag_samples():
 
     assert rows == [(2, "alpha")]
     connection.close()
+
+
+def test_mag_sample_order_values_are_reused_across_direction_changes():
+    class Repository:
+        order_loads = 0
+
+        def mag_samples(self, _mag_id):
+            return [(1, "alpha"), (2, "beta"), (3, "gamma")]
+
+        def mag_sample_order_values(self, _rows, _mag_name, _ordering):
+            self.order_loads += 1
+            return {1: 20, 2: 10, 3: 30}
+
+    repository = Repository()
+    cache = SessionDataCache()
+    service = CompositionDataService(object(), repository, cache=cache)
+    base = dict(allowed_samples=None, max_samples=2, mag_name="m7")
+    ascending = SimpleNamespace(
+        **base,
+        sample_ordering=SimpleNamespace(source="Coverage", metric="Depth", ascending=True),
+    )
+    descending = SimpleNamespace(
+        **base,
+        sample_ordering=SimpleNamespace(source="Coverage", metric="Depth", ascending=False),
+    )
+
+    assert service.ordered_mag_samples(ascending, 7) == [(2, "beta"), (1, "alpha")]
+    assert service.ordered_mag_samples(descending, 7) == [(3, "gamma"), (1, "alpha")]
+    assert repository.order_loads == 1
 
 
 def test_mag_context_projects_named_genome_members_without_database_lookup():

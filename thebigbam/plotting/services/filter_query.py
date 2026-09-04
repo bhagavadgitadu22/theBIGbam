@@ -22,6 +22,12 @@ SOURCE_TABLES = {
     "Termini": "Explicit_phage_mechanisms",
 }
 MAG_CATEGORIES = {"MAG", "MAG coverage", "MAG misassembly", "MAG microdiversity"}
+RAW_METRIC_TABLES = {
+    "Coverage": "Coverage",
+    "Misassembly": "Misassembly",
+    "Microdiversity": "Microdiversity",
+    "Side misassembly": "Side_misassembly",
+}
 
 
 class FilterQueryBuilder:
@@ -102,7 +108,10 @@ class FilterQueryBuilder:
             except (TypeError, ValueError):
                 return None
         encoding = self.filter_encode.get(predicate.column)
-        if encoding and not is_bool and column_type == "numeric" and predicate.category in ("Contig", "Sample", "MAG"):
+        if encoding and not is_bool and column_type == "numeric" and (
+            predicate.category in ("Contig", "Sample", "MAG")
+            or predicate.category in RAW_METRIC_TABLES
+        ):
             value = round(value * encoding)
         return operator, value, info
 
@@ -165,6 +174,13 @@ class FilterQueryBuilder:
                 "JOIN MAG mg ON mg.MAG_name = v.MAG_name "
                 "JOIN MAG_contigs_association mca ON mca.MAG_id = mg.MAG_id "
                 "JOIN Contig c ON c.Contig_id = mca.Contig_id "
+                f'WHERE v."{column}" {operator} ?'
+            )
+        elif predicate.category in RAW_METRIC_TABLES:
+            raw_source = RAW_METRIC_TABLES[predicate.category]
+            sql = (
+                "SELECT DISTINCT v.Contig_id, v.Sample_id "
+                f"FROM {raw_source} v "
                 f'WHERE v."{column}" {operator} ?'
             )
         else:

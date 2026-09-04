@@ -1,4 +1,5 @@
 import time
+from dataclasses import replace
 
 from bokeh.models import Range1d
 
@@ -199,7 +200,31 @@ def build_mag_plot(conn, request: MagCompositionRequest):
     profiler = request.profiler
     with phase_timings.phase("repository"):
         with profile_phase(profiler, "mag_context"):
-            context = repository.mag(request)
+            ordering = request.ordering
+            context_key = (
+                "mag_context", request.mag_name, ordering.source, ordering.metric,
+                ordering.ascending, ordering.sample_name,
+            )
+            hit = False
+            if request.data_cache is not None:
+                hit, base_context = request.data_cache.get(context_key)
+            if not hit:
+                base_context = repository.mag(replace(request, xstart=None, xend=None, focus_contig=None))
+                if request.data_cache is not None:
+                    request.data_cache.put(context_key, base_context)
+            if profiler is not None:
+                profiler.cache("mag_context", hit)
+            xstart, xend = request.xstart, request.xend
+            if request.focus_contig is not None:
+                focused = next(
+                    ((length, offset) for name, length, offset in base_context.members
+                     if name == request.focus_contig),
+                    None,
+                )
+                if focused is not None:
+                    length, offset = focused
+                    xstart, xend = offset + 1, offset + length
+            context = replace(base_context, xstart=xstart, xend=xend)
     members = context.members
     mag_members = context.feature_members
     total_len = context.total_length
@@ -220,7 +245,9 @@ def build_mag_plot(conn, request: MagCompositionRequest):
     if mag_track_colors:
         try:
             with profile_phase(profiler, "mag_overview_retrieval"):
-                dot_xs, dot_colors, dot_total = MagOverviewService(MagOverviewRepository(conn)).annotation_dots(
+                dot_xs, dot_colors, dot_total = MagOverviewService(
+                    MagOverviewRepository(conn), cache=request.data_cache, profiler=profiler
+                ).annotation_dots(
                     mag_members, mag_track_colors, max_track_dots
                 )
             if dot_xs:

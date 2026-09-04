@@ -43,6 +43,19 @@ def test_session_cache_is_bounded_and_records_invalidation_reason():
     assert stats.last_invalidation == "filter_change"
 
 
+def test_session_cache_preserves_selected_namespaces_on_invalidation():
+    cache = SessionDataCache()
+    cache.put(("mag_context", "m1"), "context")
+    cache.put(("mag_overview", "positions"), "annotations")
+    cache.put(("feature_data", "m1"), "features")
+
+    cache.invalidate("filter_change", preserve_prefixes=("mag_context", "mag_overview"))
+
+    assert cache.get(("mag_context", "m1")) == (True, "context")
+    assert cache.get(("mag_overview", "positions")) == (True, "annotations")
+    assert cache.get(("feature_data", "m1")) == (False, None)
+
+
 def test_all_samples_plain_data_cache_avoids_repeated_repository_work():
     repository = EmptyRepository()
     cache = SessionDataCache()

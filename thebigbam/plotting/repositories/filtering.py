@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+import time
+from collections import OrderedDict
 from typing import Any
 
 import duckdb
@@ -11,9 +15,39 @@ from ..shared.defaults import AUTOCOMPLETE_LIMIT
 
 
 class FilteringRepository:
-    def __init__(self, connection) -> None:
+    def __init__(self, connection, *, enable_timing: bool = False, result_cache_size: int = 8) -> None:
         self.connection = connection
+        self.enable_timing = enable_timing
+        self.result_cache_size = result_cache_size
         self.query_count = 0
+        self.last_filter_phases: dict[str, float] = {}
+        self._filter_tables: OrderedDict[str, None] = OrderedDict()
+
+    @staticmethod
+    def _filter_table(compiled: CompiledFilter) -> str:
+        payload = json.dumps(
+            [compiled.sql, list(compiled.parameters)], sort_keys=True, default=str
+        ).encode()
+        return f"_thebigbam_filter_{hashlib.sha256(payload).hexdigest()[:16]}"
+
+    def _phase(self, name: str, started: float) -> None:
+        elapsed = time.perf_counter() - started
+        self.last_filter_phases[name] = elapsed
+        if self.enable_timing:
+            print(f"[timing] Filter phase {name}: {elapsed:.3f}s", flush=True)
+
+    def reuse_filter_result(self, result: FilterResult | None) -> bool:
+        """Keep repository and service LRU order aligned for a cached snapshot."""
+        if result is None:
+            return True
+        prefix = 'SELECT Contig_id, Sample_id FROM "'
+        if not result.compiled.sql.startswith(prefix):
+            return False
+        table = result.compiled.sql[len(prefix) :].removesuffix('"')
+        if table not in self._filter_tables:
+            return False
+        self._filter_tables.move_to_end(table)
+        return True
 
     def _values(self, sql, parameters=()):
         self.query_count += 1
@@ -330,32 +364,44 @@ class FilteringRepository:
     def evaluate(self, compiled: CompiledFilter, *, has_mags: bool) -> FilterResult:
         parameters = list(compiled.parameters)
         materialized = compiled
+        self.last_filter_phases = {}
         try:
+            table = self._filter_table(compiled)
+            started = time.perf_counter()
             self.query_count += 1
             # The same applied relation feeds counts and every availability
             # dropdown. Materialize it once per filter revision instead of
             # re-running a potentially expensive annotation/MAG expression
             # for each consumer.
             self.connection.execute(
-                f"CREATE OR REPLACE TEMP TABLE _thebigbam_filter_result AS {compiled.sql}",
+                f'CREATE TEMP TABLE IF NOT EXISTS "{table}" AS {compiled.sql}',
                 parameters,
             )
-            materialized = CompiledFilter("SELECT Contig_id, Sample_id FROM _thebigbam_filter_result", ())
+            self._phase("materialize", started)
+            materialized = CompiledFilter(f'SELECT Contig_id, Sample_id FROM "{table}"', ())
+            self._filter_tables.pop(table, None)
+            self._filter_tables[table] = None
+            while len(self._filter_tables) > self.result_cache_size:
+                expired, _ = self._filter_tables.popitem(last=False)
+                self.connection.execute(f'DROP TABLE IF EXISTS "{expired}"')
+            started = time.perf_counter()
             pair_count, contig_count, sample_count = (
                 self.connection
                 .execute(
                     "SELECT COUNT(*), COUNT(DISTINCT Contig_id), COUNT(DISTINCT Sample_id) "
-                    "FROM _thebigbam_filter_result",
+                    f'FROM "{table}"',
                 )
                 .fetchone()
             )
+            self._phase("counts", started)
             mag_pair_count = None
             if has_mags:
+                started = time.perf_counter()
                 self.query_count += 1
                 mag_pair_count = (
                     self.connection
                     .execute(
-                        "WITH _f AS (SELECT * FROM _thebigbam_filter_result) SELECT COUNT(*) FROM ("
+                        f'WITH _f AS (SELECT * FROM "{table}") SELECT COUNT(*) FROM ('
                         "SELECT DISTINCT mg.MAG_name, _f.Sample_id FROM _f "
                         "JOIN MAG_contigs_association mca ON mca.Contig_id = _f.Contig_id "
                         "JOIN MAG mg ON mg.MAG_id = mca.MAG_id "
@@ -363,6 +409,7 @@ class FilteringRepository:
                     )
                     .fetchone()[0]
                 )
+                self._phase("mag_pairs", started)
         except duckdb.Error:
             pair_count = contig_count = sample_count = 0
             mag_pair_count = 0 if has_mags else None

@@ -7,7 +7,7 @@ from typing import Any, Callable
 import panel as pn
 from bokeh.models.widgets import Select
 
-from ..shared.styles import panel_stylesheet
+from ..shared.styles import ACTION_CONTROL_MARGIN, panel_control_row, panel_stylesheet
 
 
 class FilterSectionController:
@@ -52,19 +52,22 @@ class FilterSectionController:
                 following = rows[index + 1]
                 connector = following["and_div"]
                 if connector is None:
-                    connector = Select(options=["AND", "OR"], value="AND", height=30, margin=0)
+                    connector = Select(
+                        options=["AND", "OR"], value="AND", height=30, margin=ACTION_CONTROL_MARGIN
+                    )
                     connector.on_change("value", lambda attr, old, new: self._on_change())
                     following["and_div"] = connector
                 connector_items.append(connector)
             else:
                 connector_items.append(section["add_and_btn"])
             children.append(
-                pn.Row(
+                panel_control_row(
                     *connector_items,
                     sizing_mode="stretch_width",
                     height=30,
+                    control_gap=0,
                     margin=(3, 0, 6, 0),
-                    css_classes=["control-row", "nested-control-row", "filter-action-row"],
+                    css_classes=["nested-control-row", "filter-action-row"],
                     stylesheets=[panel_stylesheet(self._stylesheet)],
                 )
             )
@@ -73,7 +76,9 @@ class FilterSectionController:
     def _append_row(self, section: dict[str, Any], row: dict[str, Any]) -> None:
         """Append one row while preserving the existing Panel model subtree."""
         previous = section["rows"][-1]
-        connector = Select(options=["AND", "OR"], value="AND", height=30, margin=0)
+        connector = Select(
+            options=["AND", "OR"], value="AND", height=30, margin=ACTION_CONTROL_MARGIN
+        )
         connector.on_change("value", lambda attr, old, new: self._on_change())
         row["and_div"] = connector
         section["rows"].append(row)
@@ -82,23 +87,25 @@ class FilterSectionController:
             children.pop()
         children.extend(
             [
-                pn.Row(
+                panel_control_row(
                     previous["minus_btn"],
                     connector,
                     sizing_mode="stretch_width",
                     height=30,
+                    control_gap=0,
                     margin=(3, 0, 6, 0),
-                    css_classes=["control-row", "nested-control-row", "filter-action-row"],
+                    css_classes=["nested-control-row", "filter-action-row"],
                     stylesheets=[panel_stylesheet(self._stylesheet)],
                 ),
                 row["row_wrapper"],
-                pn.Row(
+                panel_control_row(
                     row["minus_btn"],
                     section["add_and_btn"],
                     sizing_mode="stretch_width",
                     height=30,
+                    control_gap=0,
                     margin=(3, 0, 6, 0),
-                    css_classes=["control-row", "nested-control-row", "filter-action-row"],
+                    css_classes=["nested-control-row", "filter-action-row"],
                     stylesheets=[panel_stylesheet(self._stylesheet)],
                 ),
             ]
@@ -116,7 +123,7 @@ class FilterSectionController:
             "add_and_btn": pn.widgets.Button(
                 name="+ Add AND/OR",
                 height=30,
-                margin=0,
+                margin=ACTION_CONTROL_MARGIN,
                 button_type="success",
                 stylesheets=[panel_stylesheet(self._stylesheet)],
                 css_classes=["action-add"],

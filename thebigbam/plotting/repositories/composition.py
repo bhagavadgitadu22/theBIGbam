@@ -114,6 +114,31 @@ class CompositionRepository:
         ).fetchall()
         return [(int(sid), name) for sid, name in rows]
 
+    def mag_sample_order_values(self, rows, mag_name, ordering):
+        """Return immutable sample ordering values for in-memory presentation sorting."""
+        if ordering.source == "Sample":
+            ids = [sid for sid, _name in rows]
+            if not ids:
+                return {}
+            placeholders = ",".join("?" for _ in ids)
+            values = self.connection.execute(
+                f'SELECT Sample_id, "{ordering.metric}" FROM Sample '
+                f"WHERE Sample_id IN ({placeholders})",
+                ids,
+            ).fetchall()
+            return {int(sid): value for sid, value in values}
+        names = [name for _sid, name in rows]
+        if not names:
+            return {}
+        placeholders = ",".join("?" for _ in names)
+        values = self.connection.execute(
+            f'SELECT Sample_name, "{ordering.metric}" FROM "{ordering.source}" '
+            f"WHERE MAG_name = ? AND Sample_name IN ({placeholders})",
+            [mag_name, *names],
+        ).fetchall()
+        id_by_name = {name: sid for sid, name in rows}
+        return {int(id_by_name[name]): value for name, value in values if name in id_by_name}
+
     def order_mag_samples(self, rows, mag_name, ordering):
         direction = "ASC" if ordering.ascending else "DESC"
         if ordering.source == "Sample":

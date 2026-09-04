@@ -49,6 +49,37 @@ def test_history_scenario_actions_validate_and_replay_semantically(tmp_path, mon
 
 
 @pytest.mark.parametrize(
+    ("action", "selector"),
+    [
+        ("apply_filters", ".benchmark-apply-filters"),
+        ("apply_plot", ".benchmark-apply-plot"),
+    ],
+)
+def test_apply_actions_wait_for_browser_paint(action, selector, monkeypatch):
+    events = []
+    monkeypatch.setattr(replay, "render_ack", lambda _page: events.append("read") or "old")
+    monkeypatch.setattr(
+        replay, "click_css", lambda _page, actual: events.append(("click", actual))
+    )
+    monkeypatch.setattr(
+        replay,
+        "wait_for_render_ack",
+        lambda _page, previous, timeout: events.append(("paint", previous, timeout))
+        or "APPLY_result_123",
+    )
+    class Page:
+        def wait_for_timeout(self, timeout):
+            events.append(("settle", timeout))
+
+    replay.replay_action(Page(), {"action": action}, {}, 1234)
+
+    expected = ["read", ("click", selector), ("paint", "old", 1234)]
+    if action == "apply_plot":
+        expected.append(("settle", 750))
+    assert events == expected
+
+
+@pytest.mark.parametrize(
     "details",
     [
         {"history_sequence": 0, "history_action": "apply_plot", "settings": {}},

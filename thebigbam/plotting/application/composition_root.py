@@ -35,6 +35,7 @@ from ..services.filter_metadata import FilterMetadataService
 from ..services.filter_query import FilterQueryBuilder
 from ..services.filtering import FilterExpressionService, FilteringAvailabilityService
 from ..settings.history import HistoryEntry
+from ..settings.history_descriptions import HistoryDescriptionContext
 from ..settings.scenario import ScenarioRecorder
 from ..shared.data_cache import SessionDataCache
 
@@ -298,7 +299,7 @@ def create_layout(
     if enable_timing:
         t_init = time.perf_counter()
     conn = duckdb.connect(db_path, read_only=True)
-    filtering_repository = FilteringRepository(conn)
+    filtering_repository = FilteringRepository(conn, enable_timing=enable_timing)
     availability_service = FilteringAvailabilityService(filtering_repository)
     widgets = build_controls(preloaded)
 
@@ -417,18 +418,34 @@ def create_layout(
         choice_snapshot = [(control, list(control.options), control.value) for control in choice_widgets]
         projection.apply()
         availability_service.invalidate()
-        data_cache.invalidate("filter_change")
+        # These namespaces depend only on immutable database content, not on
+        # the session's current availability filter.
+        data_cache.invalidate(
+            "filter_change",
+            preserve_prefixes=("mag_context", "mag_overview", "mag_samples", "mag_sample_order_values"),
+        )
         filter_projection_ref["projection"].invalidate()
         global_toggle_lock["locked"] = True
         try:
-            # Reconcile upstream selections before their dependent choices.
-            refresh_sample_options_unlocked()
-            refresh_mag_options_unlocked()
-            refresh_contig_options_unlocked()
-            # A cleared sample/MAG can broaden another list; converge once more.
-            refresh_sample_options_unlocked()
-            refresh_mag_options_unlocked()
-            refresh_contig_options_unlocked()
+            # Usually one pass is sufficient. Repeat only when projecting the
+            # new availability actually clears a selection and changes the
+            # dependent scope.
+            for _attempt in range(3):
+                before = (
+                    widgets["sample_select"].value,
+                    widgets["mag_select"].value,
+                    widgets["contig_select"].value,
+                )
+                refresh_sample_options_unlocked()
+                refresh_mag_options_unlocked()
+                refresh_contig_options_unlocked()
+                after = (
+                    widgets["sample_select"].value,
+                    widgets["mag_select"].value,
+                    widgets["contig_select"].value,
+                )
+                if after == before:
+                    break
             invalidate_section_titles()
             update_section_titles()
         except Exception:
@@ -444,6 +461,7 @@ def create_layout(
         finally:
             global_toggle_lock["locked"] = False
             doc.unhold()
+            _send_timing_ping("APPLY FILTERS")
 
     filter_panel = build_filter_panel(
         preloaded=preloaded,
@@ -842,6 +860,13 @@ def create_layout(
         toggle_stylesheet=toggle_stylesheet,
         settings_save_controls=settings_session.save_controls,
         initial_entries=initial_history,
+        description_context=HistoryDescriptionContext(
+            mag_order=(plot_parameters.mag_category.value, plot_parameters.mag_metric.value),
+            sample_order=(
+                plot_parameters.sample_order_category.value,
+                plot_parameters.sample_order_metric.value,
+            ),
+        ),
     )
     history_session_ref["session"] = history_session
     session_callbacks.attach_history(
@@ -1026,7 +1051,7 @@ def create_layout(
         has_samples=widgets["has_samples"],
         summary_carrier=summary_carrier,
         stylesheet=stylesheet,
-        timing_models=(timing_relay.ping, timing_relay.ack) if enable_timing else (),
+        timing_models=(timing_relay.ping, timing_relay.ack),
         history_drawer=history_session.drawer,
         apply_arguments=dict(
             db_path=db_path,

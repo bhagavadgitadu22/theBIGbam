@@ -9,6 +9,7 @@ from typing import Any, Callable, ClassVar, Generic, TypeVar
 
 import panel as pn
 
+from ..shared.styles import panel_control_row
 from ..shared.timing import estimate_grid_data_size, rss_mb
 from .apply_inputs import ApplyInputs, collect_apply_inputs
 
@@ -181,11 +182,21 @@ class PlotPresenter:
 
     def show_validation(self, failure: ValidationFailure) -> None:
         self._hide_action_buttons()
-        self.bindings.main_placeholder.objects = [pn.pane.HTML(f"<pre>Error: {failure.message}</pre>")]
+        self.bindings.main_placeholder.objects = [
+            pn.pane.HTML(
+                f"<pre>Error: {failure.message}</pre>",
+                css_classes=["benchmark-plot-error"],
+            )
+        ]
 
     def show_exception(self, traceback_text: str) -> None:
         self._hide_action_buttons()
-        self.bindings.main_placeholder.objects = [pn.pane.HTML(f"<pre>Error building plot:\n{traceback_text}</pre>")]
+        self.bindings.main_placeholder.objects = [
+            pn.pane.HTML(
+                f"<pre>Error building plot:\n{traceback_text}</pre>",
+                css_classes=["benchmark-plot-error"],
+            )
+        ]
 
     def bind_range_inputs(self, x_range: Any) -> None:
         """Replace the callbacks which project the visible range into position controls."""
@@ -254,7 +265,7 @@ class PlotPresenter:
         bindings.download_mag_metrics_button.visible = bool(has_samples)
         bindings.download_data_button.visible = True
         bindings.command_hint_pane.visible = False
-        return pn.Row(
+        return panel_control_row(
             pn.pane.HTML(dots_html, align="center", margin=(0, 5, 0, 0)),
             pn.Spacer(sizing_mode="stretch_width"),
             bindings.peruse_button,
@@ -270,7 +281,7 @@ class PlotPresenter:
         bindings.download_metrics_button.visible = bool(has_samples)
         bindings.download_mag_metrics_button.visible = bool(has_samples and has_mags)
         bindings.command_hint_pane.visible = False
-        return pn.Row(
+        return panel_control_row(
             pn.Spacer(sizing_mode="stretch_width"),
             bindings.peruse_button,
             bindings.download_mag_metrics_button,
@@ -297,7 +308,13 @@ class PlotPresenter:
             )
             sent_at = time.perf_counter()
         bindings.main_placeholder.objects = [
-            pn.Column(result.toolbar_row, bindings.command_hint_pane, result.grid, sizing_mode="stretch_both")
+            pn.Column(
+                result.toolbar_row,
+                bindings.command_hint_pane,
+                result.grid,
+                sizing_mode="stretch_both",
+                css_classes=["benchmark-plot-result"],
+            )
         ]
         if bindings.diagnostics.enabled:
             data_bytes, n_sources, n_models = payload

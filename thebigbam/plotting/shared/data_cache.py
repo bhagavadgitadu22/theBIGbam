@@ -41,8 +41,15 @@ class SessionDataCache:
         while len(self._values) > self.max_entries:
             self._values.popitem(last=False)
 
-    def invalidate(self, reason: str) -> None:
-        self._values.clear()
+    def invalidate(self, reason: str, preserve_prefixes: tuple[Hashable, ...] = ()) -> None:
+        if preserve_prefixes:
+            self._values = OrderedDict(
+                (key, value)
+                for key, value in self._values.items()
+                if isinstance(key, tuple) and key and key[0] in preserve_prefixes
+            )
+        else:
+            self._values.clear()
         self.invalidations += 1
         self.last_invalidation = reason
 

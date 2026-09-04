@@ -9,7 +9,7 @@ from bokeh.io import curdoc
 from bokeh.models.widgets import Select, Spinner
 
 from ..renderers.filter_distributions import FilterVisualizations
-from ..shared.styles import panel_stylesheet
+from ..shared.styles import panel_control_row, panel_stylesheet
 from .distinct_value_select import build_distinct_value_select
 from .searchable_select import SearchableSelect
 
@@ -502,7 +502,7 @@ class FilterRowFactory:
             css_classes=["responsive-action", "filter-remove"],
         )
 
-        query_row = pn.Row(
+        query_row = panel_control_row(
             category_select,
             subcategory_select,
             comparison_select,
@@ -511,7 +511,6 @@ class FilterRowFactory:
             sizing_mode="stretch_width",
             margin=(3, 0, 3, 0),
             css_classes=[
-                "control-row",
                 "responsive-control-row",
                 "filtering-row",
             ],

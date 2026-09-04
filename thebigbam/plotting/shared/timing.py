@@ -159,10 +159,8 @@ class BrowserTimingRelay:
     def __init__(self, enabled: bool) -> None:
         self.enabled = enabled
         self.state: dict[str, object] = {}
-        self.ping = TextInput(value="", visible=False)
-        self.ack = TextInput(value="", visible=False)
-        if not enabled:
-            return
+        self.ping = TextInput(name="benchmark-render-ping", value="", visible=False)
+        self.ack = TextInput(name="benchmark-render-ack", value="", visible=False)
         self.ping.js_on_change(
             "value",
             CustomJS(
@@ -190,11 +188,10 @@ class BrowserTimingRelay:
                 """,
             ),
         )
-        self.ack.on_change("value", self._on_ack)
+        if enabled:
+            self.ack.on_change("value", self._on_ack)
 
     def send(self, label: str, flow_start: float | None = None) -> None:
-        if not self.enabled:
-            return
         token = f"{label}_{time.perf_counter()}"
         self.state.clear()
         self.state.update(token=token, label=label, sent=time.perf_counter())

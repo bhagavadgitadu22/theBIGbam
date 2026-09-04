@@ -141,7 +141,7 @@ html, body {
 .history-entry-list,
 :host(.history-entry-list) {
   box-sizing: border-box;
-  max-height: 252px;
+  max-height: 500px;
   overflow-x: hidden;
   overflow-y: auto;
   scrollbar-gutter: stable;
@@ -154,21 +154,14 @@ html, body {
   box-sizing: border-box;
   gap: 0;
   min-width: 0;
-  overflow: hidden;
+  overflow-x: hidden;
+  overflow-y: visible;
   padding: 0;
   width: 100%;
 }
 
-.history-description-item,
-:host(.history-description-item) {
-  box-sizing: border-box;
-  min-width: 0;
-  overflow: hidden;
-  width: 100%;
-}
-
 .history-description-line,
-:host(.history-description-item) .history-description-line {
+:host(.history-description) .history-description-line {
   box-sizing: border-box;
   line-height: 18px;
   min-width: 0;
@@ -270,7 +263,8 @@ html, body {
 .control-row,
 :host(.control-row) {
   box-sizing: border-box;
-  gap: var(--control-gap);
+  column-gap: var(--control-gap) !important;
+  gap: var(--control-gap) !important;
   width: 100%;
 }
 
@@ -413,8 +407,13 @@ html, body {
   align-items: center;
 }
 
+/* Depending on the Panel/Bokeh model, the flex container is either the host
+   itself or an internal .bk-Row. Keep the shared sibling spacing identical
+   across both render paths. */
+.control-row > .bk-Row,
 :host(.control-row) .bk-Row {
-  gap: var(--control-gap);
+  column-gap: var(--control-gap) !important;
+  gap: var(--control-gap) !important;
 }
 
 .nested-section,

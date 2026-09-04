@@ -51,10 +51,11 @@ def test_filter_row_factory_builds_row_from_cached_column_options():
     assert result["subcategory_select"].css_classes == ["responsive-field", "filter-metric"]
     assert result["comparison_select"].css_classes == ["responsive-field", "filter-operator"]
     assert result["query_row"].css_classes == [
-        "control-row",
         "responsive-control-row",
         "filtering-row",
+        "control-row",
     ]
+    assert result["query_row"].styles["gap"] == "4px"
     assert result["query_row"].objects[3].css_classes == ["responsive-field", "filter-value"]
     assert result["dist_toggle"].width == 42
     assert result["dist_toggle"].css_classes[:2] == ["responsive-action", "filter-lookup"]

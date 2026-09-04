@@ -16,7 +16,9 @@ from thebigbam.plotting.benchmark.replay import (
     measure_memory,
     merge_changes,
     record_blocked_step,
+    render_ack,
     set_model,
+    wait_for_render_ack,
     write_results,
 )
 
@@ -65,6 +67,33 @@ def test_safe_model_lookup_skips_models_with_unset_names():
     assert "try" in scripts[0]
     assert "model.name" in scripts[0]
     assert "continue" in scripts[0]
+
+
+def test_render_ack_reads_named_browser_paint_boundary():
+    class Page:
+        def wait_for_function(self, expression, *, arg=None, timeout=None):
+            pass
+
+        def evaluate(self, expression, arg=None):
+            return "APPLY_123|paint=17.0" if "benchmark-render-ack" in expression else None
+
+    assert render_ack(Page()) == "APPLY_123|paint=17.0"
+
+
+def test_wait_for_render_ack_requires_a_new_nonempty_value():
+    calls = []
+
+    class Page:
+        def wait_for_function(self, expression, *, arg=None, timeout=None):
+            calls.append((expression, arg, timeout))
+
+        def evaluate(self, expression, arg=None):
+            return "new-ack"
+
+    assert wait_for_render_ack(Page(), "old-ack", 4321) == "new-ack"
+
+    assert "model.value !== previous" in calls[0][0]
+    assert calls[0][1:] == ("old-ack", 4321)
 
 
 def _scenario():

@@ -9,6 +9,7 @@ from bokeh.layouts import row
 from bokeh.models import Div, Spacer, Tooltip
 
 CONTROL_GAP_PX = 4
+ACTION_CONTROL_MARGIN = (0, 0, 0, CONTROL_GAP_PX)
 
 
 def right_panel_tooltip(content: str) -> Tooltip:
@@ -32,8 +33,13 @@ def bokeh_control_row(*children: Any, **params: Any) -> Any:
 
 def panel_control_row(*children: Any, **params: Any) -> pn.Row:
     """Build a Panel row whose sibling gap comes from the shared stylesheet."""
+    gap = params.pop("control_gap", CONTROL_GAP_PX)
     classes = list(params.pop("css_classes", ()))
     params["css_classes"] = [*classes, "control-row"]
+    styles = dict(params.pop("styles", {}))
+    styles.setdefault("column-gap", f"{gap}px")
+    styles.setdefault("gap", f"{gap}px")
+    params["styles"] = styles
     return pn.Row(*children, **params)
 
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from typing import Callable, Hashable
 
 from ..models.filters import FilterExpression, FilterResult
@@ -109,6 +110,7 @@ class FilterExpressionService:
         self.has_mags = has_mags
         self._expression: FilterExpression | None = None
         self._result: FilterResult | None = None
+        self._cache: OrderedDict[FilterExpression, FilterResult | None] = OrderedDict()
 
     def invalidate(self) -> None:
         self._expression = None
@@ -117,7 +119,17 @@ class FilterExpressionService:
     def evaluate(self, expression: FilterExpression) -> FilterResult | None:
         if expression == self._expression:
             return self._result
+        if expression in self._cache:
+            cached = self._cache.pop(expression)
+            if self.repository.reuse_filter_result(cached):
+                self._expression = expression
+                self._result = cached
+                self._cache[expression] = cached
+                return self._result
         compiled = self.builder.compile(expression)
         self._expression = expression
         self._result = self.repository.evaluate(compiled, has_mags=self.has_mags) if compiled else None
+        self._cache[expression] = self._result
+        while len(self._cache) > self.repository.result_cache_size:
+            self._cache.popitem(last=False)
         return self._result

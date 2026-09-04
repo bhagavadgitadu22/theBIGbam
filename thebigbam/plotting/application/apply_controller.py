@@ -43,6 +43,7 @@ class ApplyController:
         doc.hold("combine")
         print(flush=True)
         started_at = time.perf_counter()
+        outcome = "error"
         try:
             bindings.set_operation("apply/param_parse")
             bindings.diagnostics.next_generation()
@@ -56,6 +57,7 @@ class ApplyController:
                 return False
             result = self.dispatcher.render(build_result.request, started_at)
             self.plot_presenter.replace(result, started_at)
+            outcome = "result"
             return True
         except Exception:
             traceback_text = traceback.format_exc()
@@ -67,5 +69,8 @@ class ApplyController:
             if bindings.enable_timing:
                 print(f"[timing] Memory (current RSS) at APPLY end: {rss_mb():.0f} MB", flush=True)
                 bindings.timing.summary("APPLY")
-                bindings._send_timing_ping("APPLY", started_at)
+            if callable(bindings._send_timing_ping):
+                bindings._send_timing_ping(
+                    f"APPLY_{outcome}", started_at if bindings.enable_timing else None
+                )
             doc.unhold()

@@ -128,7 +128,11 @@ def assemble_layout(
     controls = pn.Column(sidebar_content, sizing_mode="stretch_height", width=400, css_classes=["left-col"])
     sidebar_content.stylesheets = [stylesheet]
     controls.stylesheets = [stylesheet]
-    placeholder = pn.Column(pn.pane.HTML(placeholder_text), sizing_mode="stretch_both", css_classes=["main-right"])
+    placeholder = pn.Column(
+        pn.pane.HTML(placeholder_text),
+        sizing_mode="stretch_both",
+        css_classes=["main-right", "plot-area"],
+    )
     left_toggle = pn.widgets.Button(
         name="◀",
         width=28,
@@ -220,11 +224,6 @@ def assemble_layout(
         css_classes=["panel-resize-rail", "panel-resize-rail-right"],
         styles={"bottom": "0", "left": "-8px", "position": "absolute", "top": "0"},
     )
-    plot_area = pn.Column(
-        placeholder,
-        sizing_mode="stretch_both",
-        css_classes=["plot-area"],
-    )
     left_shell = pn.Column(
         controls,
         left_rail,
@@ -245,7 +244,7 @@ def assemble_layout(
     )
     layout = pn.Row(
         left_shell,
-        plot_area,
+        placeholder,
         pn.pane.Bokeh(summary_carrier),
         right_shell,
         sizing_mode="stretch_both",

@@ -74,13 +74,47 @@ class CompositionDataService:
 
     def ordered_mag_samples(self, request, mag_id):
         """Apply user filtering, ordering, and limits to repository sample rows."""
-        rows = self.composition_repository.mag_samples(mag_id)
+        membership_key = ("mag_samples", mag_id)
+        if self.cache is None:
+            rows = self.composition_repository.mag_samples(mag_id)
+        else:
+            hit, cached_rows = self.cache.get(membership_key)
+            if self.profiler is not None:
+                self.profiler.cache("mag_samples", hit)
+            if hit:
+                rows = list(cached_rows)
+            else:
+                rows = self.composition_repository.mag_samples(mag_id)
+                self.cache.put(membership_key, tuple(rows))
         if request.allowed_samples is not None:
             rows = [(sid, name) for sid, name in rows if name in request.allowed_samples]
         ordering = request.sample_ordering
         if ordering.source and ordering.metric and ordering.metric != "Sample_name" and rows:
             try:
-                rows = self.composition_repository.order_mag_samples(rows, request.mag_name, ordering)
+                values_key = (
+                    "mag_sample_order_values",
+                    mag_id,
+                    ordering.source,
+                    ordering.metric,
+                )
+                if self.cache is None:
+                    values = self.composition_repository.mag_sample_order_values(rows, request.mag_name, ordering)
+                else:
+                    hit, values = self.cache.get(values_key)
+                    if self.profiler is not None:
+                        self.profiler.cache("mag_sample_order", hit)
+                    if not hit:
+                        # Load against complete membership so filter changes can
+                        # reuse the same order-independent metric snapshot.
+                        _, all_rows = self.cache.get(membership_key)
+                        values = self.composition_repository.mag_sample_order_values(
+                            list(all_rows), request.mag_name, ordering
+                        )
+                        self.cache.put(values_key, values)
+                present = [row for row in rows if values.get(row[0]) is not None]
+                missing = [row for row in rows if values.get(row[0]) is None]
+                present.sort(key=lambda row: values[row[0]], reverse=not ordering.ascending)
+                rows = present + missing
             except Exception as error:
                 print(f"Warning: Could not order samples by '{ordering.metric}': {error}", flush=True)
                 rows.sort(key=lambda row: row[1], reverse=not ordering.ascending)

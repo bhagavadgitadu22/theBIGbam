@@ -66,6 +66,13 @@ def test_sidebar_design_tokens_and_semantic_classes_share_one_stylesheet():
     assert "overflow: visible" in shell_rule
     responsive_rule = css.split(":host(.responsive-control-row) {", 1)[1].split("}", 1)[0]
     assert "flex-wrap: wrap" in responsive_rule
+    control_rule = css.split(":host(.control-row) {", 1)[1].split("}", 1)[0]
+    assert "column-gap: var(--control-gap) !important" in control_rule
+    assert "gap: var(--control-gap) !important" in control_rule
+    assert ".control-row > .bk-Row" in css
+    nested_control_rule = css.split(":host(.control-row) .bk-Row {", 1)[1].split("}", 1)[0]
+    assert "column-gap: var(--control-gap) !important" in nested_control_rule
+    assert "gap: var(--control-gap) !important" in nested_control_rule
     assert ":host(.filtering-row) {" in css
     assert ":host(.coloring-row) {" in css
     assert ":host(.filtering-row) .bk-Row" not in css
@@ -108,7 +115,7 @@ def test_sidebar_design_tokens_and_semantic_classes_share_one_stylesheet():
     color_list_rule = css.split(":host(.color-rule-list) {", 1)[1].split("}", 1)[0]
     assert "overflow-x: hidden" in color_list_rule
     assert ":host(.history-entry-list)" in css
-    assert "max-height: 252px" in css
+    assert "max-height: 500px" in css
     history_drawer_rule = css.split(":host(.history-drawer) {", 1)[1].split("}", 1)[0]
     assert "padding:" not in history_drawer_rule
     sidebar_rule = css.split(":host(.sidebar-content) {", 1)[1].split("}", 1)[0]
@@ -119,8 +126,9 @@ def test_sidebar_design_tokens_and_semantic_classes_share_one_stylesheet():
     assert "border-radius: 5px" in history_rule
     assert "padding: 5px" in history_rule
     description_rule = css.split(":host(.history-description) {", 1)[1].split("}", 1)[0]
-    description_line_rule = css.split(":host(.history-description-item) .history-description-line {", 1)[1].split("}", 1)[0]
-    assert "overflow: hidden" in description_rule
+    description_line_rule = css.split(":host(.history-description) .history-description-line {", 1)[1].split("}", 1)[0]
+    assert "overflow-x: hidden" in description_rule
+    assert "overflow-y: visible" in description_rule
     assert "text-overflow: ellipsis" in description_line_rule
     assert "white-space: nowrap" in description_line_rule
 
@@ -132,6 +140,7 @@ def test_control_row_constructors_apply_the_shared_spacing_contract():
     assert bokeh_row.spacing == CONTROL_GAP_PX
     assert bokeh_row.css_classes == ["position-row", "control-row"]
     assert panel_row.css_classes == ["history-entry", "control-row"]
+    assert panel_row.styles == {"column-gap": "4px", "gap": "4px"}
 
 
 def test_collapsible_section_header_centers_title_with_balanced_toggle_slot():

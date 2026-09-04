@@ -58,12 +58,14 @@ def test_filter_action_controls_share_vertical_geometry():
     section = controller.sections[0]
     action_row = section["column"].objects[1]
 
-    assert action_row.css_classes == ["control-row", "nested-control-row", "filter-action-row"]
+    assert action_row.css_classes == ["nested-control-row", "filter-action-row", "control-row"]
+    assert action_row.styles["column-gap"] == "0px"
+    assert action_row.styles["gap"] == "0px"
     assert action_row.height == 30
     assert section["add_and_btn"].height == 30
-    assert section["add_and_btn"].margin == 0
+    assert section["add_and_btn"].margin == (0, 0, 0, 4)
 
     section["add_and_btn"].param.trigger("clicks")
     connector = section["rows"][1]["and_div"]
     assert connector.height == 30
-    assert connector.margin == 0
+    assert connector.margin == (0, 0, 0, 4)
