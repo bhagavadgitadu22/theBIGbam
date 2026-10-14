@@ -5,8 +5,8 @@
 //! 2. Results collected in memory
 //! 3. Written to DuckDB sequentially (DuckDB is single-writer)
 //!
-//! BAM processing (95% of time) is fully parallelized.
-//! Database writing (5% of time) runs sequentially after processing completes.
+//! Per-contig feature work is parallelized. Large MAG calculations stream
+//! bounded batches to a dedicated writer while computation continues.
 
 use anyhow::{Context, Result};
 use atty::Stream;
@@ -22,7 +22,10 @@ use std::sync::Arc;
 use std::sync::mpsc::sync_channel;
 use std::thread;
 
-use crate::bam_reader::{detect_sequencing_type, process_contig_streaming, BamPhaseTimings};
+use crate::annotation_import::SequenceStore;
+use crate::bam_reader::{detect_sequencing_type, process_contig_streaming_counted, BamPhaseTimings};
+#[cfg(test)]
+use crate::bam_reader::process_contig_streaming;
 use crate::compress::{
     Run,
     add_compressed_feature_with_stats,
@@ -32,7 +35,7 @@ use crate::gc_content::{compute_gc_content_and_skew, GCParams};
 use crate::features::{CdsIndex, FeatureArrays, ModuleFlags, compute_codon_changes_from_summaries};
 use crate::parser::{parse_annotations, compute_annotation_sequences};
 use crate::types::{
-    ContigInfo, FeatureAnnotation, PackagingData, PresenceData, SequencingType, get_value_scale
+    ContigInfo, FeatureAnnotation, PackagingData, PresenceData, SequencingType
 };
 
 use crate::processing_phage_packaging::{
@@ -40,6 +43,16 @@ use crate::processing_phage_packaging::{
     is_valid_terminal_repeat, DtrRegion, PeakArea, PhageTerminiConfig,
 };
 use crate::processing_completeness::compute_all_metrics;
+
+pub mod annotation_data;
+use annotation_data::{CdsSource, DatabaseCdsSource, needs_codon_annotations};
+mod reference_blast;
+mod contig;
+mod writing;
+use writing::{SampleData, SampleIdentity, SampleWriteDetails, write_sample_payload, checkpoint_sample, MagResultVec};
+#[cfg(test)]
+use writing::{filter_failing_mags, apply_mag_filter};
+use contig::build_presence;
 
 /// Aggregation level for the processing pipeline.
 ///
@@ -110,9 +123,38 @@ struct MagGroupResult {
     mapped_reads: u64,
 }
 
+/// Public callers may supply positional metadata; pipeline maps carry actual DB IDs.
+pub trait ContigLookup: Sync { fn find(&self, name: &str) -> Option<(usize,i64)>; }
+impl ContigLookup for HashMap<&str,usize> {
+    fn find(&self,name:&str) -> Option<(usize,i64)> { self.get(name).map(|&i|(i,i as i64+1)) }
+}
+impl ContigLookup for HashMap<&str,(usize,i64)> {
+    fn find(&self,name:&str) -> Option<(usize,i64)> { self.get(name).copied() }
+}
+fn database_contig_lookup<'a>(contigs:&'a [ContigInfo], writer:&DbWriter) -> Result<HashMap<&'a str,(usize,i64)>> {
+    let mut map=HashMap::new();
+    for (index,contig) in contigs.iter().enumerate() {
+        let id=writer.get_contig_id(&contig.name).with_context(||format!("Missing DB contig ID for '{}'",contig.name))?;
+        map.insert(contig.name.as_str(),(index,id));
+        for alias in &contig.aliases { map.entry(alias.as_str()).or_insert((index,id)); }
+    }
+    Ok(map)
+}
+
 /// Contig→MAG membership mapping, built once per run from mag_contig_map + DB IDs.
 /// Maps contig_name → (mag_name, mag_id, offset_in_mag, mag_length).
 pub type MagMemberLookup = HashMap<String, (String, i64, u32, u32)>;
+
+/// Shared nucleotide search parameters for reference and candidate scopes.
+pub(crate) const BLAST_ARGS: &[&str] = &["-task", "megablast", "-word_size", "28", "-dust", "20 64 1", "-strand", "both", "-evalue", "1e-10", "-num_threads", "1"];
+pub(crate) const BLAST_PARAMETERS: &str = "v2;task=megablast;word_size=28;dust=20 64 1;strand=both;evalue=1e-10;threads=1";
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BlastMode { None, Termini, Mags, All }
+impl BlastMode {
+    pub fn parse(value: &str) -> Result<Self> { match value { "none" => Ok(Self::None), "termini" => Ok(Self::Termini), "mags" => Ok(Self::Mags), "all" => Ok(Self::All), _ => anyhow::bail!("blast must be none, termini, mags, or all") } }
+    pub fn reference_search(self) -> bool { matches!(self,Self::All|Self::Mags) }
+    pub fn as_str(self) -> &'static str { match self { Self::None => "none", Self::Termini => "termini", Self::Mags => "mags", Self::All => "all" } }
+}
 
 /// Configuration for processing.
 #[derive(Clone)]
@@ -136,11 +178,15 @@ pub struct ProcessConfig {
     /// Default: 2.
     pub min_occurrences: u32,
     /// When true, record per-sample phase timings and write a timing log
-    /// alongside the output database. Hidden CLI flag (--time).
+    /// alongside the output database. Hidden CLI flag (--diagnose).
     pub enable_timing: bool,
     /// When true, run BLAST-based repeat detection (autoblast in contig mode,
     /// per-MAG blast in MAG mode). Off by default.
-    pub blast: bool,
+    pub blast: BlastMode,
+    pub sample_name: String,
+    pub primary_reads_seen: Arc<AtomicU64>,
+    /// Shared on-demand terminal evidence, initialized by run_all_samples.
+    pub terminal_repeats: Option<Arc<crate::terminal_repeats::TerminalRepeatSearch>>,
     /// Aggregation level. `Contig` is the historical default.
     pub view_mode: ViewMode,
     /// Per-MAG input manifest. Empty in contig mode; one entry per MAG in MAG
@@ -196,9 +242,19 @@ pub struct SampleTimings {
     // Per-contig sub-phase sums inside par_iter (nanoseconds, summed across threads).
     // bam_open_ns now counts map_init calls (~once per rayon worker chunk),
     // not once per contig.
+    pub bam_reader_workers: usize,
+    pub bam_reader_estimated_mib: u64,
+    pub bam_reader_start_rss_mib: u64,
+    pub rss_before_reader_open_mib: f64,
     pub bam_open_ns: u64,
     pub streaming_ns: u64,
     pub feature_calc_ns: u64,
+    pub dense_encode_ns: u64,
+    pub sparse_encode_ns: u64,
+    pub db_detail: crate::db::SampleWriteTimings,
+    pub db_overlapped: bool,
+    pub mag_queue_wait_ns: u64,
+    pub terminal: crate::terminal_repeats::TerminalTimings,
     // Breakdown of streaming_ns (see BamPhaseTimings in bam_reader.rs).
     pub stream_fetch_seek_ns: u64,
     pub stream_records_ns: u64,
@@ -217,6 +273,9 @@ struct TimingAccum {
     bam_open_ns: AtomicU64,
     streaming_ns: AtomicU64,
     feature_calc_ns: AtomicU64,
+    mag_queue_wait_ns: AtomicU64,
+    sparse_encode_ns: AtomicU64,
+    dense_encode_ns: AtomicU64,
     stream_fetch_seek_ns: AtomicU64,
     stream_records_ns: AtomicU64,
     stream_process_read_ns: AtomicU64,
@@ -229,6 +288,9 @@ impl TimingAccum {
             bam_open_ns: AtomicU64::new(0),
             streaming_ns: AtomicU64::new(0),
             feature_calc_ns: AtomicU64::new(0),
+            mag_queue_wait_ns: AtomicU64::new(0),
+            sparse_encode_ns: AtomicU64::new(0),
+            dense_encode_ns: AtomicU64::new(0),
             stream_fetch_seek_ns: AtomicU64::new(0),
             stream_records_ns: AtomicU64::new(0),
             stream_process_read_ns: AtomicU64::new(0),
@@ -311,7 +373,7 @@ fn check_missing_md_tags(bam: &mut IndexedReader) -> bool {
 /// 2. If no tag found, assume linear
 fn detect_sample_circularity(
     bam: &IndexedReader,
-    sample_name: &str,
+    _sample_name: &str,
 ) -> Result<bool> {
     let header = bam.header();
 
@@ -322,11 +384,9 @@ fn detect_sample_circularity(
             if let Some(val) = rest.strip_prefix("theBIGbam:circular=") {
                 match val.trim() {
                     "true" => {
-                        eprintln!("  Sample '{}': circular=true (from BAM header)", sample_name);
                         return Ok(true);
                     }
                     "false" => {
-                        eprintln!("  Sample '{}': circular=false (from BAM header)", sample_name);
                         return Ok(false);
                     }
                     _ => {} // unrecognized value, fall through to length check
@@ -336,7 +396,6 @@ fn detect_sample_circularity(
     }
 
     // 2. No header tag found — assume linear
-    eprintln!("  Sample '{}': circular=false (no circularity tag in BAM header)", sample_name);
     Ok(false)
 }
 
@@ -507,8 +566,10 @@ fn write_contigs_fasta(contigs: &[&ContigInfo]) -> Result<tempfile::NamedTempFil
 
 /// Per-contig BLAST self-alignment for intra-contig repeat detection.
 /// Each contig is BLASTed against itself independently, parallelized with rayon.
-fn run_autoblast(contigs: &[ContigInfo]) -> Result<Vec<RepeatsData>> {
-    let contigs_with_seq: Vec<&ContigInfo> = contigs.iter().filter(|c| c.sequence.is_some()).collect();
+fn run_autoblast(contigs: &[ContigInfo], sequences: Option<&SequenceStore>) -> Result<Vec<RepeatsData>> {
+    let contigs_with_seq: Vec<usize> = contigs.iter().enumerate()
+        .filter(|(i, c)| sequences.map_or(c.sequence.is_some(), |s| s.has_sequence(*i)))
+        .map(|(i, _)| i).collect();
     if contigs_with_seq.is_empty() {
         return Ok(Vec::new());
     }
@@ -523,38 +584,24 @@ fn run_autoblast(contigs: &[ContigInfo]) -> Result<Vec<RepeatsData>> {
     let total_contigs = contigs_with_seq.len();
     eprintln!();
     eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    eprintln!("### Running repeat detection (BLAST) on {} contigs...", total_contigs);
+    eprintln!("### Reference BLAST repeat detection on {} contigs...", total_contigs);
 
     let done = std::sync::atomic::AtomicUsize::new(0);
 
     let all_repeats: Vec<Vec<RepeatsData>> = contigs_with_seq
         .par_iter()
-        .filter_map(|contig| {
-            let temp_file = match write_contigs_fasta(&[*contig]) {
-                Ok(f) => f,
-                Err(e) => {
-                    eprintln!("Warning: failed to write FASTA for {}: {}", contig.name, e);
-                    return None;
-                }
-            };
+        .map(|&i| -> Result<Vec<RepeatsData>> {
+            let loaded;
+            let contig = if let Some(store) = sequences {
+                loaded = store.load(i, &contigs[i])?; &loaded
+            } else { &contigs[i] };
+            let temp_file = write_contigs_fasta(&[contig])?;
             let temp_path = temp_file.path().to_path_buf();
-
-            let output = match std::process::Command::new("blastn")
-                .arg("-query").arg(&temp_path)
-                .arg("-subject").arg(&temp_path)
-                .arg("-evalue").arg("1e-10")
-                .arg("-outfmt").arg("6")
-                .output()
-            {
-                Ok(o) => o,
-                Err(e) => {
-                    eprintln!("Warning: blastn failed for {}: {}", contig.name, e);
-                    return None;
-                }
-            };
-            if !output.status.success() {
-                return None;
-            }
+            let output = std::process::Command::new("blastn")
+                .arg("-query").arg(&temp_path).arg("-subject").arg(&temp_path)
+                .args(BLAST_ARGS).arg("-outfmt").arg("6")
+                .output().with_context(|| format!("Starting reference BLAST for '{}'",contig.name))?;
+            anyhow::ensure!(output.status.success(), "Reference BLAST failed for '{}': {}",contig.name,String::from_utf8_lossy(&output.stderr));
 
             let stdout = String::from_utf8_lossy(&output.stdout);
             let mut repeats = Vec::new();
@@ -580,11 +627,11 @@ fn run_autoblast(contigs: &[ContigInfo]) -> Result<Vec<RepeatsData>> {
 
             let n = done.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
             if n % 500 == 0 || n == total_contigs {
-                eprintln!("  BLAST: {}/{} contigs", n, total_contigs);
+                eprintln!("  Reference BLAST: {}/{} contigs", n, total_contigs);
             }
-            Some(repeats)
+            Ok(repeats)
         })
-        .collect();
+        .collect::<Result<_>>()?;
 
     let total: Vec<RepeatsData> = all_repeats.into_iter().flatten().collect();
     eprintln!("Found {} repeat hits across {} contigs", total.len(), contigs_with_seq.len());
@@ -603,7 +650,11 @@ fn run_mag_interblast(
     contigs: &[ContigInfo],
     mag_manifest: &[(String, Vec<String>)],
     db_writer: &DbWriter,
+    sequences: Option<&SequenceStore>,
 ) -> Result<(Vec<RepeatsData>, usize)> {
+    use std::io::{BufRead, BufReader, BufWriter, Write};
+    use std::time::{Duration, Instant};
+
     for tool in &["blastn", "makeblastdb"] {
         match std::process::Command::new(tool).arg("-version").output() {
             Ok(output) if output.status.success() => {}
@@ -613,187 +664,137 @@ fn run_mag_interblast(
             }
         }
     }
-
-    let name_to_contig: HashMap<&str, &ContigInfo> =
-        contigs.iter().map(|c| (c.name.as_str(), c)).collect();
-
+    let name_to_contig: HashMap<&str, usize> =
+        contigs.iter().enumerate().map(|(i, c)| (c.name.as_str(), i)).collect();
     eprintln!();
     eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    eprintln!("### Running MAG inter-contig BLAST on {} MAGs...", mag_manifest.len());
+    eprintln!("### Reference BLAST within MAGs on {} MAGs...", mag_manifest.len());
+    eprintln!("  Hit writes: batches of at most 10,000; timing totals are summed worker seconds");
 
-    let total_repeat_count = std::sync::atomic::AtomicUsize::new(0);
-    let total_inter_count = std::sync::atomic::AtomicUsize::new(0);
-    let mags_done = std::sync::atomic::AtomicUsize::new(0);
-    let total_mags = mag_manifest.len();
-
+    let started = Instant::now();
+    let total_inter_count = AtomicUsize::new(0);
+    let mags_done = AtomicUsize::new(0);
+    // Sequence loading, FASTA writing, makeblastdb, blastn, parsing, DB wait, DB writing.
+    let timing_ns: [AtomicU64; 7] = std::array::from_fn(|_| AtomicU64::new(0));
     let all_repeats: std::sync::Mutex<Vec<RepeatsData>> = std::sync::Mutex::new(Vec::new());
 
-    mag_manifest.par_iter().for_each(|(mag_name, member_names)| {
-        let members: Vec<&ContigInfo> = member_names
-            .iter()
+    mag_manifest.par_iter().try_for_each(|(mag_name, member_names)| -> Result<()> {
+        let mag_started = Instant::now();
+        let t = Instant::now();
+        let members: Vec<std::borrow::Cow<'_, ContigInfo>> = member_names.iter()
             .filter_map(|n| name_to_contig.get(n.as_str()).copied())
-            .filter(|c| c.sequence.is_some())
-            .collect();
-        if members.is_empty() {
-            mags_done.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            return;
-        }
-
-        let mut temp_file = match tempfile::NamedTempFile::new() {
-            Ok(f) => f,
-            Err(e) => {
-                eprintln!("Warning: temp file for MAG '{}': {}", mag_name, e);
-                mags_done.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                return;
-            }
-        };
-        use std::io::Write;
-        for contig in &members {
-            if writeln!(temp_file, ">{}", contig.name).is_err() { return; }
-            if let Some(seq) = contig.sequence.as_ref() {
-                for chunk in seq.chunks(80) {
-                    if temp_file.write_all(chunk).is_err() { return; }
-                    if writeln!(temp_file).is_err() { return; }
-                }
-            }
-        }
-        if temp_file.flush().is_err() { return; }
-        let temp_path = temp_file.path().to_path_buf();
-
-        let mkdb = std::process::Command::new("makeblastdb")
-            .arg("-in").arg(&temp_path)
-            .arg("-dbtype").arg("nucl")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
-        match mkdb {
-            Ok(s) if s.success() => {}
-            Ok(s) => {
-                eprintln!("Warning: makeblastdb failed for MAG '{}' (exit {})", mag_name, s);
-                mags_done.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                return;
-            }
-            Err(e) => {
-                eprintln!("Warning: makeblastdb failed for MAG '{}': {}", mag_name, e);
-                mags_done.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                return;
-            }
-        }
-
-        let output = match std::process::Command::new("blastn")
-            .arg("-query").arg(&temp_path)
-            .arg("-db").arg(&temp_path)
-            .arg("-evalue").arg("1e-10")
-            .arg("-outfmt").arg("6")
-            .output()
-        {
-            Ok(o) => o,
-            Err(e) => {
-                eprintln!("Warning: blastn failed for MAG '{}': {}", mag_name, e);
-                mags_done.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                return;
-            }
-        };
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            eprintln!("Warning: blastn non-zero for MAG '{}': {}", mag_name, stderr);
-            mags_done.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            return;
-        }
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let mut repeats: Vec<RepeatsData> = Vec::new();
-        let mut inter: Vec<(String, String, i32, i32, i32, i32, f64)> = Vec::new();
-        for line in stdout.lines() {
-            let line = line.trim();
-            if line.is_empty() { continue; }
-            let f: Vec<&str> = line.split('\t').collect();
-            if f.len() < 10 { continue; }
-            let qid = f[0].to_string();
-            let sid = f[1].to_string();
-            let pident: f64 = f[2].parse().unwrap_or(0.0);
-            let qstart: i32 = f[6].parse().unwrap_or(0);
-            let qend:   i32 = f[7].parse().unwrap_or(0);
-            let sstart: i32 = f[8].parse().unwrap_or(0);
-            let send:   i32 = f[9].parse().unwrap_or(0);
-
-            if qid == sid {
-                if qstart == sstart && qend == send { continue; }
-                let is_direct = (qstart < qend && sstart < send) || (qstart > qend && sstart > send);
-                repeats.push(RepeatsData {
-                    contig_name: qid,
-                    position1: qstart, position2: qend,
-                    position1prime: sstart, position2prime: send,
-                    pident, is_direct,
-                });
-            } else {
-                inter.push((qid, sid, qstart, qend, sstart, send, pident));
-            }
-        }
-
-        let n_repeats = repeats.len();
-        let n_inter = inter.len();
-
-        if let Ok(conn) = db_writer.lock_conn() {
-            use duckdb::params;
-            let pident_scale = crate::types::get_column_scale("Contig_directRepeats", "Pident");
-            for dup in &repeats {
-                if let Some(contig_id) = db_writer.get_contig_id(&dup.contig_name) {
-                    let pident_int = (dup.pident * pident_scale).round() as i32;
-                    let table = if dup.is_direct { "Contig_directRepeats" } else { "Contig_invertedRepeats" };
-                    let _ = conn.execute(
-                        &format!("INSERT INTO {} (Contig_id, Position1, Position2, Position1prime, Position2prime, Pident) VALUES (?, ?, ?, ?, ?, ?)", table),
-                        params![contig_id, dup.position1, dup.position2, dup.position1prime, dup.position2prime, pident_int],
-                    );
-                }
-            }
-            if !inter.is_empty() {
-                let mut stmt = conn.prepare(
-                    "INSERT OR IGNORE INTO Contig_blast_hits
-                       (Contig_id_1, Contig_id_2, Position1, Position2, Position1prime, Position2prime, Pident)
-                     VALUES (?, ?, ?, ?, ?, ?, ?)"
-                ).ok();
-                if let Some(ref mut stmt) = stmt {
-                    for (qid, sid, mut p1, mut p2, mut p1p, mut p2p, pident) in inter.iter().cloned() {
-                        let cid_q = match db_writer.get_contig_id(&qid) { Some(v) => v, None => continue };
-                        let cid_s = match db_writer.get_contig_id(&sid) { Some(v) => v, None => continue };
-                        let (cid1, cid2) = if cid_q <= cid_s {
-                            (cid_q, cid_s)
-                        } else {
-                            std::mem::swap(&mut p1, &mut p1p);
-                            std::mem::swap(&mut p2, &mut p2p);
-                            (cid_s, cid_q)
-                        };
-                        let pident_i = (pident * pident_scale).round() as i32;
-                        let _ = stmt.execute(params![cid1, cid2, p1, p2, p1p, p2p, pident_i]);
+            .filter(|&i| sequences.map_or(contigs[i].sequence.is_some(), |s| s.has_sequence(i)))
+            .map(|i| match sequences {
+                Some(store) => store.load(i, &contigs[i]).map(std::borrow::Cow::Owned),
+                None => Ok(std::borrow::Cow::Borrowed(&contigs[i])),
+            }).collect::<Result<_>>()?;
+        let load_time = t.elapsed();
+        let mut phases = [Duration::ZERO; 7];
+        phases[0] = load_time;
+        if !members.is_empty() {
+            // One directory owns all BLAST sidecars and output, including on failure.
+            let temporary = tempfile::Builder::new().prefix("thebigbam-mag-blast-").tempdir()?;
+            let fasta_path = temporary.path().join("members.fasta");
+            let hits_path = temporary.path().join("hits.tsv");
+            let t = Instant::now();
+            {
+                let mut fasta = BufWriter::with_capacity(1024 * 1024, fs::File::create(&fasta_path)?);
+                for contig in &members {
+                    writeln!(fasta, ">{}", contig.name)?;
+                    if let Some(sequence) = &contig.sequence {
+                        for chunk in sequence.chunks(80) {
+                            fasta.write_all(chunk)?;
+                            fasta.write_all(b"\n")?;
+                        }
                     }
                 }
+                fasta.flush()?;
             }
-        }
+            phases[1] = t.elapsed();
+            drop(members);
 
-        if let Some(p) = temp_path.to_str() {
-            for ext in &[".ndb", ".nhr", ".nin", ".njs", ".not", ".nsq", ".ntf", ".nto"] {
-                let _ = std::fs::remove_file(format!("{}{}", p, ext));
+            let t = Instant::now();
+            let output = std::process::Command::new("makeblastdb")
+                .arg("-in").arg(&fasta_path).arg("-dbtype").arg("nucl")
+                .output().with_context(|| format!("Starting makeblastdb for MAG '{mag_name}'"))?;
+            anyhow::ensure!(output.status.success(), "makeblastdb failed for MAG '{}': {}",
+                mag_name, String::from_utf8_lossy(&output.stderr));
+            phases[2] = t.elapsed();
+
+            let t = Instant::now();
+            let output = std::process::Command::new("blastn")
+                .arg("-query").arg(&fasta_path).arg("-db").arg(&fasta_path)
+                .args(BLAST_ARGS).arg("-outfmt").arg("6")
+                .arg("-out").arg(&hits_path)
+                .output().with_context(|| format!("Starting blastn for MAG '{mag_name}'"))?;
+            anyhow::ensure!(output.status.success(), "blastn failed for MAG '{}': {}",
+                mag_name, String::from_utf8_lossy(&output.stderr));
+            phases[3] = t.elapsed();
+
+            let t = Instant::now();
+            let mut repeats = Vec::new();
+            let mut inter = Vec::new();
+            let mut db_wait = Duration::ZERO;
+            let mut db_write = Duration::ZERO;
+            let mut flush = |repeats: &mut Vec<RepeatsData>, inter: &mut Vec<(String, String, i32, i32, i32, i32, f64)>| -> Result<()> {
+                let (waited, written) = db_writer.write_mag_blast_batch(repeats, inter)
+                    .with_context(|| format!("Writing BLAST hits for MAG '{mag_name}'"))?;
+                db_wait += waited;
+                db_write += written;
+                total_inter_count.fetch_add(inter.len(), Ordering::Relaxed);
+                inter.clear();
+                all_repeats.lock().map_err(|e| anyhow::anyhow!("Repeat collection lock: {e}"))?.extend(repeats.drain(..));
+                Ok(())
+            };
+            for line in BufReader::new(fs::File::open(&hits_path)?).lines() {
+                let line = line?;
+                let f: Vec<&str> = line.split('\t').collect();
+                if f.len() < 10 { continue; }
+                let pident: f64 = f[2].parse().unwrap_or(0.0);
+                let qstart: i32 = f[6].parse().unwrap_or(0);
+                let qend: i32 = f[7].parse().unwrap_or(0);
+                let sstart: i32 = f[8].parse().unwrap_or(0);
+                let send: i32 = f[9].parse().unwrap_or(0);
+                if f[0] == f[1] {
+                    if qstart == sstart && qend == send { continue; }
+                    repeats.push(RepeatsData {
+                        contig_name: f[0].to_owned(), position1: qstart, position2: qend,
+                        position1prime: sstart, position2prime: send, pident,
+                        is_direct: (qstart < qend && sstart < send) || (qstart > qend && sstart > send),
+                    });
+                } else {
+                    inter.push((f[0].to_owned(), f[1].to_owned(), qstart, qend, sstart, send, pident));
+                }
+                if repeats.len() + inter.len() >= 10_000 {
+                    flush(&mut repeats, &mut inter)?;
+                }
             }
+            flush(&mut repeats, &mut inter)?;
+            phases[4] = t.elapsed().saturating_sub(db_wait + db_write);
+            phases[5] = db_wait;
+            phases[6] = db_write;
         }
-
-        all_repeats.lock().unwrap().extend(repeats);
-
-        total_repeat_count.fetch_add(n_repeats, std::sync::atomic::Ordering::Relaxed);
-        total_inter_count.fetch_add(n_inter, std::sync::atomic::Ordering::Relaxed);
-        let done = mags_done.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-        if done % 100 == 0 || done == total_mags {
-            eprintln!("  MAG BLAST: {}/{} MAGs", done, total_mags);
+        for (total, elapsed) in timing_ns.iter().zip(phases) {
+            total.fetch_add(elapsed.as_nanos() as u64, Ordering::Relaxed);
         }
-    });
+        if mag_started.elapsed().as_secs() >= 300 {
+            eprintln!("  Slow MAG '{}': load {:.1}s, FASTA {:.1}s, makeblastdb {:.1}s, blastn {:.1}s, parse {:.1}s, DB wait {:.1}s, DB write {:.1}s",
+                mag_name, phases[0].as_secs_f64(), phases[1].as_secs_f64(), phases[2].as_secs_f64(),
+                phases[3].as_secs_f64(), phases[4].as_secs_f64(), phases[5].as_secs_f64(), phases[6].as_secs_f64());
+        }
+        let done = mags_done.fetch_add(1, Ordering::Relaxed) + 1;
+        if done <= 5 || done % 100 == 0 || done == mag_manifest.len() {
+            let seconds = timing_ns.each_ref().map(|v| v.load(Ordering::Relaxed) as f64 / 1e9);
+            eprintln!("  Reference MAG BLAST: {}/{} MAGs, {:.1} min elapsed; worker totals: load {:.0}s, FASTA {:.0}s, makeblastdb {:.0}s, blastn {:.0}s, parse {:.0}s, DB wait {:.0}s, DB write {:.0}s",
+                done, mag_manifest.len(), started.elapsed().as_secs_f64() / 60.0,
+                seconds[0], seconds[1], seconds[2], seconds[3], seconds[4], seconds[5], seconds[6]);
+        }
+        Ok(())
+    })?;
 
-    let repeat_count = total_repeat_count.load(std::sync::atomic::Ordering::Relaxed);
-    let inter_count = total_inter_count.load(std::sync::atomic::Ordering::Relaxed);
-    eprintln!(
-        "MAG BLAST: {} intra-contig repeat hits, {} inter-contig hits",
-        repeat_count, inter_count,
-    );
-    let reps = all_repeats.into_inner().unwrap();
+    let reps = all_repeats.into_inner().map_err(|e| anyhow::anyhow!("Repeat collection lock: {e}"))?;
+    let inter_count = total_inter_count.load(Ordering::Relaxed);
+    eprintln!("MAG BLAST: {} intra-contig repeat hits, {} inter-contig hits", reps.len(), inter_count);
     Ok((reps, inter_count))
 }
 
@@ -840,12 +841,45 @@ fn add_features_from_arrays(
     repeats: &[RepeatsData],
     cds_index: Option<&CdsIndex>,
     blob_output: &mut Vec<(String, i64, crate::blob::EncodedBlob)>,
+    timing: Option<&TimingAccum>,
 ) -> (Option<PackagingData>, Option<(MisassemblyData, MicrodiversityData, SideMisassemblyData, TopologyData)>) {
     use crate::blob::{encode_dense_blob, smooth_dense_values, encode_sparse_blob, EventMeta, MetadataFlags,
                        codon_category_to_id, codon_to_id, aa_to_id};
     use crate::types::{get_encoding, get_value_scale, Encoding, METADATA_STATS_SCALE};
+    let encode_dense_blob = |values: &[i32], scale, len| {
+        let start = timing.map(|_| std::time::Instant::now());
+        let encoded = encode_dense_blob(values, scale, len);
+        if let (Some(a), Some(t)) = (timing, start) {
+            a.dense_encode_ns.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        }
+        encoded
+    };
+    let encode_sparse_blob = |positions: &[u32], values: &[i32], metadata: Option<&[EventMeta]>, flags, scale, len| {
+        let start = timing.map(|_| std::time::Instant::now());
+        let encoded = encode_sparse_blob(positions, values, metadata, flags, scale, len);
+        if let (Some(a), Some(t)) = (timing, start) {
+            a.sparse_encode_ns.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        }
+        encoded
+    };
     let pt_config = config.phagetermini_config;
     let contig_length = arrays.ref_length();
+
+    // Select candidates from unmodified read evidence before DTR-dependent filters.
+    let terminal_evidence;
+    let repeats = if flags.phagetermini {
+        if let Some(search) = &config.terminal_repeats {
+            if crate::terminal_repeats::has_candidate(&arrays.reads_starts, &arrays.reads_ends,
+                &arrays.coverage_reduced, &pt_config) {
+                let existing: Vec<_> = repeats.iter().filter(|r| r.contig_name == contig_name
+                    && r.pident >= pt_config.min_identity_dtr as f64
+                    && is_valid_terminal_repeat(r, contig_length, pt_config.max_distance_duplication))
+                    .cloned().collect();
+                terminal_evidence = search.lookup_for_sample(contig_id, contig_name, &existing, &config.sample_name);
+                terminal_evidence.as_slice()
+            } else { &[] }
+        } else { repeats }
+    } else { repeats };
 
     // Build DTR regions from repeats for this contig (used for both merging and classification)
     // Filter criteria:
@@ -1418,9 +1452,16 @@ fn add_features_from_arrays(
     (packaging_result, metrics_result)
 }
 
+/// Keep MAG coordinates independent of BAM access order.
+fn mag_members_in_bam_order(group: &MagJobGroup) -> Vec<&MagContigJob> {
+    let mut members: Vec<_> = group.members.iter().collect();
+    members.sort_unstable_by_key(|member| member.tid);
+    members
+}
+
 /// Process one MAG group: all member contigs in sequence with one BAM reader.
-/// Accumulates dense features into MAG-scale arrays and encodes MAG blobs
-/// directly — no decode→reencode cycle.
+/// Keeps primary coverage in MAG coordinates for summary statistics. Other
+/// feature arrays are encoded per contig, without duplicate MAG accumulators.
 fn process_mag_group(
     bam: &mut IndexedReader,
     group: &MagJobGroup,
@@ -1429,48 +1470,18 @@ fn process_mag_group(
     config: &ProcessConfig,
     is_circular: bool,
     repeats: &[RepeatsData],
-    cds_indexes: &HashMap<i64, CdsIndex>,
+    cds_indexes: &dyn CdsSource,
     accum_ref: Option<&TimingAccum>,
-) -> Option<MagGroupResult> {
+) -> Result<Option<MagGroupResult>> {
     use crate::blob::EncodedBlob;
 
     let mag_len = group.mag_length as usize;
-    if mag_len == 0 || group.members.is_empty() { return None; }
+    if mag_len == 0 || group.members.is_empty() { return Ok(None); }
 
-    // Dense accumulators — one Vec<i32> per dense sample feature.
-    // Initialized to 0; each contig writes its slice at offset.
-    struct DenseAccum {
-        primary_reads: Vec<i32>,
-        primary_reads_plus_only: Vec<i32>,
-        primary_reads_minus_only: Vec<i32>,
-        secondary_reads: Vec<i32>,
-        supplementary_reads: Vec<i32>,
-        mapq: Vec<i32>,
-        coverage_reduced: Vec<i32>,
-        sum_insert_sizes: Vec<u64>,
-        count_insert_sizes: Vec<u64>,
-        sum_read_lengths: Vec<u64>,
-        count_read_lengths: Vec<u64>,
-    }
-    impl DenseAccum {
-        fn new(len: usize) -> Self {
-            Self {
-                primary_reads: vec![0i32; len],
-                primary_reads_plus_only: vec![0i32; len],
-                primary_reads_minus_only: vec![0i32; len],
-                secondary_reads: vec![0i32; len],
-                supplementary_reads: vec![0i32; len],
-                mapq: vec![0i32; len],
-                coverage_reduced: vec![0i32; len],
-                sum_insert_sizes: vec![0u64; len],
-                count_insert_sizes: vec![0u64; len],
-                sum_read_lengths: vec![0u64; len],
-                count_read_lengths: vec![0u64; len],
-            }
-        }
-    }
-
-    let mut accum = DenseAccum::new(mag_len);
+    // Read each member once; MAG thresholds are applied to the completed results.
+    // Only primary coverage is needed for MAG stats. All other per-position
+    // features are encoded from contig arrays, so avoid duplicate MAG arrays.
+    let mut mag_primary_reads = vec![0i32; mag_len];
     let mut contig_blobs: Vec<(String, i64, EncodedBlob)> = Vec::new();
     let mut presences = Vec::new();
     let mut all_packaging = Vec::new();
@@ -1479,22 +1490,21 @@ fn process_mag_group(
     let mut all_side_misassembly = Vec::new();
     let mut all_topology = Vec::new();
     let mut mapped_reads: u64 = 0;
-    let mut contig_lengths_ordered: Vec<u32> = Vec::new();
+    // Preserve offset-order boundaries for the existing MAG roughness statistic.
+    let contig_lengths_ordered: Vec<u32> = group.members.iter().map(|m| m.ref_length as u32).collect();
 
-    for member in &group.members {
+    for member in mag_members_in_bam_order(group) {
         let off = member.offset_in_mag as usize;
         let clen = member.ref_length;
-        contig_lengths_ordered.push(clen as u32);
 
-        let cds_index = cds_indexes.get(&member.contig_id);
 
         // Process contig streaming (no per-contig AF filtering in MAG mode)
         let ts = accum_ref.map(|_| std::time::Instant::now());
         let mut phase_t: Option<BamPhaseTimings> = accum_ref.map(|_| BamPhaseTimings::default());
-        let (mut arrays, coverage_pct, primary_count) = match process_contig_streaming(
+        let (mut arrays, coverage_pct, primary_count) = match process_contig_streaming_counted(
             bam, member.tid, &member.ref_name, member.ref_length, seq_type, flags,
             is_circular, 0.0, config.phagetermini_config.min_clipping_length, &mut phase_t,
-        ) {
+        ).map(|(result,count)| { config.primary_reads_seen.fetch_add(count,Ordering::Relaxed); result }) {
             Ok(Some(result)) => result,
             Ok(None) => {
                 if let (Some(a), Some(pt)) = (accum_ref, phase_t.as_ref()) {
@@ -1509,8 +1519,7 @@ fn process_mag_group(
                 continue;
             }
             Err(e) => {
-                eprintln!("Error processing contig {} in MAG {}: {}", member.ref_name, group.mag_name, e);
-                continue;
+                return Err(e).with_context(||format!("Processing contig {} in MAG {}",member.ref_name,group.mag_name));
             }
         };
         if let (Some(a), Some(pt)) = (accum_ref, phase_t.as_ref()) {
@@ -1523,73 +1532,27 @@ fn process_mag_group(
             a.streaming_ns.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
         }
 
-        // Accumulate dense features into MAG arrays at offset (pre-smoothing raw values)
         let end = (off + clen).min(mag_len);
         let n = end - off;
         for i in 0..n.min(arrays.primary_reads.len()) {
-            accum.primary_reads[off + i] = arrays.primary_reads[i] as i32;
-            accum.primary_reads_plus_only[off + i] = arrays.primary_reads_plus_only[i] as i32;
-            accum.primary_reads_minus_only[off + i] = arrays.primary_reads_minus_only[i] as i32;
-            accum.secondary_reads[off + i] = arrays.secondary_reads[i] as i32;
-            accum.supplementary_reads[off + i] = arrays.supplementary_reads[i] as i32;
-            accum.coverage_reduced[off + i] = arrays.coverage_reduced[i] as i32;
-        }
-        // mapq: average per position
-        for i in 0..n.min(arrays.sum_mapq.len()) {
-            let pr = arrays.primary_reads[i];
-            accum.mapq[off + i] = if pr > 0 { (arrays.sum_mapq[i] as f64 / pr as f64 * get_value_scale("mapq").multiplier()).round() as i32 } else { 0 };
-        }
-        // insert_sizes / read_lengths: accumulate raw sums and counts
-        for i in 0..n.min(arrays.sum_insert_sizes.len()) {
-            accum.sum_insert_sizes[off + i] += arrays.sum_insert_sizes[i];
-            accum.count_insert_sizes[off + i] += arrays.count_insert_sizes[i];
-        }
-        for i in 0..n.min(arrays.sum_read_lengths.len()) {
-            accum.sum_read_lengths[off + i] += arrays.sum_read_lengths[i];
-            accum.count_read_lengths[off + i] += arrays.count_read_lengths[i];
+            mag_primary_reads[off + i] = arrays.primary_reads[i] as i32;
         }
 
-        // Build per-contig presence
         let coverage_mean = arrays.coverage_mean() as f32;
-        let coverage_median = arrays.coverage_median() as f32;
-        let coverage_trimmed_mean = arrays.coverage_trimmed_mean(0.05) as f32;
-        let expected_af = (1.0 - (-0.883 * coverage_mean as f64).exp()) * 100.0;
-        let coverage_relative_coverage_roughness = if arrays.primary_reads.len() > 1 && coverage_mean > 0.0 {
-            let nn = arrays.primary_reads.len();
-            let mean_cov = coverage_mean as f64;
-            let sq_diff: f64 = arrays.primary_reads.windows(2)
-                .map(|w| { let d = w[1] as f64 - w[0] as f64; d * d })
-                .sum::<f64>() / (nn - 1) as f64;
-            (sq_diff.sqrt() / mean_cov * crate::types::get_column_scale("Coverage", "Coverage_relative_coverage_roughness")) as f32
-        } else { 0.0 };
-        let coverage_coefficient_of_variation = if !arrays.primary_reads.is_empty() && coverage_mean > 0.0 {
-            let mean_cov = coverage_mean as f64;
-            let nn = arrays.primary_reads.len() as f64;
-            let var: f64 = arrays.primary_reads.iter()
-                .map(|&x| { let d = x as f64 - mean_cov; d * d }).sum::<f64>() / nn;
-            (var.sqrt() / mean_cov * crate::types::get_column_scale("Coverage", "Coverage_coefficient_of_variation")) as f32
-        } else { 0.0 };
-
-        presences.push(PresenceData {
-            contig_id: member.contig_id,
-            contig_name: member.ref_name.clone(),
-            coverage_pct: coverage_pct as f32,
-            expected_aligned_fraction: expected_af as f32,
-            read_count: primary_count,
-            coverage_relative_coverage_roughness,
-            coverage_coefficient_of_variation,
-            coverage_mean,
-            coverage_median,
-            coverage_trimmed_mean,
-        });
+        presences.push(build_presence(&arrays, member.contig_id, &member.ref_name,
+            coverage_pct, primary_count, coverage_mean));
         mapped_reads += primary_count;
 
         let ts = accum_ref.map(|_| std::time::Instant::now());
         let mut blob_output: Vec<(String, i64, EncodedBlob)> = Vec::new();
+        let cds_index = if flags.mapping_metrics && needs_codon_annotations(&arrays, config.bar_ratio * 0.01) {
+            cds_indexes.lookup(member.contig_id)
+        } else { None };
         let (pkg, metrics) = add_features_from_arrays(
             &mut arrays, &member.ref_name, member.contig_id, config, is_circular, seq_type, flags,
-            primary_count, repeats, cds_index, &mut blob_output,
+            primary_count, repeats, cds_index.as_deref(), &mut blob_output, accum_ref,
         );
+        crate::features::recycle_feature_arrays(arrays);
         contig_blobs.extend(blob_output);
         if let Some(p) = pkg { all_packaging.push(p); }
         if let Some((mis, micro, side, topo)) = metrics {
@@ -1604,16 +1567,16 @@ fn process_mag_group(
     }
 
     if presences.is_empty() {
-        return None;
+        return Ok(None);
     }
 
     // --- MAG coverage stats from raw primary_reads accumulator ---
     let total_reads_in_mag: u64 = presences.iter().map(|p| p.read_count).sum();
     let mag_cov_stats = crate::mag_blob::compute_mag_coverage_stats_from_raw(
-        &accum.primary_reads, group.mag_length, &contig_lengths_ordered, total_reads_in_mag,
+        &mag_primary_reads, group.mag_length, &contig_lengths_ordered, total_reads_in_mag,
     );
 
-    Some(MagGroupResult {
+    Ok(Some(MagGroupResult {
         mag_name: group.mag_name.clone(),
         mag_id: group.mag_id,
         contig_blobs,
@@ -1625,7 +1588,7 @@ fn process_mag_group(
         side_misassembly: all_side_misassembly,
         topology: all_topology,
         mapped_reads,
-    })
+    }))
 }
 
 /// Process one BAM file using streaming (single-pass, optimized).
@@ -1643,7 +1606,7 @@ pub struct SampleProcessResult {
     pub sample_name: String,
     pub seq_type: SequencingType,
     pub total_reads: u64,
-    /// Primary reads from contigs that *passed* the coverage filter (used for DB).
+    /// Primary reads from processed contigs (MAG filtering occurs separately).
     pub mapped_reads: u64,
     /// Total mapped reads from BAI index — non-zero even when all contigs are filtered out.
     pub bai_mapped_reads: u64,
@@ -1659,16 +1622,36 @@ pub fn process_sample(
     config: &ProcessConfig,
     is_circular: bool,
     repeats: &[RepeatsData],
-    contig_by_name: &HashMap<&str, usize>,
-    cds_indexes: &HashMap<i64, CdsIndex>,
+    contig_by_name: &dyn ContigLookup,
+    cds_indexes: &dyn CdsSource,
     mag_member_lookup: Option<&MagMemberLookup>,
 ) -> Result<SampleProcessResult> {
+    process_sample_with_mag_sink(bam_path, flags, config, is_circular, repeats,
+        contig_by_name, cds_indexes, mag_member_lookup, None)
+}
+
+fn process_sample_with_mag_sink(
+    bam_path: &Path,
+    flags: ModuleFlags,
+    config: &ProcessConfig,
+    is_circular: bool,
+    repeats: &[RepeatsData],
+    contig_by_name: &dyn ContigLookup,
+    cds_indexes: &dyn CdsSource,
+    mag_member_lookup: Option<&MagMemberLookup>,
+    mag_sink: Option<&(dyn Fn(MagStreamMessage) -> Result<()> + Sync)>,
+) -> Result<SampleProcessResult> {
+    if let Some(search) = &config.terminal_repeats { search.check_error()?; }
     let sample_name = bam_path
         .file_stem()
         .unwrap_or_default()
         .to_string_lossy()
         .replace("_with_MD", "");
 
+    let mut sample_config = config.clone();
+    sample_config.sample_name = sample_name.clone();
+    sample_config.primary_reads_seen = Arc::new(AtomicU64::new(0));
+    let config = &sample_config;
     let time_on = config.enable_timing;
     let mut st = if time_on { Some(SampleTimings::default()) } else { None };
     if let Some(s) = st.as_mut() {
@@ -1682,6 +1665,8 @@ pub fn process_sample(
     // Open the BAM once in the single-threaded prelude. We keep it alive through
     // the pre-filter phase below so the par_iter never needs to re-read the
     // header — a reopen costs ~50-200 ms for BAMs with many references.
+    let reader_rss_before = get_rss_mb();
+    if let Some(timing) = st.as_mut() { timing.rss_before_reader_open_mib = reader_rss_before; }
     let mut temp_bam = IndexedReader::from_path(bam_path)
         .with_context(|| format!("Failed to open indexed BAM: {}", bam_path.display()))?;
     let n_refs = temp_bam.header().target_count();
@@ -1698,6 +1683,10 @@ pub fn process_sample(
         s.n_contigs_in_bam = n_refs as usize;
     }
 
+    if let Some(sink) = mag_sink {
+        sink(MagStreamMessage::Start { sample_name: sample_name.clone(), seq_type, is_circular })?;
+    }
+
     // --- Phase: unmapped_read_count + per-tid mapped counts ---
     let t0 = if time_on { Some(std::time::Instant::now()) } else { None };
 
@@ -1706,8 +1695,10 @@ pub fn process_sample(
     let idx_stats = temp_bam.index_stats()
         .with_context(|| format!("Failed to get index stats from: {}", bam_path.display()))?;
     let unmapped_reads: u64 = idx_stats.iter().map(|(_, _, _, unmapped)| *unmapped).sum();
-    let mapped_per_tid: Vec<u64> = idx_stats.iter().map(|(_, _, mapped, _)| *mapped).collect();
+    let mut mapped_per_tid = vec![0u64;n_refs as usize];
+    for &(tid,_,mapped,_) in &idx_stats { if tid>=0 { if let Some(slot)=mapped_per_tid.get_mut(tid as usize) { *slot=mapped; } } }
     let bai_mapped_reads: u64 = mapped_per_tid.iter().sum();
+    let measured_reader_mib = (get_rss_mb() - reader_rss_before).max(0.0) as u64;
 
     if let (Some(s), Some(t)) = (st.as_mut(), t0) {
         s.total_read_count = t.elapsed();
@@ -1725,9 +1716,9 @@ pub fn process_sample(
                 return None;
             }
             let ref_name = std::str::from_utf8(temp_bam.header().tid2name(tid)).ok()?;
-            let contig_idx = contig_by_name.get(ref_name)?;
+            let (_, contig_id) = contig_by_name.find(ref_name)?;
             let ref_length = temp_bam.header().target_len(tid).unwrap_or(0) as usize;
-            Some((tid, (*contig_idx + 1) as i64, ref_name.to_string(), ref_length))
+            Some((tid, contig_id, ref_name.to_string(), ref_length))
         })
         .collect();
     if jobs.is_empty() && n_refs > 0 {
@@ -1735,7 +1726,18 @@ pub fn process_sample(
                    Check that contig names in your annotation/assembly files match the BAM reference names.",
                   sample_name, n_refs);
     }
+    for tid in 0..n_refs {
+        if mapped_per_tid[tid as usize] == 0 { continue; }
+        let name = std::str::from_utf8(temp_bam.header().tid2name(tid))?;
+        if contig_by_name.find(name).is_none() || mag_member_lookup.map_or(false,|lookup|!lookup.contains_key(name)) {
+            let length=temp_bam.header().target_len(tid).unwrap_or(0);
+            let count=crate::bam_reader::count_reference_primary_reads(&mut temp_bam,tid,length)?;
+            config.primary_reads_seen.fetch_add(count,Ordering::Relaxed);
+        }
+    }
     drop(temp_bam);
+    drop(idx_stats);
+    drop(mapped_per_tid);
     if let (Some(s), Some(t)) = (st.as_mut(), t_filter) {
         s.filter_tids = t.elapsed();
     }
@@ -1743,11 +1745,30 @@ pub fn process_sample(
     // --- Phase: par_iter ---
     let accum = if time_on { Some(TimingAccum::new()) } else { None };
     let accum_ref = accum.as_ref();
+    let streamed_contigs = AtomicUsize::new(0);
+    let stream_error = std::sync::Mutex::new(None);
+    let streamed_contigs_ref = &streamed_contigs;
+    let stream_error_ref = &stream_error;
     let t_par = if time_on { Some(std::time::Instant::now()) } else { None };
+
+    // Headers/indexes are replicated per reader. Reserve half the remaining
+    // headroom for feature arrays, result batches, and writer allocations.
+    let (total_gb, _) = crate::db::detect_available_memory_gb();
+    let reader_workers = bam_reader_worker_limit(config.threads, n_refs as u64,
+        measured_reader_mib, total_gb * 1024, get_rss_mb() as u64);
+    if let Some(timing) = st.as_mut() {
+        timing.bam_reader_workers = reader_workers;
+        timing.bam_reader_estimated_mib = measured_reader_mib.max((n_refs as u64 * 512).div_ceil(1024 * 1024));
+        timing.bam_reader_start_rss_mib = get_rss_mb() as u64;
+    }
+    {
+        eprintln!("Sample '{}': {} BAM readers for {} calculation threads (estimated header/index {} MiB per reader)",
+            sample_name, reader_workers, config.threads, measured_reader_mib.max((n_refs as u64 * 512).div_ceil(1024 * 1024)));
+    }
 
     // MAG mode: group jobs by MAG, process MAG-by-MAG (one BAM open per chunk).
     // Contig mode: par_chunks over individual jobs (unchanged).
-    let (all_feature_blobs, all_presences, all_packaging, all_misassembly, all_microdiversity, all_side_misassembly, all_topology, mapped_reads, mag_results) = if let Some(lookup) = mag_member_lookup {
+    let (all_feature_blobs, all_presences, all_packaging, all_misassembly, all_microdiversity, all_side_misassembly, all_topology, _retained_mapped_reads, mag_results) = if let Some(lookup) = mag_member_lookup {
         // Group jobs into MagJobGroups
         let mut mag_groups_map: HashMap<String, MagJobGroup> = HashMap::new();
         for (tid, contig_id, ref_name, ref_length) in &jobs {
@@ -1767,21 +1788,24 @@ pub fn process_sample(
                 });
             }
         }
+        drop(jobs); // Group members now own the selected job names.
         // Sort members within each group by offset so smooth_per_contig works correctly
         let mut mag_groups: Vec<MagJobGroup> = mag_groups_map.into_values().collect();
         for g in &mut mag_groups {
             g.members.sort_by_key(|m| m.offset_in_mag);
         }
+        // Nearby reference IDs stay on the same worker instead of hash-map order.
+        mag_groups.sort_unstable_by_key(|g| g.members.iter().map(|m| m.tid).min().unwrap_or(u32::MAX));
 
-        let chunk_size = (mag_groups.len() + config.threads - 1).max(1) / config.threads.max(1);
+        let chunk_size = mag_groups.len().div_ceil(reader_workers).max(1);
         let mag_results_vec: Vec<MagGroupResult> = mag_groups
             .par_chunks(chunk_size.max(1))
             .flat_map_iter(|chunk| {
                 let ts_open = accum_ref.map(|_| std::time::Instant::now());
                 let mut bam = match IndexedReader::from_path(bam_path) {
-                    Ok(mut b) => { b.set_threads(1).ok(); Some(b) }
+                    Ok(b) => Some(b),
                     Err(e) => {
-                        eprintln!("WARNING: Failed to open BAM in parallel worker for {}: {}", bam_path.display(), e);
+                        *stream_error_ref.lock().unwrap()=Some(anyhow::anyhow!("Opening BAM worker for {}: {}",bam_path.display(),e));
                         None
                     }
                 };
@@ -1791,14 +1815,40 @@ pub fn process_sample(
 
                 chunk.iter().filter_map(move |group| {
                     let bam = bam.as_mut()?;
-                    process_mag_group(bam, group, seq_type, flags, config, is_circular, repeats, cds_indexes, accum_ref)
+                    if stream_error_ref.lock().unwrap().is_some() { return None; }
+                    let r = match process_mag_group(bam, group, seq_type, flags, config, is_circular, repeats, cds_indexes, accum_ref) {
+                        Ok(Some(result))=>result, Ok(None)=>return None,
+                        Err(error)=>{ *stream_error_ref.lock().unwrap()=Some(error); return None; }
+                    };
+                    if let Some(sink) = mag_sink {
+                        streamed_contigs_ref.fetch_add(r.presences.len(), Ordering::Relaxed);
+                        // Keep only cheap summaries in the sample result. The bounded
+                        // channel owns and releases the large per-contig payloads.
+                        let summary = MagGroupResult {
+                            mag_name: r.mag_name.clone(), mag_id: r.mag_id,
+                            mag_cov_stats: r.mag_cov_stats.clone(), mapped_reads: r.mapped_reads,
+                            contig_blobs: vec![], presences: vec![], packaging: vec![],
+                            misassembly: vec![], microdiversity: vec![], side_misassembly: vec![], topology: vec![],
+                        };
+                        let queue_start = accum_ref.map(|_| std::time::Instant::now());
+                        let sent = sink(MagStreamMessage::Group(r));
+                        if let (Some(a), Some(start)) = (accum_ref, queue_start) {
+                            a.mag_queue_wait_ns.fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                        }
+                        if let Err(error) = sent {
+                            *stream_error_ref.lock().unwrap() = Some(error);
+                            return None;
+                        }
+                        Some(summary)
+                    } else { Some(r) }
                 })
             })
             .collect();
 
         if let (Some(s), Some(t)) = (st.as_mut(), t_par) {
             s.par_iter_wall = t.elapsed();
-            s.n_contigs_processed = mag_results_vec.iter().map(|r| r.presences.len()).sum();
+            s.n_contigs_processed = if mag_sink.is_some() { streamed_contigs.load(Ordering::Relaxed) }
+                else { mag_results_vec.iter().map(|r| r.presences.len()).sum() };
         }
 
         let t0 = if time_on { Some(std::time::Instant::now()) } else { None };
@@ -1831,15 +1881,15 @@ pub fn process_sample(
         (all_blobs, all_pres, all_pkg, all_mis, all_micro, all_side, all_topo, mapped, mag_res)
     } else {
         // Contig mode: par_chunks over individual contigs
-        let chunk_size = (jobs.len() + config.threads - 1).max(1) / config.threads.max(1);
+        let chunk_size = jobs.len().div_ceil(reader_workers).max(1);
         let results: Vec<_> = jobs
             .par_chunks(chunk_size.max(1))
             .flat_map_iter(|chunk| {
                 let ts_open = accum_ref.map(|_| std::time::Instant::now());
                 let mut bam = match IndexedReader::from_path(bam_path) {
-                    Ok(mut b) => { b.set_threads(1).ok(); Some(b) }
+                    Ok(b) => Some(b),
                     Err(e) => {
-                        eprintln!("WARNING: Failed to open BAM in parallel worker for {}: {}", bam_path.display(), e);
+                        *stream_error_ref.lock().unwrap()=Some(anyhow::anyhow!("Opening BAM worker for {}: {}",bam_path.display(),e));
                         None
                     }
                 };
@@ -1848,16 +1898,16 @@ pub fn process_sample(
                 }
 
                 chunk.iter().filter_map(move |(tid, contig_id, ref_name, ref_length)| {
+                    if stream_error_ref.lock().unwrap().is_some() {return None;}
                     let bam = bam.as_mut()?;
                     let tid = *tid;
                     let contig_id = *contig_id;
                     let ref_length = *ref_length;
 
-                    let cds_index = cds_indexes.get(&contig_id);
 
                     let ts = accum_ref.map(|_| std::time::Instant::now());
                     let mut phase_t: Option<BamPhaseTimings> = accum_ref.map(|_| BamPhaseTimings::default());
-                    let (mut arrays, coverage_pct, primary_count) = match process_contig_streaming(bam, tid, ref_name, ref_length, seq_type, flags, is_circular, config.min_aligned_fraction, config.phagetermini_config.min_clipping_length, &mut phase_t) {
+                    let (mut arrays, coverage_pct, primary_count) = match process_contig_streaming_counted(bam, tid, ref_name, ref_length, seq_type, flags, is_circular, config.min_aligned_fraction, config.phagetermini_config.min_clipping_length, &mut phase_t).map(|(result,count)| { config.primary_reads_seen.fetch_add(count,Ordering::Relaxed); result }) {
                         Ok(Some(result)) => result,
                         Ok(None) => {
                             if let (Some(a), Some(pt)) = (accum_ref, phase_t.as_ref()) {
@@ -1875,7 +1925,7 @@ pub fn process_sample(
                             return None;
                         }
                         Err(e) => {
-                            eprintln!("Error processing contig {} in {}: {}", ref_name, bam_path.display(), e);
+                            *stream_error_ref.lock().unwrap()=Some(anyhow::anyhow!("Processing contig {} in {}: {}",ref_name,bam_path.display(),e));
                             return None;
                         }
                     };
@@ -1894,66 +1944,24 @@ pub fn process_sample(
                         && (coverage_mean as f64) < config.min_coverage_depth
                     {
                         config.contig_drops_counter.fetch_add(1, Ordering::Relaxed);
+                        crate::features::recycle_feature_arrays(arrays);
                         return None;
                     }
 
                     let ts = accum_ref.map(|_| std::time::Instant::now());
                     let mut feature_blobs: Vec<(String, i64, crate::blob::EncodedBlob)> = Vec::new();
-                    let (packaging_info, metrics_info) = add_features_from_arrays(&mut arrays, ref_name, contig_id, config, is_circular, seq_type, flags, primary_count, repeats, cds_index, &mut feature_blobs);
-                    let coverage_median = arrays.coverage_median() as f32;
-                    let coverage_trimmed_mean = arrays.coverage_trimmed_mean(0.05) as f32;
-
-                    let expected_af = (1.0 - (-0.883 * coverage_mean as f64).exp()) * 100.0;
-
-                    let coverage_relative_coverage_roughness = if arrays.primary_reads.len() > 1 && coverage_mean > 0.0 {
-                        let n = arrays.primary_reads.len();
-                        let mean_cov = coverage_mean as f64;
-                        let sum_squared_diff: f64 = arrays.primary_reads
-                            .windows(2)
-                            .map(|w| {
-                                let diff = w[1] as f64 - w[0] as f64;
-                                diff * diff
-                            })
-                            .sum::<f64>() / (n - 1) as f64;
-                        let root_diff = sum_squared_diff.sqrt() / mean_cov;
-                        (root_diff * crate::types::get_column_scale("Coverage", "Coverage_relative_coverage_roughness")) as f32
-                    } else {
-                        0.0
-                    };
-
-                    let coverage_coefficient_of_variation = if !arrays.primary_reads.is_empty() && coverage_mean > 0.0 {
-                        let mean_cov = coverage_mean as f64;
-                        let n = arrays.primary_reads.len() as f64;
-                        let variance: f64 = arrays.primary_reads
-                            .iter()
-                            .map(|&x| {
-                                let diff = x as f64 - mean_cov;
-                                diff * diff
-                            })
-                            .sum::<f64>() / n;
-                        let cv = variance.sqrt() / mean_cov;
-                        (cv * crate::types::get_column_scale("Coverage", "Coverage_coefficient_of_variation")) as f32
-                    } else {
-                        0.0
-                    };
-
-                    let presence = PresenceData {
-                        contig_id,
-                        contig_name: ref_name.clone(),
-                        coverage_pct: coverage_pct as f32,
-                        expected_aligned_fraction: expected_af as f32,
-                        read_count: primary_count,
-                        coverage_relative_coverage_roughness,
-                        coverage_coefficient_of_variation,
-                        coverage_mean,
-                        coverage_median,
-                        coverage_trimmed_mean,
-                    };
+                    let cds_index = if flags.mapping_metrics && needs_codon_annotations(&arrays, config.bar_ratio * 0.01) {
+                        cds_indexes.lookup(contig_id)
+                    } else { None };
+                    let (packaging_info, metrics_info) = add_features_from_arrays(&mut arrays, ref_name, contig_id, config, is_circular, seq_type, flags, primary_count, repeats, cds_index.as_deref(), &mut feature_blobs, accum_ref);
+                    let presence = build_presence(&arrays, contig_id, ref_name,
+                        coverage_pct, primary_count, coverage_mean);
 
                     if let (Some(a), Some(t)) = (accum_ref, ts) {
                         a.feature_calc_ns.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
                     }
 
+                    crate::features::recycle_feature_arrays(arrays);
                     Some((feature_blobs, presence, packaging_info, metrics_info, primary_count))
                 })
             })
@@ -1996,6 +2004,9 @@ pub fn process_sample(
         (all_blobs, all_pres, all_pkg, all_mis, all_micro, all_side, all_topo, mapped, vec![])
     };
 
+    for (_,_,blob) in &all_feature_blobs { blob.ensure_valid()?; }
+    if let Some(error) = stream_error.into_inner().unwrap() { return Err(error); }
+    let mapped_reads = config.primary_reads_seen.load(Ordering::Relaxed);
     let total_reads = mapped_reads + unmapped_reads;
 
     if let Some(s) = st.as_mut() {
@@ -2004,6 +2015,9 @@ pub fn process_sample(
             s.bam_open_ns = a.bam_open_ns.load(Ordering::Relaxed);
             s.streaming_ns = a.streaming_ns.load(Ordering::Relaxed);
             s.feature_calc_ns = a.feature_calc_ns.load(Ordering::Relaxed);
+            s.mag_queue_wait_ns = a.mag_queue_wait_ns.load(Ordering::Relaxed);
+            s.sparse_encode_ns = a.sparse_encode_ns.load(Ordering::Relaxed);
+            s.dense_encode_ns = a.dense_encode_ns.load(Ordering::Relaxed);
             s.stream_fetch_seek_ns = a.stream_fetch_seek_ns.load(Ordering::Relaxed);
             s.stream_records_ns = a.stream_records_ns.load(Ordering::Relaxed);
             s.stream_process_read_ns = a.stream_process_read_ns.load(Ordering::Relaxed);
@@ -2011,6 +2025,12 @@ pub fn process_sample(
         }
     }
 
+    if let Some(search) = &config.terminal_repeats {
+        search.check_error()?;
+        let phases = search.finish_sample(&sample_name);
+        if let Some(timing) = st.as_mut() { timing.terminal = phases; }
+    }
+    cds_indexes.check_error()?;
     Ok(SampleProcessResult {
         feature_blobs: all_feature_blobs,
         presences: all_presences,
@@ -2088,6 +2108,8 @@ pub fn run_all_samples(
     extend_db: &Path,
     command_line: &str,
 ) -> Result<ProcessResult> {
+    anyhow::ensure!(config.blast != BlastMode::Mags || config.view_mode == ViewMode::Mag,
+        "--blast mags requires --view mag");
     unsafe {
         htslib::hts_set_log_level(htslib::htsLogLevel_HTS_LOG_ERROR);
     }
@@ -2127,7 +2149,31 @@ pub fn run_all_samples(
     // In MAG mode, per-MAG membership (mag_name → member contig names) is collected during parsing.
     let mut mag_contig_map: Vec<(String, Vec<String>)> = Vec::new();
 
-    let (mut contigs, mut annotations, contig_qualifiers) = if config.view_mode == ViewMode::Mag {
+    let mut streamed_writer = None;
+    let mut sequence_store = None;
+    let mut streamed_annotation_count = None;
+    let streaming = !is_extending && crate::annotation_import::can_stream(genbank_path, assembly_path, config);
+    let (mut contigs, mut annotations, mut contig_qualifiers) = if streaming {
+        eprintln!("Streaming annotations one file at a time; temporary sequences stored beside the output database");
+        let imported = crate::annotation_import::import_annotations(
+            genbank_path, output_db, config, !bam_files.is_empty(),
+            false,
+            |done, total, count| {
+                let rss = get_rss_mb();
+                eprintln!("Annotation import: {done}/{total} files, {count} annotations [RSS: {rss:.0} MiB]");
+                if let Some(ref mut f) = timing_file {
+                    use std::io::Write;
+                    let _ = writeln!(f, "  Annotation import: {done}/{total} files, {count} annotations [RSS: {rss:.0} MiB]");
+                    let _ = f.flush();
+                }
+            },
+        )?;
+        streamed_writer = Some(imported.writer);
+        sequence_store = Some(imported.sequences);
+        mag_contig_map = imported.mags;
+        streamed_annotation_count = Some(imported.annotation_count);
+        (imported.contigs, imported.cds, Vec::new())
+    } else if config.view_mode == ViewMode::Mag {
         // Parse each MAG's annotation and/or FASTA file individually. Contig names have
         // already been validated as globally unique by the Python side.
         let mut all_contigs: Vec<ContigInfo> = Vec::new();
@@ -2291,7 +2337,7 @@ pub fn run_all_samples(
     eprintln!(
         "Found {} contigs with {} annotations",
         contigs.len(),
-        annotations.len()
+        streamed_annotation_count.unwrap_or(annotations.len())
     );
 
     eprintln!("Found {} BAM files", bam_files.len());
@@ -2321,7 +2367,7 @@ pub fn run_all_samples(
     }
 
     // 3b. Compute nucleotide/protein sequences for CDS annotations
-    if !annotations.is_empty() {
+    if !streaming && !annotations.is_empty() {
         compute_annotation_sequences(&contigs, &mut annotations);
     }
     let parse_secs = t_parse.map(|t| t.elapsed().as_secs_f64()).unwrap_or(0.0);
@@ -2345,10 +2391,11 @@ pub fn run_all_samples(
     // 4. Create or open database
     let t_db_create = if config.enable_timing { Some(std::time::Instant::now()) } else { None };
     // For extend mode: read existing contigs, determine new contigs, open existing DB
-    let (db_writer, new_contigs_for_blast, repeats_from_db) = if is_extending {
+    let (mut db_writer, mut new_contigs_for_blast, repeats_from_db) = if is_extending {
         // Read existing contig names from the database
         let existing_conn = duckdb::Connection::open(extend_db)
             .with_context(|| format!("Failed to open existing database: {}", extend_db.display()))?;
+        crate::db::configure_for_bulk_writes(&existing_conn)?;
 
         // View_mode compatibility check: reject cross-mode extends early.
         let existing_view_mode: String = existing_conn
@@ -2375,20 +2422,19 @@ pub fn run_all_samples(
         let mut existing_contigs: Vec<ContigInfo> = Vec::new();
         {
             let mut stmt = existing_conn.prepare(
-                "SELECT c.Contig_name, c.Contig_length, cs.Sequence \
-                 FROM Contig c LEFT JOIN Contig_sequence cs ON c.Contig_id = cs.Contig_id"
+                "SELECT Contig_name, Contig_length FROM Contig"
             )?;
             let rows = stmt.query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, Option<String>>(2)?))
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
             })?;
             for row in rows {
-                let (name, length, seq) = row?;
+                let (name, length) = row?;
                 existing_contig_names.insert(name.clone());
                 existing_contigs.push(ContigInfo {
                     name,
                     aliases: vec![],
                     length: length as usize,
-                    sequence: seq.map(|s| s.into_bytes()),
+                    sequence: None,
                 });
             }
         }
@@ -2417,9 +2463,9 @@ pub fn run_all_samples(
             .query_row("SELECT COUNT(*) FROM Contig_annotation", [], |row| row.get::<_, i64>(0))
             .unwrap_or(0) > 0;
 
-        // Load repeats from DB for DTR region detection on existing contigs
+        // Global search recomputes reference evidence without retaining old repeat DNA metadata.
         let mut repeats_from_db: Vec<crate::db::RepeatsData> = Vec::new();
-        {
+        if !(config.blast==BlastMode::All) {
             // Build Contig_id → name mapping for repeat loading
             let mut id_to_name: HashMap<i64, String> = HashMap::new();
             {
@@ -2468,48 +2514,6 @@ pub fn run_all_samples(
             }
         }
 
-        // Load CDS annotations from DB for codon change computation (when no -g provided)
-        let db_annotations: Vec<FeatureAnnotation> = if !has_genbank && db_has_annotations {
-            let mut anns = Vec::new();
-            let mut stmt = existing_conn.prepare(
-                "SELECT ca.Contig_id, ca.\"Start\", ca.\"End\", ca.Strand, ca.\"Type\", \
-                        aseq.Nucleotide_sequence \
-                 FROM Contig_annotation_core ca \
-                 LEFT JOIN Annotation_sequence aseq ON ca.Annotation_id = aseq.Annotation_id \
-                 WHERE ca.\"Type\" = 'CDS'"
-            )?;
-            let rows = stmt.query_map([], |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, i64>(2)?,
-                    row.get::<_, i64>(3)?,
-                    row.get::<_, String>(4)?,
-                    row.get::<_, Option<String>>(5)?,
-                ))
-            })?;
-            for row in rows {
-                let (contig_id, start, end, strand, feature_type, nuc_seq) = row?;
-                anns.push(FeatureAnnotation {
-                    contig_id,
-                    start,
-                    end,
-                    strand,
-                    feature_type,
-                    nucleotide_sequence: nuc_seq,
-                    protein_sequence: None,
-                    qualifiers: HashMap::new(),
-                    segments: Vec::new(),
-                    parent_key: None,
-                    self_key: None,
-                });
-            }
-            eprintln!("Loaded {} CDS annotations from existing database", anns.len());
-            anns
-        } else {
-            Vec::new()
-        };
-
         drop(existing_conn);
 
         // Determine new contigs based on DB origin mode
@@ -2555,7 +2559,7 @@ pub fn run_all_samples(
                 }
             }
             // Filter and remap contig qualifiers to new contigs only
-            new_contig_qualifiers = contig_qualifiers.into_iter()
+            new_contig_qualifiers = std::mem::take(&mut contig_qualifiers).into_iter()
                 .filter_map(|(cid, quals)| {
                     parser_id_to_name.get(&cid)
                         .and_then(|name| new_contig_name_to_pos.get(name))
@@ -2589,11 +2593,7 @@ pub fn run_all_samples(
         for nc in &new_contigs {
             contigs.push(nc.clone());
         }
-        annotations = if new_annotations.is_empty() && !db_annotations.is_empty() {
-            db_annotations
-        } else {
-            new_annotations.clone()
-        };
+        annotations = Vec::new();
 
         // In MAG mode, validate that new contigs only belong to new MAGs.
         // Adding contigs to an existing MAG would invalidate its aggregates.
@@ -2620,6 +2620,7 @@ pub fn run_all_samples(
         }
 
         let writer = DbWriter::open(extend_db, &new_contigs, &new_annotations, &new_contig_qualifiers, !bam_files.is_empty())?;
+        if config.enable_timing { writer.enable_size_report(extend_db)?; writer.record_import_sizes(&new_contigs, &new_annotations, &new_contig_qualifiers)?; }
         writer.update_metadata_modification()?;
         writer.write_compression_metadata(
             config.min_aligned_fraction,
@@ -2628,17 +2629,19 @@ pub fn run_all_samples(
             config.variation_percentage,
             config.min_occurrences,
         )?;
-        (writer, new_contigs, repeats_from_db)
+        (writer, Some(new_contigs), repeats_from_db)
     } else {
-        let new_contigs_for_blast = contigs.clone();
-        let writer = DbWriter::create(
+        let writer = if let Some(writer) = streamed_writer.take() {
+            writer
+        } else { DbWriter::create(
             output_db,
             &contigs,
             &annotations,
             &contig_qualifiers,
             !bam_files.is_empty(),
             config.view_mode == ViewMode::Mag,
-        )?;
+        )? };
+        if config.enable_timing && writer.enable_size_report(output_db)? { writer.record_import_sizes(&contigs, &annotations, &contig_qualifiers)?; }
         writer.write_metadata(
             modules,
             config.min_aligned_fraction,
@@ -2647,11 +2650,16 @@ pub fn run_all_samples(
             config.variation_percentage,
             config.min_occurrences,
             config.view_mode.as_str(),
-            config.blast,
+            config.blast.reference_search(),
         )?;
-        (writer, new_contigs_for_blast, Vec::new())
+        (writer, None, Vec::new())
     };
 
+    let persisted_annotation_count = streamed_annotation_count.unwrap_or(annotations.len());
+    annotations = Vec::new();
+    drop(contig_qualifiers);
+    db_writer.prepare_terminase_cache(ModuleFlags::from_modules(modules).phagetermini)?;
+    db_writer.write_blast_mode(config.blast.as_str())?;
     let db_create_secs = t_db_create.map(|t| t.elapsed().as_secs_f64()).unwrap_or(0.0);
     let db_create_rss_mb = if config.enable_timing { get_rss_mb() } else { 0.0 };
     if let Some(ref mut f) = timing_file {
@@ -2672,6 +2680,10 @@ pub fn run_all_samples(
     if let Some(ref mut f) = timing_file {
         use std::io::Write;
         let _ = writeln!(f, "  Circularity detect   : {:>10.3} s  [RSS: {:.0} MB]", circ_secs, circ_rss_mb);
+        for bam_path in bam_files {
+            let sample = bam_path.file_stem().unwrap_or_default().to_string_lossy().replace("_with_MD", "");
+            let _ = writeln!(f, "  Sample '{}': circular={}", sample, circularity_map.get(bam_path).copied().unwrap_or(false));
+        }
         let _ = f.flush();
     }
 
@@ -2679,12 +2691,38 @@ pub fn run_all_samples(
     // 6. If --blast enabled and sequences available, run repeat detection.
     // Contig mode: per-contig BLAST self-alignment (autoblast).
     // MAG mode: per-MAG BLAST handles both intra-contig repeats and inter-contig hits.
-    let blast_contigs = &new_contigs_for_blast;
-    let has_sequences = blast_contigs.iter().any(|c| c.sequence.is_some());
-    let n_contigs_with_seq = blast_contigs.iter().filter(|c| c.sequence.is_some()).count();
+    // Non-streaming imports also release assembly DNA once it is persisted.
+    // GC/general BLAST consume disk-backed batches; termini use database candidates.
+    if sequence_store.is_none() {
+        let directory = output_db.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+        let mut store = SequenceStore::new(directory)?;
+        match new_contigs_for_blast.as_mut() {
+            Some(new_contigs) => {
+                store.push_batch(new_contigs)?;
+                for contig in &mut contigs { contig.sequence = None; }
+            }
+            None => store.push_batch(&mut contigs)?,
+        }
+        sequence_store = Some(store);
+    }
+    let blast_contigs = new_contigs_for_blast.as_deref().unwrap_or(&contigs);
+    let has_sequence = |i: usize, c: &ContigInfo| sequence_store.as_ref()
+        .map_or(c.sequence.is_some(), |store| store.has_sequence(i));
+    let n_contigs_with_seq = blast_contigs.iter().enumerate().filter(|(i, c)| has_sequence(*i, c)).count();
+    let has_sequences = n_contigs_with_seq > 0;
+    let mut general_assessed_ids = if config.blast.reference_search() {
+        blast_contigs.iter().enumerate().filter(|(i,c)| has_sequence(*i,c))
+            .filter_map(|(_,c)| db_writer.get_contig_id(&c.name)).collect::<Vec<_>>()
+    } else { Vec::new() };
 
     let t_autoblast = if config.enable_timing { Some(std::time::Instant::now()) } else { None };
-    let repeats = if config.blast && has_sequences {
+    let global_collection=config.blast==BlastMode::All;
+    let repeats = if global_collection {
+        let (assessed,hit_count)=reference_blast::run_global(&db_writer,&contigs)?;
+        general_assessed_ids=assessed;
+        eprintln!("Reference BLAST all: {hit_count} inter-contig hits read (including matches between contigs)");
+        Vec::new()
+    } else if config.blast.reference_search() && has_sequences {
         if config.view_mode == ViewMode::Mag {
             let blast_names: HashSet<&str> = blast_contigs.iter().map(|c| c.name.as_str()).collect();
             let filtered_manifest: Vec<(String, Vec<String>)> = mag_contig_map
@@ -2698,25 +2736,21 @@ pub fn run_all_samples(
                 })
                 .filter(|(_, m)| !m.is_empty())
                 .collect();
-            let (reps, inter_count) = run_mag_interblast(blast_contigs, &filtered_manifest, &db_writer)?;
+            let (reps, inter_count) = run_mag_interblast(blast_contigs, &filtered_manifest, &db_writer, sequence_store.as_ref())?;
             db_writer.compute_duplication_percentages(&reps)?;
-            if inter_count > 0 {
-                let t_hit_features = std::time::Instant::now();
-                db_writer.write_mag_hit_features()?;
-                eprintln!("  Per-position hit features: {:.1}s", t_hit_features.elapsed().as_secs_f64());
-            }
+            eprintln!("Reference MAG BLAST: {inter_count} inter-contig hits read");
             reps
         } else {
-            let reps = run_autoblast(blast_contigs)?;
+            let reps = run_autoblast(blast_contigs, sequence_store.as_ref())?;
             db_writer.write_repeats(&reps)?;
             db_writer.compute_duplication_percentages(&reps)?;
             reps
         }
     } else {
-        if !config.blast && has_sequences {
+        if !config.blast.reference_search() && has_sequences {
             eprintln!();
             eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-            eprintln!("### BLAST repeat detection: skipped (use --blast to enable)");
+            eprintln!("### BLAST repeat detection: skipped (use --blast all to enable)");
         }
         Vec::new()
     };
@@ -2735,13 +2769,19 @@ pub fn run_all_samples(
         repeats
     };
 
+    if config.blast.reference_search() && has_sequences {
+        let compatible: bool = db_writer.lock_conn()?.query_row(
+            "SELECT Value=? FROM Database_metadata WHERE Key='Blast_parameters'",
+            duckdb::params![BLAST_PARAMETERS], |r| r.get(0)).unwrap_or(false);
+        if !is_extending || compatible { db_writer.write_blast_parameters()?; }
+    }
+
     // 7. Compute and write GC content and GC skew from sequence data (only for new contigs)
     // Process in batches of 10k to bound memory and replace millions of individual
     // UPDATE statements with one bulk UPDATE FROM per batch.
     let t_gc = if config.enable_timing { Some(std::time::Instant::now()) } else { None };
-    let contigs_with_seq: Vec<&ContigInfo> = blast_contigs.iter()
-        .filter(|c| c.sequence.is_some())
-        .collect();
+    let contigs_with_seq: Vec<usize> = blast_contigs.iter().enumerate()
+        .filter(|(i, c)| has_sequence(*i, c)).map(|(i, _)| i).collect();
     let n_gc_contigs = contigs_with_seq.len();
     if n_gc_contigs > 0 {
         eprintln!();
@@ -2752,12 +2792,28 @@ pub fn run_all_samples(
     let mut gc_write_blob_ns: u64 = 0;
     let mut gc_update_stats_ns: u64 = 0;
     const GC_BATCH: usize = 10_000;
-    for batch_start in (0..n_gc_contigs).step_by(GC_BATCH) {
-        let batch_end = (batch_start + GC_BATCH).min(n_gc_contigs);
+    let mut batch_start = 0;
+    while batch_start < n_gc_contigs {
+        // Bound both record count and bases; one exceptionally large contig is
+        // processed alone. GC output arrays are substantially larger than DNA.
+        let mut batch_end = batch_start;
+        let mut bases = 0usize;
+        while batch_end < n_gc_contigs && batch_end - batch_start < GC_BATCH {
+            let len = blast_contigs[contigs_with_seq[batch_end]].length;
+            if batch_end > batch_start && bases.saturating_add(len) > 8 * 1024 * 1024 { break; }
+            bases = bases.saturating_add(len);
+            batch_end += 1;
+        }
         let batch = &contigs_with_seq[batch_start..batch_end];
+        let loaded: Vec<std::borrow::Cow<'_, ContigInfo>> = batch.iter().map(|&i| {
+            match sequence_store.as_ref() {
+                Some(store) => store.load(i, &blast_contigs[i]).map(std::borrow::Cow::Owned),
+                None => Ok(std::borrow::Cow::Borrowed(&blast_contigs[i])),
+            }
+        }).collect::<Result<_>>()?;
 
         let t0 = std::time::Instant::now();
-        let gc_data: Vec<GCContentData> = batch
+        let gc_data: Vec<GCContentData> = loaded
             .par_iter()
             .filter_map(|contig| {
                 contig.sequence.as_ref().map(|seq| {
@@ -2785,11 +2841,22 @@ pub fn run_all_samples(
             gc_write_blob_ns += t1.elapsed().as_nanos() as u64;
 
             let t2 = std::time::Instant::now();
-            db_writer.update_contig_gc_stats(&gc_data)?;
+            db_writer.stage_contig_gc_stats(&gc_data)?;
             gc_update_stats_ns += t2.elapsed().as_nanos() as u64;
 
 
         }
+        batch_start = batch_end;
+    }
+    if n_gc_contigs > 0 {
+        let start = std::time::Instant::now();
+        db_writer.flush_contig_gc_stats()?;
+        gc_update_stats_ns += start.elapsed().as_nanos() as u64;
+    }
+    // Termini candidates are discovered later, while reading samples. Keep
+    // disk-backed DNA until that stage finishes when the module is enabled.
+    if !ModuleFlags::from_modules(modules).phagetermini {
+        drop(sequence_store.take());
     }
     let gc_secs: [f64; 4] = [
         t_gc.map(|t| t.elapsed().as_secs_f64()).unwrap_or(0.0),
@@ -2816,8 +2883,6 @@ pub fn run_all_samples(
         if config.enable_timing {
             let rss_after = get_rss_mb();
             let ckpt_secs = t_ckpt.elapsed().as_secs_f64();
-            eprintln!("  checkpoint (post-GC): {:.3}s  [RSS: {:.0} → {:.0} MB]",
-                ckpt_secs, rss_before, rss_after);
             if let Some(ref mut f) = timing_file {
                 use std::io::Write;
                 let _ = writeln!(f, "  checkpoint (post-GC) : {:>10.3} s  [RSS: {:.0} → {:.0} MB]",
@@ -2828,10 +2893,10 @@ pub fn run_all_samples(
 
     // Convert repeat detections into per-contig blobs (only for new contigs).
     let t_repeat_blob = if config.enable_timing { Some(std::time::Instant::now()) } else { None };
-    let new_contig_ids: Vec<i64> = new_contigs_for_blast.iter()
+    let new_contig_ids: Vec<i64> = blast_contigs.iter()
         .filter_map(|c| db_writer.get_contig_id(&c.name))
         .collect();
-    db_writer.convert_repeat_blobs(&new_contig_ids)?;
+    db_writer.convert_repeat_blobs(if global_collection {&general_assessed_ids} else {&new_contig_ids})?;
     let repeat_blob_secs = t_repeat_blob.map(|t| t.elapsed().as_secs_f64()).unwrap_or(0.0);
     let repeat_rss_mb = if config.enable_timing { get_rss_mb() } else { 0.0 };
     if let Some(ref mut f) = timing_file {
@@ -2849,8 +2914,6 @@ pub fn run_all_samples(
         if config.enable_timing {
             let rss_after = get_rss_mb();
             let ckpt_secs = t_ckpt.elapsed().as_secs_f64();
-            eprintln!("  checkpoint (post-repeats): {:.3}s  [RSS: {:.0} → {:.0} MB]",
-                ckpt_secs, rss_before, rss_after);
             if let Some(ref mut f) = timing_file {
                 use std::io::Write;
                 let _ = writeln!(f, "  checkpoint (post-rep): {:>10.3} s  [RSS: {:.0} → {:.0} MB]",
@@ -2870,6 +2933,9 @@ pub fn run_all_samples(
         );
         db_writer.write_mags(&mag_contig_map)?;
     }
+    // Membership must exist before deriving explicitly within-MAG tracks.
+    if config.blast.reference_search()
+        && (global_collection || has_sequences) { db_writer.write_intercontig_hit_features()?; }
     let write_mags_secs = t_write_mags.map(|t| t.elapsed().as_secs_f64()).unwrap_or(0.0);
     let write_mags_rss_mb = if config.enable_timing { get_rss_mb() } else { 0.0 };
     if let Some(ref mut f) = timing_file {
@@ -2884,7 +2950,7 @@ pub fn run_all_samples(
         eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
         eprintln!("### No BAM files provided - skipping sample processing");
         eprintln!();
-        eprintln!("Database populated with {} contigs and {} annotations", contigs.len(), annotations.len());
+        eprintln!("Database populated with {} contigs and {} annotations", contigs.len(), persisted_annotation_count);
 
         let index_secs = if create_indexes {
             db_writer.create_serve_indexes()?
@@ -2922,6 +2988,8 @@ pub fn run_all_samples(
         });
     }
 
+    let processing_database = if is_extending { extend_db } else { output_db };
+
     // 8. Process samples
     eprintln!();
     eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
@@ -2930,8 +2998,24 @@ pub fn run_all_samples(
     eprintln!("Modules: {}", modules.join(", "));
 
     let flags = ModuleFlags::from_modules(modules);
-    if flags.phagetermini && !config.blast {
-        eprintln!("WARNING: Phage termini module is enabled without --blast. No terminal repeat (DTR/ITR) detection will be performed.\n");
+    let mut runtime_config = config.clone();
+    if flags.phagetermini {
+        drop(sequence_store.take());
+        let ids = contigs.iter().map(|c| db_writer.get_contig_id(&c.name)
+            .with_context(|| format!("Missing database ID for '{}'", c.name))).collect::<Result<Vec<_>>>()?;
+        let directory = output_db.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+        let store = SequenceStore::from_connection(directory, db_writer.lock_conn()?.try_clone()?, ids.clone())?;
+        runtime_config.terminal_repeats = Some(Arc::new(crate::terminal_repeats::TerminalRepeatSearch::new(
+            store, ids, config.phagetermini_config,
+        )));
+        eprintln!("Phage termini: BLAST mode {}", config.blast.as_str());
+    }
+    db_writer.write_blast_mode(config.blast.as_str())?;
+    if let Some(search) = &runtime_config.terminal_repeats {
+        search.configure_mode(config.blast, &db_writer)?;
+        if config.blast.reference_search() && !general_assessed_ids.is_empty() {
+            search.mark_general_assessed(&general_assessed_ids);
+        }
     }
     let pre_timings = PreSampleTimings {
         parse_secs,
@@ -2951,125 +3035,28 @@ pub fn run_all_samples(
         cds_build_secs: 0.0, // filled in process_samples_parallel/sequential
         cds_build_rss_mb: 0.0,
     };
+    drop(new_contigs_for_blast);
     for c in &mut contigs { c.sequence = None; }
-    let result = process_samples_parallel(&bam_files, &contigs, flags, config, &circularity_map, db_writer, &repeats, &annotations, output_db, timing_file, pre_timings, &mag_contig_map, t_run_start, create_indexes)?;
+    let result = process_samples_parallel(&bam_files, &contigs, flags, &runtime_config, &circularity_map, db_writer, &repeats, annotations, processing_database, timing_file, pre_timings, &mag_contig_map, t_run_start, create_indexes)?;
 
+    if let Some(search) = &runtime_config.terminal_repeats { search.check_error()?; }
     print_summary(&result, output_db);
 
     Ok(result)
 }
 
-/// For a single sample, identify MAGs that fail the aligned-fraction or
-/// coverage-depth thresholds and return the set of member contig names to drop.
-/// Uses the actual MagCoverageStats (the values written to the database) so the
-/// filter decision is consistent with the stored Aligned_fraction_percentage.
-fn filter_failing_mags(
-    presences: &[PresenceData],
-    mag_contig_map: &[(String, Vec<String>)],
-    mag_results: &MagResultVec,
-    min_aligned_fraction: f64,
-    min_coverage_depth: f64,
-) -> (HashSet<String>, usize) {
-    let s_af = crate::types::get_column_scale("Coverage", "Aligned_fraction_percentage");
-    let s_m = crate::types::get_column_scale("Coverage", "Coverage_mean");
-
-    let stats_by_name: HashMap<&str, &crate::mag_blob::MagCoverageStats> = mag_results
-        .iter()
-        .map(|(name, _, stats)| (name.as_str(), stats))
-        .collect();
-
-    let presence_names: HashSet<&str> = presences.iter().map(|p| p.contig_name.as_str()).collect();
-
-    let mut drop_set: HashSet<String> = HashSet::new();
-    let mut n_dropped: usize = 0;
-
-    for (mag_name, members) in mag_contig_map {
-        let (af_mag, cov_mag) = if let Some(stats) = stats_by_name.get(mag_name.as_str()) {
-            (
-                stats.aligned_fraction_pct_x10 as f64 / s_af,
-                stats.coverage_mean_x10 as f64 / s_m,
-            )
-        } else {
-            let has_any_presence = members.iter().any(|c| presence_names.contains(c.as_str()));
-            if has_any_presence { continue; } else { (0.0, 0.0) }
-        };
-
-        let af_fail = min_aligned_fraction > 0.0 && af_mag < min_aligned_fraction;
-        let cov_fail = min_coverage_depth > 0.0 && cov_mag < min_coverage_depth;
-
-        if af_fail || cov_fail {
-            n_dropped += 1;
-            for cname in members {
-                drop_set.insert(cname.clone());
-            }
-        }
-    }
-
-    (drop_set, n_dropped)
+/// Bound BAM readers by requested threads and available memory. The reference
+/// estimate protects against RSS deltas undercounting reused header allocations.
+fn bam_reader_worker_limit(threads: usize, references: u64, measured_mib: u64, total_mib: u64, rss_mib: u64) -> usize {
+    let reader_mib = measured_mib.max((references.saturating_mul(512)).div_ceil(1024 * 1024)).max(64);
+    let reserve = (total_mib / 5).max(256);
+    let available = total_mib.saturating_sub(rss_mib).saturating_sub(reserve) / 2;
+    let affordable = (available / reader_mib.saturating_add(256)).max(1) as usize;
+    threads.max(1).min(affordable)
 }
 
-type MagResultVec = Vec<(String, i64, crate::mag_blob::MagCoverageStats)>;
-
-/// Apply a contig drop set to all per-sample data vectors, removing entries
-/// whose contig_name is in `drop`. Also filters `mag_results` by resolving
-/// which MAGs had their contigs dropped via `mag_contig_map`.
-fn apply_mag_filter(
-    drop: &HashSet<String>,
-    mag_contig_map: &[(String, Vec<String>)],
-    presences: Vec<PresenceData>,
-    packaging: Vec<PackagingData>,
-    misassembly: Vec<MisassemblyData>,
-    microdiversity: Vec<MicrodiversityData>,
-    side_misassembly: Vec<SideMisassemblyData>,
-    topology: Vec<TopologyData>,
-    feature_blobs: Vec<(String, i64, crate::blob::EncodedBlob)>,
-    mag_results: MagResultVec,
-) -> (
-    Vec<PresenceData>,
-    Vec<PackagingData>,
-    Vec<MisassemblyData>,
-    Vec<MicrodiversityData>,
-    Vec<SideMisassemblyData>,
-    Vec<TopologyData>,
-    Vec<(String, i64, crate::blob::EncodedBlob)>,
-    MagResultVec,
-) {
-    let drop_ids: HashSet<i64> = presences.iter()
-        .filter(|p| drop.contains(&p.contig_name))
-        .map(|p| p.contig_id)
-        .collect();
-    let dropped_mag_names: HashSet<&str> = mag_contig_map.iter()
-        .filter(|(_, members)| members.iter().any(|c| drop.contains(c)))
-        .map(|(name, _)| name.as_str())
-        .collect();
-    (
-        presences.into_iter().filter(|p| !drop.contains(&p.contig_name)).collect(),
-        packaging.into_iter().filter(|p| !drop.contains(&p.contig_name)).collect(),
-        misassembly.into_iter().filter(|p| !drop.contains(&p.contig_name)).collect(),
-        microdiversity.into_iter().filter(|p| !drop.contains(&p.contig_name)).collect(),
-        side_misassembly.into_iter().filter(|p| !drop.contains(&p.contig_name)).collect(),
-        topology.into_iter().filter(|p| !drop.contains(&p.contig_name)).collect(),
-        feature_blobs.into_iter().filter(|(_, cid, _)| !drop_ids.contains(cid)).collect(),
-        mag_results.into_iter().filter(|(name, _, _)| !dropped_mag_names.contains(name.as_str())).collect(),
-    )
-}
-
-fn write_mag_results(
-    db_writer: &DbWriter,
-    sample_name: &str,
-    sample_id: i64,
-    mag_results: &MagResultVec,
-) -> u64 {
-    if mag_results.is_empty() { return 0; }
-    let mag_t = std::time::Instant::now();
-    if let Ok(conn) = db_writer.lock_conn() {
-        for (mag_name, mag_id, stats) in mag_results {
-            if let Err(e) = db_writer.write_mag_coverage(&conn, *mag_id, sample_id, stats) {
-                eprintln!("\n### ERROR writing MAG coverage for {} MAG {}: {:?}", sample_name, mag_name, e);
-            }
-        }
-    }
-    mag_t.elapsed().as_nanos() as u64
+fn mag_coverage_fails(af: f64, mean: f64, min_af: f64, min_mean: f64) -> bool {
+    (min_af > 0.0 && af < min_af) || (min_mean > 0.0 && mean < min_mean)
 }
 
 /// Holds processed sample data ready for database writing.
@@ -3101,7 +3088,7 @@ fn process_samples_parallel(
     circularity_map: &HashMap<PathBuf, bool>,
     db_writer: DbWriter,
     repeats: &[RepeatsData],
-    annotations: &[FeatureAnnotation],
+    annotations: Vec<FeatureAnnotation>,
     output_db: &Path,
     mut timing_file: Option<fs::File>,
     mut pre_timings: PreSampleTimings,
@@ -3174,11 +3161,10 @@ fn process_samples_parallel(
 
     // Clone values needed by writer thread
     let write_pb_clone = write_pb.clone();
-    let is_tty_writer = is_tty;
-    let total_writer = total;
 
     let timing_threads = config.threads;
     let enable_timing_writer = config.enable_timing;
+    let terminal_repeats_writer = config.terminal_repeats.clone();
 
     // MAG threshold filtering data (moved into writer thread)
     let is_mag_mode = config.view_mode == ViewMode::Mag;
@@ -3193,33 +3179,11 @@ fn process_samples_parallel(
     };
 
     // Build shared lookups once — avoids rebuilding per sample (critical for 2M+ contigs).
-    let contig_by_name: HashMap<&str, usize> = {
-        let mut map = HashMap::new();
-        for (idx, c) in contigs.iter().enumerate() {
-            map.insert(c.name.as_str(), idx);
-            for alias in &c.aliases {
-                map.entry(alias.as_str()).or_insert(idx);
-            }
-        }
-        map
-    };
+    let contig_by_name = database_contig_lookup(contigs, &db_writer)?;
     let t_cds = std::time::Instant::now();
-    let cds_indexes: HashMap<i64, CdsIndex> = if flags.mapping_metrics
-        && !annotations.is_empty()
-    {
-        let mut annos_by_contig: HashMap<i64, Vec<&FeatureAnnotation>> = HashMap::new();
-        for a in annotations.iter() {
-            annos_by_contig.entry(a.contig_id).or_default().push(a);
-        }
-        annos_by_contig.into_iter()
-            .filter_map(|(contig_id, annos)| {
-                let idx = CdsIndex::from_contig_annotations(&annos);
-                if idx.is_empty() { None } else { Some((contig_id, idx)) }
-            })
-            .collect()
-    } else {
-        HashMap::new()
-    };
+    drop(annotations);
+    // Finish fallible annotation-loader setup before spawning the database writer.
+    let cds_indexes = DatabaseCdsSource::from_connection(db_writer.lock_conn()?.try_clone()?, flags.mapping_metrics)?;
     pre_timings.cds_build_secs = t_cds.elapsed().as_secs_f64();
     pre_timings.cds_build_rss_mb = get_rss_mb();
     if let Some(ref mut f) = timing_file {
@@ -3243,46 +3207,35 @@ fn process_samples_parallel(
 
         // Receive and write samples as they arrive
         for result in rx {
-            written_count += 1;
 
-            // MAG-level threshold pre-filter: drop contigs from failing MAGs
-            let (presences, packaging, misassembly, microdiversity, side_misassembly, topology, feature_blobs, mag_results) =
-                if is_mag_mode && !mag_map_owned.is_empty() {
-                    let (drop_set, n_dropped) = filter_failing_mags(
-                        &result.presences, &mag_map_owned, &result.mag_results, min_af, min_cov,
-                    );
-                    mag_drops += n_dropped;
-                    if !drop_set.is_empty() {
-                        apply_mag_filter(&drop_set, &mag_map_owned, result.presences, result.packaging, result.misassembly, result.microdiversity, result.side_misassembly, result.topology, result.feature_blobs, result.mag_results)
-                    } else {
-                        (result.presences, result.packaging, result.misassembly, result.microdiversity, result.side_misassembly, result.topology, result.feature_blobs, result.mag_results)
-                    }
-                } else {
-                    (result.presences, result.packaging, result.misassembly, result.microdiversity, result.side_misassembly, result.topology, result.feature_blobs, result.mag_results)
-                };
+            let identity = SampleIdentity { name: &result.sample_name, sequencing_type: result.sequencing_type,
+                total_reads: result.total_reads, mapped_reads: result.mapped_reads, bai_mapped_reads: result.bai_mapped_reads, circular: result.is_circular };
+            let (data, dropped) = SampleData {
+                presences: result.presences,
+                packaging: result.packaging,
+                misassembly: result.misassembly,
+                microdiversity: result.microdiversity,
+                side_misassembly: result.side_misassembly,
+                topology: result.topology,
+                feature_blobs: result.feature_blobs,
+                mag_results: result.mag_results,
+            }.filter(is_mag_mode, &mag_map_owned, min_af, min_cov);
+            mag_drops += dropped;
 
-            if presences.is_empty() {
+            if data.presences.is_empty() {
                 samples_no_coverage += 1;
-                if result.bai_mapped_reads > 0 {
-                    eprintln!(
-                        "INFO: Sample '{}': {} reads in BAM index but no contig passed coverage \
-                         filters (min_aligned_fraction={:.1}%, min_coverage_depth={:.1}). \
-                         Sample recorded in DB with zero coverage.",
-                        result.sample_name, result.bai_mapped_reads,
-                        min_af, min_cov,
-                    );
+                let write_start = std::time::Instant::now();
+                identity.insert(&db_writer,true,min_af,min_cov)?;
+                db_writer.sample_complete(&result.sample_name)?;
+                if let Some(mut t) = result.timings {
+                    SampleWriteDetails { insert_ns: write_start.elapsed().as_nanos() as u64, ..Default::default() }.apply(&mut t, write_start.elapsed());
+                    if let Some(ref mut f) = timing_file {
+                        write_sample_timing(f, &t, timing_threads)?;
+                    }
+                    all_timings.push(t);
                 }
-                // Still write the Sample row so the sample appears in the DB.
-                // total_reads = bai_mapped + unmapped (result.total_reads == unmapped here)
-                if let Err(e) = db_writer.insert_sample(
-                    &result.sample_name,
-                    result.sequencing_type.as_str(),
-                    result.bai_mapped_reads + result.total_reads,
-                    result.bai_mapped_reads,
-                    result.is_circular,
-                ) {
-                    eprintln!("\nError inserting sample {}: {}", result.sample_name, e);
-                }
+                drop(data);
+                log_sample_cleanup(&result.sample_name, enable_timing_writer, &mut timing_file);
                 write_pb_clone.inc(1);
                 continue;
             }
@@ -3290,82 +3243,33 @@ fn process_samples_parallel(
             // Insert sample
             let sample_write_start = std::time::Instant::now();
             let t_insert = std::time::Instant::now();
-            let sample_id = match db_writer.insert_sample(&result.sample_name, result.sequencing_type.as_str(), result.total_reads, result.mapped_reads, result.is_circular) {
-                Ok(id) => id,
-                Err(e) => {
-                    eprintln!("\nError inserting sample {}: {}", result.sample_name, e);
-                    let msg = format!("ERR: {}", result.sample_name);
-                    write_pb_clone.set_message(msg.clone());
-                    write_pb_clone.inc(1);
-                    if !is_tty_writer {
-                        eprintln!("Writing:    [{}/{}] {}", written_count, total_writer, msg);
-                    }
-                    continue;
-                }
-            };
+            let sample_id=identity.insert(&db_writer,false,min_af,min_cov)?;
             let insert_ns = t_insert.elapsed().as_nanos() as u64;
 
             // Write all data for this sample
-            let mut contig_data_ns: u64 = 0;
-            let mut mag_write_ns: u64 = 0;
-            let t_contig = std::time::Instant::now();
-            if let Err(e) = db_writer.write_sample_data(
-                &result.sample_name,
-                &presences,
-                &packaging,
-                &misassembly,
-                &microdiversity,
-                &side_misassembly,
-                &topology,
-                &feature_blobs,
-                result.is_circular,
-            ) {
-                eprintln!("\n### ERROR writing data for {}: {:?}", result.sample_name, e);
-                let msg = format!("ERR: {}", result.sample_name);
-                write_pb_clone.set_message(msg.clone());
-                if !is_tty_writer {
-                    eprintln!("Writing:    [{}/{}] {}", written_count, total_writer, msg);
-                }
-            } else {
-                contig_data_ns = t_contig.elapsed().as_nanos() as u64;
-                mag_write_ns = write_mag_results(&db_writer, &result.sample_name, sample_id, &mag_results);
-                write_pb_clone.set_message(result.sample_name.clone());
-                if !is_tty_writer {
-                    eprintln!("Writing:    [{}/{}] {}", written_count, total_writer, result.sample_name);
-                }
+            let mut details = SampleWriteDetails { insert_ns, ..Default::default() };
+            if let Err(error)=write_sample_payload(&db_writer,&identity,sample_id,&data,enable_timing_writer,&mut details) {
+                db_writer.sample_failed(&result.sample_name,&error.to_string())?;
+                return Err(error);
             }
+            written_count+=1;
+            write_pb_clone.set_message(result.sample_name.clone());
             write_pb_clone.inc(1);
 
             // Write per-sample timings incrementally to the log file
             if let Some(mut t) = result.timings {
-                t.db_write = sample_write_start.elapsed();
-                t.insert_sample_ns = insert_ns;
-                t.write_contig_data_ns = contig_data_ns;
-                t.mag_write_ns = mag_write_ns;
+                details.apply(&mut t, sample_write_start.elapsed());
                 if let Some(ref mut f) = timing_file {
                     let _ = write_sample_timing(f, &t, timing_threads);
                 }
                 all_timings.push(t);
             }
 
-            // Flush DuckDB WAL to disk to bound memory — without this,
-            // all appended BLOB data stays resident until finalize().
-            let rss_before = if enable_timing_writer { get_rss_mb() } else { 0.0 };
-            let t_ckpt = std::time::Instant::now();
-            if let Err(e) = db_writer.checkpoint() {
-                eprintln!("WARNING: checkpoint failed after {}: {}", result.sample_name, e);
-            }
-            if enable_timing_writer {
-                let rss_after = get_rss_mb();
-                let ckpt_secs = t_ckpt.elapsed().as_secs_f64();
-                eprintln!("  checkpoint: {:.3}s  [RSS: {:.0} → {:.0} MB]",
-                    ckpt_secs, rss_before, rss_after);
-                if let Some(ref mut f) = timing_file {
-                    use std::io::Write;
-                    let _ = writeln!(f, "  checkpoint           : {:>10.3} s  [RSS: {:.0} → {:.0} MB]",
-                        ckpt_secs, rss_before, rss_after);
-                }
-            }
+            drop(data);
+            checkpoint_sample(&db_writer, &result.sample_name, enable_timing_writer, &mut timing_file)?;
+            db_writer.sample_complete(&result.sample_name)?;
+            log_sample_cleanup(&result.sample_name, enable_timing_writer, &mut timing_file);
+
         }
 
         // Build query indexes
@@ -3378,6 +3282,7 @@ fn process_samples_parallel(
         // Finalize database
         let rss_before_finalize = get_rss_mb();
         let t_finalize = std::time::Instant::now();
+        if let Some(search) = &terminal_repeats_writer { search.persist(&db_writer)?; }
         let ft = db_writer.finalize()?;
         let finalize_secs = t_finalize.elapsed().as_secs_f64();
         let rss_after_finalize = get_rss_mb();
@@ -3404,10 +3309,10 @@ fn process_samples_parallel(
                 process_pb.set_message(msg.clone());
                 process_pb.inc(1);
                 if !is_tty {
-                    eprintln!("Processing: {}", msg);
+                    eprintln!("{}", msg);
                 }
 
-                let _ = tx.send(SampleResult {
+                if tx.send(SampleResult {
                     sample_name: r.sample_name,
                     sequencing_type: r.seq_type,
                     total_reads: r.total_reads,
@@ -3423,18 +3328,18 @@ fn process_samples_parallel(
                     topology: r.topology,
                     timings: r.timings,
                     mag_results: r.mag_results,
-                });
+                }).is_err() {failed_count.fetch_add(1,Ordering::SeqCst);}
             }
             Err(e) => {
                 eprintln!("\nError processing {}: {}", bam_path.display(), e);
                 let sample_time = sample_start.elapsed().as_secs_f64();
                 completed_count.fetch_add(1, Ordering::SeqCst);
                 failed_count.fetch_add(1, Ordering::SeqCst);
-                let msg = format!("ERR ({:.2}s)", sample_time);
+                let msg = format!("{} (failed after {:.2}s)", bam_path.file_stem().unwrap_or_default().to_string_lossy(), sample_time);
                 process_pb.set_message(msg.clone());
                 process_pb.inc(1);
                 if !is_tty {
-                    eprintln!("Processing: {}", msg);
+                    eprintln!("{}", msg);
                 }
             }
         }
@@ -3452,14 +3357,14 @@ fn process_samples_parallel(
         .map_err(|_| anyhow::anyhow!("Writer thread panicked"))??;
 
     if samples_no_coverage > 0 {
-        eprintln!("{} samples written with zero coverage (no contigs passed filters)", samples_no_coverage);
+        eprintln!("{} samples recorded with no coverage results retained after filtering", samples_no_coverage);
     }
     let dropped_contigs = config.contig_drops_counter.load(Ordering::Relaxed);
     if dropped_contigs > 0 {
-        eprintln!("{} contig/sample pairs had no coverage (failed coverage thresholds)", dropped_contigs);
+        eprintln!("{} contig/sample pairs failed coverage thresholds", dropped_contigs);
     }
     if mag_drops > 0 {
-        eprintln!("{} MAGs had no coverage for some samples (failed coverage thresholds)", mag_drops);
+        eprintln!("{} MAG/sample pairs failed coverage thresholds", mag_drops);
     }
     if ft.zero_coverage_contigs > 0 {
         eprintln!("INFO: {} contigs had no coverage in any sample (Contig rows retained, Number_of_samples=0)", ft.zero_coverage_contigs);
@@ -3497,8 +3402,166 @@ fn process_samples_parallel(
     })
 }
 
-/// Sequential processing for single-threaded mode.
-/// Process one sample → write it → repeat. No channel overhead.
+enum MagStreamMessage {
+    Start { sample_name: String, seq_type: SequencingType, is_circular: bool },
+    Group(MagGroupResult),
+}
+
+#[derive(Default)]
+struct MagWriteBatch {
+    presences: Vec<PresenceData>,
+    packaging: Vec<PackagingData>,
+    misassembly: Vec<MisassemblyData>,
+    microdiversity: Vec<MicrodiversityData>,
+    side_misassembly: Vec<SideMisassemblyData>,
+    topology: Vec<TopologyData>,
+    blobs: Vec<(String, i64, crate::blob::EncodedBlob)>,
+    mags: MagResultVec,
+    payload_bytes: usize,
+}
+
+impl MagWriteBatch {
+    fn push(&mut self, r: MagGroupResult) {
+        self.payload_bytes += r.contig_blobs.iter().map(|(_, _, b)|
+            b.zoom.len() + b.chunks.iter().map(Vec::len).sum::<usize>()).sum::<usize>();
+        self.presences.extend(r.presences);
+        self.packaging.extend(r.packaging);
+        self.misassembly.extend(r.misassembly);
+        self.microdiversity.extend(r.microdiversity);
+        self.side_misassembly.extend(r.side_misassembly);
+        self.topology.extend(r.topology);
+        self.blobs.extend(r.contig_blobs);
+        self.mags.push((r.mag_name, r.mag_id, r.mag_cov_stats));
+    }
+    fn is_full(&self) -> bool {
+        self.mags.len() >= 64 || self.presences.len() >= 32768 || self.payload_bytes >= 128 * 1024 * 1024
+    }
+}
+
+#[derive(Default)]
+struct MagStreamWrites {
+    sample_id: Option<i64>,
+    insert_ns: u64,
+    contig_ns: u64,
+    mag_ns: u64,
+    detail: crate::db::SampleWriteTimings,
+    write_time: std::time::Duration,
+    coverage_rows: usize,
+    mag_drops: usize,
+}
+
+fn checkpoint_byte_limit()->Result<usize> {
+    let mib=std::env::var("THEBIGBAM_CHECKPOINT_MIB").ok().map(|s|s.parse::<usize>()).transpose()?.unwrap_or(1024);
+    anyhow::ensure!(mib>0,"THEBIGBAM_CHECKPOINT_MIB must be positive");
+    mib.checked_mul(1024*1024).context("Checkpoint byte budget overflow")
+}
+
+fn flush_mag_batch(writer: &DbWriter, sample_name: &str, sample_id: i64, circular: bool,
+    timing: bool, batch: &mut MagWriteBatch, writes: &mut MagStreamWrites) -> Result<()> {
+    if batch.mags.is_empty() { return Ok(()); }
+    let start = std::time::Instant::now();
+    let detail = writer.write_sample_batch_timed(sample_name, &batch.presences, &batch.packaging,
+        &batch.misassembly, &batch.microdiversity, &batch.side_misassembly, &batch.topology,
+        &batch.blobs, circular, timing, false)?;
+    writes.contig_ns += start.elapsed().as_nanos() as u64;
+    writes.detail.add(&detail);
+    let start = std::time::Instant::now();
+    {
+        let conn = writer.lock_conn()?;
+        writer.write_mag_coverages(&conn, sample_id, &batch.mags)?;
+    }
+    writes.mag_ns += start.elapsed().as_nanos() as u64;
+    writes.coverage_rows += batch.presences.len();
+    *batch = MagWriteBatch::default();
+    Ok(())
+}
+
+/// A bounded queue overlaps per-MAG processing and database writing. Appenders
+/// flush batches; checkpoints are periodic rather than once per small batch.
+fn process_mag_sample_streamed(
+    bam_path: &Path, flags: ModuleFlags, config: &ProcessConfig, circular: bool,
+    repeats: &[RepeatsData], contig_by_name: &dyn ContigLookup,
+    cds_indexes: &dyn CdsSource, lookup: &MagMemberLookup, writer: &DbWriter,
+) -> Result<(SampleProcessResult, MagStreamWrites)> {
+    let outcome: Result<(SampleProcessResult, MagStreamWrites)> = thread::scope(|scope| {
+        let (tx, rx) = sync_channel::<MagStreamMessage>(2);
+        let write_handle = scope.spawn(move || -> Result<MagStreamWrites> {
+            let mut writes = MagStreamWrites::default();
+            let mut sample_name = String::new();
+            let mut sample_circular = circular;
+            let mut batch = MagWriteBatch::default();
+            let checkpoint_limit=checkpoint_byte_limit()?;
+            let mut checkpoint_bytes = 0usize;
+            let mut checkpoint_rows = 0usize;
+            for message in rx {
+                match message {
+                    MagStreamMessage::Start { sample_name: name, seq_type, is_circular } => {
+                        let start = std::time::Instant::now();
+                        let id = writer.insert_sample(&name, seq_type.as_str(), 0, 0, is_circular)?;
+                        writes.insert_ns = start.elapsed().as_nanos() as u64;
+                        writes.write_time += start.elapsed();
+                        writes.sample_id = Some(id);
+                        sample_name = name;
+                        sample_circular = is_circular;
+                    }
+                    MagStreamMessage::Group(group) => {
+                        let af = group.mag_cov_stats.aligned_fraction_pct_x10 as f64 /
+                            crate::types::get_column_scale("Coverage", "Aligned_fraction_percentage");
+                        let mean = group.mag_cov_stats.coverage_mean_x10 as f64 /
+                            crate::types::get_column_scale("Coverage", "Coverage_mean");
+                        if mag_coverage_fails(af, mean, config.min_aligned_fraction, config.min_coverage_depth) {
+                            writes.mag_drops += 1;
+                            continue;
+                        }
+                        if group.presences.is_empty() { continue; }
+                        batch.push(group);
+                        if batch.is_full() {
+                            let start = std::time::Instant::now();
+                            checkpoint_bytes += batch.payload_bytes;
+                            checkpoint_rows += batch.presences.len();
+                            flush_mag_batch(writer, &sample_name, writes.sample_id.context("Missing sample start")?,
+                                sample_circular, config.enable_timing, &mut batch, &mut writes)?;
+                            if checkpoint_bytes >= checkpoint_limit || checkpoint_rows >= 1_000_000 {
+                                let checkpoint = std::time::Instant::now();
+                                writer.checkpoint()?;
+                                if config.enable_timing { writes.detail.checkpoint_ns += checkpoint.elapsed().as_nanos() as u64; }
+                                checkpoint_bytes = 0;
+                                checkpoint_rows = 0;
+                            }
+                            writes.write_time += start.elapsed();
+                        }
+                    }
+                }
+            }
+            if let Some(id) = writes.sample_id {
+                let start = std::time::Instant::now();
+                flush_mag_batch(writer, &sample_name, id, sample_circular, config.enable_timing, &mut batch, &mut writes)?;
+                writes.write_time += start.elapsed();
+            }
+            Ok(writes)
+        });
+        let sink = move |message| tx.send(message).map_err(|_| anyhow::anyhow!("MAG database writer stopped"));
+        let result = process_sample_with_mag_sink(bam_path, flags, config, circular, repeats,
+            contig_by_name, cds_indexes, Some(lookup), Some(&sink));
+        drop(sink);
+        let mut writes = write_handle.join().map_err(|_| anyhow::anyhow!("MAG database writer panicked"))??;
+        let result = result?;
+        let id = writes.sample_id.context("MAG stream did not start")?;
+        let (total,mapped)=(result.total_reads,result.mapped_reads);
+        let start = std::time::Instant::now();
+        writer.update_sample_read_counts(id, total, mapped)?;
+        writes.write_time += start.elapsed();
+        Ok((result, writes))
+    });
+    if let Err(error)=&outcome {
+        let name=bam_path.file_stem().unwrap_or_default().to_string_lossy().replace("_with_MD", "");
+        writer.sample_failed(&name,&error.to_string())?;
+    }
+    outcome
+}
+
+/// Process samples one at a time. Contig view writes after processing; MAG
+/// view overlaps per-MAG work with a bounded database-writing queue.
 fn process_samples_sequential(
     bam_files: &[PathBuf],
     contigs: &[ContigInfo],
@@ -3508,7 +3571,7 @@ fn process_samples_sequential(
     db_writer: DbWriter,
     is_tty: bool,
     repeats: &[RepeatsData],
-    annotations: &[FeatureAnnotation],
+    annotations: Vec<FeatureAnnotation>,
     _output_db: &Path,
     timing_file: Option<fs::File>,
     mut pre_timings: PreSampleTimings,
@@ -3551,33 +3614,10 @@ fn process_samples_sequential(
     };
 
     // Build shared lookups once — avoids rebuilding per sample (critical for 2M+ contigs).
-    let contig_by_name: HashMap<&str, usize> = {
-        let mut map = HashMap::new();
-        for (idx, c) in contigs.iter().enumerate() {
-            map.insert(c.name.as_str(), idx);
-            for alias in &c.aliases {
-                map.entry(alias.as_str()).or_insert(idx);
-            }
-        }
-        map
-    };
+    let contig_by_name = database_contig_lookup(contigs, &db_writer)?;
     let t_cds = std::time::Instant::now();
-    let cds_indexes: HashMap<i64, CdsIndex> = if flags.mapping_metrics
-        && !annotations.is_empty()
-    {
-        let mut annos_by_contig: HashMap<i64, Vec<&FeatureAnnotation>> = HashMap::new();
-        for a in annotations.iter() {
-            annos_by_contig.entry(a.contig_id).or_default().push(a);
-        }
-        annos_by_contig.into_iter()
-            .filter_map(|(contig_id, annos)| {
-                let idx = CdsIndex::from_contig_annotations(&annos);
-                if idx.is_empty() { None } else { Some((contig_id, idx)) }
-            })
-            .collect()
-    } else {
-        HashMap::new()
-    };
+    drop(annotations);
+    let cds_indexes = DatabaseCdsSource::from_connection(db_writer.lock_conn()?.try_clone()?, flags.mapping_metrics)?;
     pre_timings.cds_build_secs = t_cds.elapsed().as_secs_f64();
     pre_timings.cds_build_rss_mb = get_rss_mb();
     if let Some(ref mut f) = timing_file {
@@ -3592,53 +3632,107 @@ fn process_samples_sequential(
 
     for bam_path in bam_files {
         let sample_start = std::time::Instant::now();
+        let sample_memory_name = bam_path.file_stem().unwrap_or_default().to_string_lossy().replace("_with_MD", "");
 
         let sample_circular = circularity_map.get(bam_path).copied().unwrap_or(false);
+        if let Some(lookup) = mag_member_lookup.as_ref() {
+            let outcome = process_mag_sample_streamed(bam_path, flags, config, sample_circular,
+                repeats, &contig_by_name, &cds_indexes, lookup, &db_writer);
+            match outcome {
+                Ok((mut result, writes)) => {
+                    processing_time_total += sample_start.elapsed();
+                    writing_time_total += writes.write_time;
+                    // Absent groups have zero coverage; retain existing drop counts.
+                    let known: HashSet<&str> = result.mag_results.iter().map(|(name, _, _)| name.as_str()).collect();
+                    let missing_drops = if mag_coverage_fails(0.0, 0.0, config.min_aligned_fraction, config.min_coverage_depth) {
+                        mag_contig_map.iter().filter(|(name, _)| !known.contains(name.as_str())).count()
+                    } else { 0 };
+                    mag_drops += writes.mag_drops + missing_drops;
+                    if writes.coverage_rows == 0 {
+                        samples_no_coverage += 1;
+                        writing::report_empty_sample(&result.sample_name, result.bai_mapped_reads, true,
+                            config.min_aligned_fraction, config.min_coverage_depth);
+                    }
+                    else { processed += 1; }
+                    if let Some(ref mut t) = result.timings {
+                        t.db_overlapped = true;
+                        t.db_write = writes.write_time;
+                        t.insert_sample_ns = writes.insert_ns;
+                        t.write_contig_data_ns = writes.contig_ns;
+                        t.mag_write_ns = writes.mag_ns;
+                        t.db_detail = writes.detail;
+                        t.total = sample_start.elapsed();
+                        if let Some(ref mut f) = timing_file { write_sample_timing(f, t, config.threads)?; }
+                        all_timings.push(t.clone());
+                    }
+                    // Bound WAL memory at sample completion as before.
+                    let checkpoint_start = std::time::Instant::now();
+                    let rss_before = if config.enable_timing { get_rss_mb() } else { 0.0 };
+                    db_writer.checkpoint()?;
+                    db_writer.sample_complete(&result.sample_name)?;
+                    if config.enable_timing {
+                        use std::io::Write;
+                        if let Some(ref mut f) = timing_file {
+                            writeln!(f, "  checkpoint           : {:>10.3} s  [RSS: {:.0} → {:.0} MB]",
+                                checkpoint_start.elapsed().as_secs_f64(), rss_before, get_rss_mb())?;
+                        }
+                    }
+                    let msg = format!("{} ({:.2}s)", result.sample_name, sample_start.elapsed().as_secs_f64());
+                    pb.set_message(msg.clone());
+                    pb.inc(1);
+                    if !is_tty { eprintln!("{}", msg); }
+                }
+                Err(error) => {
+                    failed += 1;
+                    processing_time_total += sample_start.elapsed();
+                    pb.inc(1);
+                    let _=db_writer.sample_failed(&sample_memory_name,&error.to_string());
+                    eprintln!("Error processing {}: {}", bam_path.display(), error);
+                }
+            }
+            log_cds_cache(&cds_indexes,&sample_memory_name,config.enable_timing,&mut timing_file);
+            log_sample_cleanup(&sample_memory_name, config.enable_timing, &mut timing_file);
+            continue;
+        }
         match process_sample(bam_path, flags, config, sample_circular, repeats, &contig_by_name, &cds_indexes, mag_member_lookup.as_ref()) {
             Ok(mut r) => {
                 let process_elapsed = sample_start.elapsed();
                 processing_time_total += process_elapsed;
 
-                // MAG-level threshold pre-filter
-                let (presences, packaging, misassembly, microdiversity, side_misassembly, topology, feature_blobs, mag_results) =
-                    if is_mag_mode && !mag_contig_map.is_empty() {
-                        let (drop_set, n_dropped) = filter_failing_mags(
-                            &r.presences, mag_contig_map, &r.mag_results,
-                            config.min_aligned_fraction, config.min_coverage_depth,
-                        );
-                        mag_drops += n_dropped;
-                        if !drop_set.is_empty() {
-                            apply_mag_filter(&drop_set, mag_contig_map, r.presences, r.packaging, r.misassembly, r.microdiversity, r.side_misassembly, r.topology, r.feature_blobs, r.mag_results)
-                        } else {
-                            (r.presences, r.packaging, r.misassembly, r.microdiversity, r.side_misassembly, r.topology, r.feature_blobs, r.mag_results)
-                        }
-                    } else {
-                        (r.presences, r.packaging, r.misassembly, r.microdiversity, r.side_misassembly, r.topology, r.feature_blobs, r.mag_results)
-                    };
+                let identity = SampleIdentity { name: &r.sample_name, sequencing_type: r.seq_type,
+                    total_reads: r.total_reads, mapped_reads: r.mapped_reads, bai_mapped_reads: r.bai_mapped_reads, circular: r.is_circular };
+                let (data, dropped) = SampleData {
+                    presences: r.presences,
+                    packaging: r.packaging,
+                    misassembly: r.misassembly,
+                    microdiversity: r.microdiversity,
+                    side_misassembly: r.side_misassembly,
+                    topology: r.topology,
+                    feature_blobs: r.feature_blobs,
+                    mag_results: r.mag_results,
+                }.filter(is_mag_mode, mag_contig_map, config.min_aligned_fraction, config.min_coverage_depth);
+                mag_drops += dropped;
 
-                if presences.is_empty() {
+                if data.presences.is_empty() {
                     samples_no_coverage += 1;
-                    if r.bai_mapped_reads > 0 {
-                        eprintln!(
-                            "INFO: Sample '{}': {} reads in BAM index but no contig passed coverage \
-                             filters (min_aligned_fraction={:.1}%, min_coverage_depth={:.1}). \
-                             Sample recorded in DB with zero coverage.",
-                            r.sample_name, r.bai_mapped_reads,
-                            config.min_aligned_fraction, config.min_coverage_depth,
-                        );
+                    let write_start = std::time::Instant::now();
+                    identity.insert(&db_writer,true,config.min_aligned_fraction,config.min_coverage_depth)?;
+                    db_writer.sample_complete(&r.sample_name)?;
+                    writing_time_total += write_start.elapsed();
+                    if let Some(ref mut t) = r.timings {
+                        SampleWriteDetails { insert_ns: write_start.elapsed().as_nanos() as u64, ..Default::default() }.apply(t, write_start.elapsed());
+                        t.total = sample_start.elapsed();
+                        if let Some(ref mut f) = timing_file {
+                            write_sample_timing(f, t, config.threads)?;
+                        }
+                        all_timings.push(t.clone());
                     }
-                    // Still write the Sample row so the sample appears in the DB.
-                    // total_reads = bai_mapped + unmapped (r.total_reads == unmapped here)
-                    if let Err(e) = db_writer.insert_sample(
-                        &r.sample_name,
-                        r.seq_type.as_str(),
-                        r.bai_mapped_reads + r.total_reads,
-                        r.bai_mapped_reads,
-                        r.is_circular,
-                    ) {
-                        eprintln!("\nError inserting sample {}: {}", r.sample_name, e);
-                    }
+                    drop(data);
+                    log_sample_cleanup(&sample_memory_name, config.enable_timing, &mut timing_file);
+                    let msg = format!("{} ({:.2}s)", r.sample_name, sample_start.elapsed().as_secs_f64());
+                    pb.set_message(msg.clone());
                     pb.inc(1);
+                    if !is_tty { eprintln!("{}", msg); }
                     continue;
                 }
 
@@ -3646,11 +3740,13 @@ fn process_samples_sequential(
 
                 // Insert sample
                 let t_insert = std::time::Instant::now();
-                let sample_id = match db_writer.insert_sample(&r.sample_name, r.seq_type.as_str(), r.total_reads, r.mapped_reads, r.is_circular) {
+                let sample_id = match identity.insert(&db_writer, false, config.min_aligned_fraction, config.min_coverage_depth) {
                     Ok(id) => id,
                     Err(e) => {
                         eprintln!("\nError inserting sample {}: {}", r.sample_name, e);
                         failed += 1;
+                        drop(data);
+                        log_sample_cleanup(&sample_memory_name, config.enable_timing, &mut timing_file);
                         pb.inc(1);
                         continue;
                     }
@@ -3658,25 +3754,14 @@ fn process_samples_sequential(
                 let insert_ns = t_insert.elapsed().as_nanos() as u64;
 
                 // Write sample data
-                let mut contig_data_ns: u64 = 0;
-                let mut mag_write_ns: u64 = 0;
-                let t_contig = std::time::Instant::now();
-                if let Err(e) = db_writer.write_sample_data(
-                    &r.sample_name,
-                    &presences,
-                    &packaging,
-                    &misassembly,
-                    &microdiversity,
-                    &side_misassembly,
-                    &topology,
-                    &feature_blobs,
-                    r.is_circular,
-                ) {
+                let mut write_succeeded=false;
+                let mut details = SampleWriteDetails { insert_ns, ..Default::default() };
+                if let Err(e) = write_sample_payload(&db_writer, &identity, sample_id, &data, config.enable_timing, &mut details) {
                     eprintln!("\nError writing data for {}: {}", r.sample_name, e);
+                    db_writer.sample_failed(&r.sample_name,&e.to_string())?;
                     failed += 1;
                 } else {
-                    contig_data_ns = t_contig.elapsed().as_nanos() as u64;
-                    mag_write_ns = write_mag_results(&db_writer, &r.sample_name, sample_id, &mag_results);
+                    write_succeeded=true;
                     processed += 1;
                 }
 
@@ -3684,10 +3769,7 @@ fn process_samples_sequential(
 
                 // Write per-sample timings incrementally to the log file
                 if let Some(ref mut t) = r.timings {
-                    t.db_write = write_start.elapsed();
-                    t.insert_sample_ns = insert_ns;
-                    t.write_contig_data_ns = contig_data_ns;
-                    t.mag_write_ns = mag_write_ns;
+                    details.apply(t, write_start.elapsed());
                     t.total = sample_start.elapsed();
                     if let Some(ref mut f) = timing_file {
                         let _ = write_sample_timing(f, t, config.threads);
@@ -3695,25 +3777,9 @@ fn process_samples_sequential(
                     all_timings.push(t.clone());
                 }
 
-                // Flush DuckDB WAL to disk to bound memory — without this,
-                // all appended BLOB data stays resident until finalize().
-                let rss_before = if config.enable_timing { get_rss_mb() } else { 0.0 };
-                let t_ckpt = std::time::Instant::now();
-                if let Err(e) = db_writer.checkpoint() {
-                    eprintln!("WARNING: checkpoint failed after {}: {}", r.sample_name, e);
-                }
-                if config.enable_timing {
-                    let rss_after = get_rss_mb();
-                    let ckpt_secs = t_ckpt.elapsed().as_secs_f64();
-                    eprintln!("  checkpoint: {:.3}s  [RSS: {:.0} → {:.0} MB]",
-                        ckpt_secs, rss_before, rss_after);
-                    if let Some(ref mut f) = timing_file {
-                        use std::io::Write;
-                        let _ = writeln!(f, "  checkpoint           : {:>10.3} s  [RSS: {:.0} → {:.0} MB]",
-                            ckpt_secs, rss_before, rss_after);
-                    }
-                }
-
+                drop(data);
+                checkpoint_sample(&db_writer, &r.sample_name, config.enable_timing, &mut timing_file)?;
+                if write_succeeded {db_writer.sample_complete(&r.sample_name)?;}
                 let total_sample_time = sample_start.elapsed().as_secs_f64();
                 let msg = format!("{} ({:.2}s)", r.sample_name, total_sample_time);
                 pb.set_message(msg.clone());
@@ -3723,6 +3789,7 @@ fn process_samples_sequential(
                 }
             }
             Err(e) => {
+                db_writer.sample_failed(&sample_memory_name,&e.to_string())?;
                 eprintln!("\nError processing {}: {}", bam_path.display(), e);
                 failed += 1;
                 processing_time_total += sample_start.elapsed();
@@ -3734,17 +3801,19 @@ fn process_samples_sequential(
                 }
             }
         }
+        log_cds_cache(&cds_indexes,&sample_memory_name,config.enable_timing,&mut timing_file);
+        log_sample_cleanup(&sample_memory_name, config.enable_timing, &mut timing_file);
     }
 
     if samples_no_coverage > 0 {
-        eprintln!("{} samples written with zero coverage (no contigs passed filters)", samples_no_coverage);
+        eprintln!("{} samples recorded with no coverage results retained after filtering", samples_no_coverage);
     }
     let dropped_contigs = config.contig_drops_counter.load(Ordering::Relaxed);
     if dropped_contigs > 0 {
-        eprintln!("{} contig/sample pairs had no coverage (failed coverage thresholds)", dropped_contigs);
+        eprintln!("{} contig/sample pairs failed coverage thresholds", dropped_contigs);
     }
     if mag_drops > 0 {
-        eprintln!("{} MAGs had no coverage for some samples (failed coverage thresholds)", mag_drops);
+        eprintln!("{} MAG/sample pairs failed coverage thresholds", mag_drops);
     }
 
     // Build query indexes
@@ -3757,6 +3826,7 @@ fn process_samples_sequential(
     // Finalize database
     let rss_before_finalize = get_rss_mb();
     let t_finalize = std::time::Instant::now();
+    if let Some(search) = &config.terminal_repeats { search.persist(&db_writer)?; }
     let ft = db_writer.finalize()?;
     let finalize_secs = t_finalize.elapsed().as_secs_f64();
     if ft.zero_coverage_contigs > 0 {
@@ -3788,6 +3858,25 @@ fn process_samples_sequential(
         processing_time_secs: processing_time_total.as_secs_f64(),
         writing_time_secs: writing_time_total.as_secs_f64(),
     })
+}
+
+/// Snapshot after sample-local payloads are released. RSS includes reusable
+/// buffers, bounded caches, DuckDB residency, and concurrent work in parallel mode.
+fn log_cds_cache(source:&DatabaseCdsSource,sample:&str,enabled:bool,log:&mut Option<fs::File>) {
+    if !enabled {return;}
+    let (loads,ns,oversized,bytes)=source.diagnostics();
+    let line=format!("[Sample {sample}] CDS cache cumulative: {loads} SQL loads, {:.3}s loading, {oversized} oversized batches, {:.1} MiB retained",ns as f64/1e9,bytes as f64/(1024.0*1024.0));
+    if let Some(file)=log {use std::io::Write;let _=writeln!(file,"{line}");let _=file.flush();}
+}
+
+fn log_sample_cleanup(sample: &str, enabled: bool, log: &mut Option<fs::File>) {
+    if !enabled { return; }
+    let (rss, peak) = get_rss_and_peak_mb();
+    if let Some(file) = log {
+        use std::io::Write;
+        let _ = writeln!(file, "  Memory after sample payload cleanup [{}]: RSS {:.0} MiB; process peak {:.0} MiB", sample, rss, peak);
+        let _ = file.flush();
+    }
 }
 
 fn ns_to_s(ns: u64) -> f64 {
@@ -3862,9 +3951,8 @@ fn open_timing_log(output_db: &Path, threads: usize, n_samples: usize, command_l
     writeln!(f, "  Threads      : {}", threads)?;
     writeln!(f, "  Samples      : {}", n_samples)?;
     writeln!(f, "  Memory       : RSS tracked via /proc/self/status")?;
-    let (detected_gb, mem_source) = crate::db::detect_available_memory_gb();
-    let duckdb_gb = (detected_gb * 3 / 4).max(4);
-    writeln!(f, "  DuckDB limit : {} GB (75% of {} GB from {})", duckdb_gb, detected_gb, mem_source)?;
+    let (duckdb_mib, detected_gb, mem_source) = crate::db::duckdb_memory_budget()?;
+    writeln!(f, "  DuckDB budget: {} MiB at startup ({} GiB from {}; recalculated on connection open)", duckdb_mib, detected_gb, mem_source)?;
     let _ = f.flush();
 
     eprintln!("Timing log: {}", log_path.display());
@@ -3878,6 +3966,7 @@ fn write_sample_timing(f: &mut fs::File, t: &SampleTimings, threads: usize) -> R
     writeln!(f, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")?;
     writeln!(f, "### Sample: {}  [RSS: {:.0} MB]", t.sample_name, get_rss_mb())?;
     writeln!(f)?;
+    writeln!(f, "  RSS before reader open: {:>10.0} MiB", t.rss_before_reader_open_mib)?;
     writeln!(f, "  BAM path             : {}", t.bam_path)?;
     writeln!(f, "  Contigs in BAM       : {}", t.n_contigs_in_bam)?;
     writeln!(f, "  Contigs processed    : {}", t.n_contigs_processed)?;
@@ -3890,23 +3979,48 @@ fn write_sample_timing(f: &mut fs::File, t: &SampleTimings, threads: usize) -> R
     writeln!(f, "  Merge contig results : {:>10.3} s", t.merge_results.as_secs_f64())?;
     writeln!(f, "  DB write             : {:>10.3} s", t.db_write.as_secs_f64())?;
     writeln!(f, "  TOTAL per sample     : {:>10.3} s", t.total.as_secs_f64())?;
-    writeln!(f, "  ---- Par-iter sub-phase sums (CPU-seconds across {} threads) ----", threads)?;
+    if t.db_overlapped {
+        writeln!(f, "  DB writes overlap processing; DB write is active writer time, not an additional wall phase.")?;
+        writeln!(f, "  MAG queue send/wait  : {:>10.3} s (summed worker-seconds, included in par-iter wall)", ns_to_s(t.mag_queue_wait_ns))?;
+    }
+    writeln!(f, "  ---- Par-iter sub-phase sums (worker-seconds; {} readers, {} configured threads) ----", t.bam_reader_workers, threads)?;
+    writeln!(f, "  BAM reader budget    : {} readers; estimated {} MiB each; start RSS {} MiB", t.bam_reader_workers, t.bam_reader_estimated_mib, t.bam_reader_start_rss_mib)?;
     writeln!(f, "  BAM reader open      : {:>10.3} s", ns_to_s(t.bam_open_ns))?;
     writeln!(f, "  process_contig_stream: {:>10.3} s", ns_to_s(t.streaming_ns))?;
     writeln!(f, "    . fetch seek       : {:>10.3} s", ns_to_s(t.stream_fetch_seek_ns))?;
     writeln!(f, "    . record loop (htslib+prep): {:>10.3} s", ns_to_s(t.stream_records_ns))?;
     writeln!(f, "    . process_read     : {:>10.3} s", ns_to_s(t.stream_process_read_ns))?;
     writeln!(f, "    . finalize+cov     : {:>10.3} s", ns_to_s(t.stream_finalize_ns))?;
+    writeln!(f, "  Terminal search      : {:.3} s (worker-seconds, included in feature calculation)", ns_to_s(t.terminal.search_ns))?;
+    writeln!(f, "    . DNA loading      : {:.3} s", ns_to_s(t.terminal.dna_ns))?;
+    writeln!(f, "    . cache waits      : {:.3} s", ns_to_s(t.terminal.wait_ns))?;
+    writeln!(f, "    . output parsing   : {:.3} s", ns_to_s(t.terminal.parse_ns))?;
     writeln!(f, "  Feature calculation  : {:>10.3} s", ns_to_s(t.feature_calc_ns))?;
-    let sub_sum_ns = t.bam_open_ns
-                   + t.streaming_ns + t.feature_calc_ns;
-    writeln!(f, "  (sum of above)       : {:>10.3} s  ({}x threads -> wall ~ {:.1} s)",
-             ns_to_s(sub_sum_ns), threads, ns_to_s(sub_sum_ns) / threads as f64)?;
+    writeln!(f, "    . dense encoding   : {:>10.3} s", ns_to_s(t.dense_encode_ns))?;
+    writeln!(f, "    . sparse encoding  : {:>10.3} s", ns_to_s(t.sparse_encode_ns))?;
+    writeln!(f, "    . preparation + metrics: {:>7.3} s", ns_to_s(t.feature_calc_ns.saturating_sub(t.dense_encode_ns + t.sparse_encode_ns)))?;
+    let sub_sum_ns = t.bam_open_ns + t.streaming_ns + t.feature_calc_ns;
+    writeln!(f, "  (sum of above)       : {:>10.3} worker-seconds (overlapping work; not a wall-time estimate)", ns_to_s(sub_sum_ns))?;
     writeln!(f, "  ---- DB write sub-phases ----")?;
     writeln!(f, "  Insert sample        : {:>10.3} s", ns_to_s(t.insert_sample_ns))?;
     writeln!(f, "  Write contig data    : {:>10.3} s", ns_to_s(t.write_contig_data_ns))?;
     writeln!(f, "  Write MAG data       : {:>10.3} s", ns_to_s(t.mag_write_ns))?;
+    write_db_detail_timing(f, &t.db_detail)?;
     let _ = f.flush();
+    Ok(())
+}
+
+fn write_db_detail_timing(f: &mut fs::File, t: &crate::db::SampleWriteTimings) -> Result<()> {
+    use std::io::Write;
+    for (name, ns) in [
+        ("coverage rows", t.coverage_ns), ("metric rows", t.metrics_ns),
+        ("write checkpoints", t.checkpoint_ns), ("blob append", t.blob_append_ns),
+        ("zoom flush", t.zoom_flush_ns), ("chunk flush", t.chunk_flush_ns),
+    ] {
+        writeln!(f, "    . {:<19}: {:>10.3} s", name, ns_to_s(ns))?;
+    }
+    writeln!(f, "  Blobs written        : {} zoom rows, {} chunk rows; {} zoom bytes, {} chunk bytes (encoded payload)",
+        t.zoom_rows, t.chunk_rows, t.zoom_bytes, t.chunk_bytes)?;
     Ok(())
 }
 
@@ -3955,6 +4069,10 @@ fn finish_timing_log(
     writeln!(f, "  DB write             : {:>10.3} s", sum_dur(|t| t.db_write))?;
     writeln!(f, "  Total per-sample sum : {:>10.3} s", sum_dur(|t| t.total))?;
     writeln!(f, "  Wall-clock (calc)    : {:>10.3} s", total_wall.as_secs_f64())?;
+    if timings.iter().any(|t| t.db_overlapped) {
+        writeln!(f, "  Processing and DB write times overlap for streamed MAG samples.")?;
+        writeln!(f, "  MAG queue send/wait  : {:>10.3} s (summed worker-seconds)", sum_ns(|t| t.mag_queue_wait_ns))?;
+    }
     writeln!(f, "  ---- Par-iter sub-phase sums ----")?;
     writeln!(f, "  BAM reader open      : {:>10.3} s", sum_ns(|t| t.bam_open_ns))?;
     writeln!(f, "  process_contig_stream: {:>10.3} s", sum_ns(|t| t.streaming_ns))?;
@@ -3962,11 +4080,30 @@ fn finish_timing_log(
     writeln!(f, "    . record loop (htslib+prep): {:>10.3} s", sum_ns(|t| t.stream_records_ns))?;
     writeln!(f, "    . process_read     : {:>10.3} s", sum_ns(|t| t.stream_process_read_ns))?;
     writeln!(f, "    . finalize+cov     : {:>10.3} s", sum_ns(|t| t.stream_finalize_ns))?;
+    writeln!(f, "  Terminal BLAST       : {:.3} worker-seconds", ns_to_s(timings.iter().map(|t| t.terminal.search_ns).sum()))?;
+    writeln!(f, "  Terminal DNA loading : {:.3} worker-seconds", ns_to_s(timings.iter().map(|t| t.terminal.dna_ns).sum()))?;
+    writeln!(f, "  Terminal cache waits : {:.3} worker-seconds", ns_to_s(timings.iter().map(|t| t.terminal.wait_ns).sum()))?;
+    writeln!(f, "  Terminal parsing     : {:.3} worker-seconds", ns_to_s(timings.iter().map(|t| t.terminal.parse_ns).sum()))?;
     writeln!(f, "  Feature calculation  : {:>10.3} s", sum_ns(|t| t.feature_calc_ns))?;
+    writeln!(f, "    . dense encoding   : {:>10.3} s", sum_ns(|t| t.dense_encode_ns))?;
+    writeln!(f, "    . sparse encoding  : {:>10.3} s", sum_ns(|t| t.sparse_encode_ns))?;
     writeln!(f, "  ---- DB write sub-phase sums ----")?;
     writeln!(f, "  Insert sample        : {:>10.3} s", sum_ns(|t| t.insert_sample_ns))?;
     writeln!(f, "  Write contig data    : {:>10.3} s", sum_ns(|t| t.write_contig_data_ns))?;
     writeln!(f, "  Write MAG data       : {:>10.3} s", sum_ns(|t| t.mag_write_ns))?;
+    let db_total = crate::db::SampleWriteTimings {
+        coverage_ns: timings.iter().map(|t| t.db_detail.coverage_ns).sum(),
+        metrics_ns: timings.iter().map(|t| t.db_detail.metrics_ns).sum(),
+        checkpoint_ns: timings.iter().map(|t| t.db_detail.checkpoint_ns).sum(),
+        blob_append_ns: timings.iter().map(|t| t.db_detail.blob_append_ns).sum(),
+        zoom_flush_ns: timings.iter().map(|t| t.db_detail.zoom_flush_ns).sum(),
+        chunk_flush_ns: timings.iter().map(|t| t.db_detail.chunk_flush_ns).sum(),
+        zoom_rows: timings.iter().map(|t| t.db_detail.zoom_rows).sum(),
+        chunk_rows: timings.iter().map(|t| t.db_detail.chunk_rows).sum(),
+        zoom_bytes: timings.iter().map(|t| t.db_detail.zoom_bytes).sum(),
+        chunk_bytes: timings.iter().map(|t| t.db_detail.chunk_bytes).sum(),
+    };
+    write_db_detail_timing(f, &db_total)?;
     writeln!(f, "  ---- Post-sample phases ----")?;
     writeln!(f, "  RSS before finalize  : {:>10.0} MB", rss_before_finalize)?;
     writeln!(f, "  Build indexes        : {:>10.3} s", index_secs)?;
@@ -4005,7 +4142,7 @@ fn print_summary(result: &ProcessResult, output_db: &Path) {
     eprintln!();
     eprintln!("  Samples processed: {}/{}", result.samples_processed, result.samples_processed + result.samples_failed + result.samples_no_coverage);
     if result.samples_no_coverage > 0 {
-        eprintln!("  Samples with zero coverage: {} (written to DB; no contigs passed filters)", result.samples_no_coverage);
+        eprintln!("  Samples with no retained coverage: {} (recorded in DB after filtering)", result.samples_no_coverage);
     }
     eprintln!("  Total time:        {:.2}s", result.total_time_secs);
     if let Ok(meta) = std::fs::metadata(output_db) {
@@ -4013,4 +4150,290 @@ fn print_summary(result: &ProcessResult, output_db: &Path) {
     }
     eprintln!();
     eprintln!("  Output: {:?}", output_db);
+}
+
+#[cfg(test)]
+mod mag_processing_tests {
+    use super::*;
+    use rust_htslib::bam::{self, header::HeaderRecord};
+
+    fn config(min_af: f64, min_cov: f64) -> ProcessConfig {
+        ProcessConfig {
+            threads: 1, min_aligned_fraction: min_af, min_coverage_depth: min_cov,
+            bar_ratio: 10.0, sequencing_type: Some(SequencingType::ShortSingle),
+            phagetermini_config: PhageTerminiConfig::default(), gc_params: GCParams::default(),
+            variation_percentage: 0.0, min_occurrences: 2, enable_timing: true,
+            blast: BlastMode::None, sample_name: String::new(), primary_reads_seen: Arc::new(AtomicU64::new(0)), terminal_repeats: None, view_mode: ViewMode::Mag,
+            mag_manifest: vec![], contig_drops_counter: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    fn fixture() -> (tempfile::TempDir, PathBuf, MagJobGroup) {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("reads.bam");
+        let mut header = bam::Header::new();
+        header.push_record(HeaderRecord::new(b"HD").push_tag(b"SO", "coordinate"));
+        for name in ["a", "b", "absent"] {
+            header.push_record(HeaderRecord::new(b"SQ").push_tag(b"SN", name).push_tag(b"LN", 100));
+        }
+        let view = bam::HeaderView::from_header(&header);
+        let mut writer = bam::Writer::from_path(&path, &header, bam::Format::Bam).unwrap();
+        for line in [
+            "r1\t0\ta\t1\t60\t10M5N5M\t*\t0\t0\tAAAAAAAAAAAAAAA\t*\tMD:Z:15",
+            "sec\t256\ta\t1\t60\t50M\t*\t0\t0\t*\t*\tMD:Z:50",
+            "supp\t2048\ta\t1\t60\t50M\t*\t0\t0\t*\t*\tMD:Z:50",
+            "r2\t0\tb\t1\t60\t10M2D8M\t*\t0\t0\tAAAAAAAAAAAAAAAAAA\t*\tMD:Z:10^AA8",
+        ] {
+            writer.write(&bam::Record::from_sam(&view, line.as_bytes()).unwrap()).unwrap();
+        }
+        drop(writer);
+        bam::index::build(&path, None, bam::index::Type::Bai, 1).unwrap();
+        let group = MagJobGroup {
+            mag_name: "mag".into(), mag_id: 1, mag_length: 300,
+            // Absent member has no job, but contributes to the full MAG denominator.
+            members: ["a", "b"].iter().enumerate().map(|(tid, name)| MagContigJob {
+                tid: tid as u32, contig_id: tid as i64 + 1, ref_name: name.to_string(),
+                ref_length: 100, offset_in_mag: tid as u32 * 100,
+            }).collect(),
+        };
+        (directory, path, group)
+    }
+
+    #[test]
+    fn whole_sample_primary_counts_survive_coverage_filtering() {
+        let (_directory,path,_group)=fixture();
+        let mut configuration=config(99.0,0.0);configuration.view_mode=ViewMode::Contig;
+        let names=HashMap::from([("a",0usize),("b",1usize),("absent",2usize)]);
+        let result=process_sample(&path,ModuleFlags::from_modules(&["Coverage".into()]),&configuration,false,&[],&names,&HashMap::new(),None).unwrap();
+        assert!(result.presences.is_empty());
+        assert_eq!((result.total_reads,result.mapped_reads),(2,2));
+        assert_eq!(result.bai_mapped_reads,4);
+    }
+
+    #[test]
+    fn database_lookup_resolves_actual_ids_independent_of_vector_order() {
+        let directory=tempfile::tempdir().unwrap();let path=directory.path().join("ids.db");
+        let contigs=vec![ContigInfo{name:"a".into(),aliases:vec![],length:100,sequence:None},ContigInfo{name:"b".into(),aliases:vec![],length:100,sequence:None}];
+        let writer=DbWriter::create(&path,&contigs,&[],&[],true,false).unwrap();
+        writer.lock_conn().unwrap().execute("UPDATE Contig SET Contig_id=7 WHERE Contig_name='b'",[]).unwrap();drop(writer);
+        let writer=DbWriter::open(&path,&[],&[],&[],true).unwrap();
+        let reordered=vec![contigs[1].clone(),contigs[0].clone()];
+        let lookup=database_contig_lookup(&reordered,&writer).unwrap();
+        assert_eq!(lookup.find("a"),Some((1,1)));assert_eq!(lookup.find("b"),Some((0,7)));
+    }
+
+    #[test]
+    fn accumulator_matches_indexed_reader_when_records_cross_contig_boundaries() {
+        use rust_htslib::bam::Read;
+        let (_directory, path, group) = fixture();
+        let flags = ModuleFlags::from_modules(&["Coverage".into(), "Misalignment".into(), "RNA".into()]);
+        let mut sequential = bam::Reader::from_path(&path).unwrap();
+        let records = sequential.records().collect::<std::result::Result<Vec<_>, _>>().unwrap();
+        let mut indexed = IndexedReader::from_path(&path).unwrap();
+        let (mut cigar, mut sequence) = (Vec::new(), Vec::new());
+        for tid in 0..3 {
+            let mut accumulator = crate::bam_reader::ContigAccumulator::new(100,
+                SequencingType::ShortSingle, flags, false, 5, false);
+            for record in records.iter().filter(|r| r.tid() == tid) {
+                accumulator.consume_record(record, &mut cigar, &mut sequence);
+            }
+            let actual = accumulator.finish(0.0, &mut None);
+            let expected = process_contig_streaming(&mut indexed, tid as u32, "fixture", 100,
+                SequencingType::ShortSingle, flags, false, 0.0, 5, &mut None).unwrap();
+            match (actual, expected) {
+                (Some((mut actual, actual_af, actual_reads)), Some((mut expected, expected_af, expected_reads))) => {
+                    assert_eq!((actual_af, actual_reads), (expected_af, expected_reads));
+                    let (mut actual_blobs, mut expected_blobs) = (Vec::new(), Vec::new());
+                    for (arrays, output) in [(&mut actual, &mut actual_blobs), (&mut expected, &mut expected_blobs)] {
+                        add_features_from_arrays(arrays, &group.members[tid as usize].ref_name,
+                            tid as i64 + 1, &config(0.0, 0.0), false, SequencingType::ShortSingle,
+                            flags, actual_reads, &[], None, output, None);
+                    }
+                    assert_eq!(actual_blobs.len(), expected_blobs.len());
+                    for (a, e) in actual_blobs.iter().zip(&expected_blobs) {
+                        assert_eq!((&a.0, a.1, &a.2.zoom, &a.2.chunks), (&e.0, e.1, &e.2.zoom, &e.2.chunks));
+                    }
+                    crate::features::recycle_feature_arrays(actual);
+                    crate::features::recycle_feature_arrays(expected);
+                }
+                (None, None) => {}
+                _ => panic!("Accumulator and indexed reader disagree for reference {tid}"),
+            }
+        }
+    }
+
+    #[test]
+    fn selective_recycled_arrays_preserve_encoded_features() {
+        for modules in [
+            vec!["Coverage"], vec!["Coverage", "Misalignment"], vec!["Coverage", "RNA"],
+            vec!["Coverage", "Phage termini"], vec!["Coverage", "Paired-reads"], vec!["Coverage", "Long-reads"],
+        ] {
+            let flags = ModuleFlags::from_modules(&modules.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+            let seq_type = if flags.long_read_metrics { SequencingType::Long }
+                else if flags.paired_read_metrics { SequencingType::ShortPaired }
+                else { SequencingType::ShortSingle };
+            let mut selected = FeatureArrays::for_modules(100, flags);
+            for len in [100, 120, 80] {
+                selected.reset(len, flags);
+                let mut full = FeatureArrays::new(len);
+                let cigar = vec![(b'S' as u32, 5), (b'M' as u32, 10), (b'I' as u32, 2),
+                    (b'M' as u32, 3), (b'D' as u32, 2), (b'M' as u32, 5), (b'S' as u32, 4)];
+                for arrays in [&mut full, &mut selected] {
+                    for _ in 0..2 {
+                        crate::features::process_read(arrays, 3, 23, 29, 20, true, true, false,
+                            false, false, false, false, &cigar, Some(b"13^AA5"), &vec![b'A'; 29],
+                            60, seq_type, flags, false, 5);
+                    }
+                    if flags.phagetermini { arrays.finalize_strands(seq_type); }
+                }
+                assert_eq!(full.primary_reads, selected.primary_reads);
+                assert_eq!(selected.coverage_median_and_trimmed_mean(0.05),
+                    (full.coverage_median(), full.coverage_trimmed_mean(0.05)));
+                let mut expected = Vec::new();
+                let mut actual = Vec::new();
+                add_features_from_arrays(&mut full, "a", 1, &config(0.0, 0.0), false,
+                    seq_type, flags, 2, &[], None, &mut expected, None);
+                add_features_from_arrays(&mut selected, "a", 1, &config(0.0, 0.0), false,
+                    seq_type, flags, 2, &[], None, &mut actual, None);
+                assert_eq!(actual.len(), expected.len());
+                for (actual, expected) in actual.iter().zip(&expected) {
+                    assert_eq!((&actual.0, actual.1, &actual.2.zoom, &actual.2.chunks),
+                        (&expected.0, expected.1, &expected.2.zoom, &expected.2.chunks));
+                }
+                if !flags.phagetermini { assert!(selected.reads_starts.is_empty()); }
+                if !flags.paired_read_metrics { assert!(selected.sum_insert_sizes.is_empty()); }
+            }
+        }
+    }
+
+    #[test]
+    fn failed_mag_sink_is_reported_to_the_sample_caller() {
+        let (_directory, path, _group) = fixture();
+        let flags = ModuleFlags::from_modules(&["Coverage".into()]);
+        let names = HashMap::from([("a", 0), ("b", 1), ("absent", 2)]);
+        let lookup = HashMap::from([
+            ("a".into(), ("mag".into(), 1, 0, 300)),
+            ("b".into(), ("mag".into(), 1, 100, 300)),
+        ]);
+        let sink = |message| match message {
+            MagStreamMessage::Start { .. } => Ok(()),
+            MagStreamMessage::Group(_) => anyhow::bail!("injected writer failure"),
+        };
+        let result = process_sample_with_mag_sink(&path, flags, &config(0.0, 0.0), false,
+            &[], &names, &HashMap::new(), Some(&lookup), Some(&sink));
+        assert!(result.err().unwrap().to_string().contains("injected writer failure"));
+    }
+
+    #[test]
+    fn streamed_mag_database_matches_collected_database() {
+        for threshold in [0.0, 11.7, 20.0] {
+            let (directory, path, _group) = fixture();
+            let contigs: Vec<_> = ["a", "b", "absent"].iter().map(|name| ContigInfo {
+                name: name.to_string(), aliases: vec![], length: 100, sequence: None,
+            }).collect();
+            let baseline = DbWriter::create(&directory.path().join("baseline.db"), &contigs, &[], &[], true, true).unwrap();
+            let streamed = DbWriter::create(&directory.path().join("streamed.db"), &contigs, &[], &[], true, true).unwrap();
+            let mags = vec![("mag".into(), vec!["a".into(), "b".into(), "absent".into()])];
+            baseline.write_mags(&mags).unwrap();
+            streamed.write_mags(&mags).unwrap();
+            let lookup = crate::mag_blob::build_mag_member_lookup(&baseline).unwrap();
+            let names = HashMap::from([("a", 0), ("b", 1), ("absent", 2)]);
+            let flags = ModuleFlags::from_modules(&["Coverage".into(), "Misalignment".into()]);
+            let cfg = config(threshold, 0.0);
+            let expected = process_sample(&path, flags, &cfg, false, &[], &names, &HashMap::new(), Some(&lookup)).unwrap();
+            let (drop, _) = filter_failing_mags(&expected.presences, &mags, &expected.mag_results, threshold, 0.0);
+            let data = apply_mag_filter(&drop, &mags, expected.presences, expected.packaging,
+                expected.misassembly, expected.microdiversity, expected.side_misassembly, expected.topology,
+                expected.feature_blobs, expected.mag_results);
+            let (total,mapped)=(expected.total_reads,expected.mapped_reads);
+            let id = baseline.insert_sample(&expected.sample_name, expected.seq_type.as_str(), total, mapped, false).unwrap();
+            if !data.0.is_empty() {
+                baseline.write_sample_data(&expected.sample_name, &data.0, &data.1, &data.2, &data.3,
+                    &data.4, &data.5, &data.6, false).unwrap();
+                let conn = baseline.lock_conn().unwrap();
+                baseline.write_mag_coverages(&conn, id, &data.7).unwrap();
+            }
+            let (actual, writes) = process_mag_sample_streamed(&path, flags, &cfg, false, &[],
+                &names, &HashMap::new(), &lookup, &streamed).unwrap();
+            assert!(actual.presences.is_empty() && actual.feature_blobs.is_empty());
+            assert_eq!(writes.coverage_rows, data.0.len());
+            for table in ["Sample", "Coverage", "Misassembly", "Microdiversity", "Side_misassembly",
+                "Topology", "Feature_blob", "Feature_blob_chunk", "MAG_coverage"] {
+                let rows = |writer: &DbWriter| {
+                    let conn = writer.lock_conn().unwrap();
+                    let mut stmt = conn.prepare(&format!("SELECT CAST(to_json(t) AS VARCHAR) AS row FROM {table} t ORDER BY row")).unwrap();
+                    stmt.query_map([], |row| row.get::<_, String>(0)).unwrap()
+                        .collect::<duckdb::Result<Vec<_>>>().unwrap()
+                };
+                assert_eq!(rows(&baseline), rows(&streamed), "table {table}, threshold {threshold}");
+            }
+        }
+    }
+
+    #[test]
+    fn bam_order_does_not_change_mag_coordinate_offsets() {
+        let (_directory, path, mut group) = fixture();
+        group.members[0].offset_in_mag = 100;
+        group.members[1].offset_in_mag = 0;
+        group.members.sort_by_key(|m| m.offset_in_mag);
+        assert_eq!(group.members[0].tid, 1);
+        let order = mag_members_in_bam_order(&group);
+        assert_eq!((order[0].tid, order[0].offset_in_mag), (0, 100));
+        let mut bam = IndexedReader::from_path(&path).unwrap();
+        let flags = ModuleFlags::from_modules(&["Coverage".into()]);
+        let result = process_mag_group(&mut bam, &group, SequencingType::ShortSingle, flags,
+            &config(0.0, 0.0), false, &[], &HashMap::new(), None).unwrap().unwrap();
+        assert_eq!(result.mag_cov_stats.aligned_fraction_pct_x10, 117);
+        assert_eq!(result.mag_cov_stats.coverage_mean_x10, 1);
+    }
+
+    #[test]
+    fn mag_thresholds_filter_completed_results_at_scaled_boundary() {
+        let (_directory, path, group) = fixture();
+        let flags = ModuleFlags::from_modules(&["Coverage".into(), "Misalignment".into()]);
+        let mut bam = IndexedReader::from_path(&path).unwrap();
+        let baseline = process_mag_group(&mut bam, &group, SequencingType::ShortSingle, flags,
+            &config(0.0, 0.0), false, &[], &HashMap::new(), None).unwrap().unwrap();
+        assert_eq!(baseline.mag_cov_stats.read_count, 2);
+        assert_eq!(baseline.mag_cov_stats.aligned_fraction_pct_x10, 117); // 35/300 bp -> 11.7%
+        assert_eq!(baseline.mag_cov_stats.coverage_mean_x10, 1); // 35/300 -> 0.1x after rounding
+        assert!(!baseline.contig_blobs.is_empty());
+        for (af, cov, rejected) in [(11.7, 0.1, false), (11.71, 0.0, true), (0.0, 0.11, true)] {
+            let result = process_mag_group(&mut bam, &group, SequencingType::ShortSingle, flags,
+                &config(af, cov), false, &[], &HashMap::new(), None).unwrap().unwrap();
+            // Thresholds no longer bypass full processing or encoding.
+            assert_eq!(result.mapped_reads, baseline.mapped_reads);
+            assert_eq!(result.misassembly.len(), baseline.misassembly.len());
+            assert_eq!(result.microdiversity.len(), baseline.microdiversity.len());
+            assert_eq!(result.presences.len(), baseline.presences.len());
+            assert_eq!(result.contig_blobs.len(), baseline.contig_blobs.len());
+            for (actual, expected) in result.contig_blobs.iter().zip(&baseline.contig_blobs) {
+                assert_eq!((&actual.0, actual.1, &actual.2.zoom, &actual.2.chunks),
+                    (&expected.0, expected.1, &expected.2.zoom, &expected.2.chunks));
+            }
+            let (drop, count) = filter_failing_mags(&result.presences,
+                &[("mag".into(), vec!["a".into(), "b".into(), "absent".into()])],
+                &vec![(result.mag_name, result.mag_id, result.mag_cov_stats)], af, cov);
+            assert_eq!(count, usize::from(rejected));
+            assert_eq!(drop.len(), if rejected { 3 } else { 0 });
+        }
+    }
+
+
+}
+
+#[cfg(test)]
+mod reader_budget_tests {
+    use super::bam_reader_worker_limit;
+    #[test]
+    fn large_headers_and_low_headroom_bound_reader_count() {
+        assert_eq!(bam_reader_worker_limit(20, 7_228_544, 3530, 273 * 1024, 62_589), 20);
+        assert_eq!(bam_reader_worker_limit(20, 10_631_709, 4000, 273 * 1024, 72 * 1024), 13);
+        assert_eq!(bam_reader_worker_limit(20, 10_631_709, 4000, 136 * 1024, 72 * 1024), 3);
+        assert_eq!(bam_reader_worker_limit(20, 10_631_709, 4000, 136 * 1024, 100 * 1024), 1);
+        assert_eq!(bam_reader_worker_limit(20, 100, 64, 136 * 1024, 1024), 20);
+        assert_eq!(bam_reader_worker_limit(1, 10_631_709, 4000, 136 * 1024, 72 * 1024), 1);
+        assert_eq!(bam_reader_worker_limit(20, 100, 64, 1024, 2048), 1);
+        assert_eq!(bam_reader_worker_limit(0, 100, 64, 136 * 1024, 1024), 1);
+    }
 }

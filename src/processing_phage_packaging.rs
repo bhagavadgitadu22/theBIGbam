@@ -426,6 +426,13 @@ pub fn filter_and_merge_to_areas_with_diagnostics(
             continue; // Only DTR, not ITR
         }
 
+        // Repeat coordinates are 1-based and must fit both clipping arrays.
+        let limit = genome_length.min(left_clippings_filtered.len()).min(right_clippings_filtered.len());
+        if [dtr.first_start, dtr.first_end, dtr.second_start, dtr.second_end]
+            .iter().any(|&p| p < 1 || p as usize > limit) {
+            continue;
+        }
+
         let gl = genome_length as i32;
 
         // Snapshot to avoid cascade: zeroing copy A shouldn't cause copy B
@@ -684,6 +691,10 @@ fn merge_positions_to_areas(
 /// - One region starting within max_distance from position 1 (beginning)
 /// - The other region ending within max_distance from contig_length (end)
 pub fn is_valid_terminal_repeat(dup: &RepeatsData, contig_length: usize, max_distance: i32) -> bool {
+    if [dup.position1, dup.position2, dup.position1prime, dup.position2prime]
+        .iter().any(|&p| p < 1 || p as usize > contig_length) {
+        return false;
+    }
     let first_start = dup.position1.min(dup.position2);
     let first_end = dup.position1.max(dup.position2);
     let second_start = dup.position1prime.min(dup.position2prime);
@@ -977,5 +988,37 @@ pub fn classify_packaging_areas(
     let median_right: Vec<f64> = kept_end_areas.iter().map(|a| a.median_clippings).collect();
 
     (mechanism, all_left, all_right, dup_status, repeat_length, median_left, median_right)
+}
+
+#[cfg(test)]
+mod repeat_bounds_tests {
+    use super::*;
+
+    #[test]
+    fn terminal_repeats_must_fit_the_contig_in_both_orientations() {
+        let mut repeat = RepeatsData { contig_name: "a".into(), position1: 1, position2: 2,
+            position1prime: 9, position2prime: 10, pident: 100.0, is_direct: true };
+        assert!(is_valid_terminal_repeat(&repeat, 10, 1));
+        repeat.position1prime = 10;
+        repeat.position2prime = 9;
+        assert!(is_valid_terminal_repeat(&repeat, 10, 1));
+        repeat.position1prime = 11;
+        assert!(!is_valid_terminal_repeat(&repeat, 10, 1));
+        repeat.position1prime = 10;
+        repeat.position1 = 0;
+        assert!(!is_valid_terminal_repeat(&repeat, 10, 1));
+    }
+
+    #[test]
+    fn clipping_confirmation_ignores_repeat_coordinates_outside_arrays() {
+        let invalid = DtrRegion { first_start: 1, first_end: 2,
+            second_start: 7, second_end: 8, is_direct: true };
+        let zeros = [0u64; 4];
+        let (starts, ends) = filter_and_merge_to_areas_with_diagnostics(
+            &zeros, &zeros, &zeros, &zeros, &zeros, &zeros, 0.0,
+            &PhageTerminiConfig::default(), 8, false, &[invalid]);
+        assert!(starts.is_empty());
+        assert!(ends.is_empty());
+    }
 }
 

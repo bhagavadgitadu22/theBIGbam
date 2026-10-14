@@ -87,7 +87,7 @@ Later on, you will only need to recompile theBIGbam when modifying the Rust file
 
 theBIGbam was designed to enable the exploration of large alignment files, making performance a critical consideration during development. Developer options are available to assess how code changes affect the performance of the `calculate` and `serve` operations.
 
-The `--time` flag can be used with both `calculate` and `serve` to record the execution time of individual processing steps in a log file.
+Use `calculate --diagnose` to record processing timings in `<database>.timings.log` and write counters in `<database>.size.tsv`. The `serve --time` flag records plotting diagnostics.
 
 For `serve`, the `--scenario` parameter can be given the path to a new text file. During the localhost session, theBIGbam records the sequence of user actions, such as filtering contigs with a mean coverage >100, selecting a contig, or displaying its primary-read coverage. This recorded sequence of actions is called a **scenario**.
 

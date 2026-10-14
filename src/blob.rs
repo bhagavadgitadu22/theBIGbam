@@ -36,13 +36,31 @@ const ZOOM_MAGIC: &[u8; 4] = b"TBZ\x01";
 /// The zoom blob can be fetched independently for large-window views, avoiding the cost
 /// of transferring the full base-resolution data from the database.
 pub struct EncodedBlob {
+    /// Encoding failures are propagated before any payload can be persisted.
+    pub error: Option<String>,
     /// Standalone zoom-only BLOB (small header + zoom levels only)
     pub zoom: Vec<u8>,
     /// Individual base-resolution chunks (one per CHUNK_SIZE bp region).
     /// Each entry is the raw zstd-compressed chunk data, stored as separate DB rows
     /// so Python can fetch only the 1-2 chunks overlapping a zoomed-in view.
-    /// Empty for sparse BLOBs (sparse data is small enough to fetch whole).
+    /// Empty sparse regions have placeholder entries; writers omit those rows
+    /// while preserving the original indices of chunks containing events.
     pub chunks: Vec<Vec<u8>>,
+}
+
+impl EncodedBlob {
+    pub(crate) fn ensure_valid(&self) -> anyhow::Result<()> {
+        if let Some(error)=&self.error {anyhow::bail!("Feature blob encoding failed: {error}");}
+        Ok(())
+    }
+
+    /// Sparse events carry absolute positions; absent chunks need no database row.
+    /// Dense readers require every chunk, including all-zero regions.
+    pub(crate) fn should_store_chunk(&self, chunk: &[u8]) -> bool {
+        self.zoom.get(5).map_or(true, |flags| flags & 1 == 0)
+            || (!chunk.is_empty() && (chunk.len() < 4
+                || u32::from_le_bytes(chunk[..4].try_into().unwrap()) != 0))
+    }
 }
 
 // ValueScale is defined in types.rs (single source of truth) and re-exported here for convenience.
@@ -165,9 +183,47 @@ fn varint_encode(values: &[u32]) -> Vec<u8> {
     buf
 }
 
-/// Compress bytes with zstd.
+thread_local! {
+    // Independent, dictionary-free frames retain the existing decoder contract.
+    static COMPRESSOR: std::cell::RefCell<Option<zstd::bulk::Compressor<'static>>> =
+        std::cell::RefCell::new(zstd::bulk::Compressor::new(ZSTD_LEVEL).ok());
+    static ENCODING_ERROR: std::cell::RefCell<Option<String>> = std::cell::RefCell::new(None);
+    static VARINT_SCRATCH: std::cell::RefCell<Vec<u8>> = std::cell::RefCell::new(Vec::new());
+}
+
+/// Compress bytes with zstd using a reusable worker-local compressor.
+fn take_encoding_error()->Option<String> { ENCODING_ERROR.with(|error|error.borrow_mut().take()) }
 fn zstd_compress(data: &[u8]) -> Vec<u8> {
-    zstd::encode_all(data.as_ref(), ZSTD_LEVEL).unwrap_or_else(|_| data.to_vec())
+    let result=COMPRESSOR.with(|slot| {
+        if let Some(compressor)=slot.borrow_mut().as_mut() { compressor.compress(data).map_err(|e|e.to_string()) }
+        else { zstd::encode_all(data,ZSTD_LEVEL).map_err(|e|e.to_string()) }
+    });
+    match result {
+        Ok(bytes)=>bytes,
+        Err(error)=>{ ENCODING_ERROR.with(|state|{ state.borrow_mut().get_or_insert(error); }); Vec::new() }
+    }
+}
+
+/// Fuse delta/zigzag/varint transforms into reusable worker-local scratch.
+/// Only the final compressed frame is owned by the output blob.
+fn compress_varints(values: impl IntoIterator<Item = i32>, delta: bool) -> Vec<u8> {
+    VARINT_SCRATCH.with(|slot| {
+        let mut scratch = slot.borrow_mut();
+        scratch.clear();
+        let mut previous = 0i32;
+        for value in values {
+            let signed = if delta { value - previous } else { value };
+            previous = value;
+            let mut v = zigzag_encode_val(signed);
+            loop {
+                let byte = (v & 0x7f) as u8;
+                v >>= 7;
+                scratch.push(if v == 0 { byte } else { byte | 0x80 });
+                if v == 0 { break; }
+            }
+        }
+        zstd_compress(&scratch)
+    })
 }
 
 /// Write a little-endian u32 to a buffer.
@@ -345,8 +401,9 @@ fn build_zoom_blob(scale: ValueScale, sparse: bool, num_zoom_levels: u8, contig_
 /// * `scale` - Scale factor applied to values
 /// * `contig_length` - Length of the contig in base pairs
 pub fn encode_dense_blob(values: &[i32], scale: ValueScale, contig_length: u32) -> EncodedBlob {
+    let _=take_encoding_error();
     if values.iter().all(|&v| v == 0) {
-        return EncodedBlob { zoom: Vec::new(), chunks: Vec::new() };
+        return EncodedBlob { error: None, zoom: Vec::new(), chunks: Vec::new() };
     }
 
     // === Base Resolution Chunks ===
@@ -358,10 +415,7 @@ pub fn encode_dense_blob(values: &[i32], scale: ValueScale, contig_length: u32) 
         let end = end.min(values.len());
         let chunk_values = &values[start..end];
 
-        let deltas = delta_encode(chunk_values);
-        let zigzagged: Vec<u32> = deltas.iter().map(|&d| zigzag_encode_val(d)).collect();
-        let varint_bytes = varint_encode(&zigzagged);
-        chunks.push(zstd_compress(&varint_bytes));
+        chunks.push(compress_varints(chunk_values.iter().copied(), true));
     }
 
     // === Zoom Levels ===
@@ -369,7 +423,7 @@ pub fn encode_dense_blob(values: &[i32], scale: ValueScale, contig_length: u32) 
     let zoom_bytes = encode_zoom_levels_dense(&zoom_levels);
     let zoom_blob = build_zoom_blob(scale, false, ZOOM_BIN_SIZES.len() as u8, contig_length, &zoom_bytes);
 
-    EncodedBlob { zoom: zoom_blob, chunks }
+    EncodedBlob { error: take_encoding_error(), zoom: zoom_blob, chunks }
 }
 
 /// Adaptive smoothing for dense values before blob encoding.
@@ -434,14 +488,20 @@ pub fn encode_sparse_blob(
     scale: ValueScale,
     contig_length: u32,
 ) -> EncodedBlob {
+    encode_sparse_blob_with_levels(positions,values,metadata,flags,scale,contig_length,None)
+}
+
+fn encode_sparse_blob_with_levels(positions:&[u32],values:&[i32],metadata:Option<&[EventMeta]>,
+    flags:MetadataFlags,scale:ValueScale,contig_length:u32,levels:Option<Vec<Vec<ZoomBinSparse>>>) -> EncodedBlob {
+    let _=take_encoding_error();
     assert_eq!(positions.len(), values.len());
 
     if positions.is_empty() {
-        return EncodedBlob { zoom: Vec::new(), chunks: Vec::new() };
+        return EncodedBlob { error: None, zoom: Vec::new(), chunks: Vec::new() };
     }
 
     // === Zoom Levels ===
-    let zoom_levels = compute_zoom_levels_sparse(positions, values, contig_length, ZOOM_BIN_SIZES);
+    let zoom_levels = levels.unwrap_or_else(|| compute_zoom_levels_sparse(positions, values, contig_length, ZOOM_BIN_SIZES));
     let zoom_bytes = encode_zoom_levels_sparse(&zoom_levels);
     let zoom_blob = build_zoom_blob(scale, true, ZOOM_BIN_SIZES.len() as u8, contig_length, &zoom_bytes);
 
@@ -466,13 +526,10 @@ pub fn encode_sparse_blob(
 
         let mut cb = Vec::new();
         write_u32(&mut cb, n_events);
-        let p_deltas = delta_encode(&chunk_pos.iter().map(|&p| p as i32).collect::<Vec<_>>());
-        let p_zig: Vec<u32> = p_deltas.iter().map(|&d| zigzag_encode_val(d)).collect();
-        let p_compressed = zstd_compress(&varint_encode(&p_zig));
+        let p_compressed = compress_varints(chunk_pos.iter().map(|&p| p as i32), true);
         write_u32(&mut cb, p_compressed.len() as u32);
         cb.extend_from_slice(&p_compressed);
-        let v_zig: Vec<u32> = chunk_vals.iter().map(|&v| zigzag_encode_val(v)).collect();
-        let v_compressed = zstd_compress(&varint_encode(&v_zig));
+        let v_compressed = compress_varints(chunk_vals.iter().copied(), false);
         write_u32(&mut cb, v_compressed.len() as u32);
         cb.extend_from_slice(&v_compressed);
         if has_meta {
@@ -488,7 +545,66 @@ pub fn encode_sparse_blob(
         chunks.push(cb);
     }
 
-    EncodedBlob { zoom: zoom_blob, chunks }
+    EncodedBlob { error: take_encoding_error(), zoom: zoom_blob, chunks }
+}
+
+/// Inclusive repeat intervals in zero-based contig coordinates.
+pub struct SparseInterval {
+    pub start: u32,
+    pub end: u32,
+    pub value: i32,
+    pub partner_start: Option<i32>,
+    pub partner_end: Option<i32>,
+}
+
+/// Encode intervals with explicit gap anchors and a plateau in every crossed chunk.
+/// Zoom maxima cover all overlapping bins, without expanding to per-base arrays.
+pub fn encode_sparse_intervals(intervals: &[SparseInterval], flags: MetadataFlags,
+    scale: ValueScale, contig_length: u32) -> EncodedBlob {
+    let mut events: Vec<(u32,i32,EventMeta)> = Vec::new();
+    for interval in intervals {
+        let (start,end) = (interval.start, interval.end.min(contig_length.saturating_sub(1)));
+        if start > end || start >= contig_length { continue; }
+        if start > 0 { events.push((start-1,0,EventMeta::default())); }
+        for chunk in start/CHUNK_SIZE..=end/CHUNK_SIZE {
+            let lo = start.max(chunk*CHUNK_SIZE);
+            let hi = end.min((chunk+1)*CHUNK_SIZE-1);
+            events.push((lo,interval.value,EventMeta {partner:interval.partner_start,..Default::default()}));
+            events.push((hi,interval.value,EventMeta {partner:interval.partner_end,..Default::default()}));
+        }
+        if end+1 < contig_length { events.push((end+1,0,EventMeta::default())); }
+    }
+    events.sort_by_key(|event| event.0);
+    // Adjacent intervals supersede each other's zero anchors. Preserve paired
+    // metadata at single-base intervals, which legitimately have equal endpoints.
+    let mut positions = Vec::new(); let mut values = Vec::new(); let mut metadata = Vec::new();
+    let mut index = 0;
+    while index < events.len() {
+        let mut end = index+1;
+        while end < events.len() && events[end].0 == events[index].0 { end+=1; }
+        let nonzero = events[index..end].iter().any(|event| event.1 != 0);
+        if nonzero {
+            for event in &events[index..end] {
+                if event.1 != 0 { positions.push(event.0); values.push(event.1); metadata.push(event.2.clone()); }
+            }
+        } else {
+            positions.push(events[index].0); values.push(0); metadata.push(EventMeta::default());
+        }
+        index=end;
+    }
+    let mut levels = Vec::new();
+    for &size in ZOOM_BIN_SIZES {
+        let mut bins = vec![ZoomBinSparse {max_value:0};contig_length.div_ceil(size) as usize];
+        for interval in intervals {
+            if interval.start > interval.end || interval.start >= contig_length {continue;}
+            let end=interval.end.min(contig_length-1);
+            for bin in &mut bins[(interval.start/size) as usize..=(end/size) as usize] {
+                bin.max_value=bin.max_value.max(interval.value);
+            }
+        }
+        levels.push(bins);
+    }
+    encode_sparse_blob_with_levels(&positions,&values,Some(&metadata),flags,scale,contig_length,Some(levels))
 }
 
 /// Encode sparse metadata in columnar format.
@@ -561,6 +677,7 @@ fn encode_sparse_metadata(metadata: &[EventMeta], flags: &MetadataFlags) -> Vec<
 /// `window_size` is the genomic window each value represents (e.g. 500 for GC content).
 /// Zoom bins are computed in window-index space so indices align with the values array.
 pub fn encode_contig_dense_blob(values: &[i32], scale: ValueScale, contig_length: u32, window_size: u32) -> EncodedBlob {
+    let _=take_encoding_error();
     // === Base Resolution Chunks ===
     let num_chunks = (values.len() as u32).div_ceil(CHUNK_SIZE);
     let mut chunks = Vec::with_capacity(num_chunks as usize);
@@ -570,10 +687,7 @@ pub fn encode_contig_dense_blob(values: &[i32], scale: ValueScale, contig_length
         let end = end.min(values.len());
         let chunk_values = &values[start..end];
 
-        let deltas = delta_encode(chunk_values);
-        let zigzagged: Vec<u32> = deltas.iter().map(|&d| zigzag_encode_val(d)).collect();
-        let varint_bytes = varint_encode(&zigzagged);
-        chunks.push(zstd_compress(&varint_bytes));
+        chunks.push(compress_varints(chunk_values.iter().copied(), true));
     }
 
     // === Zoom Levels (only 10kbp for contig features) ===
@@ -584,7 +698,7 @@ pub fn encode_contig_dense_blob(values: &[i32], scale: ValueScale, contig_length
     let zoom_bytes = encode_zoom_levels_dense(&zoom_levels);
     let zoom_blob = build_zoom_blob(scale, false, CONTIG_ZOOM_BIN_SIZES.len() as u8, contig_length, &zoom_bytes);
 
-    EncodedBlob { zoom: zoom_blob, chunks }
+    EncodedBlob { error: take_encoding_error(), zoom: zoom_blob, chunks }
 }
 
 /// Chunk size in base pairs (must match CHUNK_SIZE constant used in encoding).
@@ -652,8 +766,8 @@ pub fn feature_id(name: &str) -> Option<u16> {
 // with contig offsets baked in, and re-encodes the result as a MAG blob.
 // ============================================================================
 
-fn zstd_decompress(bytes: &[u8]) -> Vec<u8> {
-    zstd::decode_all(bytes).unwrap_or_default()
+fn zstd_decompress(bytes: &[u8]) -> anyhow::Result<Vec<u8>> {
+    zstd::decode_all(bytes).map_err(Into::into)
 }
 
 #[inline]
@@ -662,24 +776,23 @@ fn zigzag_decode_val(v: u32) -> i32 {
 }
 
 /// Decode LEB128 varint bytes into `count` unsigned values.
-fn varint_decode(bytes: &[u8], count: usize) -> Vec<u32> {
-    let mut out = Vec::with_capacity(count);
-    let mut i = 0;
-    while out.len() < count && i < bytes.len() {
-        let mut val: u32 = 0;
-        let mut shift = 0u32;
+fn varint_decode(bytes:&[u8],count:usize)->anyhow::Result<Vec<u32>> {
+    anyhow::ensure!(count<=bytes.len(),"Truncated varint payload");
+    let mut out=Vec::with_capacity(count);let mut index=0;
+    for _ in 0..count {
+        let mut value=0u32;let mut shift=0;
         loop {
-            if i >= bytes.len() { break; }
-            let b = bytes[i];
-            i += 1;
-            val |= ((b & 0x7F) as u32) << shift;
-            if b & 0x80 == 0 { break; }
-            shift += 7;
-            if shift >= 35 { break; }
+            let byte=*bytes.get(index).ok_or_else(||anyhow::anyhow!("Truncated varint"))?;
+            index+=1;
+            anyhow::ensure!(shift<32 && (shift!=28 || byte&0xF0==0),"Invalid u32 varint");
+            value|=((byte&0x7f) as u32)<<shift;
+            if byte&0x80==0 {break;}
+            shift+=7;
         }
-        out.push(val);
+        out.push(value);
     }
-    out
+    anyhow::ensure!(index==bytes.len(),"Trailing varint payload");
+    Ok(out)
 }
 
 fn undo_delta(deltas: &[i32]) -> Vec<i32> {
@@ -709,42 +822,42 @@ pub fn decode_zoom_blob_header(bytes: &[u8]) -> Option<(ValueScale, bool, u32)> 
 /// Reassemble a dense per-position array from `Feature_blob_chunk` /
 /// `Contig_blob_chunk` rows. Chunks must be passed in `Chunk_idx` order.
 /// Missing chunks (sparse tail) are filled with zeros.
-pub fn decode_dense_from_chunks(chunks: &[(i32, Vec<u8>)], total_values: u32) -> Vec<i32> {
+pub fn decode_dense_from_chunks(chunks: &[(i32, Vec<u8>)], total_values: u32) -> anyhow::Result<Vec<i32>> {
     let mut out = vec![0i32; total_values as usize];
     for (chunk_idx, data) in chunks {
         let start = (*chunk_idx as u32) * CHUNK_SIZE;
         let end = (start + CHUNK_SIZE).min(total_values);
         if start >= total_values { continue; }
         let expected = (end - start) as usize;
-        let varint_bytes = zstd_decompress(data);
-        let zigzagged = varint_decode(&varint_bytes, expected);
+        let varint_bytes = zstd_decompress(data)?;
+        let zigzagged = varint_decode(&varint_bytes, expected)?;
         let deltas: Vec<i32> = zigzagged.iter().map(|&v| zigzag_decode_val(v)).collect();
         let values = undo_delta(&deltas);
         let copy_n = expected.min(values.len());
         out[start as usize .. start as usize + copy_n].copy_from_slice(&values[..copy_n]);
     }
-    out
+    Ok(out)
 }
 
 /// Decode the columnar sparse metadata block (see `encode_sparse_metadata`)
 /// for exactly `n` events.
-fn decode_sparse_metadata_block(bytes: &[u8], flags: &MetadataFlags, n: usize) -> Vec<EventMeta> {
+fn decode_sparse_metadata_block(bytes: &[u8], flags: &MetadataFlags, n: usize) -> anyhow::Result<Vec<EventMeta>> {
     let mut meta: Vec<EventMeta> = (0..n).map(|_| EventMeta::default()).collect();
     let mut off = 0usize;
 
     if flags.has_stats {
         for m in meta.iter_mut() {
-            if off + 4 > bytes.len() { return meta; }
+            anyhow::ensure!(!(off + 4 > bytes.len()),"Truncated sparse metadata");
             m.mean = Some(i32::from_le_bytes([bytes[off], bytes[off+1], bytes[off+2], bytes[off+3]]));
             off += 4;
         }
         for m in meta.iter_mut() {
-            if off + 4 > bytes.len() { return meta; }
+            anyhow::ensure!(!(off + 4 > bytes.len()),"Truncated sparse metadata");
             m.median = Some(i32::from_le_bytes([bytes[off], bytes[off+1], bytes[off+2], bytes[off+3]]));
             off += 4;
         }
         for m in meta.iter_mut() {
-            if off + 4 > bytes.len() { return meta; }
+            anyhow::ensure!(!(off + 4 > bytes.len()),"Truncated sparse metadata");
             m.std = Some(i32::from_le_bytes([bytes[off], bytes[off+1], bytes[off+2], bytes[off+3]]));
             off += 4;
         }
@@ -752,17 +865,17 @@ fn decode_sparse_metadata_block(bytes: &[u8], flags: &MetadataFlags, n: usize) -
 
     if flags.has_sequence {
         for m in meta.iter_mut() {
-            if off >= bytes.len() { return meta; }
+            anyhow::ensure!(!(off >= bytes.len()),"Truncated sparse metadata");
             let len = bytes[off] as usize;
             off += 1;
-            if off + len > bytes.len() { return meta; }
+            anyhow::ensure!(!(off + len > bytes.len()),"Truncated sparse metadata");
             if len > 0 {
                 m.sequence = Some(bytes[off..off+len].to_vec());
             }
             off += len;
         }
         for m in meta.iter_mut() {
-            if off + 2 > bytes.len() { return meta; }
+            anyhow::ensure!(!(off + 2 > bytes.len()),"Truncated sparse metadata");
             m.prevalence = Some(i16::from_le_bytes([bytes[off], bytes[off+1]]));
             off += 2;
         }
@@ -770,17 +883,17 @@ fn decode_sparse_metadata_block(bytes: &[u8], flags: &MetadataFlags, n: usize) -
 
     if flags.has_codons {
         for m in meta.iter_mut() {
-            if off >= bytes.len() { return meta; }
+            anyhow::ensure!(!(off >= bytes.len()),"Truncated sparse metadata");
             let v = bytes[off]; off += 1;
             m.codon_category = if v == 255 { None } else { Some(v) };
         }
         for m in meta.iter_mut() {
-            if off >= bytes.len() { return meta; }
+            anyhow::ensure!(!(off >= bytes.len()),"Truncated sparse metadata");
             let v = bytes[off]; off += 1;
             m.codon_id = if v == 255 { None } else { Some(v) };
         }
         for m in meta.iter_mut() {
-            if off >= bytes.len() { return meta; }
+            anyhow::ensure!(!(off >= bytes.len()),"Truncated sparse metadata");
             let v = bytes[off]; off += 1;
             m.aa_id = if v == 255 { None } else { Some(v) };
         }
@@ -788,14 +901,15 @@ fn decode_sparse_metadata_block(bytes: &[u8], flags: &MetadataFlags, n: usize) -
 
     if flags.has_partner {
         for m in meta.iter_mut() {
-            if off + 4 > bytes.len() { return meta; }
+            anyhow::ensure!(!(off + 4 > bytes.len()),"Truncated sparse metadata");
             let v = i32::from_le_bytes([bytes[off], bytes[off+1], bytes[off+2], bytes[off+3]]);
             m.partner = Some(v);
             off += 4;
         }
     }
 
-    meta
+    anyhow::ensure!(off==bytes.len(),"Trailing sparse metadata");
+    Ok(meta)
 }
 
 /// Reassemble sparse events from chunks. Returns positions, values, per-event
@@ -803,7 +917,7 @@ fn decode_sparse_metadata_block(bytes: &[u8], flags: &MetadataFlags, n: usize) -
 /// the union of metadata flags observed across chunks.
 pub fn decode_sparse_from_chunks(
     chunks: &[(i32, Vec<u8>)],
-) -> (Vec<u32>, Vec<i32>, Vec<EventMeta>, MetadataFlags) {
+) -> anyhow::Result<(Vec<u32>, Vec<i32>, Vec<EventMeta>, MetadataFlags)> {
     let mut all_pos: Vec<u32> = Vec::new();
     let mut all_val: Vec<i32> = Vec::new();
     let mut all_meta: Vec<EventMeta> = Vec::new();
@@ -811,23 +925,24 @@ pub fn decode_sparse_from_chunks(
     union_flags.sparse = true;
 
     for (_chunk_idx, data) in chunks {
-        if data.len() < 4 { continue; }
+        if data.is_empty() { continue; }
+        anyhow::ensure!(data.len()>=4,"Truncated sparse chunk header");
         let mut off = 0usize;
         let n_events = read_u32_le(data, off) as usize; off += 4;
         if n_events == 0 { continue; }
-        if off + 4 > data.len() { continue; }
+        anyhow::ensure!(off.saturating_add(4)<=data.len(),"Truncated sparse payload");
         let p_len = read_u32_le(data, off) as usize; off += 4;
-        if off + p_len > data.len() { continue; }
-        let p_varint = zstd_decompress(&data[off..off+p_len]); off += p_len;
-        let p_zigzagged = varint_decode(&p_varint, n_events);
+        anyhow::ensure!(off.saturating_add(p_len)<=data.len(),"Truncated sparse payload");
+        let p_varint = zstd_decompress(&data[off..off+p_len])?; off += p_len;
+        let p_zigzagged = varint_decode(&p_varint, n_events)?;
         let p_deltas: Vec<i32> = p_zigzagged.iter().map(|&v| zigzag_decode_val(v)).collect();
         let positions = undo_delta(&p_deltas);
 
-        if off + 4 > data.len() { continue; }
+        anyhow::ensure!(off.saturating_add(4)<=data.len(),"Truncated sparse payload");
         let v_len = read_u32_le(data, off) as usize; off += 4;
-        if off + v_len > data.len() { continue; }
-        let v_varint = zstd_decompress(&data[off..off+v_len]); off += v_len;
-        let v_zigzagged = varint_decode(&v_varint, n_events);
+        anyhow::ensure!(off.saturating_add(v_len)<=data.len(),"Truncated sparse payload");
+        let v_varint = zstd_decompress(&data[off..off+v_len])?; off += v_len;
+        let v_zigzagged = varint_decode(&v_varint, n_events)?;
         let values: Vec<i32> = v_zigzagged.iter().map(|&v| zigzag_decode_val(v)).collect();
 
         // Metadata flags byte + optional compressed metadata block
@@ -839,17 +954,15 @@ pub fn decode_sparse_from_chunks(
         };
         let has_any_meta = chunk_flags.has_stats || chunk_flags.has_sequence
                           || chunk_flags.has_codons || chunk_flags.has_partner;
-        let chunk_meta: Vec<EventMeta> = if has_any_meta && off + 4 <= data.len() {
-            let m_len = read_u32_le(data, off) as usize; off += 4;
-            if off + m_len <= data.len() {
-                let m_bytes = zstd_decompress(&data[off..off+m_len]);
-                decode_sparse_metadata_block(&m_bytes, &chunk_flags, n_events)
-            } else {
-                (0..n_events).map(|_| EventMeta::default()).collect()
-            }
-        } else {
-            (0..n_events).map(|_| EventMeta::default()).collect()
-        };
+        let chunk_meta=if has_any_meta {
+            anyhow::ensure!(off+4<=data.len(),"Missing sparse metadata length");
+            let length=read_u32_le(data,off) as usize;off+=4;
+            anyhow::ensure!(off.saturating_add(length)<=data.len(),"Truncated sparse metadata frame");
+            let bytes=zstd_decompress(&data[off..off+length])?;
+            off+=length;
+            decode_sparse_metadata_block(&bytes,&chunk_flags,n_events)?
+        } else {(0..n_events).map(|_|EventMeta::default()).collect()};
+        anyhow::ensure!(off==data.len(),"Trailing sparse chunk payload");
 
         // OR chunk_flags into union_flags so re-encoding preserves them.
         union_flags.has_stats    |= chunk_flags.has_stats;
@@ -864,7 +977,7 @@ pub fn decode_sparse_from_chunks(
         }
     }
 
-    (all_pos, all_val, all_meta, union_flags)
+    Ok((all_pos, all_val, all_meta, union_flags))
 }
 
 // ============================================================================
@@ -874,6 +987,27 @@ pub fn decode_sparse_from_chunks(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fused_encoding_preserves_legacy_varint_bytes() {
+        for values in [vec![], vec![0], vec![127, 128, -129, 65_535, -32_768, 0],
+            (0..100_000).map(|i| (i % 1000) - 500).collect()] {
+            for delta in [true, false] {
+                let signed = if delta { delta_encode(&values) } else { values.clone() };
+                let expected = varint_encode(&signed.iter().map(|&v| zigzag_encode_val(v)).collect::<Vec<_>>());
+                let compressed = compress_varints(values.iter().copied(), delta);
+                assert_eq!(zstd::decode_all(compressed.as_slice()).unwrap(), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn reused_compressor_produces_independent_frames() {
+        for data in [vec![1u8; 100_000], vec![], vec![7], vec![9; 65536], vec![1; 100_000]] {
+            let compressed = zstd_compress(&data);
+            assert_eq!(zstd::decode_all(compressed.as_slice()).unwrap(), data);
+        }
+    }
 
     #[test]
     fn test_delta_encode() {
@@ -950,9 +1084,9 @@ mod tests {
         let blob = encode_dense_blob(&values, ValueScale::Raw, 1000);
 
         // Verify chunk count
-        let base_offset = u32::from_le_bytes([blob[12], blob[13], blob[14], blob[15]]) as usize;
-        let num_chunks = u16::from_le_bytes([blob[base_offset], blob[base_offset + 1]]);
-        assert_eq!(num_chunks, 1);
+        assert_eq!(blob.chunks.len(), 1);
+        let chunks = blob.chunks.into_iter().enumerate().map(|(i, data)| (i as i32, data)).collect::<Vec<_>>();
+        assert_eq!(decode_dense_from_chunks(&chunks, 1000).unwrap(), values);
     }
 
     #[test]
@@ -961,9 +1095,7 @@ mod tests {
         let values: Vec<i32> = (0..100_000).collect();
         let blob = encode_dense_blob(&values, ValueScale::Raw, 100_000);
 
-        let base_offset = u32::from_le_bytes([blob[12], blob[13], blob[14], blob[15]]) as usize;
-        let num_chunks = u16::from_le_bytes([blob[base_offset], blob[base_offset + 1]]);
-        assert_eq!(num_chunks, 2); // 100000 / 65536 = 2 chunks
+        assert_eq!(blob.chunks.len(), 2); // 100000 / 65536 = 2 chunks
     }
 
     #[test]
@@ -984,24 +1116,18 @@ mod tests {
         assert_eq!(vals[2], 100);
         assert_eq!(vals[3], 100);
         assert_eq!(vals[4], 100);
-        // 200 starts new run; 195 within 5% of 200 (10), 205 within 5% of 200
-        assert_eq!(vals[5], 200);
-        assert_eq!(vals[6], 200);
-        assert_eq!(vals[7], 200);
+        // [200,195] fits; adding 205 makes spread 10 > 5% of 195.
+        assert_eq!(vals[5], 197);
+        assert_eq!(vals[6], 197);
+        assert_eq!(vals[7], 205);
     }
 
     #[test]
     fn test_smooth_dense_near_zero() {
         let mut vals = vec![0, 1, 0, 1, 0, 5, 0];
         smooth_dense_values(&mut vals, 10.0);
-        // threshold = max(|0| * 0.1, 1) = 1 → |1-0|=1 ≤ 1 → collapsed
-        assert_eq!(vals[0], 0);
-        assert_eq!(vals[1], 0);
-        assert_eq!(vals[2], 0);
-        assert_eq!(vals[3], 0);
-        assert_eq!(vals[4], 0);
-        assert_eq!(vals[5], 5); // |5-0|=5 > 1 → new run
-        assert_eq!(vals[6], 0); // |0-5|=5 > max(5*0.1,1)=1 → new run
+        // The implemented threshold is ratio * max(min_abs, 1) = 0.1.
+        assert_eq!(vals, vec![0, 1, 0, 1, 0, 5, 0]);
     }
 
     #[test]
@@ -1029,14 +1155,82 @@ mod tests {
             },
         ];
         let flags = MetadataFlags {
-            sparse: true, has_stats: true, has_sequence: true, has_codons: true,
+            sparse: true, has_stats: true, has_sequence: true, has_codons: true, has_partner: false,
         };
         let blob = encode_sparse_blob(&positions, &values, Some(&metadata), flags, ValueScale::Times1000, 100);
 
-        // Just verify it doesn't panic and produces reasonable output
-        assert!(blob.len() > 32);
-        // Check sparse_meta_offset is non-zero
-        let meta_offset = u32::from_le_bytes([blob[24], blob[25], blob[26], blob[27]]);
-        assert!(meta_offset > 0);
+        let chunks = blob.chunks.into_iter().enumerate().map(|(i, data)| (i as i32, data)).collect::<Vec<_>>();
+        let (decoded_pos, decoded_values, decoded_meta, decoded_flags) = decode_sparse_from_chunks(&chunks).unwrap();
+        assert_eq!(decoded_pos, positions);
+        assert_eq!(decoded_values, values);
+        assert!(decoded_flags.has_stats && decoded_flags.has_sequence && decoded_flags.has_codons);
+        for (actual, expected) in decoded_meta.iter().zip(&metadata) {
+            assert_eq!(actual.mean, expected.mean);
+            assert_eq!(actual.sequence, expected.sequence);
+            assert_eq!(actual.codon_id, expected.codon_id);
+        }
     }
+}
+
+#[cfg(test)]
+mod chunk_storage_tests {
+    use super::*;
+    #[test]
+    fn empty_sparse_chunks_are_optional_but_dense_chunks_are_required() {
+        let sparse = encode_sparse_blob(&[1, 2 * CHUNK_SIZE + 1], &[2, 3], None, MetadataFlags::default(), ValueScale::Times1000, 3 * CHUNK_SIZE);
+        let kept = sparse.chunks.iter().enumerate().filter(|(_, c)| sparse.should_store_chunk(c)).map(|(i,c)| (i as i32, c.clone())).collect::<Vec<_>>();
+        assert_eq!(kept.iter().map(|(i,_)| *i).collect::<Vec<_>>(), vec![0,2]);
+        assert_eq!(decode_sparse_from_chunks(&kept).unwrap().0, vec![1, 2 * CHUNK_SIZE + 1]);
+        let mut values = vec![0; (3 * CHUNK_SIZE) as usize]; values[0] = 1;
+        let dense = encode_dense_blob(&values, ValueScale::Times1000, 3 * CHUNK_SIZE);
+        assert_eq!(dense.chunks.len(), 3);
+        assert!(dense.chunks.iter().all(|c| dense.should_store_chunk(c)));
+    }
+}
+
+#[cfg(test)]
+mod invalid_frame_tests {
+    use super::*;
+    #[test]
+    fn invalid_zstd_and_truncated_chunks_are_errors() {
+        assert!(decode_dense_from_chunks(&[(0,b"not-zstd".to_vec())],10).is_err());
+        assert!(decode_sparse_from_chunks(&[(0,vec![1,0])]).is_err());
+        let blob=encode_sparse_blob(&[1],&[2],None,MetadataFlags::default(),ValueScale::Raw,100);
+        let mut data=blob.chunks[0].clone(); data.truncate(5);
+        assert!(decode_sparse_from_chunks(&[(0,data)]).is_err());
+        assert!(varint_decode(&[0x80],1).is_err());
+    }
+    #[test]
+    fn repeat_intervals_fill_zoom_bins_and_middle_chunks() {
+        let encoded = encode_sparse_intervals(&[SparseInterval {
+            start:10,end:300000,value:8849,partner_start:Some(400000),partner_end:Some(699990),
+        }], MetadataFlags {sparse:true,has_partner:true,..Default::default()}, ValueScale::Times100, 800000);
+        encoded.ensure_valid().unwrap();
+        let (positions,values,metadata,_) = decode_sparse_from_chunks(&[(1,encoded.chunks[1].clone())]).unwrap();
+        assert_eq!(positions,vec![CHUNK_SIZE,2*CHUNK_SIZE-1]);
+        assert_eq!(values,vec![8849,8849]);
+        assert_eq!(metadata[0].partner,Some(400000));
+        assert_eq!(metadata[1].partner,Some(699990));
+        let compressed_size=read_u32_le(&encoded.zoom,16) as usize;
+        let level=zstd::decode_all(&encoded.zoom[20..20+compressed_size]).unwrap();
+        let count=read_u32_le(&level,0) as usize;
+        let index_bytes=read_u32_le(&level,4) as usize;
+        let indices=varint_decode(&level[8..8+index_bytes],count).unwrap();
+        let mut bin=0;
+        let indices=indices.into_iter().map(|value| {bin+=zigzag_decode_val(value);bin}).collect::<Vec<_>>();
+        assert!(indices.contains(&2000)); // Interior at 200 kb, far from either endpoint.
+        assert_eq!(indices.first(),Some(&0));
+        assert_eq!(indices.last(),Some(&3000));
+    }
+
+    #[test]
+    fn adjacent_repeat_intervals_do_not_create_false_zero_peaks() {
+        let intervals=[SparseInterval {start:0,end:9,value:1,partner_start:None,partner_end:None},
+                       SparseInterval {start:10,end:20,value:2,partner_start:None,partner_end:None}];
+        let encoded=encode_sparse_intervals(&intervals,MetadataFlags::default(),ValueScale::Raw,100);
+        let (positions,values,_,_)=decode_sparse_from_chunks(&[(0,encoded.chunks[0].clone())]).unwrap();
+        assert_eq!(positions,vec![0,9,10,20,21]);
+        assert_eq!(values,vec![1,1,2,2,0]);
+    }
+
 }

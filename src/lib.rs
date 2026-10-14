@@ -18,6 +18,7 @@
 //! # result = {"samples_processed": 10, "samples_failed": 0, "total_time": 123.4}
 //! ```
 
+mod annotation_import;
 pub mod bam_reader;
 pub mod blob;
 pub mod cigar;
@@ -29,6 +30,7 @@ pub mod gc_content;
 pub mod mag_blob;
 pub mod parser;
 pub mod processing;
+pub mod terminal_repeats;
 pub mod processing_completeness;
 pub mod processing_phage_packaging;
 pub mod types;
@@ -80,7 +82,7 @@ mod python {
     ///         - "samples_failed": int
     ///         - "total_time": float (seconds)
     #[pyfunction]
-    #[pyo3(signature = (genbank_path, bam_files, output_db, modules, threads, sequencing_type=None, min_aligned_fraction=50.0, min_coverage_depth=0.0, bar_ratio=10.0, create_indexes=true, assembly_path="", extend_db="", min_occurrences=2, enable_timing=false, view="contig", mag_manifest=vec![], variation_percentage=0.0, blast=false, command_line=""))]
+    #[pyo3(signature = (genbank_path, bam_files, output_db, modules, threads, sequencing_type=None, min_aligned_fraction=50.0, min_coverage_depth=0.0, bar_ratio=10.0, create_indexes=true, assembly_path="", extend_db="", min_occurrences=2, enable_timing=false, view="contig", mag_manifest=vec![], variation_percentage=0.0, blast="none", command_line=""))]
     fn process_all_samples<'py>(
         py: Python<'py>,
         genbank_path: &str,
@@ -100,7 +102,7 @@ mod python {
         view: &str,
         mag_manifest: Vec<(String, String, String)>,
         variation_percentage: f64,
-        blast: bool,
+        blast: &str,
         command_line: &str,
     ) -> PyResult<Bound<'py, PyDict>> {
         use crate::gc_content::GCParams;
@@ -141,7 +143,10 @@ mod python {
             view_mode,
             mag_manifest,
             contig_drops_counter: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            blast,
+            blast: crate::processing::BlastMode::parse(blast).map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?,
+            sample_name: String::new(),
+            primary_reads_seen: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            terminal_repeats: None,
         };
 
         // Convert string paths to PathBuf

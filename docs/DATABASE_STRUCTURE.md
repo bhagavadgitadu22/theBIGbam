@@ -60,7 +60,7 @@ Tables are grouped by what they describe. Not all tables are present in every da
 | ----------------------------- | --------------------------------------- | ---------------------------------------------------------- |
 | **Contig_directRepeats**      | `(Contig_id, positions)`                | Direct repeats detected by BLAST self-alignment            |
 | **Contig_invertedRepeats**    | `(Contig_id, positions)`                | Inverted repeats detected by BLAST self-alignment          |
-| **Contig_blast_hits** *(MAG)* | `(Contig_id_1, Contig_id_2, positions)` | Inter-contig BLAST hits, stored canonically (id_1 <= id_2) |
+| **Contig_blast_hits** | `(Contig_id_1, Contig_id_2, positions)` | Directed inter-contig BLAST hits: id_1 is query, id_2 is subject |
 
 ### Visualization metadata
 
@@ -88,7 +88,7 @@ Views compute derived metrics on the fly from the tables above. They are not sto
 | **Explicit_phage_mechanisms**               | `Packaging_mechanisms` with contig/sample names                                                                         |
 | **Explicit_phage_termini**                  | `Packaging_termini` with contig/sample names and all diagnostics                                                        |
 | **MAG_annotation_core** *(MAG)*             | Annotations shifted to MAG coordinates via `Offset_in_MAG`                                                              |
-| **Contig_blast_hits_symmetric** *(MAG)*     | BLAST hits from `Contig_blast_hits` in both directions (both (A,B) and (B,A))                                           |
+| **Contig_blast_hits_query**     | Query-side BLAST hits from `Contig_blast_hits`; rows are never mirrored                                           |
 | **Explicit_coverage_per_MAG** *(MAG)*       | Human-readable `MAG_coverage` table with RPKM and TPM computed on the fly                                               |
 | **Explicit_misassembly_per_MAG** *(MAG)*    | MAG-level `Misassembly`` counts per 100 kbp                                                                             |
 | **Explicit_microdiversity_per_MAG** *(MAG)* | MAG-level `Microdiversity`` counts per 100 kbp                                                                          |

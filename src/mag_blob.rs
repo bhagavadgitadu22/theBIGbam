@@ -53,6 +53,7 @@ pub fn build_mag_member_lookup(db_writer: &DbWriter) -> Result<crate::processing
 /// Pre-scaled integer fields ready for MAG_coverage INSERT.
 /// Scaling matches the per-contig Coverage table so the view can reuse
 /// the same /10 and /1_000_000 divisors.
+#[derive(Clone)]
 pub struct MagCoverageStats {
     pub mag_length: u32,
     pub aligned_fraction_pct_x10: i32,

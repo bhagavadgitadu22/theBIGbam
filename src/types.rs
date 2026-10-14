@@ -357,6 +357,9 @@ pub const VARIABLES: &[VariableConfig] = &[
     VariableConfig { name: "coverage_reduced", subplot: "Coverage reduced", module: "Phage termini", module_order: 1, plot_type: PlotType::Curve, encoding: Encoding::Dense, value_scale: ValueScale::Raw, color: "#00c53b", alpha: 0.8, fill_alpha: 0.4, size: 1.0, title: "Coverage reduced", help: Some("Retains primary mappings starting with an exact match (and ending with an exact match for long reads)") },
     VariableConfig { name: "reads_starts", subplot: "Reads termini", module: "Phage termini", module_order: 2, plot_type: PlotType::Bars, encoding: Encoding::Sparse, value_scale: ValueScale::Times1000, color: "#215732", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Read starts", help: None },
     VariableConfig { name: "reads_ends", subplot: "Reads termini", module: "Phage termini", module_order: 3, plot_type: PlotType::Bars, encoding: Encoding::Sparse, value_scale: ValueScale::Times1000, color: "#572146", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Read ends", help: None },
+    // Append new features to preserve existing database feature IDs.
+    VariableConfig { name: "hit_count", subplot: "Hit count", module: "Genome", module_order: 3, plot_type: PlotType::Curve, encoding: Encoding::Sparse, value_scale: ValueScale::Raw, color: "#e09f3e", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Hit count", help: Some("Matches to other MAGs in MAG view, or to other contigs in contig view") },
+    VariableConfig { name: "hit_identity", subplot: "Max hit identity", module: "Genome", module_order: 4, plot_type: PlotType::Curve, encoding: Encoding::Sparse, value_scale: ValueScale::Times100, color: "#e09f3e", alpha: 0.6, fill_alpha: 0.4, size: 1.0, title: "Max hit identity", help: Some("Matches to other MAGs in MAG view, or to other contigs in contig view") },
 ];
 
 // ============================================================================

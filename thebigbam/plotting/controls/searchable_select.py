@@ -271,7 +271,9 @@ class SearchableSelect(JSComponent):
 
         model.on('search_result_nonce', () => {
             const query = model.search_result_query;
-            const currentQuery = ts.control_input.value;
+            // Tom Select trims input before load/onType. Compare using the
+            // same normalization so pasted whitespace cannot discard a match.
+            const currentQuery = ts.inputValue();
             const request = pendingFilterLoads.get(query);
             if (request && request.nonce === model.search_result_nonce) pendingFilterLoads.delete(query);
             const newOptions = model.options.slice();

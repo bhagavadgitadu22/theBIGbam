@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Callable
 
 from bokeh.io import curdoc
@@ -117,11 +117,10 @@ class ScopeTransitionController:
                     (bindings.mag_sort_sample_row, "visible", visibility.mag_sort_sample_row),
                 )
             )
-            self.plot_controller.switch_sample_scope(scope)
-            # Stored scope snapshots may predate a filter change. Recompute
-            # from the current filter after projection; sample availability is
-            # refreshed first by the callback so an invalid sample cannot
-            # clear an otherwise-valid MAG through reciprocal callbacks.
+            # Cached suggestions may omit a valid search-selected contig or
+            # predate a filter change. Refresh before projecting them so a
+            # valid selection is never temporarily cleared. The callback
+            # refreshes samples first, then MAGs and contigs.
             bindings.refresh_availability()
             self.plot_controller.set_snapshot(
                 scope,
@@ -131,6 +130,19 @@ class ScopeTransitionController:
                     mags=tuple(bindings.widgets["mag_select"].options) if bindings.widgets["has_mags"] else (),
                 ),
             )
+            widgets = bindings.widgets
+            self.plot_controller.state = replace(
+                self.plot_controller.state,
+                sample=widgets["sample_select"].value,
+                contig=widgets["contig_select"].value,
+                mag=widgets["mag_select"].value if widgets["has_mags"] else "",
+                subject_scope=(
+                    SubjectScope.MAG
+                    if widgets["has_mags"] and widgets["view_radio"].active == 0
+                    else SubjectScope.CONTIG
+                ),
+            )
+            self.plot_controller.switch_sample_scope(scope)
             bindings.diagnostics.record(
                 "view_change", diagnostic_started, query_count=0, callbacks=1, property_updates=changed
             )

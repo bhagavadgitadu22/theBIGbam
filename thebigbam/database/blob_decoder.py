@@ -68,7 +68,16 @@ def _ensure_scales(conn):
 
 def get_blob_scale(conn, feature_name):
     """Get BLOB value scale divisor for a feature from Column_scales."""
-    return _ensure_scales(conn).get((feature_name, "Value"), 1)
+    scales = _ensure_scales(conn)
+    key = (feature_name, "Value")
+    if key not in scales:
+        row = conn.execute("SELECT Value_scale FROM Variable WHERE Variable_name=?", (feature_name,)).fetchone()
+        scales[key] = {"raw": 1, "times100": 100, "times1000": 1000, "times10": 10}.get(str(row[0]), 1) if row else 1
+    if feature_name in {"hit_count", "hit_count_within_mag", "hit_identity", "hit_identity_within_mag"}:
+        marker = conn.execute("SELECT Value FROM Database_metadata WHERE Key='Blast_hit_storage'").fetchone()
+        if not marker or marker[0] != "query-v1":
+            raise ValueError("Legacy BLAST hit tracks are unsupported. Rebuild the database for query-only hits.")
+    return scales[key]
 
 def _get_metadata_value(conn, key, default):
     """Read a single value from Database_metadata by key."""

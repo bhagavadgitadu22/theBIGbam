@@ -10,7 +10,7 @@ import tempfile
 
 import duckdb
 
-from thebigbam.database.database_getters import _table_exists, update_database_metadata
+from thebigbam.database.database_getters import _table_exists, _table_has_column, update_database_metadata
 
 COMPRESSION_METADATA_KEYS = [
     "Min_aligned_fraction",
@@ -80,8 +80,10 @@ def purge_mapping_data(input_db, output_db):
         dst = duckdb.connect(output_db)
         dst.execute(f"IMPORT DATABASE '{tmpdir}'")
 
-        if _table_exists(dst, "Contig"):
-            dst.execute("UPDATE Contig SET Number_of_samples = NULL")
+        # Sample counts live on Contig in contig mode and MAG in MAG mode.
+        for table in ("Contig", "MAG"):
+            if _table_exists(dst, table) and _table_has_column(dst, table, "Number_of_samples"):
+                dst.execute(f'UPDATE "{table}" SET Number_of_samples = NULL')
 
         if _table_exists(dst, "Database_metadata"):
             for key in COMPRESSION_METADATA_KEYS:

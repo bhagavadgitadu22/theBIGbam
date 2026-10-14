@@ -36,6 +36,41 @@ def test_color_template_repository_groups_rules():
     ]
 
 
+def test_empathi_template_populates_annotation_color_controls():
+    templates = ColorTemplateRepository(Connection()).load(["empathi_Annotation"])
+    assert len(templates["empathi"]) == 19
+    controls = build_color_rule_controls(
+        MetadataService(),
+        {"Annotations": {"columns": {"empathi_Annotation": {"type": "text"}}}},
+        templates,
+        InlineStyleSheet(css=""),
+        False,
+    )
+
+    controls.template_select.value = "empathi"
+
+    assert len(controls.custom_rows) == 19
+    for row, rule in zip(controls.custom_rows, templates["empathi"]):
+        assert row["qualifier_select"].value == "empathi_Annotation"
+        assert row["operator_select"].value == "has"
+        assert row["input_ref"]["widget"].allow_custom
+        assert row["input_ref"]["widget"].value == rule["qualifier_value"]
+        assert row["color_picker"].color == rule["color"]
+    assert controls.custom_rows[0]["color_picker"].color == "#feb2ff"
+    assert controls.custom_rows[-1]["color_picker"].color == "#d8dfdf"
+    assert "empathi" not in ColorTemplateRepository(Connection()).load(["product"])
+
+
+def test_empathi_template_available_without_saved_template_tables():
+    class LegacyConnection:
+        def execute(self, sql):
+            raise RuntimeError("Missing template tables")
+
+    templates = ColorTemplateRepository(LegacyConnection()).load(["empathi_Annotation"])
+    assert list(templates) == ["empathi"]
+    assert len(templates["empathi"]) == 19
+
+
 def test_color_controls_expose_independent_annotation_and_mag_rule_lists():
     stylesheet = InlineStyleSheet(css=":host { color: red; }")
     controls = build_color_rule_controls(

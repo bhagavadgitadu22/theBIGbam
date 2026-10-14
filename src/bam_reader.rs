@@ -7,7 +7,10 @@ use anyhow::{Context, Result};
 use rust_htslib::bam::{self, Read as BamRead};
 use std::path::Path;
 
-use crate::features::{process_read, FeatureArrays, ModuleFlags};
+use crate::features::{FeatureArrays, ModuleFlags};
+
+mod accumulator;
+pub(crate) use accumulator::ContigAccumulator;
 use crate::types::SequencingType;
 
 // ============================================================================
@@ -113,6 +116,82 @@ pub fn process_contig_streaming(
     min_clipping_length: u32,
     phase_timings: &mut Option<BamPhaseTimings>,
 ) -> Result<Option<(FeatureArrays, f64, u64)>> {
+    process_contig_streaming_counted(bam,tid,contig_name,ref_length,seq_type,flags,circular,min_aligned_fraction,min_clipping_length,phase_timings).map(|(result,_)|result)
+}
+
+pub(crate) fn process_contig_streaming_counted(
+    bam: &mut bam::IndexedReader,
+    tid: u32,
+    contig_name: &str,
+    ref_length: usize,
+    seq_type: SequencingType,
+    flags: ModuleFlags,
+    circular: bool,
+    min_aligned_fraction: f64,
+    min_clipping_length: u32,
+    phase_timings: &mut Option<BamPhaseTimings>,
+) -> Result<(Option<(FeatureArrays, f64, u64)>, u64)> {
+    BAM_SCRATCH.with(|slot| {
+        let mut buffers = slot.borrow_mut();
+        let result = process_contig_with_buffers(bam, tid, contig_name, ref_length, seq_type, flags,
+            circular, min_aligned_fraction, min_clipping_length, phase_timings, &mut buffers);
+        // Reuse record storage without pinning the sample's huge BAM header.
+        let empty_header = buffers.empty_header.clone();
+        buffers.record.set_header(empty_header);
+        result
+    })
+}
+
+struct BamBuffers {
+    record: bam::Record,
+    cigar_buf: Vec<(u32, u32)>,
+    seq_buf: Vec<u8>,
+    empty_header: std::sync::Arc<bam::HeaderView>,
+}
+
+impl Default for BamBuffers {
+    fn default() -> Self {
+        Self {
+            record: bam::Record::new(), cigar_buf: Vec::with_capacity(16), seq_buf: Vec::with_capacity(256),
+            empty_header: std::sync::Arc::new(bam::HeaderView::from_header(&bam::Header::new())),
+        }
+    }
+}
+
+thread_local! {
+    static BAM_SCRATCH: std::cell::RefCell<BamBuffers> =
+        std::cell::RefCell::new(BamBuffers::default());
+}
+
+/// Decode BAM's packed CIGAR directly into reusable scratch, without the
+/// intermediate CigarString allocation made by Record::cigar().
+pub(crate) fn prepare_cigar(raw: &[u32], start: i64, scratch: &mut Vec<(u32, u32)>) -> i64 {
+    const OPS: &[u8; 9] = b"MIDNSHP=X";
+    scratch.clear();
+    let mut end = start;
+    for &packed in raw {
+        let code = (packed & 15) as usize;
+        let op = *OPS.get(code).expect("Unexpected cigar operation") as u32;
+        let len = packed >> 4;
+        scratch.push((op, len));
+        if crate::cigar::raw_cigar_consumes_ref(op) { end += len as i64; }
+    }
+    end
+}
+
+fn process_contig_with_buffers(
+    bam: &mut bam::IndexedReader,
+    tid: u32,
+    contig_name: &str,
+    ref_length: usize,
+    seq_type: SequencingType,
+    flags: ModuleFlags,
+    circular: bool,
+    min_aligned_fraction: f64,
+    min_clipping_length: u32,
+    phase_timings: &mut Option<BamPhaseTimings>,
+    buffers: &mut BamBuffers,
+) -> Result<(Option<(FeatureArrays, f64, u64)>, u64)> {
     let time_on = phase_timings.is_some();
 
     // Fetch by tid directly — skips the name→tid hash lookup (and, crucially,
@@ -126,248 +205,19 @@ pub fn process_contig_streaming(
         pt.fetch_seek_ns = t.elapsed().as_nanos() as u64;
     }
 
-    let mut arrays = FeatureArrays::new(ref_length);
-    let need_md = flags.needs_md();
-    let mut has_reads = false;
-    let mut primary_count: u64 = 0;
-    let mut cigar_buf: Vec<(u32, u32)> = Vec::with_capacity(16);
-    let mut seq_buf: Vec<u8> = Vec::with_capacity(256);
-    let need_seq = flags.mapping_metrics;
-
-    // Sum of time spent strictly inside process_read(). Subtracted from total
-    // loop wall below to yield records_ns (decode + per-record filtering).
-    let mut process_read_ns: u64 = 0;
-    let t_loop = if time_on { Some(std::time::Instant::now()) } else { None };
-
-    for result in bam.records() {
-        let record = match result {
-            Ok(r) => r,
-            Err(_) => continue,
-        };
-
-        if record.is_unmapped() {
-            continue;
-        }
-
-        has_reads = true;
-
-        // Count primary alignments (not secondary, not supplementary)
-        if !record.is_secondary() && !record.is_supplementary() {
-            primary_count += 1;
-        }
-
-        // Parse CIGAR string and MD tag (if needed)
-        let cigar_view = record.cigar();
-        cigar_buf.clear();
-        cigar_buf.extend(cigar_view.iter().map(|c| (c.char() as u32, c.len())));
-
-        let md_tag: Option<&[u8]> = if need_md {
-            record.aux(b"MD").ok().and_then(|aux| match aux {
-                rust_htslib::bam::record::Aux::String(s) => Some(s.as_bytes()),
-                _ => None,
-            })
-        } else {
-            None
-        };
-
-        // Extract SEQ bytes for sequence tracking (reuses buffer to avoid per-read allocation)
-        if need_seq {
-            seq_buf.clear();
-            let seq = record.seq();
-            let seq_len = seq.len();
-            seq_buf.reserve(seq_len);
-            for i in 0..seq_len {
-                seq_buf.push(seq[i]);
-            }
-        }
-
-        // Compute template length and proper_pair
-        // BAM proper pair flag is unreliable (mapper-dependent), so recompute for all short-paired reads
-        let (template_length, is_proper_pair, is_non_inward) = if seq_type.is_short_paired() {
-            let pos1 = record.pos() as usize;
-            let pos2 = record.mpos() as usize;
-
-            let (corrected_tlen, corrected_proper) = if circular {
-                // Circular: shortest path around the genome using actual (non-duplicated) length
-                let p1 = pos1 % ref_length;
-                let p2 = pos2 % ref_length;
-                let direct = (p1 as i32 - p2 as i32).abs();
-                let wrapped = ref_length as i32 - direct;
-                let tlen = direct.min(wrapped);
-
-                let same_ref = record.tid() == record.mtid();
-                let opposite_strands = record.is_reverse() != record.is_mate_reverse();
-                let reasonable = tlen > 0 && tlen < MAX_REASONABLE_INSERT_SIZE;
-                (tlen, same_ref && opposite_strands && reasonable)
-            } else {
-                // Linear: use absolute insert size, recompute proper pair
-                let tlen = record.insert_size().abs() as i32;
-                let same_ref = record.tid() == record.mtid();
-                let opposite_strands = record.is_reverse() != record.is_mate_reverse();
-                let reasonable = tlen > 0 && tlen < MAX_REASONABLE_INSERT_SIZE;
-                (tlen, same_ref && opposite_strands && reasonable)
-            };
-
-            let non_inward = record.tid() == record.mtid()
-                && !record.is_mate_unmapped()
-                && !corrected_proper;
-
-            (corrected_tlen, corrected_proper, non_inward)
-        } else {
-            (record.insert_size().abs() as i32, record.is_proper_pair(), false)
-        };
-
-        // Track circularising reads (primary alignments only, circular mode only)
-        // Origin-crossing reads: alignment end exceeds contig length
-        let _is_circularising_read = if circular && !record.is_secondary() && !record.is_supplementary() {
-            let raw_start = record.pos() as usize;
-            let raw_end = cigar_view.end_pos() as usize;
-
-            if raw_end > ref_length {
-                arrays.circularising_reads_count += 1;
-                // Gate: confirm circularity if ≥20bp mapped on both sides
-                let left_overlap = ref_length - raw_start;
-                let right_overlap = raw_end - ref_length;
-                if left_overlap >= 20 && right_overlap >= 20 {
-                    arrays.circularising_confirmed = true;
-                }
-                arrays.circularising_min_overlaps.push(left_overlap.min(right_overlap));
-                true
-            } else {
-                false
-            }
-        } else {
-            false
-        };
-
-        // Track circularising inserts & contig-end anomalies (primary paired-end only)
-        // Skip reads already counted as circularising reads to avoid double-counting
-        if seq_type.is_short_paired() && !record.is_secondary() && !record.is_supplementary() {
-            // Detect reads near contig ends for circularisation analysis
-            let pos = record.pos() as usize;
-            let near_left = pos < NEAR_CONTIG_END_DISTANCE;
-            let near_right = pos >= ref_length.saturating_sub(NEAR_CONTIG_END_DISTANCE);
-
-            if near_left || near_right {
-                // Circularising inserts: read1 near one end, mate near opposite end
-                if record.is_first_in_template() {
-                    if circular {
-                        // In SAM-spec circular mode, both mates have POS < LN.
-                        // Junction-spanning pairs have one mate near each end.
-                        let mpos = record.mpos() as usize;
-                        let mate_near_left = mpos < NEAR_CONTIG_END_DISTANCE;
-                        let mate_near_right = mpos >= ref_length.saturating_sub(NEAR_CONTIG_END_DISTANCE);
-                        if (near_left && mate_near_right) || (near_right && mate_near_left) {
-                            let bam_proper = record.is_proper_pair();
-                            let bam_non_inward = !record.is_proper_pair()
-                                && record.tid() == record.mtid()
-                                && !record.is_mate_unmapped();
-                            if bam_proper || bam_non_inward {
-                                arrays.circularising_inserts_count += 1;
-                                arrays.circularising_insert_sizes.push(template_length);
-                            }
-                        }
-                    } else if is_non_inward {
-                        // Linear mode: non-inward pairs with mate on opposite end
-                        let mpos = record.mpos() as usize;
-                        let mate_near_left = mpos < NEAR_CONTIG_END_DISTANCE;
-                        let mate_near_right = mpos >= ref_length.saturating_sub(NEAR_CONTIG_END_DISTANCE);
-                        if (near_left && mate_near_right) || (near_right && mate_near_left) {
-                            arrays.circularising_inserts_count += 1;
-                            // Use wrapped distance: these pairs span the contig boundary,
-                            // so the true insert size is ref_length - raw_tlen
-                            let wrapped_tlen = ref_length as i32 - template_length;
-                            arrays.circularising_insert_sizes.push(wrapped_tlen.abs());
-                        }
-                    }
-                }
-
-                // Unmapped mate with orientation suggesting mate beyond contig end
-                // Forward on right end → mate expected further right → beyond right end
-                // Reverse on left end  → mate expected further left  → beyond left end
-                if record.is_mate_unmapped() {
-                    if (near_right && !record.is_reverse()) || (near_left && record.is_reverse()) {
-                        arrays.contig_end_unmapped_mates += 1;
-                    }
-                }
-
-                // Mate on another contig near contig ends
-                if record.tid() != record.mtid() && !record.is_mate_unmapped() {
-                    arrays.contig_end_mates_mapped_on_another_contig += 1;
-                }
-            }
-
-            // Collect all proper-pair insert sizes for overall mean/median baseline
-            if record.is_first_in_template() && template_length > 0 && is_proper_pair {
-                arrays.all_proper_insert_sizes.push(template_length);
-            }
-        }
-
-        let t_pr = if time_on { Some(std::time::Instant::now()) } else { None };
-        process_read(
-            &mut arrays,
-            record.pos(),
-            cigar_view.end_pos(),
-            record.seq_len() as i32,
-            template_length,
-            record.is_first_in_template(),
-            is_proper_pair,
-            record.is_reverse(),
-            record.is_secondary(),
-            record.is_supplementary(),
-            record.is_mate_unmapped(),
-            record.tid() != record.mtid(),
-            &cigar_buf,
-            md_tag,
-            if need_seq { &seq_buf } else { &[] },
-            record.mapq(),
-            seq_type,
-            flags,
-            circular,
-            min_clipping_length,
-        );
-        if let Some(t) = t_pr {
-            process_read_ns += t.elapsed().as_nanos() as u64;
-        }
+    let mut accumulator = ContigAccumulator::new(ref_length, seq_type, flags, circular,
+        min_clipping_length, time_on);
+    let BamBuffers { record, cigar_buf, seq_buf, .. } = buffers;
+    let t_loop = time_on.then(std::time::Instant::now);
+    while let Some(result) = bam.read(record) {
+        result.with_context(||format!("Reading BAM records for {contig_name}"))?;
+        accumulator.consume_record(record, cigar_buf, seq_buf);
     }
-
-    // Flush loop timings before any early return — records_ns = (total loop
-    // wall) − (time inside process_read).
-    if let (Some(pt), Some(t)) = (phase_timings.as_mut(), t_loop) {
-        let total_ns = t.elapsed().as_nanos() as u64;
-        pt.records_ns = total_ns.saturating_sub(process_read_ns);
-        pt.process_read_ns = process_read_ns;
+    if let Some(t) = t_loop {
+        accumulator.record_loop_timing(t.elapsed().as_nanos() as u64, phase_timings);
     }
-
-    if !has_reads {
-        return Ok(None);
-    }
-
-    // Check coverage percentage before post-processing and feature calculation
-    // This saves time on low-coverage contigs by skipping:
-    // 1. finalize_strands() (phagetermini-specific, expensive)
-    // 2. All feature compression in the caller (very expensive)
-    // 3. Database writes
-    let t_fin = if time_on { Some(std::time::Instant::now()) } else { None };
-    let coverage_pct = arrays.coverage_percentage();
-    if coverage_pct < min_aligned_fraction {
-        if let (Some(pt), Some(t)) = (phase_timings.as_mut(), t_fin) {
-            pt.finalize_ns = t.elapsed().as_nanos() as u64;
-        }
-        return Ok(None);
-    }
-
-    // Finalize strand-specific reads_starts/reads_ends for phagetermini
-    // This merges forward/reverse strand tracking into final arrays
-    // Only needed for phagetermini; other features are already finalized
-    if flags.phagetermini {
-        arrays.finalize_strands(seq_type);
-    }
-    if let (Some(pt), Some(t)) = (phase_timings.as_mut(), t_fin) {
-        pt.finalize_ns = t.elapsed().as_nanos() as u64;
-    }
-
-    Ok(Some((arrays, coverage_pct, primary_count)))
+    let count=accumulator.primary_count();
+    Ok((accumulator.finish(min_aligned_fraction, phase_timings),count))
 }
 
 // ============================================================================
@@ -396,4 +246,33 @@ pub fn get_unmapped_read_count(bam_path: &Path) -> Result<u64> {
     let unmapped_total: u64 = stats.iter().map(|(_, _, _mapped, unmapped)| *unmapped).sum();
 
     Ok(unmapped_total)
+}
+
+#[cfg(test)]
+mod buffer_tests {
+    use super::*;
+
+    #[test]
+    fn packed_cigar_preparation_matches_htslib_view() {
+        use rust_htslib::bam::record::{Cigar, CigarString};
+        let cigar = CigarString(vec![Cigar::HardClip(2), Cigar::SoftClip(5), Cigar::Match(10),
+            Cigar::Ins(3), Cigar::Equal(4), Cigar::Diff(2), Cigar::Del(5), Cigar::RefSkip(20), Cigar::Pad(1)]);
+        let mut record = bam::Record::new();
+        record.set(b"read", Some(&cigar), &vec![b'A'; 24], &vec![30; 24]);
+        record.set_pos(7);
+        let mut scratch = vec![(999, 999)];
+        let end = prepare_cigar(record.raw_cigar(), record.pos(), &mut scratch);
+        let view = record.cigar();
+        assert_eq!(end, view.end_pos());
+        assert_eq!(scratch, view.iter().map(|c| (c.char() as u32, c.len())).collect::<Vec<_>>());
+        assert_eq!(prepare_cigar(&[], 11, &mut scratch), 11);
+        assert!(scratch.is_empty());
+    }
+}
+
+pub(crate) fn count_reference_primary_reads(bam:&mut bam::IndexedReader,tid:u32,length:u64)->Result<u64> {
+    bam.fetch((tid as i32,0,length as i64))?;
+    let mut record=bam::Record::new(); let mut count=0;
+    while let Some(result)=bam.read(&mut record) { result?; if !record.is_unmapped() && !record.is_secondary() && !record.is_supplementary() {count+=1;} }
+    Ok(count)
 }

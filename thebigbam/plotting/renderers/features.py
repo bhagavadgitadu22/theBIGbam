@@ -54,7 +54,7 @@ def _tooltips(items):
             ("Identity", "@y{0.01}%"),
         ]
     if any("partner_contig" in item for item in items):
-        return [("Position", "@x{0,0}"), ("Identity (%)", "@y{0.01}"), ("Closest contig:", "@partner_contig")]
+        return [("Position", "@x{0,0}"), ("Identity (%)", "@y{0.01}"), ("Best-hit contig", "@partner_contig")]
     if any("repeat_positions" in item for item in items):
         return [("Position", "@x{0,0}"), ("Value", "@y{0.00}"), ("Repeat positions", "@repeat_positions")]
     if any("width" in item and any(width != 1 for width in item["width"]) for item in items):

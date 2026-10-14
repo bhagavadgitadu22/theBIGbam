@@ -13,7 +13,7 @@ except ImportError:
     _rust = None
 
 
-def calculating_all_features_parallel(list_modules, bam_files, output_db, min_aligned_fraction, min_coverage_depth, coverage_percentage, n_sample_cores=None, sequencing_type=None, genbank_path=None, assembly_path=None, extend_db=None, min_occurrences=2, enable_timing=False, view="contig", mag_manifest=None, variation_percentage=0.0, blast=False, command_line=""):
+def calculating_all_features_parallel(list_modules, bam_files, output_db, min_aligned_fraction, min_coverage_depth, coverage_percentage, n_sample_cores=None, sequencing_type=None, genbank_path=None, assembly_path=None, extend_db=None, min_occurrences=2, enable_timing=False, view="contig", mag_manifest=None, variation_percentage=0.0, blast="none", command_line=""):
     """Process all BAM files in parallel using Rust bindings."""
     if not HAS_RUST:
         sys.exit("ERROR: Rust bindings (thebigbam_rs) are required but not available. Please install them first.")
@@ -59,12 +59,28 @@ def calculating_all_features_parallel(list_modules, bam_files, output_db, min_al
         print(f"Warning: {samples_failed} samples failed to process", flush=True)
 
 def add_calculate_args(parser):
+    parser.formatter_class = argparse.RawDescriptionHelpFormatter
+    parser.description = (
+        "Calculate features from annotations and BAM alignments.\n\n"
+        "Default modules for fresh calculations with BAM files:\n"
+        "  --view contig (default):\n"
+        "    coverage, misalignment\n"
+        "  --view mag:\n"
+        "    coverage, misalignment\n\n"
+        "rna, longreads, pairedreads and phagetermini are opt-in in both views.\n"
+        "--modules replaces these defaults; only the listed modules are selected.\n"
+        "To include phagetermini alongside the defaults, for example in MAG view, use:\n"
+        "  --view mag -m coverage,misalignment,phagetermini\n\n"
+        "Without BAM files, mapping-derived modules are skipped.\n"
+        "With --extend, modules are inherited from the existing database;\n"
+        "--modules and the fresh-calculation defaults do not apply."
+    )
     parser.add_argument('-t', '--threads', type=int, default=4, help='Number of threads available (default: 4)')
     parser.add_argument("-g", "--genbank", help="Path to annotation FILE or DIRECTORY: GenBank (.gbk, .gbff, .gb) or GFF3 (.gff, .gff3). With --view mag, a directory means one file per MAG (MAG name = filename stem). Required if no BAM files provided.")
     parser.add_argument("-b", "--bam_files", help="Path to bam file or directory containing mapping files (BAM format). Optional if genbank is provided.")
     parser.add_argument("-o", "--output", required=True, help="Output database file path (.db)")
-    parser.add_argument("-m", "--modules", required=False, default=None, help="List of modules to compute (comma-separated). If not provided, all modules are computed. Options: coverage,misalignment,rna,longreads,pairedreads,phagetermini")
-    parser.add_argument("-a", "--assembly", help="Path to assembly FASTA FILE or DIRECTORY (.fa, .fasta, .fna). Needed for autoblast when genbank lacks sequence data. With --view mag, a directory means one file per MAG (MAG name = filename stem).")
+    parser.add_argument("-m", "--modules", required=False, default=None, help="Comma-separated modules to compute, replacing the defaults listed above for each view. Choices: coverage,misalignment,rna,longreads,pairedreads,phagetermini. Default in both views: coverage,misalignment. All other modules must be explicitly included. Ignored with --extend.")
+    parser.add_argument("-a", "--assembly", help="Path to assembly FASTA FILE or DIRECTORY (.fa, .fasta, .fna). Needed for repeat detection when annotations lack sequence data. With --view mag, a directory means one file per MAG (MAG name = filename stem).")
     parser.add_argument("--view", choices=["contig", "mag"], default="contig", help="Aggregation level: 'contig' (default) processes each contig independently; 'mag' groups contigs by MAG. With a directory of per-MAG files, each file defines one MAG (MAG name = filename stem). With a single file, all its contigs form one MAG.")
     parser.add_argument('-s', '--sequencing_type', choices=['long', 'paired-short', 'single-short'], help='Sequencing type (long or short allowed)')
     parser.add_argument("--min_aligned_fraction", type=int, default=50, help="Minimum alignment-length coverage proportion for inclusion (default: 50%%). In --view mag, the threshold is applied to the MAG aggregate (length-weighted across member contigs); failing MAGs drop all member contigs together.")
@@ -73,13 +89,22 @@ def add_calculate_args(parser):
     parser.add_argument('--min_occurrences', type=int, default=2, help='Minimum absolute event count for sparse features (default: 2). Position kept only if value >= coverage × coverage_percentage AND value >= min_occurrences.')
     parser.add_argument('--variation_percentage', type=float, default=0, help='Adaptive smoothing for dense features (coverage, MAPQ, etc.): consecutive positions within this %% of each other are collapsed. 0 = disabled (exact base resolution). Good for reducing database size; OK for visualization; slightly lossy for precise analysis. Recommended: 5-10%%.')
     parser.add_argument('--extend', action='store_true', help='Extend an existing database with new samples (and optionally new contigs)')
-    parser.add_argument('--blast', action='store_true', default=False, help='Enable BLAST-based repeat detection (autoblast for contig mode, per-MAG blast for MAG mode). Off by default.')
+    parser.add_argument('--blast', choices=['none', 'termini', 'mags', 'all'], default='none', help='BLAST scope: none (default; no new searches), termini (Phagetermini candidate end searches), mags (requires --view mag; repeats and similarities only within each MAG, never between MAGs), all (global all-versus-all across all reference contigs in either view, including different MAGs in MAG view). BLAST is not recommended for large datasets. If BLAST is needed for a large MAG dataset, prefer mags over all to explicitly restrict the scope. Compatible stored evidence is reused; mags/all do not launch candidate terminal searches. --extend defaults to none.')
     parser.add_argument(
-        '--time',
+        '--diagnose',
         action='store_true',
         default=False,
-        help='(for developers) Print timing diagnostics during feature calculation',
+        help='Write calculation timing diagnostics (.timings.log) and size report (.size.tsv) alongside the database',
     )
+
+def _retryable_sample_names(conn):
+    """Only explicitly incomplete states permit replacing a sample's payload."""
+    if not conn.execute("SELECT 1 FROM information_schema.tables WHERE table_name='Sample_processing'").fetchone():
+        return set()
+    return {row[0] for row in conn.execute(
+        "SELECT Sample_name FROM Sample JOIN Sample_processing USING(Sample_id) WHERE State <> 'complete'"
+    ).fetchall()}
+
 
 GENBANK_EXTS = ('.gbk', '.gbff', '.gb', '.genbank', '.gff', '.gff3')
 FASTA_EXTS = ('.fa', '.fasta', '.fna')
@@ -269,6 +294,12 @@ MODULE_ALIASES = {
 }
 VALID_MODULES = list(MODULE_ALIASES.keys())
 
+
+def default_modules(view):
+    """Both views default to coverage and misalignment only."""
+    return [MODULE_ALIASES["coverage"], MODULE_ALIASES["misalignment"]]
+
+
 def run_calculate_args(args):
     print(f"Running command: {' '.join(sys.argv)}", flush=True)
 
@@ -276,6 +307,8 @@ def run_calculate_args(args):
     assembly_path = getattr(args, 'assembly', None)
     is_extending = getattr(args, 'extend', False)
     view = getattr(args, 'view', 'contig')
+    if getattr(args, 'blast', 'none') == 'mags' and view != 'mag':
+        sys.exit("ERROR: --blast mags requires --view mag")
 
     # Handle optional bam_files
     bam_files = []
@@ -323,7 +356,7 @@ def run_calculate_args(args):
         if conn.execute("SELECT 1 FROM information_schema.tables WHERE table_name = 'Contig'").fetchone():
             existing_contig_names = {r[0] for r in conn.execute("SELECT Contig_name FROM Contig").fetchall()}
 
-        # Detect modules from existing Variable table
+        # Legacy fallback: interrupted databases can still list every variable.
         existing_modules = sorted({
             r[0] for r in conn.execute("SELECT DISTINCT Module FROM Variable").fetchall()
         } & set(MODULE_ALIASES.values()))
@@ -336,8 +369,32 @@ def run_calculate_args(args):
 
         conn.close()
 
+        # Recorded modules describe what was requested, even before finalization
+        # removes unused Variable entries after an interrupted calculation.
+        if "Modules" in db_metadata:
+            existing_modules = []
+            for module in db_metadata["Modules"].split(","):
+                module = module.strip()
+                if not module:
+                    continue
+                canonical = module if module in MODULE_ALIASES.values() else MODULE_ALIASES.get(module.lower())
+                if canonical is None:
+                    sys.exit(f"ERROR: Unknown module in database metadata: {module}")
+                if canonical not in existing_modules:
+                    existing_modules.append(canonical)
+
+        # Incomplete samples can be retried: Rust clears their partial payload
+        # while keeping the existing Sample_id. Legacy untracked rows stay complete.
+        recovery = duckdb.connect(output_db, read_only=True)
+        try:
+            if recovery.execute("SELECT 1 FROM information_schema.tables WHERE table_name='Sample_processing'").fetchone():
+                retryable = _retryable_sample_names(recovery)
+                existing_samples -= retryable
+        finally:
+            recovery.close()
+
         # Check for sample name collisions
-        new_sample_names = [Path(bam).stem for bam in bam_files]
+        new_sample_names = [Path(bam).stem.replace("_with_MD", "") for bam in bam_files]
         for name in new_sample_names:
             if name in existing_samples:
                 sys.exit(
@@ -353,13 +410,9 @@ def run_calculate_args(args):
             print(f"WARNING: --modules is ignored in extend mode. Using modules from existing database: {', '.join(existing_modules)}", flush=True)
         requested_modules = existing_modules
 
-        # Inherit blast setting from existing database
-        db_blast = db_metadata.get("Blast_enabled", "false") == "true"
-        if getattr(args, 'blast', False) and not db_blast:
-            print("WARNING: --blast is ignored in extend mode. Original database was created without --blast.", flush=True)
-        elif not getattr(args, 'blast', False) and db_blast:
-            print("INFO: --blast inherited from existing database.", flush=True)
-        blast_enabled = db_blast
+        # Search mode is selected per invocation; extension defaults to no new searches.
+        # Legacy Blast_enabled metadata describes prior work, not permission to search.
+        blast_enabled = getattr(args, 'blast', 'none')
 
         # Compression parameters: use DB values if present, otherwise accept CLI values.
         # When DB has stored params (not purged), the user's CLI values are disregarded.
@@ -409,7 +462,7 @@ def run_calculate_args(args):
 
         # Handle modules - if no BAM files, modules are ignored
         if args.modules is None:
-            requested_modules = list(MODULE_ALIASES.values()) if bam_files else []
+            requested_modules = default_modules(view) if bam_files else []
         else:
             requested_modules = [m.strip().lower() for m in args.modules.split(",")]
             for module in requested_modules:
@@ -429,7 +482,7 @@ def run_calculate_args(args):
     # DB in extend mode). Runs in both contig and MAG modes.
     validate_unique_contig_names(genbank_files, assembly_files, existing_contig_names)
 
-    _enable_timing = getattr(args, 'time', False)
+    _enable_timing = getattr(args, 'diagnose', False)
     calculating_all_features_parallel(
         requested_modules, bam_files, output_db, min_aligned_fraction, min_coverage_depth, coverage_percentage,
         n_sample_cores=n_cores,
@@ -441,7 +494,7 @@ def run_calculate_args(args):
         view=view,
         mag_manifest=mag_manifest,
         variation_percentage=args.variation_percentage,
-        blast=blast_enabled if is_extending else getattr(args, 'blast', False),
+        blast=blast_enabled if is_extending else getattr(args, 'blast', 'none'),
         command_line=' '.join(sys.argv),
     )
 

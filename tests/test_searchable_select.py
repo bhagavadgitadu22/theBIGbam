@@ -1,3 +1,8 @@
+import json
+import shutil
+import subprocess
+from pathlib import Path
+
 import pytest
 
 from thebigbam.plotting.controls.searchable_select import SearchableSelect, decode_search_request
@@ -40,3 +45,25 @@ def test_atomic_search_request_keeps_nonce_and_query_together():
     assert decode_search_request('{"nonce": 7, "query": "337R"}') == (7, "337R")
     with pytest.raises(ValueError, match="invalid autocomplete request"):
         decode_search_request("not-json")
+
+
+@pytest.mark.parametrize("padding", ["", " ", "\t", "\n", "\u00a0"])
+@pytest.mark.parametrize("current", [None, "different_contig", ""])
+def test_pasted_exact_name_response_uses_normalized_active_query(padding, current):
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is required to execute the autocomplete response handler")
+    name = "Ferret_FED_2019_07_19_NODE_485927_length_336492_cov_115.9959_ID_971853"
+    result = subprocess.run(
+        [node, str(Path(__file__).with_name("searchable_select_harness.cjs"))],
+        input=json.dumps({
+            "source": SearchableSelect._esm,
+            "name": name,
+            "pasted": f"{padding}{name}{padding}",
+            "current": current,
+        }),
+        text=True,
+        capture_output=True,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stderr

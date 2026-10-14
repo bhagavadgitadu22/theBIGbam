@@ -14,6 +14,7 @@ from ...database.blob_decoder import decode_raw_chunks, decode_raw_sparse_chunks
 from ..models.plots import AllSamplesPlotData, AllSamplesPlotRequest, FeatureSeries, GenomeTrack, SampleTrack
 from ..repositories.all_samples import AllSamplesRepository
 from .features import apply_minimum_frequency
+from .blob_features import FeatureDataService, _format_zoom, _slice_with_anchors
 
 
 def _as_tuple_mapping(data: Mapping) -> dict[str, tuple]:
@@ -31,80 +32,10 @@ def _as_tuple_mapping(data: Mapping) -> dict[str, tuple]:
     return result
 
 
-def _format_zoom(data, plot_type, start, end):
-    starts = data["bin_start"]
-    ends = data["bin_end"]
-    mask = (ends >= start - 1) & (starts <= end - 1)
-    starts, ends = starts[mask], ends[mask]
-    if len(starts) == 0:
-        return None
-    midpoints = ((starts + ends) / 2.0 + 1).tolist()
-    if plot_type == "bars":
-        y = data.get("max", data.get("mean"))[mask].tolist()
-        return {
-            "x": midpoints,
-            "y": y,
-            "width": (ends - starts + 1).tolist(),
-            "first_pos": (starts + 1).tolist(),
-            "last_pos": (ends + 1).tolist(),
-        }
-    y = data["mean"][mask].tolist()
-    if data.get("sparse") and midpoints:
-        bin_size = int(ends[0] - starts[0] + 1)
-        anchored_x, anchored_y = [midpoints[0] - bin_size], [0.0]
-        for index, midpoint in enumerate(midpoints):
-            if index and starts[index] > ends[index - 1] + 1:
-                anchored_x.extend((midpoints[index - 1] + bin_size, midpoint - bin_size))
-                anchored_y.extend((0.0, 0.0))
-            anchored_x.append(midpoint)
-            anchored_y.append(y[index])
-        anchored_x.append(midpoints[-1] + bin_size)
-        anchored_y.append(0.0)
-        return {"x": anchored_x, "y": anchored_y}
-    return {"x": midpoints, "y": y}
-
-
 def _format_chunks(data, plot_type, start, end, position_scale=1, position_offset=0):
-    x = data["x"] * position_scale + position_offset
-    y = data["y"]
-    left = max(0, int(np.searchsorted(x, start - 1, side="right")) - 1)
-    right = min(len(x), int(np.searchsorted(x, end - 1, side="left")) + 1)
-    if right <= left:
-        return None
-    original_length = len(x)
-    sliced_x, sliced_y = x[left:right], y[left:right]
-    result = {"x": (sliced_x + 1).tolist(), "y": sliced_y.tolist()}
-    for key, value in data.items():
-        if key in {"x", "y", "sparse"}:
-            continue
-        if hasattr(value, "__len__") and len(value) == original_length:
-            result[key] = value[left:right].tolist() if hasattr(value, "tolist") else list(value[left:right])
-    if plot_type == "bars":
-        result.update(width=[1] * len(result["x"]), first_pos=result["x"], last_pos=result["x"])
-    elif data.get("sparse") and len(sliced_x):
-        metadata = {key: list(value) for key, value in result.items() if key not in {"x", "y"}}
-        anchored_x, anchored_y = [], []
-        anchored_metadata = {key: [] for key in metadata}
-
-        def anchor(position):
-            anchored_x.append(float(position) + 1)
-            anchored_y.append(0.0)
-            for values in anchored_metadata.values():
-                values.append(None)
-
-        for index, position in enumerate(sliced_x):
-            if index == 0 and position > 0:
-                anchor(position - 1)
-            elif index and position > sliced_x[index - 1] + 1:
-                anchor(sliced_x[index - 1] + 1)
-                anchor(position - 1)
-            anchored_x.append(float(position) + 1)
-            anchored_y.append(float(sliced_y[index]))
-            for key, values in metadata.items():
-                anchored_metadata[key].append(values[index])
-        anchor(sliced_x[-1] + 1)
-        result = {"x": anchored_x, "y": anchored_y, **anchored_metadata}
-    return result
+    data = dict(data)
+    data["x"] = data["x"] * position_scale + position_offset
+    return _slice_with_anchors(data, start, end, plot_type)
 
 
 def _apply_threshold(data, relative_threshold):
@@ -222,6 +153,7 @@ class AllSamplesDataService:
             return None
         scale, chunk_size, zoom_bins, position_scale = self.repository.blob_settings(style.variable_name)
         region = request.region
+        intervals = style.variable_name in {"direct_repeat_count", "inverted_repeat_count", "direct_repeat_identity", "inverted_repeat_identity"} and self.repository.storage_settings(style.variable_name).get("intervals",False)
         use_zoom = region.length > (
             10_000_000 if style.variable_name in {"gc_content", "gc_skew"} else region.max_base_resolution
         )
@@ -230,7 +162,7 @@ class AllSamplesDataService:
             blob = self.repository.contig_zoom_blob(contig_id, feature_id)
             self._phase("blob_retrieval", retrieval_started)
             decoding_started = time.perf_counter()
-            data = self._decode_zoom(blob, scale, zoom_bins, style.plot_type, region) if blob else None
+            data = self._decode_zoom(blob, scale, zoom_bins, style.plot_type, region, intervals) if blob else None
             self._phase("blob_decoding", decoding_started)
         else:
             first = max(0, ((region.start - 1) // position_scale) // chunk_size)
@@ -240,9 +172,16 @@ class AllSamplesDataService:
             self._phase("blob_retrieval", retrieval_started)
             decoder = decode_raw_sparse_chunks if style.encoding == "sparse" else decode_raw_chunks
             decoding_started = time.perf_counter()
+            decoded = decoder(rows, scale, chunk_size) if rows else None
+            if decoded and style.variable_name in {"direct_repeat_count", "inverted_repeat_count", "direct_repeat_identity", "inverted_repeat_identity"}:
+                settings = self.repository.storage_settings(style.variable_name)
+                if settings.get("intervals"):
+                    decoded["sparse"] = False
+                    decoded["intervals"] = True
+                    FeatureDataService._repeat_labels(decoded)
             data = (
                 _format_chunks(
-                    decoder(rows, scale, chunk_size),
+                    decoded,
                     style.plot_type,
                     region.start,
                     region.end,
@@ -253,14 +192,17 @@ class AllSamplesDataService:
                 else None
             )
             self._phase("blob_decoding", decoding_started)
+        if data:
+            FeatureDataService(self.repository)._resolve_partners(
+                data, style.variable_name, ((contig_id, 0, region.end),))
         return FeatureSeries(style, _as_tuple_mapping(data)) if data else None
 
     @staticmethod
-    def _decode_zoom(blob, scale, bins, plot_type, region):
+    def _decode_zoom(blob, scale, bins, plot_type, region, intervals=False):
         for bin_size in bins:
             if region.length // bin_size <= 10_000:
                 decoded = decode_zoom_standalone(blob, bin_size, scale, bins)
                 if decoded is not None:
-                    return _format_zoom(decoded, plot_type, region.start, region.end)
+                    return _format_zoom(decoded, plot_type, region.start, region.end, intervals)
         decoded = decode_zoom_standalone(blob, bins[-1], scale, bins)
-        return _format_zoom(decoded, plot_type, region.start, region.end) if decoded is not None else None
+        return _format_zoom(decoded, plot_type, region.start, region.end, intervals) if decoded is not None else None

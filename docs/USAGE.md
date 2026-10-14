@@ -254,3 +254,303 @@ thebigbam calculate -t 8 -b new_phage.bam -g pharokka_new_phage/pharokka.gbk -o 
 When extending a database, previously processed samples will not contain mapping information for newly added contigs. If this information is required, those samples must be removed and reprocessed using updated BAM files that include the new contigs as references.
 
 This is not useful for the collection presented here, but it may be relevant in [Use case 2](#use-case-2-large-dataset-50k-contigs-192-samples). For example, if a new glacier-fed stream metagenome is sequenced, additional viral contigs may be assembled that were present but not assembled in previously sequenced metagenomes. Detecting these would require remapping all samples to the updated reference set. However, remapping all samples can be computationally expensive and should only be performed if the final results are expected to substantially differ.
+
+
+## Memory use during annotation loading
+
+Fresh `calculate` builds with per-MAG annotation files (`--view mag`), or an
+annotation directory with embedded sequences and no separate `-a`, ingest one
+file at a time. Each file's qualifiers and translated proteins are released after
+insertion. Only contig metadata is retained globally. CDS DNA is loaded from the database
+for active batches when Misalignment has qualifying mismatches.
+
+Contig DNA is temporarily stored in `.thebigbam-sequences-*` beside the output
+database. BLAST reads one contig/MAG per worker; GC reads batches capped at 10,000
+contigs and 8 MiB of bases (an oversized contig is processed alone). Allow disk
+space for this uncompressed DNA copy in addition to the database and DuckDB spill
+files. The temporary sequence file is removed after preprocessing; phage termini loads
+candidate DNA from the database. Temporary files are also removed on a normal error;
+a forcibly killed process may leave it behind.
+
+The parser still holds one annotation file at a time. A single unusually large
+file, `--extend`, or global annotations matched to separate assembly inputs can
+still require substantial memory. These fallback paths no longer duplicate all
+contigs for BLAST on fresh builds. Phage termini can request terminal-repeat
+evidence while processing candidates from BAM read-start/end counts.
+
+DuckDB defaults to the smaller of 16 GiB and 25% of the detected allocation,
+further limited by current process RSS and a 20% reserve (at least 256 MiB).
+Detection uses the smallest scheduler, cgroup ancestor, and physical-memory
+limit. To override the requested database budget, set a positive integer:
+
+```shell
+THEBIGBAM_DUCKDB_MEMORY_GB=8 thebigbam calculate ...
+```
+
+Overrides are still capped by available headroom. This is a DuckDB budget, not a
+hard limit on total process memory. `--diagnose` logs annotation-import progress and
+RSS so growth is visible before BAM processing begins.
+
+With `--diagnose`, the per-sample log also separates dense and sparse feature
+encoding from preparation/metrics. Database timings distinguish coverage rows,
+metric rows, checkpoints during writes, blob appends (including any automatic
+appender flushes), and explicit zoom/chunk flushes. Blob row counts and byte
+counts describe the encoded payload written, rather than database file size.
+`--diagnose` also creates `<database>.size.tsv` automatically. Counters are
+collected during import and blob writes, without scanning the completed database.
+The report refreshes after annotation and blob batches and at checkpoints;
+finalization marks it complete. It lists per-feature zoom/chunk rows, encoded
+payload bytes, mean row sizes, skipped empty sparse chunks, and imported
+annotation/sequence/qualifier rows and sequence/qualifier text bytes. Database
+and WAL file sizes are separate snapshots: payload counters do not measure
+DuckDB table/index storage. On extension, counters cover only the current run,
+while file size includes the entire database.
+
+Empty sparse chunk rows are omitted in all calculation modes, regardless of
+`--diagnose`. Original chunk indices and absolute event positions are preserved;
+dense chunks and the database schema are unchanged. Existing databases are not
+rewritten.
+
+Encoding and MAG precheck times are summed worker elapsed seconds; they are
+subphases, not additional wall-clock time.
+
+In MAG view, active aligned-fraction or mean-depth thresholds trigger a
+coverage-only pass before full feature processing. This pass includes absent
+members in the MAG-length denominator and uses the same rounded values as the
+final filter. Failed MAGs skip feature calculation and encoding. The precheck
+stops as soon as both thresholds are met. Passing MAGs are then read through
+the full processing path, keeping temporary coverage
+memory bounded to one contig per worker. The timing log reports precheck time
+and the numbers of checked and rejected MAGs so the saved work can be compared
+with the extra read cost. Zero thresholds bypass this pass.
+
+Large MAG calculations (at least 500 contigs, or a single calculation thread)
+stream completed MAGs through a queue of two results to a dedicated database
+writer. It combines up to 64 MAGs per batch, flushing earlier at 32,768 contig
+rows or 128 MiB of encoded payload. A single large MAG can exceed these batch
+thresholds. Checkpoints occur periodically at 1 GiB of payload or 1,000,000
+contig rows, and at sample completion. This overlaps processing and writing;
+`DB write` reports active writer time and must not be added to processing wall
+time. `MAG queue send/wait` shows summed worker time sending results, including
+backpressure when the writer falls behind.
+
+Workers reuse dictionary-free Zstd compressors, encoding scratch, BAM records,
+and enabled feature arrays. MAG jobs and their member reads are ordered by BAM
+reference ID for locality; stored MAG offsets retain their existing ordering.
+Only primary coverage is accumulated at MAG scale for summary statistics.
+These changes preserve the database schema, constraints, indexes, blob format,
+and decoded feature values. Compressed bytes and physical row order can differ.
+
+### MAG BLAST throughput and diagnostics
+
+`--blast {none,termini,mags,all}` selects search scope. The default is `none` on both
+fresh calculations and extension; stored boolean `Blast_enabled` metadata never
+implicitly enables new searches. An explicit choice applies to the current run.
+
+- `none`: no new searches; compatible stored evidence can still correct termini.
+- `termini`: search contig ends only for qualifying Phage termini candidates.
+- `mags`: requires `--view mag`; repeats and similarities only within each MAG,
+  never between MAGs, with no additional candidate terminal searches.
+- `all`: global all-versus-all in either view across the complete reference
+  collection, including contigs from different MAGs. General results supply
+  terminal correction without candidate searches. Global searches
+  include existing reference DNA during extension.
+
+Both scopes explicitly use `megablast`, word size 28, DUST `20 64 1`, both strands,
+E-value `1e-10`, and one thread per subprocess. This replaces the previous terminal
+word-size-7 unmasked search and may miss short/divergent repeats. Stored evidence
+is reused only with matching search/filter parameters. Incompatible terminal cache
+entries are invalidated when newly collected evidence is persisted. Legacy general
+BLAST parameters are unknown and are not relabelled compatible during extension.
+
+`--blast mags` uses one worker per MAG within the configured thread pool. FASTA output
+is buffered, and BLAST tabular output is read from a temporary file in batches of
+at most 10,000 retained hits. Database writes use bulk appenders and one transaction
+per batch. Query/subject direction is preserved; exact repeated directed rows
+retain the first stored identity value.
+Both scopes use the shared search parameters above. Temporary BLAST directories use `TMPDIR` when
+set; a fast local disk can reduce temporary-file IO costs.
+
+Progress reports elapsed wall time plus cumulative worker time for sequence
+loading, FASTA writing, `makeblastdb`, `blastn`, parsing, database-lock waiting,
+and database writing. Worker totals can exceed elapsed wall time because workers
+run concurrently. MAGs taking at least five minutes also report their individual
+phase times when they finish. Database waiting/writing dominating the totals
+indicates contention or storage costs; `blastn` dominating indicates alignment
+work. Failed BLAST commands or database writes now return an error instead of
+silently omitting a MAG's results.
+
+
+### On-demand phage terminal repeats
+
+For fresh calculations, both `--view contig` and `--view mag` default to
+`coverage,misalignment` only. Select phage termini explicitly, for example
+`-m coverage,misalignment,phagetermini`, to include it. `rna`, `longreads`, and
+`pairedreads` are also opt-in. An explicit module list replaces the defaults.
+`--extend` continues to inherit modules from the existing database.
+
+With `--blast termini`, candidate contigs
+must pass the module's aligned-fraction requirement and have at least one read
+start/end position passing its local count/frequency thresholds. This decision
+precedes clipping, Poisson and repeat-aware filtering, so terminal repeats are
+available before those filters run. Peaks can be anywhere on the contig.
+
+For a candidate without existing terminal-repeat evidence, BLAST compares its
+left and right 10,000-base (10 kbp) windows on both strands. Windows double when no valid
+repeat is found or a hit approaches an internal window boundary, up to a
+full-contig fallback. The dedicated search uses the shared megablast parameters above. Long-repeat and no-repeat candidates may therefore require more than
+one BLAST call. BLAST+ must be installed when a candidate needs this search.
+
+Positive and negative results are shared across samples in the current run,
+with only one search at a time for a given contig. Candidate DNA is read from
+DuckDB and released when its search completes. Candidates without reference DNA retain read-based
+analysis, with a warning and an `unavailable` evidence status. BLAST failures
+are errors, not negative repeat results.
+
+`Terminal_repeat_search` records candidate status (`found`, `none`, or
+`unavailable`), and `Terminal_repeat_evidence` records the repeat coordinates
+(1-based inclusive), percent identity and orientation. This evidence is separate
+from general homology tracks and whole-contig duplication percentages. The cache
+is shared within a run; persisted evidence is retained for inspection, but is not
+yet loaded as a cache on a later `--extend` run.
+
+For BAMs with at least one million references, calculation uses at most four
+simultaneous BAM readers, further reduced when estimated memory headroom is low.
+`-t` still sets the calculation thread pool. Reader estimates combine observed
+header/index RSS growth with a conservative per-reference allowance; diagnostics
+report the selected count and estimate. This reduces duplicated headers and
+indexes but is not a hard total-process memory limit. CDS batches use a cache capped at 128 MiB and 64 batches of 256 contig IDs.
+Cache eviction releases unused sequences; in-flight workers can retain their
+current contig, and an oversized batch may temporarily exceed the cache limit. MAG metadata is resolved with a bulk join and associations are
+written with appenders, preserving longest-first order and stable length ties.
+GC computation still uses bounded batches. Scalar statistics accumulate in a
+DuckDB temporary table and are applied in one update by numeric contig ID before
+MAG aggregation, avoiding a full contig-table update for every computation batch.
+
+Fresh calculations and `--extend` use the same processing annotation loaders.
+Extension loads contig metadata without assembly DNA and does not preload CDS
+sequences. Qualifiers, proteins, and parser annotation records are released after
+persistence. Misalignment loads CDS batches only for qualifying mismatches;
+Coverage and paired-read processing do not load CDS DNA. Terminase coordinates
+are loaded only when Phage termini is enabled. Candidate terminal-repeat searches
+load one contig's DNA from DuckDB and release it afterward; full-contig fallback
+behavior and repeat-search sensitivity are unchanged. CDS load errors fail the
+sample rather than silently dropping codon annotations.
+
+Terminal search logs identify the sample. Cumulative numbers of searched contigs
+are no longer printed. Long-running BLAST subprocesses report sample, contig,
+sequence length, window size, and elapsed time every minute. Sample start/end
+messages give the mode and summed worker timings. `--diagnose` reports terminal
+BLAST execution, candidate DNA loading, cache waits, and output parsing separately
+for each sample; these are subphases of feature calculation, not additional wall
+time. `not_assessed` evidence is distinct from a completed negative search.
+
+With `--diagnose`, each sample reports process RSS immediately before opening its
+initial BAM reader and after sample payload cleanup. The cleanup snapshot includes
+process peak RSS and is written to both stderr and the timing log. Completed blob
+and metric vectors are released before the snapshot. Reusable buffers, bounded
+caches, DuckDB residency, and other samples in parallel mode can still contribute
+to RSS; this is not a measurement of the current sample alone. Reader concurrency
+is unchanged by these diagnostics. Annotation-loader initialization completes
+before the collected-result writer thread starts.
+
+Sample processing records `processing`, `complete`, or `failed` in the additive
+`Sample_processing` table. A retry with `--extend` may replace explicitly incomplete
+samples: partial child rows are cleared while the original Sample_id is preserved.
+Completed samples remain protected from replacement. Legacy samples without state
+records are treated as complete; old interruptions cannot be inferred reliably.
+Failed writes/read errors fail the sample and clear incomplete payloads when cleanup
+succeeds; interrupted cleanup remains retryable. Success is recorded only after
+required writes and sample checkpoints finish. Sample read totals count primary
+mapped reads independently of coverage filters, plus index-reported unmapped reads;
+BAM-index mapped alignment counts are diagnostic only.
+
+Streamed MAG write batches have soft limits of 64 MAGs, 32,768 presence rows, or
+128 MiB encoded payload (one oversized MAG may exceed a limit). Periodic checkpoints
+use 1 GiB payload or one million presence rows; sample-end checkpoints remain.
+`THEBIGBAM_CHECKPOINT_MIB` can override the byte interval with a positive integer.
+CDS cache hits do not wait for unrelated SQL loads. SQL results are consumed row by
+row; oversized batches retain only the requested contig and are not cached as a
+complete block. Diagnostics report cumulative CDS loads/time, oversized batches,
+and retained cache bytes. A single large contig and DuckDB result buffers can still
+exceed the cache budget. Blob encoding failures are rejected before blob insertion;
+Rust decoding reports invalid compression frames and truncated payloads as errors.
+
+BLAST is not recommended for large datasets unless its outputs are needed. For a
+large MAG dataset requiring BLAST, prefer `--blast mags` to state the scope
+explicitly. `all` compares the entire collection, whereas `mags` runs independent within-MAG
+searches and excludes cross-MAG comparisons.
+`mags` is rejected in contig view and is recorded explicitly in database metadata.
+
+Global reference BLAST exports DNA in database batches to a temporary FASTA, builds one
+shared BLAST database, and searches bounded query shards in parallel. Hits are
+parsed from disk and written in batches of 10,000; the full sequence collection
+and hit output are not accumulated in Rust memory. The subject-count limit is
+set to the number of exported references, avoiding BLAST's default subject cap.
+Cross-MAG hits use the existing Contig_blast_hits table; within-MAG count/identity
+tracks explicitly filter by shared MAG membership. Cross-MAG curves share the
+Hit count and Max hit identity subplots with the within-MAG curves, using a distinct
+color. In contig view, these general curves show matches to any other contig.
+Self-repeats remain on the direct/inverted repeat tracks. Existing general reference
+tracks are replaced only after all BLAST subprocesses finish successfully. A
+parsing/write failure marks reference evidence incomplete; rerun the global search
+to rebuild it. This mode can require substantial time and temporary disk space.
+
+
+During sample processing, Slurm output shows the BAM reader allocation and one
+completion line per sample. Warnings and errors remain visible, including
+unmatched references and samples with no coverage results retained after filtering.
+These notices distinguish MAG filtering from contig filtering; mapped alignments
+may exist even when no coverage results are retained. With `--diagnose`, memory
+snapshots, CDS cache statistics, checkpoint details, and terminal-search subphase
+timings are written to `<database>.timings.log`. Blob sizes remain in
+`<database>.size.tsv`. Routine terminal-search progress is omitted from Slurm;
+terminal-search failures identify the sample and contig.
+
+
+The Max hit identity subplot displays nucleotide identity as a percentage (0–100).
+Hover tooltips show the best-hit contig name separately for within-MAG and external
+matches. At base resolution the partner is selected per position; at zoom resolution
+it is the highest-identity alignment overlapping the displayed bin. Empty member
+contigs preserve partner metadata on other MAG members. Identities remain stored
+as integers multiplied by 100 (10000 means 100%); plotting also reads Variable
+scale declarations when a Column_scales entry is absent.
+
+
+Repeat/hit scopes are exclusive per alignment: same-contig alignments contribute
+only to direct/inverted repeats; different-contig alignments sharing a MAG
+contribute only to within-MAG hits; different-MAG alignments contribute only to
+external hits. In contig view, external hits mean matches to any other contig.
+A position can still have separate alignments in multiple scopes; each alignment
+is counted in only one scope.
+
+
+Inter-contig tracks count only alignments where the displayed contig is the BLAST
+query. A→B contributes to A; B→A contributes to B. Reciprocal alignments are never
+mirrored into both tracks. Multiple distinct overlapping HSPs in one query→subject
+direction still count separately. No near-duplicate overlap checks run during
+calculation or plotting. Databases record `Blast_hit_storage=query-v1`; previous
+undirected hit databases must be rebuilt, and their hit tracks cannot be used by
+this version.
+
+
+Repeat blobs use explicit intervals (`Repeat_blob_encoding=interval-v1`). Zoom bins
+contain the maximum value of every overlapping repeat interval, including bins
+between its endpoints. Precise chunks contain plateau endpoints in each crossed
+chunk and explicit zero anchors in gaps; plotting does not infer whether endpoints
+form a plateau. Old endpoint-only repeat blobs must be regenerated before plotting.
+This remains sparse and does not allocate per-base repeat arrays.
+
+
+Repeat regeneration atomically replaces the selected contigs' four repeat features,
+including removal of stale blobs when repeats disappear. On the first upgrade to
+`interval-v2`, every existing repeat blob is regenerated from stored alignments,
+so a partial extension cannot leave mixed encodings. The version marker commits
+with the blobs; failures preserve the previous state. Wholly out-of-range repeat
+intervals are skipped; intervals crossing the contig end are clipped.
+
+Inter-contig hit curves reuse cached reference lengths and consume sorted query
+hits incrementally. Contigs are encoded in parallel batches with a 64 MiB estimated
+working-memory target and at most 32 workers. Only encoded results survive until
+batch writing. The limit is soft: one oversized contig and its hits may exceed it.
+DuckDB manages the sorting memory separately under its configured memory limit.

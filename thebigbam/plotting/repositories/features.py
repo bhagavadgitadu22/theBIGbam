@@ -48,11 +48,20 @@ class FeatureRepository:
             "SELECT Scale FROM Column_scales WHERE Feature_name=? AND Column_name='Value'",
             (variable_name,),
         ).fetchone()
+        if scale is None:
+            declared = self._execute("SELECT Value_scale FROM Variable WHERE Variable_name=?", (variable_name,)).fetchone()
+            scale = ({"raw": 1, "times100": 100, "times1000": 1000, "times10": 10}.get(str(declared[0]), 1),) if declared else (1,)
         rows = self._execute(
             "SELECT Key, Value FROM Database_metadata WHERE Key IN "
-            "('Chunk_size','Zoom_bin_sizes','GC_content_window_size','GC_skew_window_size')"
+            "('Chunk_size','Zoom_bin_sizes','GC_content_window_size','GC_skew_window_size','Repeat_blob_encoding')"
         ).fetchall()
         values = {str(key): value for key, value in rows}
+        if variable_name in {"hit_count", "hit_count_within_mag", "hit_identity", "hit_identity_within_mag"}:
+            marker = self._execute("SELECT Value FROM Database_metadata WHERE Key='Blast_hit_storage'").fetchone()
+            if not marker or marker[0] != "query-v1":
+                raise ValueError("Legacy BLAST hit tracks are unsupported. Rebuild the database for query-only hits.")
+        if variable_name in {"direct_repeat_count", "inverted_repeat_count", "direct_repeat_identity", "inverted_repeat_identity"} and values.get("Repeat_blob_encoding") not in {"interval-v1", "interval-v2"}:
+            raise ValueError("Repeat blobs use the old endpoint encoding. Regenerate the database to plot complete repeat intervals.")
         gc_key = "GC_content_window_size" if variable_name == "gc_content" else "GC_skew_window_size"
         gc_window = int(values.get(gc_key, 1)) if variable_name in {"gc_content", "gc_skew"} else 1
         return {
@@ -60,6 +69,7 @@ class FeatureRepository:
             "chunk_size": int(values.get("Chunk_size", 65536)),
             "zoom_bins": tuple(int(value) for value in str(values.get("Zoom_bin_sizes", "100,1000,10000")).split(",")),
             "window_size": gc_window,
+            "intervals": variable_name in {"direct_repeat_count", "inverted_repeat_count", "direct_repeat_identity", "inverted_repeat_identity"} and values.get("Repeat_blob_encoding") in {"interval-v1", "interval-v2"},
         }
 
     def zoom_blobs(self, contig_ids, sample_ids, feature_id, contig_level=False):
@@ -116,6 +126,34 @@ class FeatureRepository:
             f"SELECT Contig_id, Contig_name FROM Contig WHERE Contig_id IN ({marks})", list(contig_ids)
         ).fetchall()
         return {int(cid): str(name) for cid, name in rows}
+
+    def best_hit_names(self, targets, within_mag):
+        """Resolve the maximum-identity partner per visible bin, without loading DNA."""
+        if not targets:
+            return {}
+        exists = self._execute("SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_name='Contig_blast_hits')").fetchone()[0]
+        if not exists:
+            return {}
+        mode = self._execute("SELECT Value FROM Database_metadata WHERE Key='View_mode'").fetchone()
+        predicate = "TRUE"
+        if mode and mode[0] == "mag":
+            same_mag = "EXISTS (SELECT 1 FROM MAG_contigs_association a JOIN MAG_contigs_association b ON a.MAG_id=b.MAG_id WHERE a.Contig_id=t.cid AND b.Contig_id=h.Contig_id_other)"
+            predicate = same_mag if within_mag else f"NOT ({same_mag})"
+        columns = [list(column) for column in zip(*targets)]
+        rows = self._execute(f"""
+            WITH targets AS (SELECT unnest(?::BIGINT[]) AS idx, unnest(?::BIGINT[]) AS cid,
+                unnest(?::BIGINT[]) AS lo, unnest(?::BIGINT[]) AS hi)
+            SELECT t.idx, best.Contig_name FROM targets t
+            LEFT JOIN LATERAL (
+                SELECT c.Contig_name FROM Contig_blast_hits_query h
+                JOIN Contig c ON c.Contig_id=h.Contig_id_other
+                WHERE h.Contig_id=t.cid AND h.Contig_id_other<>t.cid
+                  AND LEAST(h.Position1,h.Position2)<=t.hi
+                  AND GREATEST(h.Position1,h.Position2)>=t.lo AND {predicate}
+                ORDER BY h.Pident DESC, h.Contig_id_other, h.Position1, h.Position2 LIMIT 1
+            ) best ON TRUE
+        """, columns).fetchall()
+        return {int(index): name for index, name in rows}
 
     def contig_length(self, contig_id):
         row = self._execute("SELECT Contig_length FROM Contig WHERE Contig_id=?", (contig_id,)).fetchone()

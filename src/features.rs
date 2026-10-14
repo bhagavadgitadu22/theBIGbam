@@ -52,6 +52,7 @@ fn track_sequence(
 /// This "struct of arrays" layout is more cache-friendly than an
 /// "array of structs" layout. When incrementing coverage for 150
 /// consecutive positions, all the data we need is contiguous in memory.
+#[derive(Default)]
 pub struct FeatureArrays {
     // -------------------------------------------------------------------------
     // Coverage Module
@@ -220,6 +221,24 @@ pub struct FeatureArrays {
     end_minus: Vec<u64>,
 }
 
+thread_local! {
+    static FEATURE_SCRATCH: std::cell::RefCell<Option<FeatureArrays>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+pub(crate) fn take_feature_arrays(ref_length: usize, flags: ModuleFlags) -> FeatureArrays {
+    FEATURE_SCRATCH.with(|slot| {
+        if let Some(mut arrays) = slot.borrow_mut().take() {
+            arrays.reset(ref_length, flags);
+            arrays
+        } else { FeatureArrays::for_modules(ref_length, flags) }
+    })
+}
+
+pub(crate) fn recycle_feature_arrays(arrays: FeatureArrays) {
+    FEATURE_SCRATCH.with(|slot| *slot.borrow_mut() = Some(arrays));
+}
+
 impl FeatureArrays {
     /// Create new feature arrays for a given reference length.
     ///
@@ -231,53 +250,79 @@ impl FeatureArrays {
     /// `vec![0u64; 50000]` creates a Vec with 50,000 zeros.
     #[inline]
     pub fn new(ref_length: usize) -> Self {
-        Self {
-            // Initialize all arrays to zero
-            primary_reads: vec![0u64; ref_length],
-            primary_reads_plus_only: vec![0u64; ref_length],
-            primary_reads_minus_only: vec![0u64; ref_length],
-            secondary_reads: vec![0u64; ref_length],
-            supplementary_reads: vec![0u64; ref_length],
-            sum_mapq: vec![0u64; ref_length],
-            coverage_reduced: vec![0u64; ref_length],
-            reads_starts: vec![0u64; ref_length],
-            reads_ends: vec![0u64; ref_length],
-            start_event_lengths: vec![Vec::new(); ref_length],
-            end_event_lengths: vec![Vec::new(); ref_length],
-            left_clipping_lengths: vec![Vec::new(); ref_length],
-            right_clipping_lengths: vec![Vec::new(); ref_length],
-            insertion_lengths: vec![Vec::new(); ref_length],
-            deletions: vec![0u64; ref_length],
-            deletion_lengths: vec![Vec::new(); ref_length],
-            splices: vec![0u64; ref_length],
-            mismatches: vec![0u64; ref_length],
-            mismatch_base_counts: vec![[0u32; 4]; ref_length],
-            insertion_sequences: HashMap::new(),
-            left_clip_sequences: HashMap::new(),
-            right_clip_sequences: HashMap::new(),
-            start_clip_sequences: HashMap::new(),
-            end_clip_sequences: HashMap::new(),
-            sum_read_lengths: vec![0u64; ref_length],
-            count_read_lengths: vec![0u64; ref_length],
-            sum_insert_sizes: vec![0u64; ref_length],
-            count_insert_sizes: vec![0u64; ref_length],
-            non_inward_pairs: vec![0u64; ref_length],
-            mate_not_mapped: vec![0u64; ref_length],
-            mate_on_another_contig: vec![0u64; ref_length],
-            circularising_reads_count: 0,
-            circularising_confirmed: false,
-            circularising_min_overlaps: Vec::new(),
-            circularising_inserts_count: 0,
-            circularising_insert_sizes: Vec::new(),
-            all_proper_insert_sizes: Vec::new(),
-            contig_end_unmapped_mates: 0,
-            contig_end_mates_mapped_on_another_contig: 0,
-            clean_reads_count: 0,
-            start_plus: vec![0u64; ref_length],
-            start_minus: vec![0u64; ref_length],
-            end_plus: vec![0u64; ref_length],
-            end_minus: vec![0u64; ref_length],
+        Self::for_modules(ref_length, ModuleFlags {
+            coverage: true, mapping_metrics: true, long_read_metrics: true,
+            paired_read_metrics: true, phagetermini: true, rna: true,
+        })
+    }
+
+    pub(crate) fn for_modules(ref_length: usize, flags: ModuleFlags) -> Self {
+        let mut arrays = Self::default();
+        arrays.reset(ref_length, flags);
+        arrays
+    }
+
+    /// Clear old evidence while keeping capacities for the next contig.
+    pub(crate) fn reset(&mut self, ref_length: usize, flags: ModuleFlags) {
+        macro_rules! reset_dense {
+            ($field:ident, $enabled:expr) => {{
+                let len = if $enabled { ref_length } else { 0 };
+                self.$field.resize(len, Default::default());
+                self.$field.fill(Default::default());
+            }};
         }
+        macro_rules! reset_events {
+            ($field:ident, $enabled:expr) => {{
+                let len = if $enabled { ref_length } else { 0 };
+                self.$field.resize_with(len, Vec::new);
+                for events in &mut self.$field { events.clear(); }
+            }};
+        }
+        // The primary vector also defines reference length when coverage is off.
+        reset_dense!(primary_reads, true);
+        reset_dense!(primary_reads_plus_only, flags.coverage);
+        reset_dense!(primary_reads_minus_only, flags.coverage);
+        reset_dense!(secondary_reads, flags.coverage);
+        reset_dense!(supplementary_reads, flags.coverage);
+        reset_dense!(sum_mapq, flags.coverage);
+        reset_dense!(coverage_reduced, flags.phagetermini);
+        reset_dense!(reads_starts, flags.phagetermini);
+        reset_dense!(reads_ends, flags.phagetermini);
+        reset_dense!(start_plus, flags.phagetermini);
+        reset_dense!(start_minus, flags.phagetermini);
+        reset_dense!(end_plus, flags.phagetermini);
+        reset_dense!(end_minus, flags.phagetermini);
+        reset_dense!(deletions, flags.mapping_metrics);
+        reset_dense!(mismatches, flags.mapping_metrics);
+        reset_dense!(mismatch_base_counts, flags.mapping_metrics);
+        reset_dense!(sum_insert_sizes, flags.paired_read_metrics);
+        reset_dense!(count_insert_sizes, flags.paired_read_metrics);
+        reset_dense!(non_inward_pairs, flags.paired_read_metrics);
+        reset_dense!(mate_not_mapped, flags.paired_read_metrics);
+        reset_dense!(mate_on_another_contig, flags.paired_read_metrics);
+        reset_dense!(sum_read_lengths, flags.long_read_metrics);
+        reset_dense!(count_read_lengths, flags.long_read_metrics);
+        reset_dense!(splices, flags.rna);
+        reset_events!(start_event_lengths, flags.phagetermini);
+        reset_events!(end_event_lengths, flags.phagetermini);
+        reset_events!(left_clipping_lengths, flags.mapping_metrics || flags.phagetermini);
+        reset_events!(right_clipping_lengths, flags.mapping_metrics || flags.phagetermini);
+        reset_events!(insertion_lengths, flags.mapping_metrics);
+        reset_events!(deletion_lengths, flags.mapping_metrics);
+        self.insertion_sequences.clear();
+        self.left_clip_sequences.clear();
+        self.right_clip_sequences.clear();
+        self.start_clip_sequences.clear();
+        self.end_clip_sequences.clear();
+        self.circularising_min_overlaps.clear();
+        self.circularising_insert_sizes.clear();
+        self.all_proper_insert_sizes.clear();
+        self.circularising_reads_count = 0;
+        self.circularising_inserts_count = 0;
+        self.contig_end_unmapped_mates = 0;
+        self.contig_end_mates_mapped_on_another_contig = 0;
+        self.clean_reads_count = 0;
+        self.circularising_confirmed = false;
     }
 
     /// Get the reference length (number of positions in arrays).
@@ -371,6 +416,20 @@ impl FeatureArrays {
         } else {
             trimmed.iter().sum::<u64>() as f64 / trimmed.len() as f64
         }
+    }
+
+    /// Preserve the existing upper-median and trim rules, sorting only once.
+    pub fn coverage_median_and_trimmed_mean(&self, trim_fraction: f64) -> (f64, f64) {
+        if self.primary_reads.is_empty() { return (0.0, 0.0); }
+        let mut sorted = self.primary_reads.clone();
+        sorted.sort_unstable();
+        let n = sorted.len();
+        let median = sorted[n / 2] as f64;
+        let trim = (n as f64 * trim_fraction) as usize;
+        let trimmed = &sorted[trim..n.saturating_sub(trim)];
+        let mean = if trimmed.is_empty() { 0.0 }
+            else { trimmed.iter().sum::<u64>() as f64 / trimmed.len() as f64 };
+        (median, mean)
     }
 
     /// Compute dominant mismatch base per position.
@@ -475,6 +534,35 @@ impl CdsIndex {
             .collect();
         intervals.sort_by_key(|c| c.start);
         Self { intervals }
+    }
+
+    /// Consume persisted annotations, moving DNA into the index instead of cloning it.
+    #[cfg(test)]
+    pub(crate) fn from_owned_annotations(annotations: Vec<FeatureAnnotation>) -> HashMap<i64, Self> {
+        let mut indexes: HashMap<i64, Self> = HashMap::new();
+        for mut annotation in annotations {
+            if annotation.feature_type != "CDS" { continue; }
+            if let Some(sequence) = annotation.nucleotide_sequence.take() {
+                indexes.entry(annotation.contig_id).or_insert_with(|| Self { intervals: Vec::new() })
+                    .intervals.push(CdsInterval { start: annotation.start, end: annotation.end,
+                        strand: annotation.strand, nucleotide_sequence: sequence });
+            }
+        }
+        for index in indexes.values_mut() { index.intervals.sort_by_key(|c| c.start); }
+        indexes
+    }
+
+    pub(crate) fn empty() -> Self { Self {intervals:Vec::new()} }
+    pub(crate) fn push_annotation(&mut self,mut annotation:FeatureAnnotation) {
+        if let Some(sequence)=annotation.nucleotide_sequence.take() {
+            self.intervals.push(CdsInterval {start:annotation.start,end:annotation.end,strand:annotation.strand,nucleotide_sequence:sequence});
+        }
+    }
+    pub(crate) fn sort_intervals(&mut self) {self.intervals.sort_by_key(|interval|interval.start);}
+
+    pub(crate) fn estimated_bytes(&self) -> usize {
+        self.intervals.capacity() * std::mem::size_of::<CdsInterval>()
+            + self.intervals.iter().map(|interval| interval.nucleotide_sequence.capacity()).sum::<usize>()
     }
 
     /// Find the CDS covering a given 1-based position, if any.
@@ -898,7 +986,7 @@ fn apply_n_corrections(arrays: &mut FeatureArrays, ctx: &ReadContext) {
                 }
 
                 // Splice tracking: only for primary reads (same gating as deletions).
-                if is_primary {
+                if is_primary && !arrays.splices.is_empty() {
                     for j in 0..len_usize {
                         arrays.splices[(ref_pos + j) % ref_length] += 1;
                     }
@@ -1304,5 +1392,26 @@ pub fn process_read(
     }
     if flags.phagetermini && is_primary {
         process_phagetermini(arrays, &ctx);
+    }
+}
+
+#[cfg(test)]
+mod owned_cds_tests {
+    use super::*;
+    #[test]
+    fn owned_index_moves_sequence_and_preserves_interval_lookup() {
+        let annotation = FeatureAnnotation { contig_id: 7, start: 1, end: 6, strand: -1,
+            feature_type: "CDS".into(), qualifiers: HashMap::new(),
+            nucleotide_sequence: Some("ATGAAA".into()), protein_sequence: Some("MK".into()),
+            segments: vec![], parent_key: None, self_key: None };
+        let pointer = annotation.nucleotide_sequence.as_ref().unwrap().as_ptr();
+        let borrowed = CdsIndex::from_contig_annotations(&[&annotation]);
+        let owned = CdsIndex::from_owned_annotations(vec![annotation]);
+        let actual = owned.get(&7).unwrap().find_cds(3).unwrap();
+        let expected = borrowed.find_cds(3).unwrap();
+        assert_eq!(actual.nucleotide_sequence.as_ptr(), pointer);
+        assert_eq!((actual.start, actual.end, actual.strand, &actual.nucleotide_sequence),
+            (expected.start, expected.end, expected.strand, &expected.nucleotide_sequence));
+        assert!(owned.get(&7).unwrap().find_cds(7).is_none());
     }
 }

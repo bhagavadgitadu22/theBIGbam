@@ -638,7 +638,9 @@ def create_layout(
 
     genome_controls = build_genome_controls(
         metadata_service=filter_metadata_service,
-        color_templates=ColorTemplateRepository(conn).load(),
+        color_templates=ColorTemplateRepository(conn).load(
+            filtering_metadata.get("Annotations", {}).get("columns", {})
+        ),
         genome_capabilities=GenomeControlRepository(conn).capabilities(),
         widgets=widgets,
         filtering_metadata=filtering_metadata,

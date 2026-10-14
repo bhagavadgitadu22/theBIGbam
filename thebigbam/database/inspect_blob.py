@@ -152,6 +152,12 @@ def _inspect_contig_feature(conn, contig_id, contig_name, feature_name, fid,
                             region_start, region_end, zoom_bin_size,
                             mag_name="", mag_offset=0):
     """Inspect a contig-level feature from Contig_blob / Contig_blob_chunk."""
+    if zoom_bin_size is None and feature_name in {
+        "direct_repeat_count", "inverted_repeat_count",
+        "direct_repeat_identity", "inverted_repeat_identity",
+    }:
+        return _inspect_repeat_regions(conn, contig_id, contig_name, feature_name,
+                                       region_start, region_end, mag_name, mag_offset)
     row = conn.execute(
         "SELECT Zoom_data FROM Contig_blob WHERE Contig_id = ? AND Feature_id = ?",
         [contig_id, fid],
@@ -172,7 +178,8 @@ def _inspect_contig_feature(conn, contig_id, contig_name, feature_name, fid,
     if not chunk_rows:
         return
 
-    data = decode_raw_chunks(chunk_rows, scale_div, chunk_sz)
+    decoder = decode_raw_sparse_chunks if is_sparse_zoom_blob(zoom_blob) else decode_raw_chunks
+    data = decoder(chunk_rows, scale_div, chunk_sz)
     x_arr = data["x"]
     y_arr = data["y"]
 
@@ -181,6 +188,37 @@ def _inspect_contig_feature(conn, contig_id, contig_name, feature_name, fid,
 
     _print_rows(contig_name, "", feature_name, x_arr, y_arr, region_start, region_end,
                 window_size=gc_win, mag_name=mag_name, mag_offset=mag_offset)
+
+
+def _inspect_repeat_regions(conn, contig_id, contig_name, feature_name,
+                            region_start, region_end, mag_name, mag_offset):
+    """Export repeat intervals from alignment coordinates, not sparse endpoint events."""
+    table = "Contig_directRepeats" if feature_name.startswith("direct_") else "Contig_invertedRepeats"
+    identity = feature_name.endswith("identity")
+    aggregate = "CAST(MAX(r.Pident) AS DOUBLE) / ?" if identity else "COUNT(*)"
+    params = [contig_id]
+    if identity:
+        scale = conn.execute("SELECT Scale FROM Column_scales WHERE Feature_name=? AND Column_name='Pident'", [table]).fetchone()
+        params.append(int(scale[0]) if scale else 10000)
+    rows = conn.execute(f"""
+        WITH repeats AS (SELECT LEAST(Position1,Position2) AS lo,
+            GREATEST(Position1,Position2) AS hi, Pident FROM {table} WHERE Contig_id=?),
+        boundaries AS (SELECT lo AS pos FROM repeats UNION SELECT hi+1 FROM repeats),
+        segments AS (SELECT pos AS lo, LEAD(pos) OVER (ORDER BY pos)-1 AS hi FROM boundaries)
+        SELECT s.lo, s.hi, {aggregate} AS value FROM segments s
+        JOIN repeats r ON r.lo<=s.hi AND r.hi>=s.lo
+        WHERE s.hi IS NOT NULL GROUP BY s.lo,s.hi ORDER BY s.lo
+    """, params).fetchall()
+    starts, ends, values = [], [], []
+    for lo, hi, value in rows:
+        lo = max(lo, region_start) if region_start is not None else lo
+        hi = min(hi, region_end) if region_end is not None else hi
+        if lo <= hi:
+            starts.append(lo + mag_offset)
+            ends.append(hi + mag_offset)
+            values.append(value)
+    _write_rle(contig_name, "", feature_name, np.asarray(starts, dtype=np.int64),
+               np.asarray(ends, dtype=np.int64), np.round(values, 4), mag_name=mag_name)
 
 
 def _inspect_sample_feature(conn, contig_id, contig_name, sample_name, sample_id,
