@@ -105,21 +105,32 @@ def _format_zoom(data, plot_type, start, end, intervals=False):
         }
     values = np.asarray(data.get("mean", ()))[mask].tolist()
     if intervals:
-        x,y,first,last=[],[],[],[]
-        previous=None
-        for lo,hi,value in zip(starts,ends,values):
-            if previous is not None and lo>previous+1:
-                x.extend((previous+1,lo-1)); y.extend((0.,0.))
-                first.extend((None,None)); last.extend((None,None))
-            elif previous is None and lo>start-1:
-                x.append(lo-1); y.append(0.); first.append(None); last.append(None)
-            x.extend((lo,hi)); y.extend((value,value))
-            first.extend((int(lo)+1,int(lo)+1)); last.extend((int(hi)+1,int(hi)+1))
-            previous=hi
-        if previous is not None and previous<end-1:
-            x.append(previous+1); y.append(0.); first.append(None); last.append(None)
-        return _clip_interval_curve({"x":np.asarray(x),"y":np.asarray(y),
-                                    "first_pos":first,"last_pos":last},start,end)
+        x, y, first, last = [], [], [], []
+        previous = None
+        for lo, hi, value in zip(starts, ends, values):
+            if previous is not None and lo > previous + 1:
+                x.extend((previous + 1, lo - 1))
+                y.extend((0., 0.))
+                first.extend((None, None))
+                last.extend((None, None))
+            elif previous is None and lo > start - 1:
+                x.append(lo - 1)
+                y.append(0.)
+                first.append(None)
+                last.append(None)
+            x.extend((lo, hi))
+            y.extend((value, value))
+            first.extend((int(lo) + 1, int(lo) + 1))
+            last.extend((int(hi) + 1, int(hi) + 1))
+            previous = hi
+        if previous is not None and previous < end - 1:
+            x.append(previous + 1)
+            y.append(0.)
+            first.append(None)
+            last.append(None)
+        return _clip_interval_curve(
+            {"x": np.asarray(x), "y": np.asarray(y), "first_pos": first, "last_pos": last}, start, end
+        )
     if data.get("sparse") and midpoints:
         width, new_x, new_y = int(ends[0] - starts[0] + 1), [], []
         first_positions, last_positions = [], []

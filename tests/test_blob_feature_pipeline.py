@@ -212,6 +212,7 @@ def test_zoom_best_partner_respects_mag_scope_offsets_and_identity():
 
 def test_identity_zoom_decodes_stored_10000_as_100_percent():
     import struct
+
     import zstandard
     # One sparse zoom bin: delta index 0 and zigzag identity 10000.
     identity = bytes([0xA0, 0x9C, 0x01])

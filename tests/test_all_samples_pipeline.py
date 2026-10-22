@@ -218,6 +218,6 @@ def test_all_samples_genome_identity_resolves_partner_names(monkeypatch):
     series = AllSamplesDataService(Repository())._load_contig_style(1, style, request)
     assert 'partner_contig_id' not in series.data
     assert series.data['partner_contig'] == (None, 'best-outside-contig', 'best-outside-contig', None)
-    from thebigbam.plotting.renderers.features import _tooltips
     from thebigbam.plotting.renderers.all_samples import _legacy_feature_dict
+    from thebigbam.plotting.renderers.features import _tooltips
     assert ('Best-hit contig', '@partner_contig') in _tooltips([_legacy_feature_dict(series)])

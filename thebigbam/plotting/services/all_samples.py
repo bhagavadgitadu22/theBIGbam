@@ -13,8 +13,8 @@ import numpy as np
 from ...database.blob_decoder import decode_raw_chunks, decode_raw_sparse_chunks, decode_zoom_standalone
 from ..models.plots import AllSamplesPlotData, AllSamplesPlotRequest, FeatureSeries, GenomeTrack, SampleTrack
 from ..repositories.all_samples import AllSamplesRepository
-from .features import apply_minimum_frequency
 from .blob_features import FeatureDataService, _format_zoom, _slice_with_anchors
+from .features import apply_minimum_frequency
 
 
 def _as_tuple_mapping(data: Mapping) -> dict[str, tuple]:
