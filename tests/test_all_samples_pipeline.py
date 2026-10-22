@@ -206,18 +206,33 @@ def test_renderer_accepts_plain_data_without_database_calls():
 
 def test_all_samples_genome_identity_resolves_partner_names(monkeypatch):
     class Repository:
-        def feature_id(self, _): return 1
-        def blob_settings(self, _): return 100, 65536, [100,1000,10000], 1
-        def contig_chunks(self, *_): return [(0, b'chunk')]
-        def contig_names(self, ids): return {7: 'best-outside-contig'}
-    monkeypatch.setattr('thebigbam.plotting.services.all_samples.decode_raw_sparse_chunks',
-        lambda *_: {"x": np.array([1,2]), "y": np.array([98.0,99.0]), "sparse": True,
-                    "partner_contig_id": np.array([7,7])})
-    style = FeatureStyle('curve', '#000', 1, .2, 1, 'Max hit identity', 'hit_identity', 'Contig_blob', 'sparse')
-    request = AllSamplesPlotRequest('query', None, GenomicRegion(1,10))
+        def feature_id(self, _):
+            return 1
+
+        def blob_settings(self, _):
+            return 100, 65536, [100, 1000, 10000], 1
+
+        def contig_chunks(self, *_):
+            return [(0, b"chunk")]
+
+        def contig_names(self, ids):
+            return {7: "best-outside-contig"}
+
+    monkeypatch.setattr(
+        "thebigbam.plotting.services.all_samples.decode_raw_sparse_chunks",
+        lambda *_: {
+            "x": np.array([1, 2]),
+            "y": np.array([98.0, 99.0]),
+            "sparse": True,
+            "partner_contig_id": np.array([7, 7]),
+        },
+    )
+    style = FeatureStyle("curve", "#000", 1, 0.2, 1, "Max hit identity", "hit_identity", "Contig_blob", "sparse")
+    request = AllSamplesPlotRequest("query", None, GenomicRegion(1, 10))
     series = AllSamplesDataService(Repository())._load_contig_style(1, style, request)
-    assert 'partner_contig_id' not in series.data
-    assert series.data['partner_contig'] == (None, 'best-outside-contig', 'best-outside-contig', None)
+    assert "partner_contig_id" not in series.data
+    assert series.data["partner_contig"] == (None, "best-outside-contig", "best-outside-contig", None)
     from thebigbam.plotting.renderers.all_samples import _legacy_feature_dict
     from thebigbam.plotting.renderers.features import _tooltips
-    assert ('Best-hit contig', '@partner_contig') in _tooltips([_legacy_feature_dict(series)])
+
+    assert ("Best-hit contig", "@partner_contig") in _tooltips([_legacy_feature_dict(series)])

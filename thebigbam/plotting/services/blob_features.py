@@ -23,26 +23,32 @@ def _clip_interval_curve(data, start, end):
     x, y = np.asarray(data["x"]), np.asarray(data["y"])
     if not len(x):
         return None
-    metadata = {key: list(value) for key,value in data.items()
-                if key not in {"x","y","sparse","intervals"} and hasattr(value,"__len__") and len(value)==len(x)}
-    points = [(float(position), float(y[index]), index) for index,position in enumerate(x)
-              if start-1 <= position <= end-1]
-    for boundary in dict.fromkeys((start-1,end-1)):
-        index = int(np.searchsorted(x,boundary,side="right"))-1
-        if index>=0 and index+1<len(x) and x[index]<boundary<x[index+1] and y[index]==y[index+1]:
-            points.append((float(boundary),float(y[index]),index))
+    metadata = {
+        key: list(value)
+        for key, value in data.items()
+        if key not in {"x", "y", "sparse", "intervals"} and hasattr(value, "__len__") and len(value) == len(x)
+    }
+    points = [
+        (float(position), float(y[index]), index)
+        for index, position in enumerate(x)
+        if start - 1 <= position <= end - 1
+    ]
+    for boundary in dict.fromkeys((start - 1, end - 1)):
+        index = int(np.searchsorted(x, boundary, side="right")) - 1
+        if index >= 0 and index + 1 < len(x) and x[index] < boundary < x[index + 1] and y[index] == y[index + 1]:
+            points.append((float(boundary), float(y[index]), index))
     if not points:
         return None
-    points.sort(key=lambda item:item[0])
-    result={"x":[position+1 for position,_,_ in points],"y":[value for _,value,_ in points]}
-    for key,values in metadata.items():
-        result[key]=[values[index] for _,_,index in points]
+    points.sort(key=lambda item: item[0])
+    result = {"x": [position + 1 for position, _, _ in points], "y": [value for _, value, _ in points]}
+    for key, values in metadata.items():
+        result[key] = [values[index] for _, _, index in points]
     return result
 
 
 def _slice_with_anchors(data, start, end, plot_type):
     if data.get("intervals") and plot_type != "bars":
-        return _clip_interval_curve(data,start,end)
+        return _clip_interval_curve(data, start, end)
     x, y = np.asarray(data["x"]), np.asarray(data["y"])
     if len(x) == 0:
         return None
@@ -110,12 +116,12 @@ def _format_zoom(data, plot_type, start, end, intervals=False):
         for lo, hi, value in zip(starts, ends, values):
             if previous is not None and lo > previous + 1:
                 x.extend((previous + 1, lo - 1))
-                y.extend((0., 0.))
+                y.extend((0.0, 0.0))
                 first.extend((None, None))
                 last.extend((None, None))
             elif previous is None and lo > start - 1:
                 x.append(lo - 1)
-                y.append(0.)
+                y.append(0.0)
                 first.append(None)
                 last.append(None)
             x.extend((lo, hi))
@@ -125,7 +131,7 @@ def _format_zoom(data, plot_type, start, end, intervals=False):
             previous = hi
         if previous is not None and previous < end - 1:
             x.append(previous + 1)
-            y.append(0.)
+            y.append(0.0)
             first.append(None)
             last.append(None)
         return _clip_interval_curve(
@@ -154,7 +160,11 @@ def _format_zoom(data, plot_type, start, end, intervals=False):
         first_positions.append(None)
         last_positions.append(None)
         midpoints, values = new_x, new_y
-    return {"x": midpoints, "y": values, "first_pos": first_positions, "last_pos": last_positions} if data.get("sparse") else {"x": midpoints, "y": values}
+    return (
+        {"x": midpoints, "y": values, "first_pos": first_positions, "last_pos": last_positions}
+        if data.get("sparse")
+        else {"x": midpoints, "y": values}
+    )
 
 
 def _merge(parts):
@@ -164,7 +174,7 @@ def _merge(parts):
     result = {}
     for key in keys:
         if key in {"sparse", "intervals"}:
-            result[key] = any(bool(part.get(key,False)) for part in parts)
+            result[key] = any(bool(part.get(key, False)) for part in parts)
         elif any(hasattr(part.get(key), "__len__") for part in parts):
             result[key] = np.concatenate([np.asarray(part.get(key, [None] * len(part["x"]))) for part in parts])
     order = np.argsort(result["x"])
@@ -328,7 +338,7 @@ class FeatureDataService:
                     plot_type,
                     request.region.start,
                     request.region.end,
-                    settings.get("intervals",False),
+                    settings.get("intervals", False),
                 )
             else:
                 active_members = _overlapping_members(request.members, request.region.start, request.region.end)
@@ -380,7 +390,11 @@ class FeatureDataService:
             if values:
                 transformed = time.perf_counter()
                 values["y"] = apply_minimum_frequency(values["y"], request.minimum_relative_value)
-                self._resolve_partners(values, variable, tuple((member.contig_id, member.offset, member.length) for member in request.members))
+                self._resolve_partners(
+                    values,
+                    variable,
+                    tuple((member.contig_id, member.offset, member.length) for member in request.members),
+                )
                 output.append(self._style(row, values))
                 self.phase_seconds["transformation"] = self.phase_seconds.get("transformation", 0) + (
                     time.perf_counter() - transformed
@@ -419,7 +433,7 @@ class FeatureDataService:
         window = end - start
         target = next((size for size in settings["zoom_bins"] if window // size <= 10_000), settings["zoom_bins"][-1])
         decoded = decode_zoom_standalone(blob, target, settings["scale"], settings["zoom_bins"])
-        return _format_zoom(decoded, plot_type, start, end, settings.get("intervals",False)) if decoded else None
+        return _format_zoom(decoded, plot_type, start, end, settings.get("intervals", False)) if decoded else None
 
     def _mag_zoom_parts(self, request, zooms, settings, plot_type, contig_level):
         parts = []
@@ -467,9 +481,13 @@ class FeatureDataService:
         if ids is None:
             return
         labels = [None] * len(ids)
-        nonzero = [index for index, partner in enumerate(ids) if partner is not None and int(partner)>=0 and values["y"][index]>0]
+        nonzero = [
+            index
+            for index, partner in enumerate(ids)
+            if partner is not None and int(partner) >= 0 and values["y"][index] > 0
+        ]
         for first, last in zip(nonzero[::2], nonzero[1::2]):
-            labels[first] = labels[last] = f"{int(ids[first])+1}-{int(ids[last])+1}"
+            labels[first] = labels[last] = f"{int(ids[first]) + 1}-{int(ids[last]) + 1}"
         values["repeat_positions"] = labels
 
     def _resolve_partners(self, values, variable, members=()):
@@ -480,15 +498,19 @@ class FeatureDataService:
             targets = []
             ordered_members = sorted(members, key=lambda member: member[1])
             offsets = [member[1] for member in ordered_members]
-            for index, (lo, hi, identity) in enumerate(zip(values.get("first_pos", ()), values.get("last_pos", ()), values["y"])):
+            for index, (lo, hi, identity) in enumerate(
+                zip(values.get("first_pos", ()), values.get("last_pos", ()), values["y"])
+            ):
                 if lo is None or hi is None or identity <= 0:
                     continue
                 member_index = bisect_right(offsets, lo - 1) - 1
                 if member_index >= 0:
                     cid, offset, length = ordered_members[member_index]
                     if offset < lo <= offset + length:
-                        targets.append((index, cid, max(1, lo-offset), min(length, hi-offset)))
-            names = self._timed("blob_retrieval", self.repository.best_hit_names, targets, variable == "hit_identity_within_mag")
+                        targets.append((index, cid, max(1, lo - offset), min(length, hi - offset)))
+            names = self._timed(
+                "blob_retrieval", self.repository.best_hit_names, targets, variable == "hit_identity_within_mag"
+            )
             values["partner_contig"] = [names.get(index) for index in range(len(values["x"]))]
             return
         if variable in {"direct_repeat_identity", "inverted_repeat_identity"}:
