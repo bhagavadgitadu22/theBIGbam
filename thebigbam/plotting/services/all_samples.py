@@ -13,8 +13,8 @@ import numpy as np
 from ...database.blob_decoder import decode_raw_chunks, decode_raw_sparse_chunks, decode_zoom_standalone
 from ..models.plots import AllSamplesPlotData, AllSamplesPlotRequest, FeatureSeries, GenomeTrack, SampleTrack
 from ..repositories.all_samples import AllSamplesRepository
-from .features import apply_minimum_frequency
 from .blob_features import FeatureDataService, _format_zoom, _slice_with_anchors
+from .features import apply_minimum_frequency
 
 
 def _as_tuple_mapping(data: Mapping) -> dict[str, tuple]:
@@ -153,7 +153,12 @@ class AllSamplesDataService:
             return None
         scale, chunk_size, zoom_bins, position_scale = self.repository.blob_settings(style.variable_name)
         region = request.region
-        intervals = style.variable_name in {"direct_repeat_count", "inverted_repeat_count", "direct_repeat_identity", "inverted_repeat_identity"} and self.repository.storage_settings(style.variable_name).get("intervals",False)
+        intervals = style.variable_name in {
+            "direct_repeat_count",
+            "inverted_repeat_count",
+            "direct_repeat_identity",
+            "inverted_repeat_identity",
+        } and self.repository.storage_settings(style.variable_name).get("intervals", False)
         use_zoom = region.length > (
             10_000_000 if style.variable_name in {"gc_content", "gc_skew"} else region.max_base_resolution
         )
@@ -173,7 +178,12 @@ class AllSamplesDataService:
             decoder = decode_raw_sparse_chunks if style.encoding == "sparse" else decode_raw_chunks
             decoding_started = time.perf_counter()
             decoded = decoder(rows, scale, chunk_size) if rows else None
-            if decoded and style.variable_name in {"direct_repeat_count", "inverted_repeat_count", "direct_repeat_identity", "inverted_repeat_identity"}:
+            if decoded and style.variable_name in {
+                "direct_repeat_count",
+                "inverted_repeat_count",
+                "direct_repeat_identity",
+                "inverted_repeat_identity",
+            }:
                 settings = self.repository.storage_settings(style.variable_name)
                 if settings.get("intervals"):
                     decoded["sparse"] = False
@@ -194,7 +204,8 @@ class AllSamplesDataService:
             self._phase("blob_decoding", decoding_started)
         if data:
             FeatureDataService(self.repository)._resolve_partners(
-                data, style.variable_name, ((contig_id, 0, region.end),))
+                data, style.variable_name, ((contig_id, 0, region.end),)
+            )
         return FeatureSeries(style, _as_tuple_mapping(data)) if data else None
 
     @staticmethod
