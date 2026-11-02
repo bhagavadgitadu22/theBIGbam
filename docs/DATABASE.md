@@ -2,7 +2,7 @@
 
 Several commands are available to manipulate the database.
 
-### Extending an existing database
+## Extending a database
 
 For large datasets, it may be practical to build the database incrementally rather than processing all BAM files in a single run. The `--extend` flag allows adding new samples (and optionally new contigs) to an existing database:
 
@@ -33,6 +33,10 @@ thebigbam calculate --extend -b third_batch/ -g new_contigs.gbk -o my_database.d
   
   - If the database was created with annotation files (`-g`/`-a`), new contigs are only added if you also provide `-g`/`-a` during extend.
   - If the database was created in BAM-only mode (no annotation files), new contigs found in BAM headers are automatically added.
+
+## Emptying a database
+
+To create a new database using the same reference sequences as an existing one, use `purge-mapping-data` to remove all mapping-derived data while preserving genome sequences and annotations. The emptied database can then be populated with new samples using `calculate --extend`.
 
 ## Adding content to the database
 
@@ -85,7 +89,7 @@ Custom variables (added via `add-variable`) can be removed with:
 thebigbam remove-variable -d my_database.db --name my_variable
 ```
 
-### Listing database contents
+## Listing database contents
 
 ```sh
 thebigbam list-samples -d my_database.db
@@ -97,4 +101,4 @@ thebigbam list-mag-metadata -d my_database.db
 thebigbam list-variables -d my_database.db
 ```
 
-`list-variables --detailed`` returns a description of each variable in addition to the list of variables.
+`list-variables --detailed` returns a description of each variable in addition to the list of variables.

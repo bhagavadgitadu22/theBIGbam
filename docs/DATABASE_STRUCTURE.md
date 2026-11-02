@@ -56,11 +56,11 @@ Tables are grouped by what they describe. Not all tables are present in every da
 
 ### Contig repeats and BLAST hits
 
-| Table                         | Key                                     | Description                                                |
-| ----------------------------- | --------------------------------------- | ---------------------------------------------------------- |
-| **Contig_directRepeats**      | `(Contig_id, positions)`                | Direct repeats detected by BLAST self-alignment            |
-| **Contig_invertedRepeats**    | `(Contig_id, positions)`                | Inverted repeats detected by BLAST self-alignment          |
-| **Contig_blast_hits** | `(Contig_id_1, Contig_id_2, positions)` | Directed inter-contig BLAST hits: id_1 is query, id_2 is subject |
+| Table                      | Key                                     | Description                                                      |
+| -------------------------- | --------------------------------------- | ---------------------------------------------------------------- |
+| **Contig_directRepeats**   | `(Contig_id, positions)`                | Direct repeats detected by BLAST self-alignment                  |
+| **Contig_invertedRepeats** | `(Contig_id, positions)`                | Inverted repeats detected by BLAST self-alignment                |
+| **Contig_blast_hits**      | `(Contig_id_1, Contig_id_2, positions)` | Directed inter-contig BLAST hits: id_1 is query, id_2 is subject |
 
 ### Visualization metadata
 
@@ -88,7 +88,7 @@ Views compute derived metrics on the fly from the tables above. They are not sto
 | **Explicit_phage_mechanisms**               | `Packaging_mechanisms` with contig/sample names                                                                         |
 | **Explicit_phage_termini**                  | `Packaging_termini` with contig/sample names and all diagnostics                                                        |
 | **MAG_annotation_core** *(MAG)*             | Annotations shifted to MAG coordinates via `Offset_in_MAG`                                                              |
-| **Contig_blast_hits_query**     | Query-side BLAST hits from `Contig_blast_hits`; rows are never mirrored                                           |
+| **Contig_blast_hits_query**                 | Query-side BLAST hits from `Contig_blast_hits`; rows are never mirrored                                                 |
 | **Explicit_coverage_per_MAG** *(MAG)*       | Human-readable `MAG_coverage` table with RPKM and TPM computed on the fly                                               |
 | **Explicit_misassembly_per_MAG** *(MAG)*    | MAG-level `Misassembly`` counts per 100 kbp                                                                             |
 | **Explicit_microdiversity_per_MAG** *(MAG)* | MAG-level `Microdiversity`` counts per 100 kbp                                                                          |
@@ -119,8 +119,6 @@ When visualising a range of positions from a contig and clicking APPLY, BLOB dat
 At low zoom levels, users may view very large genomic regions. To avoid the computational cost of decoding multiple chunks simultaneously and to prevent visual clutter in the plots, each feature has a pre-computed **zoom BLOB** (stored in the `Feature_blob` or `Contig_blob` table) containing summaries at three resolutions: 100 bp, 1 kbp, and 10 kbp. Only 1 zoom level (10 kbp) is used for GC content and GC skew as those features are already 500 and 1000 bp summaries. **Dense zoom bins** store the **mean** value across the bin. **Sparse zoom bins** store the **max** value across the bin (so peaks are never hidden when zoomed out).
 
 With `thebigbam serve`, zoom BLOBs are used instead of per-position data when the displayed window exceeds 10 kbp. This threshold can be adjusted through the **Feature plots without binning (bp)** parameter in the **Plotting parameters** section. See [the main page](../README.md#adaptive-resolution-rendering) for more details regarding the plotting with zooms.
-
-Conversely, `thebigbam inspect` always returns base-resolution data, never zoom summaries.
 
 ### BLOB stitching into MAGs
 

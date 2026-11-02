@@ -66,7 +66,7 @@ python3.10 -m pip install thebigbam
 
 In the example we used conda, but the dependencies can be installed using any package manager (e.g. `apt` on Linux, `brew` on macOS) or from the binaries provided on their respective websites. If you do not plan to use the per-sample mapping command, `samtools`, `minimap2`, and `bwa-mem2` are optional. If you do not need to detect within-contig repeats (for instance to find DTR/ITR), `blast` is optional.
 
-To install the lastest version directly from GitHub, follow [the developer's guide](docs/DEVELOPERS_NOTE.md).
+To install the latest version directly from GitHub, follow [the developer's guide](docs/DEVELOPERS_NOTE.md).
 
 ## Check installation succeeded
 
@@ -141,12 +141,11 @@ For more complex examples see [the usage page](docs/USAGE.md). It covers large-s
 Example command to compute the database for a single sample containing paired-end short reads mapped to the reference genome of phage HK97:
 
 ```sh
-thebigbam calculate  
--b tests/HK97  
--g tests/HK97/HK97_GCF_000848825.1_pharokka.gbk  
--m coverage,misalignment  
--o tests/HK97/HK97.db  
--t 4
+thebigbam calculate -t 4 \
+-b tests/HK97 \
+-g tests/HK97/HK97_GCF_000848825.1_pharokka.gbk \
+-m coverage,misalignment \
+-o tests/HK97/HK97.db
 ```
 
 For more complex examples see [the usage page](docs/USAGE.md).
@@ -413,10 +412,10 @@ The `--circular` flag is a specificity of theBIGbam mapping allowing explicit ci
 Example command: 
 
 ```sh
-thebigbam mapping-per-sample  
--r1 tests/HK97/HK97_R1_illumina.fastq.gz  
--r2 tests/HK97/HK97_R2_illumina.fastq.gz  
--a tests/HK97/HK97_GCF_000848825.1.fasta  
+thebigbam mapping-per-sample \
+-r1 tests/HK97/HK97_R1_illumina.fastq.gz \
+-r2 tests/HK97/HK97_R2_illumina.fastq.gz \
+-a tests/HK97/HK97_GCF_000848825.1.fasta \
 --circular -o tests/HK97/HK97_illumina_circular.bam
 ```
 

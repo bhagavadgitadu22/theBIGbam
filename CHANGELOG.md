@@ -2,11 +2,9 @@
 
 ## 0.8.0
 
-- Default calculations to coverage and misalignment. Other mapping modules are opt-in.
+- Default modules coverage and misalignment only for `calculate`.
 - Add BLAST scopes: `none` (default), `termini`, `contig`, `mag`, and `all`.
-- Add candidate terminal-repeat searches and reuse compatible stored evidence.
 - Reduce memory use during annotation loading, BAM processing, and database writes.
-- Add `calculate --diagnose` timing logs and size reports. Rename `serve --time` to `--diagnose`.
 - Allow `--extend` to retry incomplete samples while preserving completed samples.
 - Add the Empathi annotation color template.
 - Fix repeat intervals, hit identities, partner tooltips, and selection handling.

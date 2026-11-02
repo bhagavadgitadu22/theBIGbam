@@ -67,7 +67,7 @@ Each peak area stores:
 
 - **Poisson test:** validates that the peak area itself is significant. The peak should harbor more starts than expected under uniform fragmentation.
 
-- **Clipping test**:** checks whether a significant peak is likely to be an artifact. High clipping rates near a peak indicate potential misalignment rather than a true terminus. This test requires mappings generated with `thebigbam mapping-per-sample --circular`, as standard linear mappings produce artificial clipping at contig ends, making genuine termini indistinguishable from alignment artifacts.
+- **Clipping test**: checks whether a significant peak is likely to be an artifact. High clipping rates near a peak indicate potential misalignment rather than a true terminus. This test requires mappings generated with `thebigbam mapping-per-sample --circular`, as standard linear mappings produce artificial clipping at contig ends, making genuine termini indistinguishable from alignment artifacts.
 
 These are complementary: the Poisson test filters noise, the clipping test filters artifacts. An area must pass both tests to be kept.
 
