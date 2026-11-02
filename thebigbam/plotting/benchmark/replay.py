@@ -56,7 +56,7 @@ class Server:
             str(self.port),
             "--allow-websocket-origin",
             f"127.0.0.1:{self.port}",
-            "--time",
+            "--diagnose",
             "--no-browser",
             "--json",
             str(self.settings),

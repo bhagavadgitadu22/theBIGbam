@@ -89,7 +89,7 @@ def add_calculate_args(parser):
     parser.add_argument('--min_occurrences', type=int, default=2, help='Minimum absolute event count for sparse features (default: 2). Position kept only if value >= coverage × coverage_percentage AND value >= min_occurrences.')
     parser.add_argument('--variation_percentage', type=float, default=0, help='Adaptive smoothing for dense features (coverage, MAPQ, etc.): consecutive positions within this %% of each other are collapsed. 0 = disabled (exact base resolution). Good for reducing database size; OK for visualization; slightly lossy for precise analysis. Recommended: 5-10%%.')
     parser.add_argument('--extend', action='store_true', help='Extend an existing database with new samples (and optionally new contigs)')
-    parser.add_argument('--blast', choices=['none', 'termini', 'mags', 'all'], default='none', help='BLAST scope: none (default; no new searches), termini (Phagetermini candidate end searches), mags (requires --view mag; repeats and similarities only within each MAG, never between MAGs), all (global all-versus-all across all reference contigs in either view, including different MAGs in MAG view). BLAST is not recommended for large datasets. If BLAST is needed for a large MAG dataset, prefer mags over all to explicitly restrict the scope. Compatible stored evidence is reused; mags/all do not launch candidate terminal searches. --extend defaults to none.')
+    parser.add_argument('--blast', choices=['none', 'termini', 'contig', 'mag', 'all'], default='none', help='BLAST scope: none (default; no new searches), termini (Phagetermini candidate end searches), contig (full self-BLAST within each contig in either view; no comparisons between contigs), mag (requires --view mag; repeats and similarities only within each MAG, never between MAGs), all (global all-versus-all across all reference contigs in either view, including different MAGs in MAG view). BLAST is not recommended for large datasets. If BLAST is needed for a large MAG dataset, prefer mag over all to explicitly restrict the scope. Compatible stored evidence is reused; contig/mag/all do not launch candidate terminal searches. --extend defaults to none.')
     parser.add_argument(
         '--diagnose',
         action='store_true',
@@ -307,8 +307,8 @@ def run_calculate_args(args):
     assembly_path = getattr(args, 'assembly', None)
     is_extending = getattr(args, 'extend', False)
     view = getattr(args, 'view', 'contig')
-    if getattr(args, 'blast', 'none') == 'mags' and view != 'mag':
-        sys.exit("ERROR: --blast mags requires --view mag")
+    if getattr(args, 'blast', 'none') == 'mag' and view != 'mag':
+        sys.exit("ERROR: --blast mag requires --view mag")
 
     # Handle optional bam_files
     bam_files = []

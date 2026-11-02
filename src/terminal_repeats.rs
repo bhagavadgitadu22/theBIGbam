@@ -529,7 +529,7 @@ mod mode_tests {
     #[test]
     fn none_and_all_do_not_launch_candidate_searches_and_preserve_assessment_status() {
         let directory = tempfile::tempdir().unwrap();
-        for mode in [crate::processing::BlastMode::None,crate::processing::BlastMode::Mags,crate::processing::BlastMode::All] {
+        for mode in [crate::processing::BlastMode::None,crate::processing::BlastMode::Contig,crate::processing::BlastMode::Mag,crate::processing::BlastMode::All] {
             let store = SequenceStore::new(directory.path()).unwrap();
             let search = TerminalRepeatSearch::new(store,vec![1],PhageTerminiConfig::default());
             *search.mode.lock().unwrap() = mode;

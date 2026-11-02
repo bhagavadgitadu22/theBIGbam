@@ -55,7 +55,7 @@ def add_serve_args(parser) -> None:
         help="Additional browser origin allowed to connect (for example host.example.org:5006). May be repeated.",
     )
     parser.add_argument(
-        "--time",
+        "--diagnose",
         action="store_true",
         default=False,
         help="(for developers) Print timing and memory diagnostics to the terminal",
@@ -95,7 +95,7 @@ def _print_database_metadata(db_path: str) -> None:
 
 
 def run_serve(args) -> int:
-    enable_timing = getattr(args, "time", False)
+    enable_timing = getattr(args, "diagnose", False)
     application._TIMING = TimingPhase()
     if enable_timing:
         application._start_rss_watchdog()

@@ -1,4 +1,4 @@
-from types import SimpleNamespace
+import argparse
 
 from thebigbam.plotting.application import server
 
@@ -11,14 +11,12 @@ def _run(monkeypatch, *, enable_timing):
     monkeypatch.setattr(server.application, "preload_db_data", lambda *_args, **_kwargs: object())
     monkeypatch.setattr(server, "warm_plot_pipeline_imports", lambda: None)
     monkeypatch.setattr(server.pn, "serve", lambda *_args, **kwargs: serve_kwargs.update(kwargs))
-    result = server.run_serve(
-        SimpleNamespace(
-            db="example.db",
-            port=5006,
-            time=enable_timing,
-            settings_json=None,
-        )
-    )
+    parser = argparse.ArgumentParser()
+    server.add_serve_args(parser)
+    arguments = ["--db", "example.db"]
+    if enable_timing:
+        arguments.append("--diagnose")
+    result = server.run_serve(parser.parse_args(arguments))
     return result, watchdog_calls, serve_kwargs
 
 

@@ -149,11 +149,11 @@ pub type MagMemberLookup = HashMap<String, (String, i64, u32, u32)>;
 pub(crate) const BLAST_ARGS: &[&str] = &["-task", "megablast", "-word_size", "28", "-dust", "20 64 1", "-strand", "both", "-evalue", "1e-10", "-num_threads", "1"];
 pub(crate) const BLAST_PARAMETERS: &str = "v2;task=megablast;word_size=28;dust=20 64 1;strand=both;evalue=1e-10;threads=1";
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum BlastMode { None, Termini, Mags, All }
+pub enum BlastMode { None, Termini, Contig, Mag, All }
 impl BlastMode {
-    pub fn parse(value: &str) -> Result<Self> { match value { "none" => Ok(Self::None), "termini" => Ok(Self::Termini), "mags" => Ok(Self::Mags), "all" => Ok(Self::All), _ => anyhow::bail!("blast must be none, termini, mags, or all") } }
-    pub fn reference_search(self) -> bool { matches!(self,Self::All|Self::Mags) }
-    pub fn as_str(self) -> &'static str { match self { Self::None => "none", Self::Termini => "termini", Self::Mags => "mags", Self::All => "all" } }
+    pub fn parse(value: &str) -> Result<Self> { match value { "none" => Ok(Self::None), "termini" => Ok(Self::Termini), "contig" => Ok(Self::Contig), "mag" => Ok(Self::Mag), "all" => Ok(Self::All), _ => anyhow::bail!("blast must be none, termini, contig, mag, or all") } }
+    pub fn reference_search(self) -> bool { matches!(self,Self::All|Self::Mag|Self::Contig) }
+    pub fn as_str(self) -> &'static str { match self { Self::None => "none", Self::Termini => "termini", Self::Contig => "contig", Self::Mag => "mag", Self::All => "all" } }
 }
 
 /// Configuration for processing.
@@ -2108,8 +2108,8 @@ pub fn run_all_samples(
     extend_db: &Path,
     command_line: &str,
 ) -> Result<ProcessResult> {
-    anyhow::ensure!(config.blast != BlastMode::Mags || config.view_mode == ViewMode::Mag,
-        "--blast mags requires --view mag");
+    anyhow::ensure!(config.blast != BlastMode::Mag || config.view_mode == ViewMode::Mag,
+        "--blast mag requires --view mag");
     unsafe {
         htslib::hts_set_log_level(htslib::htsLogLevel_HTS_LOG_ERROR);
     }
@@ -2723,7 +2723,7 @@ pub fn run_all_samples(
         eprintln!("Reference BLAST all: {hit_count} inter-contig hits read (including matches between contigs)");
         Vec::new()
     } else if config.blast.reference_search() && has_sequences {
-        if config.view_mode == ViewMode::Mag {
+        if config.blast == BlastMode::Mag {
             let blast_names: HashSet<&str> = blast_contigs.iter().map(|c| c.name.as_str()).collect();
             let filtered_manifest: Vec<(String, Vec<String>)> = mag_contig_map
                 .iter()
@@ -4156,6 +4156,22 @@ fn print_summary(result: &ProcessResult, output_db: &Path) {
 mod mag_processing_tests {
     use super::*;
     use rust_htslib::bam::{self, header::HeaderRecord};
+
+    #[test]
+    fn blast_scopes_parse_and_classify_reference_searches() {
+        for (name, mode, general) in [
+            ("none", BlastMode::None, false),
+            ("termini", BlastMode::Termini, false),
+            ("contig", BlastMode::Contig, true),
+            ("mag", BlastMode::Mag, true),
+            ("all", BlastMode::All, true),
+        ] {
+            assert_eq!(BlastMode::parse(name).unwrap(), mode);
+            assert_eq!(mode.as_str(), name);
+            assert_eq!(mode.reference_search(), general);
+        }
+        assert!(BlastMode::parse("mags").is_err());
+    }
 
     fn config(min_af: f64, min_cov: f64) -> ProcessConfig {
         ProcessConfig {

@@ -9,6 +9,8 @@ It enables compression and visualization of **large genomic annotation (GenBank)
 
 Built with **Rust** for fast BAM processing and **Python + Bokeh** for interactive visualization.
 
+See the [changelog](CHANGELOG.md) for changes in each release.
+
 ---
 
 # Table of contents
