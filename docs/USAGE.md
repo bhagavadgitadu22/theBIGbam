@@ -255,7 +255,6 @@ When extending a database, previously processed samples will not contain mapping
 
 This is not useful for the collection presented here, but it may be relevant in [Use case 2](#use-case-2-large-dataset-50k-contigs-192-samples). For example, if a new glacier-fed stream metagenome is sequenced, additional viral contigs may be assembled that were present but not assembled in previously sequenced metagenomes. Detecting these would require remapping all samples to the updated reference set. However, remapping all samples can be computationally expensive and should only be performed if the final results are expected to substantially differ.
 
-
 ## Memory use during annotation loading
 
 Fresh `calculate` builds with per-MAG annotation files (`--view mag`), or an
@@ -363,7 +362,7 @@ is reused only with matching search/filter parameters. Incompatible terminal cac
 entries are invalidated when newly collected evidence is persisted. Legacy general
 BLAST parameters are unknown and are not relabelled compatible during extension.
 
-`--blast mags` uses one worker per MAG within the configured thread pool. FASTA output
+`--blast mag` uses one worker per MAG within the configured thread pool. FASTA output
 is buffered, and BLAST tabular output is read from a temporary file in batches of
 at most 10,000 retained hits. Database writes use bulk appenders and one transaction
 per batch. Query/subject direction is preserved; exact repeated directed rows
@@ -379,7 +378,6 @@ phase times when they finish. Database waiting/writing dominating the totals
 indicates contention or storage costs; `blastn` dominating indicates alignment
 work. Failed BLAST commands or database writes now return an error instead of
 silently omitting a MAG's results.
-
 
 ### On-demand phage terminal repeats
 
@@ -477,10 +475,10 @@ exceed the cache budget. Blob encoding failures are rejected before blob inserti
 Rust decoding reports invalid compression frames and truncated payloads as errors.
 
 BLAST is not recommended for large datasets unless its outputs are needed. For a
-large MAG dataset requiring BLAST, prefer `--blast mags` to state the scope
-explicitly. `all` compares the entire collection, whereas `mags` runs independent within-MAG
+large MAG dataset requiring BLAST, prefer `--blast mag` to state the scope
+explicitly. `all` compares the entire collection, whereas `mag` runs independent within-MAG
 searches and excludes cross-MAG comparisons.
-`mags` is rejected in contig view and is recorded explicitly in database metadata.
+`mag` is rejected in contig view and is recorded explicitly in database metadata.
 
 Global reference BLAST exports DNA in database batches to a temporary FASTA, builds one
 shared BLAST database, and searches bounded query shards in parallel. Hits are
@@ -496,7 +494,6 @@ tracks are replaced only after all BLAST subprocesses finish successfully. A
 parsing/write failure marks reference evidence incomplete; rerun the global search
 to rebuild it. This mode can require substantial time and temporary disk space.
 
-
 During sample processing, Slurm output shows the BAM reader allocation and one
 completion line per sample. Warnings and errors remain visible, including
 unmatched references and samples with no coverage results retained after filtering.
@@ -507,7 +504,6 @@ timings are written to `<database>.timings.log`. Blob sizes remain in
 `<database>.size.tsv`. Routine terminal-search progress is omitted from Slurm;
 terminal-search failures identify the sample and contig.
 
-
 The Max hit identity subplot displays nucleotide identity as a percentage (0–100).
 Hover tooltips show the best-hit contig name separately for within-MAG and external
 matches. At base resolution the partner is selected per position; at zoom resolution
@@ -516,14 +512,12 @@ contigs preserve partner metadata on other MAG members. Identities remain stored
 as integers multiplied by 100 (10000 means 100%); plotting also reads Variable
 scale declarations when a Column_scales entry is absent.
 
-
 Repeat/hit scopes are exclusive per alignment: same-contig alignments contribute
 only to direct/inverted repeats; different-contig alignments sharing a MAG
 contribute only to within-MAG hits; different-MAG alignments contribute only to
 external hits. In contig view, external hits mean matches to any other contig.
 A position can still have separate alignments in multiple scopes; each alignment
 is counted in only one scope.
-
 
 Inter-contig tracks count only alignments where the displayed contig is the BLAST
 query. A→B contributes to A; B→A contributes to B. Reciprocal alignments are never
@@ -533,14 +527,12 @@ calculation or plotting. Databases record `Blast_hit_storage=query-v1`; previous
 undirected hit databases must be rebuilt, and their hit tracks cannot be used by
 this version.
 
-
 Repeat blobs use explicit intervals (`Repeat_blob_encoding=interval-v1`). Zoom bins
 contain the maximum value of every overlapping repeat interval, including bins
 between its endpoints. Precise chunks contain plateau endpoints in each crossed
 chunk and explicit zero anchors in gaps; plotting does not infer whether endpoints
 form a plateau. Old endpoint-only repeat blobs must be regenerated before plotting.
 This remains sparse and does not allocate per-base repeat arrays.
-
 
 Repeat regeneration atomically replaces the selected contigs' four repeat features,
 including removal of stale blobs when repeats disappear. On the first upgrade to

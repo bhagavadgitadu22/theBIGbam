@@ -203,9 +203,9 @@ Examples of commands to generate such annotations are available in [the usage pa
 
 **Parameter (optional):** --modules COMMA-SEPARATED LIST, short version -m
 
-**When BAM files are provided**, theBIGbam performs fast Rust-based computations on them to extract relevant values. Individual read information is discarded in favor of lightweight per-position averages for each contig in each sample.
+**When BAM files are provided**, theBIGbam performs fast Rust-based computations on them to extract relevant values. Individual read information is discarded in favor of lightweight per-position averages for each contig in each sample. 
 
-Both `--view contig` and `--view mag` default to **coverage and misalignment only**. Enable `rna`, `longreads`, `pairedreads`, or `phagetermini` explicitly with `-m`. An explicit module list replaces the defaults. Six mapping-derived modules are available:
+Six mapping-derived modules are available:
 
 - **Coverage**: computes per-position coverage for primary, secondary, and supplementary reads, as well as the mapping quality (MAPQ)
 - **Misalignment:** computes per-position number of clippings, insertions, deletions and mismatches
@@ -214,11 +214,15 @@ Both `--view contig` and `--view mag` default to **coverage and misalignment onl
 - **Paired-reads:** computes per-position average insert size of reads along with the number of incorrect pair orientations (non-inward pairs, mates unmapped or mapping or another contig)
 - **Phage termini:** compute per-position coverage for primary-reads starting with an exact match (a short clipping < 5 bp is tolerated). Among those reads, the number of mapped reads starting and ending is computed. **This module requires sequences** to be provided to find terminal repeats
 
+Both `--view contig` and `--view mag` default to **coverage,misalignment**. Enable `rna`, `longreads`, `pairedreads`, or `phagetermini` explicitly with `-m`. An explicit module list replaces the defaults.
+
 **Important precision:** Except for the Misalignment module, the RNA module and the read starts/ends of the Termini module, coverage tracks are not CIGAR/MD-aware: **we monitor "how many reads span this position" and not "how many reads truly match at this position"**. That means mismatches and deletions still count as covered. CIGAR N spans (splices) are subtracted though.
 
-**When sequences are provided**, the **Genome** module is computed. It calculates GC content and GC skew. General repeat/similarity analysis is optional and **off by default**: enable `--blast all` for global all-versus-all across the reference collection in either view. Use `--blast mags` for repeats and similarities only within each MAG. BLAST is not recommended for large datasets; if needed for a large MAG dataset, prefer `mags` to explicitly restrict the scope. This can be slow on large datasets and is unnecessary for coverage and misalignment. Use `--blast termini` for candidate terminal-repeat searches. The default `--blast none` launches no searches; compatible stored evidence can still be used. `--blast all` supplies terminal evidence from general results without additional candidate searches. Annotations (e.g. positions of the coding sequences and their functions) are also saved when available (GenBank file provided).
+**When sequences are provided**, the **Genome** module is computed. It calculates GC content and GC skew. Blast can be allowed to find sequences shared within the references (`--blast none` by default). Annotations (e.g. positions of the coding sequences and their functions) are also saved when available (GenBank file provided).
 
 A more detailed explanation of the modules and the features it contains is available in [the features section](docs/FEATURES.md).
+
+General repeat/similarity analysis is optional and **off by default**: enable `--blast all` for global all-versus-all across the reference collection in either view. Use `--blast mag` for repeats and similarities only within each MAG. BLAST is not recommended for large datasets; if needed for a large MAG dataset, prefer `mag` to explicitly restrict the scope. This can be slow on large datasets and is unnecessary for coverage and misalignment. Use `--blast termini` for candidate terminal-repeat searches. The default `--blast none` launches no searches; compatible stored evidence can still be used. `--blast all` supplies terminal evidence from general results without additional candidate searches.
 
 ### Database compression
 

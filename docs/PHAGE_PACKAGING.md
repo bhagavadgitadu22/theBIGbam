@@ -30,26 +30,13 @@ Only contigs where ≥ *min_aligned_fraction* (default 90%) of positions have at
 
 ## 4. Terminal repeats (DTR/ITR) are identified:
 
-`--blast none` (default) launches no searches and reuses compatible stored
-terminal-repeat evidence when available. Missing evidence is not assessed.
-`--blast all` uses general reference results without additional candidate searches;
-in MAG view it compares contigs across the entire collection, including different MAGs.
-In MAG view, `--blast mags` explicitly searches only within each MAG and also
-uses those results without additional candidate searches.
-With `--blast termini`, contigs passing the aligned-fraction requirement and local
-read-start/end thresholds in Step 5 are candidates. This preliminary check runs
-before repeat-aware clipping and peak filtering. Candidate searches compare contig
-ends and expand windows as needed, with a full-contig fallback. Both general and
-terminal searches use megablast, word size 28, DUST filtering, and E-value 1e-10.
-Positive and negative compatible evidence is cached across samples.
-
-The resulting alignments are filtered to keep terminal repeats:
+Repeat detection results (BLAST self-alignment) are filtered to keep terminal repeats:
 
 - Identity ≥ *min_identity_dtr* (default 90%)
 - One of the repeats within *max_distance_duplication* (default 100 bp) of contig start
 - The other repeat within *max_distance_duplication* of contig end
 
-Identification of DTR regions enable the filtering of clippings and termini peaks later in the pipeline.
+Identifying direct terminal repeat (DTR) regions allows clipping signals and termini peaks within these regions to be filtered out during subsequent analysis. DTR detection requires BLAST to be enabled during `calculate`. With `--blast none` (the default BLAST), a DTR phage may exhibit four termini peaks instead of two, leading to its misclassification as `Unknown packaging` rather than `DTR` (see [the classification section](#9-classification)).
 
 ## 5. Position filtering
 
