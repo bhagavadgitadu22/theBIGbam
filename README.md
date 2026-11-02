@@ -531,7 +531,7 @@ If you use theBIGbam in your research, please cite this paper:
 
 > Boutroux, M., Thomas, E., Chin, W. H., & Peter, H. (2026). theBIGbam: Compression and interactive exploration of large-scale sequencing alignments with circular mapping support. *Bioinformatics*, *42*(Supplement_2), btag459. https://doi.org/10.1093/bioinformatics/btag459
 
-In addition, if you use the gene map visualization, do not forget to cite the amazing tool [DNA Features Viewer]([DNA Features Viewer &mdash; DnaFeaturesViewer 3.1.5 documentation](https://edinburgh-genome-foundry.github.io/DnaFeaturesViewer/)).
+In addition, if you use the gene map visualization, do not forget to cite the amazing tool [DNA Features Viewer](https://edinburgh-genome-foundry.github.io/DnaFeaturesViewer/).
 
 ---
 
