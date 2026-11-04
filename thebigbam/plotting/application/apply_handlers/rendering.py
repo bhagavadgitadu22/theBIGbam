@@ -11,6 +11,9 @@ from ...models.composition import (
     SingleSampleCompositionRequest,
     TrackSelection,
 )
+from ...models.read_plot import ReadPlotRequest
+from ...services.read_selection import database_features, read_classes_for_subplots
+from ...shared.read_diagnostics import ReadProfiler
 from ...shared.timing import rss_mb
 from ..apply_inputs import ApplyInputs
 from ..apply_modes import all_sample_features, one_sample_features, track_visibility, without_gene_map
@@ -18,6 +21,7 @@ from ..apply_pipeline import (
     PlotPresenter,
     PlotResult,
 )
+from ..read_track_pipeline import read_track_config
 from ..subject import sample_order_category_for_view
 from .bindings import ApplyBindings
 
@@ -127,7 +131,9 @@ class ApplyRenderEngine:
         # Collect requested features
         if is_all:
             # ALL SAMPLES mode: pick one sample-level variable (same logic as contig-view all-samples)
-            mag_requested_features, selected_var = all_sample_features(combined_features_cbg, active_variables_widgets)
+            mag_requested_features, selected_var = all_sample_features(
+                combined_features_cbg, active_variables_widgets, read_mode=inputs.read_plot.enabled,
+            )
             if selected_var:
                 mag_requested_features.append(selected_var)
             mag_requested_features = [f for f in mag_requested_features if f != "Gene map"]
@@ -139,6 +145,11 @@ class ApplyRenderEngine:
             # Gene map is handled via genbank_path, not as a feature name
             mag_requested_features = [f for f in mag_requested_features if f != "Gene map"]
             mag_allowed_samples = None
+
+        mag_requested_features = database_features(
+            mag_requested_features, widgets.get("db_subplots", frozenset(mag_requested_features)),
+            widgets.get("read_subplots", frozenset()),
+        )
 
         # Read MAG contig sort parameters
         _sort_cat = mag_params_category_select.value
@@ -192,6 +203,7 @@ class ApplyRenderEngine:
             print(f"[timing] RSS before MAG composition: {rss_mb():.0f} MB", flush=True)
             t_plot = time.perf_counter()
         request = MagCompositionRequest(
+            read_tracks=read_track_config(inputs, widgets, diagnose=enable_timing),
             mag_name=active_mag,
             sample_name=sample or None,
             xstart=xstart,
@@ -381,7 +393,9 @@ class ApplyRenderEngine:
             # Genome module is shared (in Contigs section):
             #   - Gene map (index 0) is handled via genbank_path
             #   - Other Genome features (Repeats, etc.) are passed via genome_features parameter
-            genome_features, selected_var = all_sample_features(combined_features_cbg, active_variables_widgets)
+            genome_features, selected_var = all_sample_features(
+                combined_features_cbg, active_variables_widgets, read_mode=inputs.read_plot.enabled,
+            )
 
             filtered_samples = _get_filtered_samples_for_contig(contig)
 
@@ -433,6 +447,7 @@ class ApplyRenderEngine:
                 encoding_by_feature=_encoding_by_feature,
                 data_cache=bindings.data_cache,
                 profiler=profiler,
+                read_tracks=read_track_config(inputs, widgets, diagnose=enable_timing),
             )
             if enable_timing:
                 _step = time.perf_counter() - t_plot
@@ -443,7 +458,32 @@ class ApplyRenderEngine:
                 print(f"[timing] Bokeh model count in grid: {len(grid.references())}{timing.tag(0)}", flush=True)
         else:
             # One-sample view: collect possibly-many requested features and call per-sample plot
-            requested_features = one_sample_features(combined_features_cbg, active_variables_widgets)
+            selected_features = one_sample_features(combined_features_cbg, active_variables_widgets)
+            requested_features = database_features(
+                selected_features, widgets["db_subplots"], widgets["read_subplots"]
+            )
+            read_request = None
+            if inputs.read_plot.enabled:
+                catalog = widgets["bam_catalog"]
+                bam_sample = catalog.by_sample.get(sample) if catalog is not None else None
+                if bam_sample is not None and bam_sample.available:
+                    read_request = ReadPlotRequest(
+                        bam_path=str(bam_sample.path),
+                        contig=contig,
+                        contig_length=contig_length,
+                        start=xstart,
+                        end=xend,
+                        max_reads=inputs.read_plot.max_reads,
+                        link_pairs=inputs.read_plot.link_pairs,
+                        classes=read_classes_for_subplots(
+                            inputs.read_plot.selected_subplots, widgets["subplot_to_varnames"]
+                        ),
+                        colors=widgets["read_colors"],
+                        plot_height=inputs.read_plot.plot_height,
+                        read_height=inputs.read_plot.read_height,
+                        sample_name=sample,
+                        profiler=ReadProfiler() if enable_timing else None,
+                    )
 
             print(
                 f"[start_bokeh_server] Generating plot for sample={sample}, contig={contig}, features={requested_features}",
@@ -484,6 +524,7 @@ class ApplyRenderEngine:
                 encoding_by_feature=_encoding_by_feature,
                 data_cache=bindings.data_cache,
                 profiler=profiler,
+                read_plot=read_request,
             )
             from ..sample_mag_pipeline import build_single_sample_plot
 

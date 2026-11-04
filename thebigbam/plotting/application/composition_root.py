@@ -19,10 +19,12 @@ from bokeh.models.widgets import (
     TextAreaInput,
 )
 
+from ..controls.bam_status import build_bam_warning_controls
 from ..controls.base import build_controls
 from ..controls.filter_panel import build_filter_panel
 from ..controls.genome import build_genome_controls
 from ..controls.plot_parameters import build_plot_parameter_controls
+from ..controls.read_plotting import build_read_plot_controls
 from ..controls.variables import attach_module_synchronization, build_variable_controls
 from ..models.preload import PreloadedPlotData
 from ..models.session import PlotSessionContext
@@ -177,11 +179,11 @@ def _start_rss_watchdog(interval: int = 5) -> None:
     start_rss_watchdog(lambda: _current_op, interval)
 
 
-def preload_db_data(db_path, enable_timing=False):
+def preload_db_data(db_path, enable_timing=False, include_read_variables=False):
     """Run all expensive DB queries once at startup. Returns a dict of pure data."""
     started = time.perf_counter()
     repository = PreloadRepository(db_path)
-    preloaded = repository.load()
+    preloaded = repository.load(include_read_variables=include_read_variables)
     if enable_timing:
         elapsed = time.perf_counter() - started
         print(
@@ -199,6 +201,7 @@ def create_layout(
     initial_settings=None,
     initial_history=(),
     scenario_path=None,
+    bam_catalog=None,
     _return_application=False,
 ):
     """Create and return the application layout for Panel serve."""
@@ -301,7 +304,7 @@ def create_layout(
     conn = duckdb.connect(db_path, read_only=True)
     filtering_repository = FilteringRepository(conn, enable_timing=enable_timing)
     availability_service = FilteringAvailabilityService(filtering_repository)
-    widgets = build_controls(preloaded)
+    widgets = build_controls(preloaded, include_read_variables=bam_catalog is not None)
 
     _sync_from_to_for_selected_contig = session_callbacks.sync_selected_contig_position
 
@@ -422,7 +425,8 @@ def create_layout(
         # the session's current availability filter.
         data_cache.invalidate(
             "filter_change",
-            preserve_prefixes=("mag_context", "mag_overview", "mag_samples", "mag_sample_order_values"),
+            preserve_prefixes=("mag_context", "mag_overview", "mag_samples", "mag_sample_order_values",
+                               "read_plot", "read_candidates"),
         )
         filter_projection_ref["projection"].invalidate()
         global_toggle_lock["locked"] = True
@@ -677,6 +681,7 @@ def create_layout(
         push_search_completions=push_search_completions,
         sort_sample_completions=_sort_sample_completions_for,
         interaction_lock=global_toggle_lock,
+        include_read_plot=bam_catalog is not None,
     )
     separator_plotting_params = plot_parameters.separator
     plotting_params_header = plot_parameters.header
@@ -967,13 +972,45 @@ def create_layout(
     # sample_section must exist before settings restoration runs, since restoring the
     # ALL SAMPLES scope fires on_view_change, which sets sample_section.visible.
     separator_samples = separator()
+    bam_status_controls = (
+        build_bam_warning_controls(
+            bam_catalog, widgets["sample_select"], widgets["contig_select"], preloaded.contig_lengths
+        )
+        if bam_catalog is not None
+        else ()
+    )
     sample_section = pn.Column(
         separator_samples,
         sample_title,
         widgets["sample_select"],
+        *bam_status_controls,
         sizing_mode="stretch_width",
         margin=0,
     )
+    if bam_status_controls and not widgets["has_samples"]:
+        below_contig_content.children = [*below_contig_content.children, bam_status_controls[0]]
+    read_plot_controls = (
+        build_read_plot_controls(
+            max_reads=plot_parameters.read_max_reads,
+            link_pairs=plot_parameters.read_link_pairs,
+            plot_height=plot_parameters.read_plot_height,
+            read_height=plot_parameters.individual_read_height,
+        )
+        if bam_catalog is not None
+        else None
+    )
+    widgets["bam_catalog"] = bam_catalog
+    widgets["read_plot_controls"] = read_plot_controls
+    if read_plot_controls is not None:
+        def update_read_toggle(_attr, _old, _new):
+            read_plot_controls.add_reads.visible = views.active == 0
+            read_plot_controls.all_reads.visible = views.active == 1
+
+        views.on_change("active", update_read_toggle)
+        update_read_toggle("initial", None, None)
+        plot_parameters.read_section.visible = True
+        plot_parameters.read_height_row.visible = True
+        plot_parameters.individual_read_row.visible = True
 
     def refresh_scope_availability():
         # Preserve the selected subject when an old scope snapshot contains a
@@ -1005,6 +1042,8 @@ def create_layout(
         )
     )
     session_callbacks.attach_scope(scope_transition)
+    if read_plot_controls is not None:
+        read_plot_controls.all_reads.on_change("active", scope_transition.read_plot_changed)
     controller = scope_transition.plot_controller
     for variable_group in widgets["variables_widgets_all"]:
         variable_group.on_change("active", scope_transition.variable_callback(variable_group))
@@ -1049,6 +1088,7 @@ def create_layout(
             plotting_header=plotting_params_header,
             plotting_content=plotting_params_content,
             buttons=buttons_row,
+            read_section=read_plot_controls.section if read_plot_controls is not None else None,
         ),
         has_samples=widgets["has_samples"],
         summary_carrier=summary_carrier,

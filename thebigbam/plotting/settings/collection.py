@@ -168,6 +168,16 @@ class SettingsCollector:
                 },
             },
         }
+        read_controls = widgets.get("read_plot_controls")
+        if read_controls is not None:
+            settings["plotting_params"]["read_plotting"] = {
+                "enabled": 0 in read_controls.add_reads.active,
+                "enabled_all": 0 in read_controls.all_reads.active,
+                "max_reads": read_controls.max_reads.value,
+                "link_pairs": 0 in read_controls.link_pairs.active,
+                "plot_height": read_controls.plot_height.value,
+                "read_height": read_controls.read_height.value,
+            }
         return settings
 
     def collect_applied(self, filter_expression: Any) -> dict[str, Any]:

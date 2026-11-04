@@ -20,7 +20,11 @@ def one_sample_features(genome_group: Any, variable_groups: Iterable[Any]) -> li
     return [*selected_labels(genome_group), *selected_features(variable_groups)]
 
 
-def all_sample_features(genome_group: Any, variable_groups: Iterable[Any]) -> tuple[list[str], str | None]:
+def all_sample_features(
+    genome_group: Any, variable_groups: Iterable[Any], *, read_mode: bool = False,
+) -> tuple[list[str], str | None]:
+    if read_mode:
+        return selected_labels(genome_group), None
     variable = next(
         (labels[-1] for group in variable_groups if (labels := selected_labels(group))),
         None,

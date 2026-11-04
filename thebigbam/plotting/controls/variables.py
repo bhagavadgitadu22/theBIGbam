@@ -104,8 +104,8 @@ def build_variable_controls(
         module_name = widgets["module_names"][i]
         help_tooltip = widgets["helps_widgets"][i]
 
-        # Skip Genome module - it's in the Contigs section (shared between views)
-        if module_name == "Genome":
+        # Genome is displayed separately; omit modules without choices.
+        if module_name == "Genome" or not widgets["variables_widgets_all"][i].labels:
             continue
 
         # Create toggle button for collapsible section

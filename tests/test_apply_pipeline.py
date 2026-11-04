@@ -69,6 +69,18 @@ def test_request_builder_reports_invalid_positions_without_rendering(monkeypatch
     assert result.failure == ValidationFailure("Invalid position range - positions must be integers.")
 
 
+def test_read_plot_apply_reports_incompatible_sample_bam():
+    catalog = SimpleNamespace(warning_for_sample=lambda sample, contig, length: "BAM reference length differs.")
+    bindings = SimpleNamespace(widgets={"bam_catalog": catalog, "contig_lengths": {"c1": 100}})
+    inputs = SimpleNamespace(
+        read_plot=SimpleNamespace(enabled=True, max_reads=1000), sample="s1", contig="c1"
+    )
+
+    failure = ApplyRequestBuilder(bindings)._validate_selection(ApplyMode.CONTIG_ONE, inputs)
+
+    assert failure == ValidationFailure("BAM reference length differs.")
+
+
 def test_presenter_owns_validation_display_and_button_state():
     buttons = [SimpleNamespace(visible=True) for _ in range(4)]
     bindings = SimpleNamespace(

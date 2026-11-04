@@ -9,11 +9,13 @@ from typing import Any, Callable, Mapping, Sequence
 from ..shared.defaults import (
     DEFAULT_GENEMAP_HEIGHT,
     DEFAULT_GENEMAP_WINDOW,
+    DEFAULT_INDIVIDUAL_READ_HEIGHT,
     DEFAULT_MAG_MAX_DOTS,
     DEFAULT_MAG_ORDER_DIRECTION,
     DEFAULT_MAX_BASE_RESOLUTION,
     DEFAULT_MAX_SAMPLES,
     DEFAULT_MIN_COVERAGE_FREQUENCY,
+    DEFAULT_READ_PLOT_HEIGHT,
     DEFAULT_SAMPLE_ORDER_DIRECTION,
     DEFAULT_SEQUENCE_HEIGHT,
     DEFAULT_SEQUENCE_WINDOW,
@@ -52,6 +54,7 @@ _SETTING_LABELS = {
     "plotting_params": "Plotting parameters",
     "mag_params": "MAG params",
     "sample_params": "Sample params",
+    "read_plotting": "Read plotting",
     "feature_widgets": "Genome features",
     "coloring": "Coloring",
     "apply_annotation_rules_to_mag_track": "Apply annotation rules to MAG track",
@@ -74,6 +77,11 @@ _DEFAULT_VALUES = {
     ("plotting_params", "mag_params", "max_dots"): DEFAULT_MAG_MAX_DOTS,
     ("plotting_params", "sample_params", "max_samples"): DEFAULT_MAX_SAMPLES,
     ("plotting_params", "sample_params", "same_y_scale"): False,
+    ("plotting_params", "read_plotting", "enabled"): False,
+    ("plotting_params", "read_plotting", "max_reads"): 1000,
+    ("plotting_params", "read_plotting", "link_pairs"): False,
+    ("plotting_params", "read_plotting", "plot_height"): DEFAULT_READ_PLOT_HEIGHT,
+    ("plotting_params", "read_plotting", "read_height"): DEFAULT_INDIVIDUAL_READ_HEIGHT,
 }
 _MISSING = object()
 

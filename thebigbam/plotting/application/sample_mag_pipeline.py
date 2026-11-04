@@ -11,14 +11,17 @@ from ..models.composition import (
 from ..renderers.composition import apply_per_feature_y_ranges, apply_primary_relative_y_range
 from ..renderers.features import render_feature_tracks
 from ..renderers.mag_tracks import MagTrackRenderer
+from ..renderers.read_alignments import render_read_track
 from ..repositories.composition import CompositionRepository
 from ..repositories.features import FeatureRepository
 from ..repositories.mag_overview import MagOverviewRepository
 from ..services.composition import CompositionDataService
 from ..services.mag_overview import MagOverviewService
+from ..services.read_plots import prepare_read_plot
 from ..shared.defaults import DEFAULT_GENEMAP_WINDOW, DEFAULT_SEQUENCE_WINDOW
 from ..shared.timing import PipelineTimings, profile_phase
 from .genome_track_pipeline import GenomeTrackPipeline
+from .read_track_pipeline import build_read_tracks
 
 
 def build_single_sample_plot(conn, request: SingleSampleCompositionRequest):
@@ -160,6 +163,13 @@ def build_single_sample_plot(conn, request: SingleSampleCompositionRequest):
         except Exception as e:
             print(f"Error building MAG track for '{mag_name}': {e}", flush=True)
             mag_fig = None
+
+    if request.read_plot is not None:
+        read_data = prepare_read_plot(request.read_plot, cache=request.data_cache)
+        read_figure, read_scrollbar = render_read_track(
+            read_data, request.read_plot, shared_xrange
+        )
+        subplots.append((read_figure, read_scrollbar))
 
     top_plots = [mag_fig] if mag_fig is not None else []
     grid_phase = profiler.phase("grid_assembly") if profiler is not None else phase_timings.phase("renderer")
@@ -347,6 +357,17 @@ def build_mag_plot(conn, request: MagCompositionRequest):
             f"[timing]   MAG feature subplots ({len(subplots)} plots): {time.perf_counter() - t_features:.3f}s",
             flush=True,
         )
+
+    if request.read_tracks is not None:
+        read_samples = (
+            [name for _, name in CompositionDataService(
+                feature_repository, repository, cache=request.data_cache, profiler=profiler,
+            ).ordered_mag_samples(request, context.mag_id)]
+            if is_all else [sample_name]
+        )
+        subplots.extend(build_read_tracks(
+            request.read_tracks, read_samples, members, shared_xrange, request.data_cache,
+        ))
 
     top_plots = [mag_fig] if mag_fig is not None else []
     all_plots = top_plots + ([annotation_fig] if annotation_fig is not None else []) + subplots

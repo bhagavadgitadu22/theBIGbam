@@ -18,6 +18,7 @@ def test_feature_projection_distinguishes_one_and_all_sample_modes():
 
     assert one_sample_features(genome, variables) == ["Gene map", "Repeats", "Depth", "Breadth", "Identity"]
     assert all_sample_features(genome, variables) == (["Gene map", "Repeats"], "Breadth")
+    assert all_sample_features(genome, variables, read_mode=True) == (["Gene map", "Repeats"], None)
 
 
 def test_track_visibility_and_gene_map_filtering_use_window_thresholds():

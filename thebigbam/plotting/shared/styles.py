@@ -12,6 +12,20 @@ CONTROL_GAP_PX = 4
 ACTION_CONTROL_MARGIN = (0, 0, 0, CONTROL_GAP_PX)
 
 
+def section_separator() -> Div:
+    """Keep sidebar section bars aligned with consistent vertical spacing."""
+    return Div(
+        text="",
+        height=2,
+        min_height=2,
+        max_height=2,
+        sizing_mode="stretch_width",
+        margin=(10, 0),
+        styles={"background-color": "#333", "box-sizing": "border-box"},
+        css_classes=["section-separator"],
+    )
+
+
 def right_panel_tooltip(content: str) -> Tooltip:
     """Place right-sidebar help inward so it remains inside the viewport."""
     return Tooltip(content=content, position="left")

@@ -50,6 +50,14 @@ def _state(*, populated):
             _control(labels=["depth", "breadth"], active=[0, 1] if populated else []),
             _control(labels=["snps", "indels"], active=[1] if populated else [0]),
         ],
+        "read_plot_controls": SimpleNamespace(
+            add_reads=_control(active=[0] if populated else []),
+            all_reads=_control(active=[0] if populated else []),
+            max_reads=_control(value=1200 if populated else 1000),
+            link_pairs=_control(active=[0] if populated else []),
+            plot_height=_control(value=500 if populated else 400),
+            read_height=_control(value=18 if populated else 14),
+        ),
     }
     controls = {
         "views": _control(active=1 if populated else 0),

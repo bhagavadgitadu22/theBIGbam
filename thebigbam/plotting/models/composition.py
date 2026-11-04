@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 
+from .read_plot import ReadPlotRequest, ReadTrackConfig
+
 
 @dataclass(frozen=True)
 class TrackSelection:
@@ -45,6 +47,7 @@ class SingleSampleCompositionRequest:
     encoding_by_feature: Mapping[str, Any] | None = None
     data_cache: Any = field(default=None, compare=False, repr=False)
     profiler: Any = field(default=None, compare=False, repr=False)
+    read_plot: ReadPlotRequest | None = None
 
 
 @dataclass(frozen=True)
@@ -76,3 +79,4 @@ class MagCompositionRequest:
     encoding_by_feature: Mapping[str, Any] | None = None
     data_cache: Any = field(default=None, compare=False, repr=False)
     profiler: Any = field(default=None, compare=False, repr=False)
+    read_tracks: ReadTrackConfig | None = None

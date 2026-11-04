@@ -90,8 +90,33 @@ def test_service_orders_then_limits_repository_samples(repository_db):
         GenomicRegion(1, 10),
         ordering=SampleOrdering(source="Sample", column="rank", ascending=True, max_samples=3),
     )
-    samples = AllSamplesDataService(repository)._resolve_samples(1, request)
+    samples = AllSamplesDataService(repository).ordered_samples(1, request)
     assert [name for _, name in samples] == ["sample_150", "sample_149", "sample_148"]
+
+
+def test_read_only_all_samples_respects_filter_order_and_limit(repository_db, monkeypatch):
+    from types import SimpleNamespace
+
+    from bokeh.plotting import figure
+
+    from thebigbam.plotting.application.all_samples_pipeline import build_all_samples_plot
+    from thebigbam.plotting.models.read_plot import ReadPlotData, ReadPlotOptions, ReadTrackConfig
+
+    monkeypatch.setattr("thebigbam.plotting.application.read_track_pipeline.prepare_read_plot",
+                        lambda *args: ReadPlotData((), 0))
+    names = ("sample_002", "sample_003", "sample_004")
+    catalog = SimpleNamespace(by_sample={
+        name: SimpleNamespace(path=f"{name}.bam", available=True) for name in names
+    })
+    config = ReadTrackConfig(ReadPlotOptions(enabled=True), catalog, frozenset({"primary"}), {})
+    grid = build_all_samples_plot(
+        repository_db, None, "c1", xstart=1, xend=100, allowed_samples=set(names),
+        order_by_source="Sample", order_by_column="rank", max_samples=2, read_tracks=config,
+    )
+    titles = [plot.title.text for plot in grid.select({"type": figure})]
+    assert len(titles) == 2
+    assert any("sample_004" in title for title in titles)
+    assert any("sample_003" in title for title in titles)
 
 
 def test_service_orders_samples_alphabetically_by_text_metric(repository_db):

@@ -14,11 +14,13 @@ from ..shared.defaults import (
     AUTOCOMPLETE_LIMIT,
     DEFAULT_GENEMAP_HEIGHT,
     DEFAULT_GENEMAP_WINDOW,
+    DEFAULT_INDIVIDUAL_READ_HEIGHT,
     DEFAULT_MAG_MAX_DOTS,
     DEFAULT_MAG_ORDER_DIRECTION,
     DEFAULT_MAX_BASE_RESOLUTION,
     DEFAULT_MAX_SAMPLES,
     DEFAULT_MIN_COVERAGE_FREQUENCY,
+    DEFAULT_READ_PLOT_HEIGHT,
     DEFAULT_SAMPLE_ORDER_DIRECTION,
     DEFAULT_SEQUENCE_HEIGHT,
     DEFAULT_SEQUENCE_WINDOW,
@@ -63,6 +65,13 @@ class PlotParameterControls:
     sample_category_sources: Mapping[str, str]
     sample_contig_categories: list[str]
     sample_mag_categories: list[str]
+    read_section: Any
+    read_max_reads: Any
+    read_link_pairs: Any
+    read_plot_height: Any
+    individual_read_height: Any
+    read_height_row: Any
+    individual_read_row: Any
     sample_current_categories: list[str]
 
 
@@ -95,6 +104,7 @@ def build_plot_parameter_controls(
     push_search_completions: Callable[[Any, list[str]], None],
     sort_sample_completions: Callable[[list[str]], list[str]],
     interaction_lock: Mapping[str, bool],
+    include_read_plot: bool = False,
 ) -> PlotParameterControls:
     ## Plotting parameters section
     separator_plotting_params = Div(
@@ -199,9 +209,20 @@ def build_plot_parameter_controls(
     subplot_height_label = Div(text="Per feature plot (px)", margin=(5, 0, 5, 5))
     subplot_height_row = row(subplot_height_input, subplot_height_label, sizing_mode="stretch_width")
 
+    read_plot_height_input = Spinner(value=DEFAULT_READ_PLOT_HEIGHT, low=100, high=2000, step=10,
+                                     width=100, margin=(0, 2, 0, 0))
+    read_plot_height_row = row(read_plot_height_input, Div(text="Of read plot (px)", margin=(5, 0, 5, 5)),
+                               sizing_mode="stretch_width", margin=(0, 0, 5, 0))
+    individual_read_height_input = Spinner(value=DEFAULT_INDIVIDUAL_READ_HEIGHT, low=1, high=50, step=1,
+                                           width=100, margin=(0, 2, 0, 0))
+    individual_read_height_row = row(individual_read_height_input,
+                                     Div(text="Of individual reads (px)", margin=(5, 0, 5, 5)),
+                                     sizing_mode="stretch_width", margin=(0, 0, 5, 0))
+    read_plot_height_row.visible = individual_read_height_row.visible = include_read_plot
     plot_heights_header, plot_heights_content = _collapsible_section(
         "Plot heights",
-        [genemap_height_row, sequence_height_row, translated_sequence_height_row, subplot_height_row],
+        [genemap_height_row, sequence_height_row, translated_sequence_height_row,
+         read_plot_height_row, individual_read_height_row, subplot_height_row],
         toggle_stylesheet,
         make_toggle_callback,
     )
@@ -404,6 +425,16 @@ def build_plot_parameter_controls(
     )
     sample_params_toggle_btn.on_click(make_toggle_callback(sample_params_toggle_btn, sample_params_content))
 
+    read_max_reads = Spinner(value=1000, low=1, step=100, width=100, margin=(0, 2, 0, 0))
+    read_count_row = row(read_max_reads, Div(text="Number of subsampled reads", margin=(5, 0, 5, 5)),
+                         sizing_mode="stretch_width", margin=(5, 0, 5, 0))
+    read_link_pairs = CheckboxGroup(labels=["Link paired reads"], active=[], sizing_mode="stretch_width")
+    read_params_header, read_params_content = _collapsible_section(
+        "Read plotting", [read_count_row, row(read_link_pairs, sizing_mode="stretch_width")],
+        toggle_stylesheet, make_toggle_callback,
+    )
+    read_section = pn.Column(read_params_header, read_params_content,
+                             sizing_mode="stretch_width", visible=include_read_plot)
     plotting_params_content = pn.Column(
         show_subplot_titles,
         min_coverage_freq_row,
@@ -411,6 +442,7 @@ def build_plot_parameter_controls(
         max_window_content,
         plot_heights_header,
         plot_heights_content,
+        read_section,
         mag_params_header,
         mag_params_content,
         sample_params_header,
@@ -455,5 +487,12 @@ def build_plot_parameter_controls(
         sample_category_sources=_sample_sort_category_sources,
         sample_contig_categories=_sample_contig_categories,
         sample_mag_categories=_sample_mag_categories,
+        read_section=read_section,
+        read_max_reads=read_max_reads,
+        read_link_pairs=read_link_pairs,
+        read_plot_height=read_plot_height_input,
+        individual_read_height=individual_read_height_input,
+        read_height_row=read_plot_height_row,
+        individual_read_row=individual_read_height_row,
         sample_current_categories=_sample_sort_current_categories,
     )

@@ -12,6 +12,7 @@ from ..services.all_samples import AllSamplesDataService
 from ..shared.defaults import DEFAULT_GENEMAP_WINDOW
 from ..shared.timing import PipelineTimings, profile_phase
 from .genome_track_pipeline import GenomeTrackPipeline
+from .read_track_pipeline import build_read_tracks
 
 
 def _expand_genome_features(features):
@@ -56,6 +57,7 @@ def build_all_samples_plot(
     encoding_by_feature=None,
     data_cache=None,
     profiler=None,
+    read_tracks=None,
 ):
     """Generate an all-samples plot through repository, service and renderer layers."""
     started = time.perf_counter()
@@ -88,6 +90,12 @@ def build_all_samples_plot(
     render_phase = profiler.phase("track_rendering") if profiler is not None else phase_timings.phase("renderer")
     with render_phase:
         shared_xrange, genome_figures, sample_figures = renderer.render_figures(plot_data, subplot_size, same_y_scale)
+    if read_tracks is not None:
+        samples = service.ordered_samples(contig_id, request)
+        sample_figures.extend(build_read_tracks(
+            read_tracks, [name for _, name in samples], ((contig_name, locus_size, 0),),
+            shared_xrange, data_cache,
+        ))
 
     genome_track_composer = GenomeTrackPipeline(conn)
     members = ((contig_id, contig_name, locus_size, 0),)

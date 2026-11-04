@@ -64,7 +64,7 @@ class AllSamplesDataService:
                 return cached
         started = time.perf_counter()
         contig_id, contig_name, contig_length = self.repository.resolve_contig(request.contig_name)
-        samples = self._resolve_samples(contig_id, request)
+        samples = self.ordered_samples(contig_id, request)
         self._phase("resolve_subjects", started)
 
         sample_series: dict[int, list[FeatureSeries]] = {sid: [] for sid, _ in samples}
@@ -98,7 +98,7 @@ class AllSamplesDataService:
             request.data_cache.put(cache_key, result)
         return result
 
-    def _resolve_samples(self, contig_id, request):
+    def ordered_samples(self, contig_id, request):
         samples = self.repository.available_samples(contig_id)
         if request.allowed_samples is not None:
             samples = [item for item in samples if item[1] in request.allowed_samples]

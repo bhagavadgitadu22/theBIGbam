@@ -37,6 +37,7 @@ def test_collect_apply_inputs_parses_rules_and_stable_display_values():
         mag_track_max_dots_input=_value(200),
         max_genemap_window_input=_value(1000),
         same_y_scale_cbg=SimpleNamespace(active=[0]),
+        show_subplot_titles_cbg=SimpleNamespace(active=[0]),
         subplot_height_input=_value(90),
         genemap_height_input=_value(80),
         sequence_height_input=_value(40),

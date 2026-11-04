@@ -196,6 +196,14 @@ def restore_settings(settings: Mapping[str, Any], bindings: SettingsRestoreBindi
         _restore("contig.position_range.to", lambda: setattr(to_position_input, "value", position_range["to"]))
 
     # 4. Module / variable checkboxes (matched by name, not index)
+    # Enable multi-selection before restoring ALL SAMPLES variable choices.
+    read_controls = widgets.get("read_plot_controls")
+    read_saved = ((settings.get("plotting_params") or {}).get("read_plotting") or {})
+    if read_controls is not None and "enabled_all" in read_saved:
+        _restore("plotting_params.read_plotting.enabled_all", lambda: setattr(
+            read_controls.all_reads, "active", [0] if read_saved["enabled_all"] else [],
+        ))
+
     for mod_name, mod_settings in (settings.get("variables") or {}).items():
         if mod_name not in widgets["module_names"]:
             _warn(f"variables.{mod_name}", "module not present in this database")
@@ -368,6 +376,25 @@ def restore_settings(settings: Mapping[str, Any], bindings: SettingsRestoreBindi
     ):
         if key in pp and pp[key] is not None:
             _restore(f"plotting_params.{key}", lambda widget=widget, value=pp[key]: setattr(widget, "value", value))
+
+    read_controls = widgets.get("read_plot_controls")
+    read_saved = pp.get("read_plotting") or {}
+    if read_controls is not None:
+        for key, control in (
+            ("max_reads", read_controls.max_reads),
+            ("plot_height", read_controls.plot_height),
+            ("read_height", read_controls.read_height),
+        ):
+            if key in read_saved and read_saved[key] is not None:
+                _restore(f"plotting_params.read_plotting.{key}",
+                         lambda control=control, value=read_saved[key]: setattr(control, "value", value))
+        for key, control in (
+            ("enabled", read_controls.add_reads),
+            ("link_pairs", read_controls.link_pairs),
+        ):
+            if key in read_saved:
+                _restore(f"plotting_params.read_plotting.{key}",
+                         lambda control=control, value=read_saved[key]: setattr(control, "active", [0] if value else []))
 
     mag_params = pp.get("mag_params") or {}
     if mag_params.get("category") in mag_params_category_select.options:

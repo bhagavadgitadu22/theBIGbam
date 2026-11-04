@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from ..models.read_plot import ReadPlotOptions
+
 
 @dataclass(frozen=True)
 class ApplyInputs:
@@ -29,6 +31,7 @@ class ApplyInputs:
     translated_sequence_size: int
     max_binning: int
     min_coverage_freq: float
+    read_plot: ReadPlotOptions = ReadPlotOptions()
 
 
 _OPERATOR_MODES = {
@@ -71,6 +74,23 @@ def collect_apply_inputs(bindings) -> ApplyInputs:
     genbank_path = bindings.db_path if feature_types else None
     custom_colors = _color_rules(bindings.custom_color_rows, allow_random=True)
     mag_colors = _color_rules(bindings.mag_track_color_rows, allow_random=False)
+    active_variables = widgets["variables_widgets_all"] if is_all else widgets["variables_widgets_one"]
+    read_controls = widgets.get("read_plot_controls")
+    read_options = ReadPlotOptions()
+    if read_controls is not None:
+        read_options = ReadPlotOptions(
+            enabled=0 in (read_controls.all_reads if is_all else read_controls.add_reads).active,
+            max_reads=int(read_controls.max_reads.value or 0),
+            link_pairs=0 in read_controls.link_pairs.active,
+            plot_height=int(read_controls.plot_height.value),
+            read_height=int(read_controls.read_height.value),
+            selected_subplots=tuple(
+                label
+                for group in active_variables
+                for index in group.active
+                if (label := group.labels[index]) in widgets["read_subplots"]
+            ),
+        )
     if (
         bindings.apply_annotation_rules_cbg is not None
         and 0 in bindings.apply_annotation_rules_cbg.active
@@ -91,7 +111,7 @@ def collect_apply_inputs(bindings) -> ApplyInputs:
         custom_colors=custom_colors,
         mag_track_colors=mag_colors,
         max_track_dots=int(bindings.mag_track_max_dots_input.value),
-        active_variables_widgets=(widgets["variables_widgets_all"] if is_all else widgets["variables_widgets_one"]),
+        active_variables_widgets=active_variables,
         max_genemap_window=int(bindings.max_genemap_window_input.value),
         same_y_scale=0 in bindings.same_y_scale_cbg.active,
         show_subplot_titles=0 in bindings.show_subplot_titles_cbg.active,
@@ -101,4 +121,5 @@ def collect_apply_inputs(bindings) -> ApplyInputs:
         translated_sequence_size=int(bindings.translated_sequence_height_input.value),
         max_binning=int(bindings.max_binning_window_input.value),
         min_coverage_freq=float(bindings.min_coverage_freq_input.value),
+        read_plot=read_options,
     )

@@ -75,3 +75,25 @@ def test_sample_ordering_includes_text_filtering_metrics():
         ("Mean_coverage", "Mean coverage"),
         ("Coverage_class", "Coverage class"),
     ]
+
+
+def test_bam_read_parameters_use_existing_row_sizes_and_defaults():
+    catalog = ParameterOptionCatalog.from_filtering_metadata({})
+    controls = build_plot_parameter_controls(
+        widgets={"has_mags": False, "has_samples": True},
+        sample_scope=SimpleNamespace(active=0), original_samples=[], parameter_options=catalog,
+        toggle_stylesheet="", stylesheet="",
+        make_toggle_callback=lambda button, content: lambda event: None,
+        compute_sample_completions=lambda query: [],
+        push_search_completions=lambda widget, values: None,
+        sort_sample_completions=lambda values: values,
+        interaction_lock={"locked": False}, include_read_plot=True,
+    )
+    assert controls.read_section.visible
+    assert controls.read_max_reads.value == 1000
+    assert controls.read_max_reads.width == controls.genemap_height.width == 100
+    assert controls.read_plot_height.value == 400
+    assert controls.individual_read_height.value == 14
+    assert controls.individual_read_height.low == 1
+    assert controls.read_link_pairs.active == []
+    assert controls.read_height_row.visible

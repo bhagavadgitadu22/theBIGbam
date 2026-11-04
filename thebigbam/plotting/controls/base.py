@@ -9,7 +9,7 @@ from ..shared.defaults import AUTOCOMPLETE_LIMIT
 from .searchable_select import SearchableSelect
 
 
-def build_controls(preloaded: PreloadedPlotData):
+def build_controls(preloaded: PreloadedPlotData, *, include_read_variables: bool = False):
     """Create core selection widgets without performing database queries."""
     mags = preloaded.mags
     contigs = preloaded.contigs
@@ -53,15 +53,24 @@ def build_controls(preloaded: PreloadedPlotData):
         sizing_mode="stretch_width",
         margin=0,
     )
+    db_modules = dict(zip(preloaded.module_names, preloaded.module_variables))
+    read_modules = preloaded.read_module_variables if include_read_variables else {}
+    module_names = list(preloaded.module_names)
+    module_names.extend(module for module in read_modules if module not in db_modules)
+    module_order = {name: index for index, name in enumerate(
+        ("Genome", "Coverage", "Misalignment", "RNA", "Long-reads", "Paired-reads", "Phage termini")
+    )}
+    module_names.sort(key=lambda name: module_order.get(name, len(module_order)))
+    db_subplots = frozenset(subplot for choices in preloaded.module_variables for subplot in choices)
     module_widgets_one = []
     variables_widgets_one = []
     variables_widgets_all = []
     helps_widgets = []
-    for module, variables, help_text in zip(
-        preloaded.module_names,
-        preloaded.module_variables,
-        preloaded.module_helps,
-    ):
+    help_by_module = dict(zip(preloaded.module_names, preloaded.module_helps))
+    for module in module_names:
+        db_variables = db_modules.get(module, ())
+        variables = tuple(dict.fromkeys((*db_variables, *read_modules.get(module, ()))))
+        help_text = help_by_module.get(module, "")
         module_widgets_one.append(CheckboxGroup(name=f"benchmark-module-{module}", labels=[module], active=[]))
         variables_widgets_one.append(
             CheckboxButtonGroup(name=f"benchmark-one-{module}", labels=list(variables), active=[], sizing_mode="stretch_width", orientation="vertical")
@@ -85,7 +94,11 @@ def build_controls(preloaded: PreloadedPlotData):
         "mag_to_contig_offsets": preloaded.mag_to_contig_offsets,
         "mags": mags,
         "has_mags": preloaded.has_mags,
-        "module_names": preloaded.module_names,
+        "module_names": tuple(module_names),
+        "db_subplots": db_subplots,
+        "read_subplots": frozenset(subplot for choices in read_modules.values() for subplot in choices),
+        "read_colors": preloaded.read_colors if include_read_variables else {},
+        "subplot_to_varnames": preloaded.subplot_to_varnames,
         "module_widgets_one": module_widgets_one,
         "helps_widgets": helps_widgets,
         "variables_widgets_one": variables_widgets_one,

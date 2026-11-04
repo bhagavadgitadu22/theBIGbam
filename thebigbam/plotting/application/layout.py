@@ -6,23 +6,10 @@ from dataclasses import dataclass
 from typing import Any
 
 import panel as pn
-from bokeh.models import Div
 
 from ..controls.panel_resizer import PanelResizer
 from ..shared.styles import panel_stylesheet
-
-
-def separator() -> Div:
-    return Div(
-        text="",
-        height=2,
-        min_height=2,
-        max_height=2,
-        sizing_mode="stretch_width",
-        margin=(10, 0),
-        styles={"background-color": "#333", "box-sizing": "border-box"},
-        css_classes=["section-separator"],
-    )
+from ..shared.styles import section_separator as separator
 
 
 @dataclass(frozen=True)
@@ -45,6 +32,7 @@ class LayoutParts:
     plotting_header: Any
     plotting_content: Any
     buttons: Any
+    read_section: Any = None
 
 
 @dataclass(frozen=True)
@@ -94,6 +82,7 @@ def assemble_layout(
             variable_separator,
             parts.variables_one,
             parts.variables_all,
+            *([parts.read_section] if parts.read_section is not None else []),
             parts.plotting_separator,
             parts.plotting_header,
             parts.plotting_content,
@@ -116,6 +105,7 @@ def assemble_layout(
             parts.contig_header,
             parts.contig_select,
             parts.below_contig_content,
+            *([parts.read_section] if parts.read_section is not None else []),
             parts.plotting_separator,
             parts.plotting_header,
             parts.plotting_content,

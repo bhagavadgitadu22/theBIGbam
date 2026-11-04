@@ -10,6 +10,7 @@ from typing import Any, Mapping
 import panel as pn
 
 from ..repositories.database_metadata import DatabaseMetadataRepository
+from ..services.bam_catalog import build_bam_catalog
 from ..settings.history import HISTORY_FORMAT, HistoryEntry, entries_from_session_document
 from ..settings.persistence import load_settings_document
 from ..settings.scenario import ScenarioPathAllocator
@@ -34,6 +35,10 @@ def restore_payload(
 
 def add_serve_args(parser) -> None:
     parser.add_argument("--db", required=True, help="Path to DuckDB database")
+    parser.add_argument(
+        "-b", "--bam_files",
+        help="Path to one indexed BAM file or a directory of indexed BAM files for read plotting",
+    )
     parser.add_argument("--port", type=int, default=5006, help="Port to serve Panel app")
     parser.add_argument(
         "--json",
@@ -112,7 +117,17 @@ def run_serve(args) -> int:
         scenario_paths = ScenarioPathAllocator(requested_path)
 
     print("\nPreloading database data...", flush=True)
-    preloaded = application.preload_db_data(args.db, enable_timing=enable_timing)
+    preloaded = application.preload_db_data(
+        args.db, enable_timing=enable_timing, include_read_variables=bool(args.bam_files)
+    )
+    bam_catalog = None
+    if args.bam_files:
+        try:
+            bam_catalog = build_bam_catalog(args.bam_files, preloaded.samples, preloaded.contig_lengths)
+        except ValueError as error:
+            raise SystemExit(f"ERROR: {error}") from error
+        for warning in bam_catalog.warnings:
+            print(f"WARNING: {warning}", flush=True)
     warm_started = time.perf_counter()
     warm_plot_pipeline_imports()
     if enable_timing:
@@ -131,6 +146,7 @@ def run_serve(args) -> int:
             initial_settings=initial_settings,
             initial_history=initial_history,
             scenario_path=allocated_scenario_path,
+            bam_catalog=bam_catalog,
         )
 
     allowed_origins = getattr(args, "allow_websocket_origin", None) or [

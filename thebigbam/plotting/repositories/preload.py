@@ -36,7 +36,7 @@ class PreloadRepository:
         self.query_count += 1
         return cursor.execute(sql, parameters)
 
-    def load(self) -> PreloadedPlotData:
+    def load(self, *, include_read_variables: bool = False) -> PreloadedPlotData:
         connection = duckdb.connect(self.db_path, read_only=True)
         try:
             initializer = self.scale_initializer
@@ -182,6 +182,21 @@ class PreloadRepository:
                     "WHERE Variable_name IS NOT NULL AND Encoding IS NOT NULL",
                 ).fetchall()
             )
+            read_module_variables: dict[str, tuple[str, ...]] = {}
+            read_colors: dict[str, str] = {}
+            if include_read_variables:
+                from thebigbam_rs import read_plot_variables
+
+                grouped: dict[str, list[str]] = {}
+                for module, subplot, variable_name, _order, color in read_plot_variables():
+                    choices = grouped.setdefault(module, [])
+                    if subplot not in choices:
+                        choices.append(subplot)
+                    subplot_to_varnames.setdefault(subplot, [])
+                    if variable_name not in subplot_to_varnames[subplot]:
+                        subplot_to_varnames[subplot].append(variable_name)
+                    read_colors[variable_name] = color
+                read_module_variables = {module: tuple(choices) for module, choices in grouped.items()}
             total_coverage_count = self._execute(cursor, "SELECT COUNT(*) FROM Coverage").fetchone()[0]
             return PreloadedPlotData(
                 annotation_types=annotation_types,
@@ -207,6 +222,8 @@ class PreloadRepository:
                 encoding_by_feature=encoding_by_feature,
                 total_coverage_count=total_coverage_count,
                 filter_encode=filter_encode,
+                read_module_variables=read_module_variables,
+                read_colors=read_colors,
             )
         finally:
             connection.close()
