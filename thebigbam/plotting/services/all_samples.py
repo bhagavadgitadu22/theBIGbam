@@ -14,7 +14,7 @@ from ...database.blob_decoder import decode_raw_chunks, decode_raw_sparse_chunks
 from ..models.plots import AllSamplesPlotData, AllSamplesPlotRequest, FeatureSeries, GenomeTrack, SampleTrack
 from ..repositories.all_samples import AllSamplesRepository
 from .blob_features import FeatureDataService, _format_zoom, _slice_with_anchors
-from .features import apply_minimum_frequency
+from .features import add_valid_termini, apply_minimum_frequency
 
 
 def _as_tuple_mapping(data: Mapping) -> dict[str, tuple]:
@@ -141,6 +141,12 @@ class AllSamplesDataService:
                 )
             self._phase("blob_decoding", decoding_started)
         self._phase("retrieve_and_decode", started)
+        if style.variable_name in {"reads_starts", "reads_ends"}:
+            status = "start" if style.variable_name == "reads_starts" else "end"
+            passing = self.repository.valid_termini((contig_id,), sample_ids)
+            for sid, data in raw_by_sample.items():
+                if data:
+                    add_valid_termini(data, passing.get((contig_id, sid, status), ()))
         return {
             sid: FeatureSeries(style, _as_tuple_mapping(_apply_threshold(data, request.display.min_relative_value)))
             for sid, data in raw_by_sample.items()

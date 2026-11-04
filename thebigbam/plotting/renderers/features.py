@@ -24,6 +24,7 @@ def _source_data(item):
         "length",
         "repeat_positions",
         "partner_contig",
+        "terminus_valid",
         "mean",
         "median",
         "std",
@@ -43,7 +44,7 @@ def _source_data(item):
     return data
 
 
-def _tooltips(items):
+def _base_tooltips(items):
     if any(item.get("is_duplication", False) for item in items):
         return [
             ("First position", "@first_pos{0,0}"),
@@ -81,6 +82,14 @@ def _tooltips(items):
             tips.extend((("Category", "@codon_category"), ("Codon", "@codon_change"), ("Amino acid", "@aa_change")))
         return tips
     return [("Position", "@x{0,0}"), ("Value", "@y{0.00}")]
+
+
+def _tooltips(items):
+    tips = _base_tooltips(items)
+    if all("terminus_valid" in item for item in items):
+        zoomed = any(any(width != 1 for width in item.get("width", ())) for item in items)
+        tips.append(("Contains valid terminus" if zoomed else "Valid terminus", "@terminus_valid"))
+    return tips
 
 
 class FeatureRenderer:

@@ -164,6 +164,33 @@ def test_service_returns_plain_data_without_bokeh(monkeypatch):
     assert result.sample_tracks[0].series[0].data["y"] == (1.0, 2.0, 3.0)
 
 
+def test_all_samples_termini_flags_survive_plain_data_projection(monkeypatch):
+    import thebigbam.plotting.services.all_samples as service_module
+
+    monkeypatch.setattr(
+        service_module,
+        "decode_raw_sparse_chunks",
+        lambda rows, scale, chunk_size: {
+            "x": np.array([0, 1, 2]),
+            "y": np.array([1.0, 2.0, 3.0]),
+            "sparse": True,
+        },
+    )
+
+    class TerminiRepository(_FakeRepository):
+        def feature_styles(self, subplot, table=None):
+            if table == "Feature_blob":
+                return [FeatureStyle("bars", "#000", 1, 0.2, 1, "Read ends", "reads_ends", table, "sparse")]
+            return []
+
+        def valid_termini(self, contig_ids, sample_ids):
+            return {(1, 1, "end"): {2}}
+
+    request = AllSamplesPlotRequest("c1", "Reads termini", GenomicRegion(1, 10))
+    result = AllSamplesDataService(TerminiRepository()).load(request)
+    assert result.sample_tracks[0].series[0].data["terminus_valid"] == ("No", "Yes", "No")
+
+
 def test_all_samples_minimum_frequency_is_absolute(monkeypatch):
     import thebigbam.plotting.services.all_samples as service_module
 

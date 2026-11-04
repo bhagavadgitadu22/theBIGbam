@@ -97,6 +97,7 @@ def _state(*, populated):
         ),
         "sample_order_direction": _control(active=1 if populated else 0),
         "same_y_scale_cbg": _control(active=[0] if populated else []),
+        "show_subplot_titles_cbg": _control(active=[] if populated else [0]),
     }
     if populated:
         sections = [
@@ -131,6 +132,7 @@ def _collector(widgets, controls, sections, connectors, custom_colors, mag_color
 def test_every_persisted_left_panel_setting_round_trips_through_restore():
     source = _state(populated=True)
     expected = _collector(*source).collect()
+    assert expected["plotting_params"]["show_subplot_titles"] is False
     target = _state(populated=False)
     widgets, controls, sections, connectors, custom_colors, mag_colors = target
 

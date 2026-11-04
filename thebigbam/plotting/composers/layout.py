@@ -7,11 +7,15 @@ import time
 from bokeh.layouts import gridplot
 
 
-def assemble_grid(plots, *, empty_message="No plots to display", enable_timing=False):
+def assemble_grid(plots, *, empty_message="No plots to display", enable_timing=False, show_subplot_titles=True):
     """Combine individual figures into the application's shared plot grid."""
     figures = [plot for plot in plots if plot is not None]
     if not figures:
         raise ValueError(empty_message)
+    if not show_subplot_titles:
+        for figure in figures:
+            for legend in figure.legend:
+                legend.visible = False
     started = time.perf_counter()
     grid = gridplot([[figure] for figure in figures], merge_tools=True, sizing_mode="stretch_width")
     if enable_timing:

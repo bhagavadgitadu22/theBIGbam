@@ -22,6 +22,7 @@ class ApplyInputs:
     active_variables_widgets: Any
     max_genemap_window: int
     same_y_scale: bool
+    show_subplot_titles: bool
     subplot_size: int
     genemap_size: int
     sequence_size: int
@@ -93,6 +94,7 @@ def collect_apply_inputs(bindings) -> ApplyInputs:
         active_variables_widgets=(widgets["variables_widgets_all"] if is_all else widgets["variables_widgets_one"]),
         max_genemap_window=int(bindings.max_genemap_window_input.value),
         same_y_scale=0 in bindings.same_y_scale_cbg.active,
+        show_subplot_titles=0 in bindings.show_subplot_titles_cbg.active,
         subplot_size=int(bindings.subplot_height_input.value),
         genemap_size=int(bindings.genemap_height_input.value),
         sequence_size=int(bindings.sequence_height_input.value),

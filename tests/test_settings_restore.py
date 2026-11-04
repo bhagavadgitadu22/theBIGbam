@@ -24,6 +24,7 @@ def test_restore_settings_applies_view_and_valid_subject_selection():
     values.update(
         widgets=widgets,
         views=_widget(active=0),
+        show_subplot_titles_cbg=_widget(active=[]),
         or_sections=[],
         inter_section_selects=[],
         custom_color_rows=[],
@@ -49,6 +50,7 @@ def test_restore_settings_applies_view_and_valid_subject_selection():
     assert bindings.views.active == 1
     assert sample.value == "new"
     assert widgets["contig_select"].value == "c1"
+    assert bindings.show_subplot_titles_cbg.active == [0]
 
 
 def test_explicit_empty_filtering_clears_existing_filter_builder():

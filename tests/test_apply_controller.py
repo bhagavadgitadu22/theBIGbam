@@ -40,6 +40,7 @@ def test_apply_controller_reports_missing_contig_and_completes_lifecycle():
         mag_track_max_dots_input=spinner,
         max_genemap_window_input=spinner,
         same_y_scale_cbg=SimpleNamespace(active=[]),
+        show_subplot_titles_cbg=SimpleNamespace(active=[0]),
         subplot_height_input=spinner,
         genemap_height_input=spinner,
         sequence_height_input=spinner,

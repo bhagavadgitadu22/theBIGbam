@@ -24,6 +24,7 @@ class CompositionDisplay:
     sequence_height: int | None = None
     translation_height: int | None = None
     same_y_scale: bool = False
+    show_subplot_titles: bool = True
     max_base_resolution: int | None = None
     max_genemap_window: int | None = None
     max_sequence_window: int | None = None

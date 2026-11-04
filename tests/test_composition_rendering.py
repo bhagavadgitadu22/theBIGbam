@@ -16,6 +16,19 @@ def test_grid_assembly_filters_missing_optional_tracks():
         assemble_grid([None], empty_message="nothing")
 
 
+def test_subplot_titles_setting_hides_feature_legends():
+    visible_plot = figure()
+    visible_plot.line([1, 2], [1, 2], legend_label="Coverage")
+    assemble_grid([visible_plot])
+    assert visible_plot.legend[0].visible
+
+    hidden_plot = figure()
+    hidden_plot.line([1, 2], [1, 2], legend_label="Coverage")
+    assemble_grid([hidden_plot], show_subplot_titles=False)
+    assert not hidden_plot.legend[0].visible
+    assert hidden_plot.renderers
+
+
 def test_y_range_policies_are_sql_free_and_deterministic():
     first = SimpleNamespace(y_range=None)
     second = SimpleNamespace(y_range=None)

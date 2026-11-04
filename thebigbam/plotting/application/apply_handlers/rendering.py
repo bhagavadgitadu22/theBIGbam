@@ -82,6 +82,7 @@ class ApplyRenderEngine:
         active_variables_widgets = inputs.active_variables_widgets
         max_genemap_window = inputs.max_genemap_window
         same_y_scale = inputs.same_y_scale
+        show_subplot_titles = inputs.show_subplot_titles
         subplot_size = inputs.subplot_size
         genemap_size = inputs.genemap_size
         sequence_size = inputs.sequence_size
@@ -211,6 +212,7 @@ class ApplyRenderEngine:
                 sequence_height=sequence_size,
                 translation_height=translated_sequence_size,
                 same_y_scale=same_y_scale,
+                show_subplot_titles=show_subplot_titles,
                 max_base_resolution=max_binning,
                 max_genemap_window=max_genemap_window,
                 max_sequence_window=mag_max_sequence_window,
@@ -319,6 +321,7 @@ class ApplyRenderEngine:
         active_variables_widgets = inputs.active_variables_widgets
         max_genemap_window = inputs.max_genemap_window
         same_y_scale = inputs.same_y_scale
+        show_subplot_titles = inputs.show_subplot_titles
         subplot_size = inputs.subplot_size
         genemap_size = inputs.genemap_size
         sequence_size = inputs.sequence_size
@@ -412,6 +415,7 @@ class ApplyRenderEngine:
                 plot_sequence=visibility.sequence,
                 plot_translated_sequence=visibility.translation,
                 same_y_scale=same_y_scale,
+                show_subplot_titles=show_subplot_titles,
                 subplot_size=subplot_size,
                 genemap_size=genemap_size,
                 sequence_size=sequence_size,
@@ -474,6 +478,7 @@ class ApplyRenderEngine:
                     max_genemap_window=max_genemap_window,
                     max_sequence_window=int(max_sequence_window_input.value),
                     min_relative_value=min_coverage_freq,
+                    show_subplot_titles=show_subplot_titles,
                 ),
                 enable_timing=enable_timing,
                 encoding_by_feature=_encoding_by_feature,

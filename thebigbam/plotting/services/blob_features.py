@@ -15,7 +15,7 @@ from thebigbam.database.blob_decoder import (
 )
 
 from ..models.blobs import FeatureLoadRequest, MagFeatureLoadRequest
-from .features import apply_minimum_frequency
+from .features import add_valid_termini, apply_minimum_frequency
 
 
 def _clip_interval_curve(data, start, end):
@@ -295,6 +295,12 @@ class FeatureDataService:
             if values:
                 transformed = time.perf_counter()
                 values["y"] = apply_minimum_frequency(values["y"], request.minimum_relative_value)
+                if variable in {"reads_starts", "reads_ends"} and request.sample_id is not None:
+                    status = "start" if variable == "reads_starts" else "end"
+                    centers = self.repository.valid_termini((request.contig_id,), (request.sample_id,)).get(
+                        (request.contig_id, request.sample_id, status), ()
+                    )
+                    add_valid_termini(values, centers)
                 self._resolve_partners(values, variable, ((request.contig_id, 0, request.region.end),))
                 output.append(self._style(row, values))
                 self.phase_seconds["transformation"] = self.phase_seconds.get("transformation", 0) + (
@@ -390,6 +396,15 @@ class FeatureDataService:
             if values:
                 transformed = time.perf_counter()
                 values["y"] = apply_minimum_frequency(values["y"], request.minimum_relative_value)
+                if variable in {"reads_starts", "reads_ends"} and request.sample_id is not None:
+                    status = "start" if variable == "reads_starts" else "end"
+                    passing = self.repository.valid_termini(contig_ids, (request.sample_id,))
+                    centers = (
+                        center + member.offset
+                        for member in request.members
+                        for center in passing.get((member.contig_id, request.sample_id, status), ())
+                    )
+                    add_valid_termini(values, centers)
                 self._resolve_partners(
                     values,
                     variable,

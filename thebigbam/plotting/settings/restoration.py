@@ -42,6 +42,7 @@ class SettingsRestoreBindings:
     rebuild_mag_track_color_rows: Any
     rebuild_section: Any
     same_y_scale_cbg: Any
+    show_subplot_titles_cbg: Any
     sample_order_category_select: Any
     sample_order_direction: Any
     sample_order_metric_select: Any
@@ -130,6 +131,7 @@ def restore_settings(settings: Mapping[str, Any], bindings: SettingsRestoreBindi
     rebuild_mag_track_color_rows = bindings.rebuild_mag_track_color_rows
     rebuild_section = bindings.rebuild_section
     same_y_scale_cbg = bindings.same_y_scale_cbg
+    show_subplot_titles_cbg = bindings.show_subplot_titles_cbg
     sample_order_category_select = bindings.sample_order_category_select
     sample_order_direction = bindings.sample_order_direction
     sample_order_metric_select = bindings.sample_order_metric_select
@@ -349,6 +351,11 @@ def restore_settings(settings: Mapping[str, Any], bindings: SettingsRestoreBindi
 
     # 8. Plotting parameters
     pp = settings.get("plotting_params") or {}
+    if show_subplot_titles_cbg is not None:
+        _restore(
+            "plotting_params.show_subplot_titles",
+            lambda: setattr(show_subplot_titles_cbg, "active", [0] if pp.get("show_subplot_titles", True) else []),
+        )
     for key, widget in (
         ("min_coverage_freq", min_coverage_freq_input),
         ("max_genemap_window", max_genemap_window_input),

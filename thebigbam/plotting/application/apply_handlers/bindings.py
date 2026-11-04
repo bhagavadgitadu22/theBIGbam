@@ -46,6 +46,7 @@ class ApplyBindings:
     plot_isoforms_cbg: Any
     plot_lifecycle: Any
     same_y_scale_cbg: Any
+    show_subplot_titles_cbg: Any
     sample_order_category_select: Any
     sample_order_direction: Any
     sample_order_metric_select: Any

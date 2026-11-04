@@ -30,6 +30,9 @@ def test_plot_parameter_controls_build_from_catalog_without_database_access():
     )
 
     assert controls.mag_category.value == "Contig"
+    assert controls.show_subplot_titles.labels == ["Show subplot titles"]
+    assert controls.show_subplot_titles.active == [0]
+    assert controls.content.objects[0].object is controls.show_subplot_titles
     assert controls.mag_metric.value == "Contig_length"
     assert controls.max_genemap_window.value > 0
     assert controls.max_genemap_window.high >= 10_000_000

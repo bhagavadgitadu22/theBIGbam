@@ -39,6 +39,7 @@ def build_all_samples_plot(
     plot_sequence=False,
     plot_translated_sequence=False,
     same_y_scale=False,
+    show_subplot_titles=True,
     genemap_size=None,
     sequence_size=None,
     translated_sequence_size=None,
@@ -126,7 +127,10 @@ def build_all_samples_plot(
 
     grid_phase = profiler.phase("grid_assembly") if profiler is not None else phase_timings.phase("renderer")
     with grid_phase:
-        grid = assemble_grid([*supplemental_figures, *genome_figures, *sample_figures])
+        grid = assemble_grid(
+            [*supplemental_figures, *genome_figures, *sample_figures],
+            show_subplot_titles=show_subplot_titles,
+        )
     if enable_timing:
         phases = ", ".join(f"{name}={seconds:.3f}s" for name, seconds in service.phase_seconds.items())
         print(

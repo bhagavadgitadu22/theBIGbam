@@ -57,6 +57,37 @@ class FakeBlobRepository:
         return {identifier: f"contig-{identifier}" for identifier in ids}
 
 
+def test_mag_termini_flags_use_sample_status_and_member_offsets(monkeypatch):
+    import thebigbam.plotting.services.blob_features as module
+
+    monkeypatch.setattr(
+        module,
+        "decode_raw_chunks",
+        lambda rows, scale, chunk_size: {
+            "x": np.asarray([0, 1]),
+            "y": np.asarray([2.0, 3.0]),
+            "sparse": False,
+        },
+    )
+
+    class TerminiRepository(FakeBlobRepository):
+        def metadata(self, feature):
+            return [("bars", "#000", 1.0, 0.2, 1, "Read starts", "Feature_blob")]
+
+        def variable_name(self, title, table):
+            return "reads_starts"
+
+        def valid_termini(self, contig_ids, sample_ids):
+            assert sample_ids == (7,)
+            return {(1, 7, "start"): {2}, (2, 7, "start"): {1}, (1, 7, "end"): {1}}
+
+    service = FeatureDataService(TerminiRepository())
+    request = MagFeatureLoadRequest("Reads termini", 7, FeatureRegion(1, 6), (MagMember(1, 3, 0), MagMember(2, 3, 3)))
+    result = service.load_mag(request)
+    assert result[0]["x"] == [1, 2, 4, 5]
+    assert result[0]["terminus_valid"] == ["No", "Yes", "Yes", "No"]
+
+
 def test_sparse_clipping_keeps_boundary_context_and_metadata_alignment():
     data = {
         "x": np.asarray([1, 5, 9]),

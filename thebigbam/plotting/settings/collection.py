@@ -41,6 +41,7 @@ class SettingsCollectorBindings:
     or_sections: Any
     plot_isoforms_cbg: Any
     same_y_scale_cbg: Any
+    show_subplot_titles_cbg: Any
     sample_order_category_select: Any
     sample_order_direction: Any
     sample_order_metric_select: Any
@@ -84,6 +85,7 @@ class SettingsCollector:
         or_sections = bindings.or_sections
         plot_isoforms_cbg = bindings.plot_isoforms_cbg
         same_y_scale_cbg = bindings.same_y_scale_cbg
+        show_subplot_titles_cbg = bindings.show_subplot_titles_cbg
         sample_order_category_select = bindings.sample_order_category_select
         sample_order_direction = bindings.sample_order_direction
         sample_order_metric_select = bindings.sample_order_metric_select
@@ -141,6 +143,7 @@ class SettingsCollector:
             "variables": serialize_variable_selection(widgets),
             "filtering": serialize_filter_sections(or_sections, inter_section_selects),
             "plotting_params": {
+                "show_subplot_titles": bool(show_subplot_titles_cbg.active),
                 "min_coverage_freq": min_coverage_freq_input.value,
                 "max_genemap_window": max_genemap_window_input.value,
                 "max_sequence_window": max_sequence_window_input.value,

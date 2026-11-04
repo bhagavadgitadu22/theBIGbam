@@ -7,6 +7,7 @@ class FeatureRepository:
     def __init__(self, connection_or_cursor) -> None:
         self.database = connection_or_cursor
         self.query_count = 0
+        self._valid_termini_cache = {}
 
     def _execute(self, sql, params=()):
         self.query_count += 1
@@ -178,6 +179,33 @@ class FeatureRepository:
     def contig_length(self, contig_id):
         row = self._execute("SELECT Contig_length FROM Contig WHERE Contig_id=?", (contig_id,)).fetchone()
         return int(row[0]) if row else 1
+
+    def valid_termini(self, contig_ids, sample_ids):
+        """Return passing start/end centers keyed by contig, sample, and status."""
+        key = (tuple(sorted(set(contig_ids))), tuple(sorted(set(sample_ids))))
+        if not key[0] or not key[1]:
+            return {}
+        if key not in self._valid_termini_cache:
+            exists = self._execute(
+                "SELECT 1 FROM information_schema.tables WHERE table_name='Phage_termini'"
+            ).fetchone()
+            if not exists:
+                self._valid_termini_cache[key] = {}
+            else:
+                contig_marks = ",".join("?" for _ in key[0])
+                sample_marks = ",".join("?" for _ in key[1])
+                rows = self._execute(
+                    "SELECT m.Contig_id, m.Sample_id, t.Status, t.Center "
+                    "FROM Phage_termini t JOIN Phage_mechanisms m ON m.Packaging_id=t.Packaging_id "
+                    f"WHERE m.Contig_id IN ({contig_marks}) AND m.Sample_id IN ({sample_marks}) "
+                    "AND t.Passed_PoissonTest=true AND t.Passed_ClippingTest=true",
+                    [*key[0], *key[1]],
+                ).fetchall()
+                result = {}
+                for contig_id, sample_id, status, center in rows:
+                    result.setdefault((int(contig_id), int(sample_id), str(status)), set()).add(int(center))
+                self._valid_termini_cache[key] = result
+        return self._valid_termini_cache[key]
 
 
 def split_features_by_storage(metadata, requested_features):

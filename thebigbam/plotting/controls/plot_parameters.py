@@ -35,6 +35,7 @@ class PlotParameterControls:
     separator: Any
     header: Any
     content: Any
+    show_subplot_titles: Any
     min_coverage_freq: Any
     max_genemap_window: Any
     max_sequence_window: Any
@@ -106,6 +107,7 @@ def build_plot_parameter_controls(
         text="<span style='font-size: 1.2em;'><b>Plotting parameters</b></span>", align="center"
     )
     plotting_params_header = row(plotting_params_title, sizing_mode="stretch_width", align="center")
+    show_subplot_titles = CheckboxGroup(labels=["Show subplot titles"], active=[0], margin=(5, 0, 5, 0))
 
     ## Plotting parameters useful in both views
     min_coverage_freq_input = Spinner(
@@ -403,6 +405,7 @@ def build_plot_parameter_controls(
     sample_params_toggle_btn.on_click(make_toggle_callback(sample_params_toggle_btn, sample_params_content))
 
     plotting_params_content = pn.Column(
+        show_subplot_titles,
         min_coverage_freq_row,
         max_window_header,
         max_window_content,
@@ -424,6 +427,7 @@ def build_plot_parameter_controls(
         separator=separator_plotting_params,
         header=plotting_params_header,
         content=plotting_params_content,
+        show_subplot_titles=show_subplot_titles,
         min_coverage_freq=min_coverage_freq_input,
         max_genemap_window=max_genemap_window_input,
         max_sequence_window=max_sequence_window_input,

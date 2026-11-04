@@ -164,7 +164,11 @@ def build_single_sample_plot(conn, request: SingleSampleCompositionRequest):
     top_plots = [mag_fig] if mag_fig is not None else []
     grid_phase = profiler.phase("grid_assembly") if profiler is not None else phase_timings.phase("renderer")
     with grid_phase:
-        grid = assemble_grid(top_plots + [annotation_fig] + subplots, enable_timing=enable_timing)
+        grid = assemble_grid(
+            top_plots + [annotation_fig] + subplots,
+            enable_timing=enable_timing,
+            show_subplot_titles=request.display.show_subplot_titles,
+        )
     if enable_timing:
         print(f"[timing] single-sample phases: {phase_timings.format()}", flush=True)
     return grid
@@ -348,7 +352,12 @@ def build_mag_plot(conn, request: MagCompositionRequest):
     all_plots = top_plots + ([annotation_fig] if annotation_fig is not None else []) + subplots
     grid_phase = profiler.phase("grid_assembly") if profiler is not None else phase_timings.phase("renderer")
     with grid_phase:
-        grid = assemble_grid(all_plots, empty_message="No plots to display for MAG view", enable_timing=enable_timing)
+        grid = assemble_grid(
+            all_plots,
+            empty_message="No plots to display for MAG view",
+            enable_timing=enable_timing,
+            show_subplot_titles=request.display.show_subplot_titles,
+        )
     actual_contig_offsets = {name: off for name, _clen, off in members}
     mag_meta = {
         "dots_shown": len(track_dots["xs"]) if track_dots else 0,
