@@ -380,12 +380,15 @@ def restore_settings(settings: Mapping[str, Any], bindings: SettingsRestoreBindi
     read_controls = widgets.get("read_plot_controls")
     read_saved = pp.get("read_plotting") or {}
     if read_controls is not None:
+        if "filters" in read_saved and getattr(read_controls, "filters", None) is not None:
+            _restore("plotting_params.read_plotting.filters", lambda: read_controls.filters.restore(read_saved["filters"]))
         for key, control in (
             ("max_reads", read_controls.max_reads),
             ("plot_height", read_controls.plot_height),
             ("read_height", read_controls.read_height),
+            ("max_discrepancy_window", getattr(read_controls, "max_discrepancy_window", None)),
         ):
-            if key in read_saved and read_saved[key] is not None:
+            if control is not None and key in read_saved and read_saved[key] is not None:
                 _restore(f"plotting_params.read_plotting.{key}",
                          lambda control=control, value=read_saved[key]: setattr(control, "value", value))
         for key, control in (

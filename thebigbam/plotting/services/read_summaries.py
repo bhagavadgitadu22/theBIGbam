@@ -1,16 +1,14 @@
 """Build display alignment blocks only after candidates have been selected."""
 
-import re
-
 from ..models.read_plot import ReadAlignment
-
-_CIGAR = re.compile(r"(\d+)([MIDNSHP=X])")
+from ..shared.read_cigar import CIGAR
+from ..shared.read_identity import read_identity
 
 
 def summarize_candidate(read):
     position = read.start
     blocks = []
-    for match in _CIGAR.finditer(read.cigar):
+    for match in CIGAR.finditer(read.cigar):
         length, operation = int(match[1]), match[2]
         if operation in "M=X":
             blocks.append((position, position + length))
@@ -20,4 +18,5 @@ def summarize_candidate(read):
     return ReadAlignment(
         read.name, read.start, read.end, tuple(blocks), read.forward, read.alignment_class,
         read.mapq, read.cigar, read.mate_start, read.is_read1, read.is_paired,
+        alignment_id=read_identity(read),
     )

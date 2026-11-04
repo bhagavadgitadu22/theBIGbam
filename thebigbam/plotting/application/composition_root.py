@@ -19,7 +19,6 @@ from bokeh.models.widgets import (
     TextAreaInput,
 )
 
-from ..controls.bam_status import build_bam_warning_controls
 from ..controls.base import build_controls
 from ..controls.filter_panel import build_filter_panel
 from ..controls.genome import build_genome_controls
@@ -32,6 +31,7 @@ from ..repositories.color_templates import ColorTemplateRepository
 from ..repositories.filter_metadata import FilterMetadataRepository
 from ..repositories.filtering import FilteringRepository
 from ..repositories.genome_controls import GenomeControlRepository
+from ..repositories.genome_tracks import GenomeTrackRepository
 from ..repositories.preload import PreloadRepository
 from ..services.filter_metadata import FilterMetadataService
 from ..services.filter_query import FilterQueryBuilder
@@ -972,29 +972,24 @@ def create_layout(
     # sample_section must exist before settings restoration runs, since restoring the
     # ALL SAMPLES scope fires on_view_change, which sets sample_section.visible.
     separator_samples = separator()
-    bam_status_controls = (
-        build_bam_warning_controls(
-            bam_catalog, widgets["sample_select"], widgets["contig_select"], preloaded.contig_lengths
-        )
-        if bam_catalog is not None
-        else ()
-    )
     sample_section = pn.Column(
         separator_samples,
         sample_title,
         widgets["sample_select"],
-        *bam_status_controls,
         sizing_mode="stretch_width",
         margin=0,
     )
-    if bam_status_controls and not widgets["has_samples"]:
-        below_contig_content.children = [*below_contig_content.children, bam_status_controls[0]]
     read_plot_controls = (
         build_read_plot_controls(
             max_reads=plot_parameters.read_max_reads,
             link_pairs=plot_parameters.read_link_pairs,
             plot_height=plot_parameters.read_plot_height,
             read_height=plot_parameters.individual_read_height,
+            max_discrepancy_window=plot_parameters.read_max_discrepancy_window,
+            toggle_stylesheet=toggle_stylesheet,
+            make_toggle_callback=make_toggle_callback,
+            stylesheet=stylesheet,
+            circular_available=bool(GenomeTrackRepository(conn).circular_samples(tuple(bam_catalog.by_sample))),
         )
         if bam_catalog is not None
         else None

@@ -20,6 +20,7 @@ from ..shared.defaults import (
     DEFAULT_MAX_BASE_RESOLUTION,
     DEFAULT_MAX_SAMPLES,
     DEFAULT_MIN_COVERAGE_FREQUENCY,
+    DEFAULT_READ_DISCREPANCY_WINDOW,
     DEFAULT_READ_PLOT_HEIGHT,
     DEFAULT_SAMPLE_ORDER_DIRECTION,
     DEFAULT_SEQUENCE_HEIGHT,
@@ -72,6 +73,8 @@ class PlotParameterControls:
     individual_read_height: Any
     read_height_row: Any
     individual_read_row: Any
+    read_max_discrepancy_window: Any
+    read_discrepancy_window_row: Any
     sample_current_categories: list[str]
 
 
@@ -163,9 +166,17 @@ def build_plot_parameter_controls(
         max_binning_window_input, max_binning_window_label, sizing_mode="stretch_width", margin=(0, 0, 5, 0)
     )
 
+    read_discrepancy_window_input = Spinner(
+        value=DEFAULT_READ_DISCREPANCY_WINDOW, low=1, high=1_000_000_000, step=1000,
+        width=100, margin=(0, 2, 0, 0),
+    )
+    read_discrepancy_window_row = row(
+        read_discrepancy_window_input, Div(text="Read discrepancies (bp)", margin=(5, 0, 5, 5)),
+        sizing_mode="stretch_width", margin=(0, 0, 5, 0), visible=include_read_plot,
+    )
     max_window_header, max_window_content = _collapsible_section(
         "Max window size for plotting",
-        [max_genemap_window_row, max_sequence_window_row, max_binning_window_row],
+        [max_genemap_window_row, max_sequence_window_row, read_discrepancy_window_row, max_binning_window_row],
         toggle_stylesheet,
         make_toggle_callback,
     )
@@ -494,5 +505,7 @@ def build_plot_parameter_controls(
         individual_read_height=individual_read_height_input,
         read_height_row=read_plot_height_row,
         individual_read_row=individual_read_height_row,
+        read_max_discrepancy_window=read_discrepancy_window_input,
+        read_discrepancy_window_row=read_discrepancy_window_row,
         sample_current_categories=_sample_sort_current_categories,
     )

@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Mapping
 
+from ..shared.defaults import DEFAULT_MAX_BASE_RESOLUTION
+
 
 @dataclass(frozen=True)
 class FeatureRegion:
@@ -26,7 +28,7 @@ class FeatureLoadRequest:
     contig_id: int
     sample_id: int | None
     region: FeatureRegion
-    max_base_resolution: int = 10_000
+    max_base_resolution: int = DEFAULT_MAX_BASE_RESOLUTION
     minimum_relative_value: float = 0.0
     encoding_by_feature: Mapping[str, str] | None = None
 
@@ -44,6 +46,6 @@ class MagFeatureLoadRequest:
     sample_id: int | None
     region: FeatureRegion
     members: tuple[MagMember, ...]
-    max_base_resolution: int = 10_000
+    max_base_resolution: int = DEFAULT_MAX_BASE_RESOLUTION
     minimum_relative_value: float = 0.0
     encoding_by_feature: Mapping[str, str] | None = None

@@ -324,6 +324,16 @@ html, body {
   width: 100%;
 }
 
+.read-filter-row,
+:host(.read-filter-row) {
+  grid-template-columns: minmax(0, 2.5fr) minmax(0, 1fr) minmax(0, 2fr);
+}
+
+.read-filter-boolean,
+:host(.read-filter-boolean) {
+  grid-template-columns: minmax(0, 2.5fr) minmax(0, 2fr);
+}
+
 /* Grid items default to min-width:auto, which lets a Bokeh widget's intrinsic
    width enlarge its track and consume the sidebar's right gutter. */
 :host(.filtering-row) > *,

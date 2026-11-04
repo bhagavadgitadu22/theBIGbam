@@ -5,7 +5,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from ..models.filters import FilterExpression
+from ..models.read_events import EVENT_VARIABLES
 from ..models.read_plot import ReadPlotOptions
+from ..shared.defaults import DEFAULT_READ_DISCREPANCY_WINDOW
 
 
 @dataclass(frozen=True)
@@ -78,12 +81,20 @@ def collect_apply_inputs(bindings) -> ApplyInputs:
     read_controls = widgets.get("read_plot_controls")
     read_options = ReadPlotOptions()
     if read_controls is not None:
+        discrepancy_window = getattr(read_controls, "max_discrepancy_window", None)
         read_options = ReadPlotOptions(
             enabled=0 in (read_controls.all_reads if is_all else read_controls.add_reads).active,
             max_reads=int(read_controls.max_reads.value or 0),
             link_pairs=0 in read_controls.link_pairs.active,
             plot_height=int(read_controls.plot_height.value),
             read_height=int(read_controls.read_height.value),
+            event_variables=frozenset(
+                variable for group in active_variables for index in group.active
+                for variable in widgets["subplot_to_varnames"].get(group.labels[index], ())
+                if variable in EVENT_VARIABLES
+            ),
+            max_discrepancy_window=int(discrepancy_window.value) if discrepancy_window is not None and discrepancy_window.value is not None else DEFAULT_READ_DISCREPANCY_WINDOW,
+            filters=(read_controls.filters.expression() if getattr(read_controls, "filters", None) is not None else FilterExpression(())),
             selected_subplots=tuple(
                 label
                 for group in active_variables

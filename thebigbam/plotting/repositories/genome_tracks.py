@@ -76,6 +76,22 @@ class GenomeTrackRepository:
         ).fetchone()
         return str(row[0]) if row and row[0] else ""
 
+    def circular_sample(self, sample_name):
+        return sample_name in self.circular_samples((sample_name,))
+
+    def circular_samples(self, sample_names):
+        if not sample_names:
+            return frozenset()
+        exists = self._execute(
+            "SELECT 1 FROM information_schema.columns WHERE table_name='Sample' AND column_name='Circular_mapping'"
+        ).fetchone()
+        if not exists:
+            return frozenset()
+        marks = ",".join("?" for _ in sample_names)
+        rows = self._execute(f"SELECT Sample_name FROM Sample WHERE Circular_mapping AND Sample_name IN ({marks})",
+                             list(sample_names)).fetchall()
+        return frozenset(row[0] for row in rows)
+
     def cds(self, contig_name, start, end):
         exists = self._execute(
             "SELECT 1 FROM information_schema.columns WHERE table_name='Contig_annotation' "

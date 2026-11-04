@@ -9,7 +9,7 @@ from ..models.plots import AllSamplesPlotRequest, DisplayOptions, GenomicRegion,
 from ..renderers.all_samples import AllSamplesRenderer
 from ..repositories.all_samples import AllSamplesRepository
 from ..services.all_samples import AllSamplesDataService
-from ..shared.defaults import DEFAULT_GENEMAP_WINDOW
+from ..shared.defaults import DEFAULT_GENEMAP_WINDOW, DEFAULT_MAX_BASE_RESOLUTION
 from ..shared.timing import PipelineTimings, profile_phase
 from .genome_track_pipeline import GenomeTrackPipeline
 from .read_track_pipeline import build_read_tracks
@@ -71,7 +71,7 @@ def build_all_samples_plot(
     request = AllSamplesPlotRequest(
         contig_name=contig_name,
         variable=variable,
-        region=GenomicRegion(start, end, max_base_resolution or 10_000),
+        region=GenomicRegion(start, end, max_base_resolution or DEFAULT_MAX_BASE_RESOLUTION),
         allowed_samples=frozenset(allowed_samples) if allowed_samples is not None else None,
         ordering=SampleOrdering(order_by_source, order_by_column, order_ascending, max_samples),
         display=DisplayOptions(subplot_size, same_y_scale, min_relative_value),

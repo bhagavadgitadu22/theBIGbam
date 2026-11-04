@@ -18,6 +18,7 @@ from bokeh.models.widgets import (
 )
 
 from ..shared.styles import bokeh_control_row
+from .collapsible import build_collapsible as _build_collapsible
 from .color_rules import build_color_rule_controls
 
 
@@ -41,27 +42,6 @@ class GenomeControls:
     rebuild_color_rows: Any
     rebuild_mag_color_rows: Any
     reset_position: Any
-
-
-def _build_collapsible(title, children, toggle_stylesheet, make_toggle_callback, *, margin=(0, 0, 5, 0)):
-    title_text = title.text if isinstance(title, Div) else title
-    benchmark_slug = title_text.split(" (")[0].lower().replace(" ", "-")
-    toggle = Button(
-        label="▶",
-        width=20,
-        height=20,
-        button_type="primary",
-        align="center",
-        margin=0,
-        stylesheets=[toggle_stylesheet],
-        css_classes=[f"benchmark-toggle-{benchmark_slug}"],
-    )
-    toggle.styles = {"padding": "0px", "line-height": "20px"}
-    title_model = title if isinstance(title, Div) else Div(text=title, align="center")
-    header = row(toggle, title_model, sizing_mode="stretch_width", align="center")
-    content = pn.Column(*children, visible=False, sizing_mode="stretch_width", margin=margin)
-    toggle.on_click(make_toggle_callback(toggle, content))
-    return header, content
 
 
 def _wire_master_checkbox(master, features, interaction_lock) -> None:

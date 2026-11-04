@@ -30,6 +30,7 @@ def test_plot_parameter_controls_build_from_catalog_without_database_access():
     )
 
     assert controls.mag_category.value == "Contig"
+    assert controls.max_binning_window.value == 1000
     assert controls.show_subplot_titles.labels == ["Show subplot titles"]
     assert controls.show_subplot_titles.active == [0]
     assert controls.content.objects[0].object is controls.show_subplot_titles
@@ -91,6 +92,9 @@ def test_bam_read_parameters_use_existing_row_sizes_and_defaults():
     )
     assert controls.read_section.visible
     assert controls.read_max_reads.value == 1000
+    assert controls.read_max_discrepancy_window.value == 10_000
+    assert controls.read_max_discrepancy_window.width == 100
+    assert controls.read_discrepancy_window_row.visible
     assert controls.read_max_reads.width == controls.genemap_height.width == 100
     assert controls.read_plot_height.value == 400
     assert controls.individual_read_height.value == 14

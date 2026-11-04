@@ -177,7 +177,10 @@ class SettingsCollector:
                 "link_pairs": 0 in read_controls.link_pairs.active,
                 "plot_height": read_controls.plot_height.value,
                 "read_height": read_controls.read_height.value,
+                "filters": read_controls.filters.serialize() if getattr(read_controls, "filters", None) is not None else [],
             }
+            if getattr(read_controls, "max_discrepancy_window", None) is not None:
+                settings["plotting_params"]["read_plotting"]["max_discrepancy_window"] = read_controls.max_discrepancy_window.value
         return settings
 
     def collect_applied(self, filter_expression: Any) -> dict[str, Any]:

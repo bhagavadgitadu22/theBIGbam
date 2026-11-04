@@ -57,18 +57,7 @@ class FilterRowFactory:
 
     def _remove_row(self, row_data) -> None:
         row_data["loading_gen"] += 1
-        if self.controller.count_rows() <= 1:
-            return
-        for section in self.controller.sections:
-            if row_data not in section["rows"]:
-                continue
-            section["rows"].remove(row_data)
-            self.controller.rebuild_section(section)
-            if not section["rows"]:
-                self.controller.sections.remove(section)
-                self.controller.rebuild_content()
-            self.refresh()
-            return
+        self.controller.remove_row(row_data)
 
     def _toggle_distribution(self, row_data, *, record_action: bool = True) -> None:
         container = row_data["hist_container"]

@@ -12,6 +12,7 @@ from ...models.composition import (
     TrackSelection,
 )
 from ...models.read_plot import ReadPlotRequest
+from ...repositories.genome_tracks import GenomeTrackRepository
 from ...services.read_selection import database_features, read_classes_for_subplots
 from ...shared.read_diagnostics import ReadProfiler
 from ...shared.timing import rss_mb
@@ -203,7 +204,8 @@ class ApplyRenderEngine:
             print(f"[timing] RSS before MAG composition: {rss_mb():.0f} MB", flush=True)
             t_plot = time.perf_counter()
         request = MagCompositionRequest(
-            read_tracks=read_track_config(inputs, widgets, diagnose=enable_timing),
+            read_tracks=read_track_config(inputs, widgets, diagnose=enable_timing,
+                                          reference_source=GenomeTrackRepository(conn)),
             mag_name=active_mag,
             sample_name=sample or None,
             xstart=xstart,
@@ -447,7 +449,8 @@ class ApplyRenderEngine:
                 encoding_by_feature=_encoding_by_feature,
                 data_cache=bindings.data_cache,
                 profiler=profiler,
-                read_tracks=read_track_config(inputs, widgets, diagnose=enable_timing),
+                read_tracks=read_track_config(inputs, widgets, diagnose=enable_timing,
+                                              reference_source=GenomeTrackRepository(conn)),
             )
             if enable_timing:
                 _step = time.perf_counter() - t_plot
@@ -467,6 +470,7 @@ class ApplyRenderEngine:
                 catalog = widgets["bam_catalog"]
                 bam_sample = catalog.by_sample.get(sample) if catalog is not None else None
                 if bam_sample is not None and bam_sample.available:
+                    reference_source = GenomeTrackRepository(conn)
                     read_request = ReadPlotRequest(
                         bam_path=str(bam_sample.path),
                         contig=contig,
@@ -483,6 +487,11 @@ class ApplyRenderEngine:
                         read_height=inputs.read_plot.read_height,
                         sample_name=sample,
                         profiler=ReadProfiler() if enable_timing else None,
+                        event_variables=inputs.read_plot.event_variables,
+                        filters=inputs.read_plot.filters,
+                        max_discrepancy_window=inputs.read_plot.max_discrepancy_window,
+                        reference_source=reference_source,
+                        circular=reference_source.circular_sample(sample),
                     )
 
             print(

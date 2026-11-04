@@ -5,12 +5,14 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 
+from ..shared.defaults import DEFAULT_MAX_BASE_RESOLUTION
+
 
 @dataclass(frozen=True)
 class GenomicRegion:
     start: int
     end: int
-    max_base_resolution: int = 10_000
+    max_base_resolution: int = DEFAULT_MAX_BASE_RESOLUTION
 
     def __post_init__(self) -> None:
         if self.end <= self.start:

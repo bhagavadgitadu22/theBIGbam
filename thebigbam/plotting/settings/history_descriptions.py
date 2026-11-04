@@ -6,6 +6,7 @@ import json
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Sequence
 
+from ..models.read_filters import READ_FILTER_LABELS
 from ..shared.defaults import (
     DEFAULT_GENEMAP_HEIGHT,
     DEFAULT_GENEMAP_WINDOW,
@@ -15,6 +16,7 @@ from ..shared.defaults import (
     DEFAULT_MAX_BASE_RESOLUTION,
     DEFAULT_MAX_SAMPLES,
     DEFAULT_MIN_COVERAGE_FREQUENCY,
+    DEFAULT_READ_DISCREPANCY_WINDOW,
     DEFAULT_READ_PLOT_HEIGHT,
     DEFAULT_SAMPLE_ORDER_DIRECTION,
     DEFAULT_SEQUENCE_HEIGHT,
@@ -82,6 +84,7 @@ _DEFAULT_VALUES = {
     ("plotting_params", "read_plotting", "link_pairs"): False,
     ("plotting_params", "read_plotting", "plot_height"): DEFAULT_READ_PLOT_HEIGHT,
     ("plotting_params", "read_plotting", "read_height"): DEFAULT_INDIVIDUAL_READ_HEIGHT,
+    ("plotting_params", "read_plotting", "max_discrepancy_window"): DEFAULT_READ_DISCREPANCY_WINDOW,
 }
 _MISSING = object()
 
@@ -233,6 +236,12 @@ def _flatten_settings(
         for key, child in items:
             if key == "_meta":
                 continue
+            if path == ("plotting_params", "read_plotting") and key == "filters":
+                prefix = "plotting_params.read_plotting.filters"
+                filter_lines = _filter_description_lines({"filtering": child}, key_prefix=prefix, label="Read filter")
+                if not (len(filter_lines) == 1 and filter_lines[0].key == prefix):
+                    lines.extend(filter_lines)
+                continue
             if not path and key == "filtering":
                 filter_lines = _filter_description_lines({"filtering": child})
                 if not (len(filter_lines) == 1 and filter_lines[0].key == "filtering"):
@@ -285,15 +294,17 @@ def _flatten_settings(
     ]
 
 
-def _filter_description_lines(settings: Mapping[str, Any]) -> list[HistoryDescriptionLine]:
+def _filter_description_lines(
+    settings: Mapping[str, Any], *, key_prefix: str = "filtering", label: str = "Filter",
+) -> list[HistoryDescriptionLine]:
     lines = []
     for section_index, section in enumerate(settings.get("filtering") or [], start=1):
         if section_index > 1:
             connector = section.get("section_and_or") or "AND"
             lines.append(
                 HistoryDescriptionLine(
-                    f"filtering.section.{section_index}.connector",
-                    f"Filter group #{section_index}: {connector}",
+                    f"{key_prefix}.section.{section_index}.connector",
+                    f"{label} group #{section_index}: {connector}",
                 )
             )
         for row_index, row in enumerate(section.get("rows") or [], start=1):
@@ -301,14 +312,17 @@ def _filter_description_lines(settings: Mapping[str, Any]) -> list[HistoryDescri
             if value in (None, ""):
                 continue
             connector = f"{row.get('row_and_or') or 'AND'} · " if row_index > 1 else ""
+            column = row.get("column", "?")
+            if row.get("category") == "Reads":
+                column = READ_FILTER_LABELS.get(column, column)
             lines.append(
                 HistoryDescriptionLine(
-                    f"filtering.section.{section_index}.row.{row_index}",
-                    f"Filter #{section_index}.{row_index}: {connector}{row.get('category', '?')} · "
-                    f"{row.get('column', '?')} {row.get('operator', '=')} {_display_value(value)}",
+                    f"{key_prefix}.section.{section_index}.row.{row_index}",
+                    f"{label} #{section_index}.{row_index}: {connector}{row.get('category', '?')} · "
+                    f"{column} {row.get('operator', '=')} {_display_value(value)}",
                 )
             )
-    return lines or [HistoryDescriptionLine("filtering", "Filters: None")]
+    return lines or [HistoryDescriptionLine(key_prefix, f"{label}s: None")]
 
 
 def canonical_history_description_lines(

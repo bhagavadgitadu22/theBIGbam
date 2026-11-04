@@ -41,6 +41,21 @@ class FilterSectionController:
     def count_rows(self) -> int:
         return sum(len(section["rows"]) for section in self.sections)
 
+    def remove_row(self, row: dict[str, Any]) -> None:
+        """Remove a row and any empty block using the shared editor structure."""
+        if self.count_rows() <= 1:
+            return
+        for section in self.sections:
+            if row not in section["rows"]:
+                continue
+            section["rows"].remove(row)
+            self.rebuild_section(section)
+            if not section["rows"]:
+                self.sections.remove(section)
+                self.rebuild_content()
+            self._on_change()
+            return
+
     def rebuild_section(self, section: dict[str, Any]) -> None:
         children = []
         rows = section["rows"]

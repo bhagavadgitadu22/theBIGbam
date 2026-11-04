@@ -51,3 +51,9 @@ def test_multiple_samples_share_range_without_refresh_callbacks(monkeypatch):
     assert all(track[0].x_range is xrange for track in figures)
     assert not xrange._callbacks.get("start")
     assert not xrange._callbacks.get("end")
+
+
+def test_missing_bams_do_not_add_warning_widgets_to_plot():
+    catalog = SimpleNamespace(by_sample={})
+    config = ReadTrackConfig(ReadPlotOptions(enabled=True), catalog, frozenset({"primary"}), {})
+    assert build_read_tracks(config, ("missing",), (("contig", 100, 0),), Range1d(1, 100), None) == []

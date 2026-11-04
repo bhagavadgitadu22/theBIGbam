@@ -9,8 +9,10 @@ from bokeh.models import ColumnDataSource, CustomJS, Div, HoverTool, NumeralTick
 from bokeh.plotting import figure
 
 from ..models.read_plot import ReadPlotData, ReadPlotRequest
+from ..services.read_coordinates import wrap_interval
 from ..services.read_layout import pack_read_rows
 from .clipboard import COPY_FEEDBACK_JS
+from .read_events import render_read_events
 from .read_scrollbar import scrollbar_html
 
 COLOR_VARIABLES = {"secondary": "secondary_reads", "supplementary": "supplementary_reads"}
@@ -52,16 +54,7 @@ def _cigar_preview(cigar: str) -> str:
 
 def _display_blocks(blocks: tuple[tuple[int, int], ...], contig_length: int) -> tuple[tuple[int, int], ...]:
     """Show both ends of a SAM circular alignment crossing the reference origin."""
-    if contig_length < 1:
-        return blocks
-    visible = []
-    for left, right in blocks:
-        while left < right:
-            wrapped_left = left % contig_length
-            width = min(right - left, contig_length - wrapped_left)
-            visible.append((wrapped_left, wrapped_left + width))
-            left += width
-    return tuple(visible)
+    return tuple(span for start, end in blocks for span in wrap_interval(start, end, contig_length))
 
 
 def render_read_track(data: ReadPlotData, request: ReadPlotRequest, x_range: Range1d):
@@ -118,7 +111,7 @@ def render_read_track(data: ReadPlotData, request: ReadPlotRequest, x_range: Ran
     def redraw(current: ReadPlotData, visible: ReadPlotRequest) -> None:
         profiler = visible.profiler
         started = perf_counter() if profiler is not None else 0
-        layout = pack_read_rows(current.alignments, visible.link_pairs)
+        layout = pack_read_rows(current.alignments, visible.link_pairs, visible.contig_length)
         if profiler is not None:
             profiler.add_time("row_packing", perf_counter() - started)
             profiler.count("rows", layout.row_count)
@@ -191,6 +184,7 @@ def render_read_track(data: ReadPlotData, request: ReadPlotRequest, x_range: Ran
             "x1": [item.right + 0.5 for item in layout.connectors],
             "y": [layout.row_count - item.row - 0.5 for item in layout.connectors],
         }
+        render_read_events(plot, layout, visible, row_pitch, current.warnings)
         if profiler is not None:
             profiler.add_time("glyph_construction", perf_counter() - started)
             profiler.count("body_glyphs", len(columns["name"]))

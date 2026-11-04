@@ -9,7 +9,10 @@ from typing import Any, Callable, ClassVar, Generic, TypeVar
 
 import panel as pn
 
+from ..models.filters import FilterExpression
+from ..services.read_filtering import validate_read_filters
 from ..services.read_selection import database_features
+from ..shared.defaults import DEFAULT_READ_DISCREPANCY_WINDOW
 from ..shared.styles import panel_control_row
 from ..shared.timing import estimate_grid_data_size, rss_mb
 from .apply_inputs import ApplyInputs, collect_apply_inputs
@@ -137,6 +140,12 @@ class ApplyRequestBuilder:
         if inputs.read_plot.enabled and inputs.read_plot.max_reads < 1:
             return ValidationFailure("Number of subsampled reads must be at least 1.")
         if inputs.read_plot.enabled:
+            if getattr(inputs.read_plot, "max_discrepancy_window", DEFAULT_READ_DISCREPANCY_WINDOW) < 1:
+                return ValidationFailure("Read discrepancies window must be at least 1 bp.")
+            try:
+                validate_read_filters(getattr(inputs.read_plot, "filters", FilterExpression(())))
+            except ValueError as error:
+                return ValidationFailure(str(error))
             is_all = mode in (ApplyMode.CONTIG_ALL, ApplyMode.MAG_ALL)
             catalog = self.bindings.widgets.get("bam_catalog")
             if catalog is None or (not is_all and not inputs.sample):

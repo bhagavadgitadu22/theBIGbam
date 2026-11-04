@@ -42,6 +42,10 @@ class SessionDataCache:
         self._values.pop(key)
         self.retained_bytes -= self._weights.pop(key, 0)
 
+    def discard(self, key: Hashable) -> None:
+        if key in self._values:
+            self._remove(key)
+
     def put(self, key: Hashable, value: Any, *, retained_bytes: int = 0) -> bool:
         if retained_bytes > self.max_retained_bytes:
             return False

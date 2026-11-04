@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import heapq
+from bisect import bisect_left, insort
 from dataclasses import dataclass
 
 from ..models.read_plot import ReadAlignment
+from .read_layout_groups import packing_groups, pair_connector
 
 
 @dataclass(frozen=True)
@@ -28,34 +30,12 @@ class ReadLayout:
     row_count: int
 
 
-def _groups(reads: tuple[ReadAlignment, ...], link_pairs: bool):
-    if not link_pairs:
-        return [((read,), read.start, read.end) for read in reads]
-    grouped: dict[tuple[str, str], list[ReadAlignment]] = {}
-    for read in reads:
-        if read.is_paired:
-            grouped.setdefault((read.name, read.alignment_class), []).append(read)
-    used: set[int] = set()
-    result = []
-    for candidates in grouped.values():
-        first = next((read for read in candidates if read.is_read1), None)
-        second = next((read for read in candidates if not read.is_read1), None)
-        if first is not None and second is not None and first is not second:
-            result.append(((first, second), min(first.start, second.start), max(first.end, second.end)))
-            used.update((id(first), id(second)))
-    result.extend(((read,), read.start, read.end) for read in reads if id(read) not in used)
-    return result
-
-
-def pack_read_rows(reads: tuple[ReadAlignment, ...], link_pairs: bool) -> ReadLayout:
-    """Place the earliest genomic start first, reusing rows after their end."""
-    groups = sorted(_groups(reads, link_pairs), key=lambda item: (item[1], item[2], item[0][0].name))
+def _linear_rows(groups):
     active: list[tuple[int, int]] = []
     free_rows: list[int] = []
-    placed: list[PlacedRead] = []
-    connectors: list[PairConnector] = []
     row_count = 0
-    for members, start, end in groups:
+    for group in groups:
+        start, end = group.intervals[0]
         while active and active[0][0] + 2 <= start:
             _, free = heapq.heappop(active)
             heapq.heappush(free_rows, free)
@@ -65,9 +45,39 @@ def pack_read_rows(reads: tuple[ReadAlignment, ...], link_pairs: bool) -> ReadLa
             row = row_count
             row_count += 1
         heapq.heappush(active, (end, row))
-        placed.extend(PlacedRead(read, row) for read in members)
-        if len(members) == 2:
-            left, right = sorted(members, key=lambda read: read.start)
-            if left.end < right.start:
-                connectors.append(PairConnector(left.end, right.start, row))
+        yield group, row
+
+
+def _fits(occupied, intervals):
+    for start, end in intervals:
+        index = bisect_left(occupied, (start,))
+        if index and occupied[index - 1][1] + 2 > start:
+            return False
+        if index < len(occupied) and end + 2 > occupied[index][0]:
+            return False
+    return True
+
+
+def _circular_rows(groups):
+    rows = []
+    for group in groups:
+        row = next((index for index, occupied in enumerate(rows) if _fits(occupied, group.intervals)), len(rows))
+        if row == len(rows):
+            rows.append([])
+        for interval in group.intervals:
+            insort(rows[row], interval)
+        yield group, row
+
+
+def pack_read_rows(reads: tuple[ReadAlignment, ...], link_pairs: bool, contig_length: int = 0) -> ReadLayout:
+    """Reserve every displayed interval; only explicitly linked mates may overlap."""
+    groups = packing_groups(reads, link_pairs, contig_length)
+    assignments = _linear_rows(groups) if all(len(group.intervals) == 1 for group in groups) else _circular_rows(groups)
+    placed, connectors, row_count = [], [], 0
+    for group, row in assignments:
+        row_count = max(row_count, row + 1)
+        placed.extend(PlacedRead(read, row) for read in group.reads)
+        connector = pair_connector(group, contig_length)
+        if connector is not None and connector[0] < connector[1]:
+            connectors.append(PairConnector(*connector, row))
     return ReadLayout(tuple(placed), tuple(connectors), row_count)

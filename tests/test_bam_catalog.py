@@ -8,10 +8,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from bokeh.models import Select
 
 from thebigbam.plotting.application import server
-from thebigbam.plotting.controls.bam_status import build_bam_warning_controls
 from thebigbam.plotting.services.bam_catalog import build_bam_catalog
 
 FIXTURE = Path(__file__).parent / "HK97" / "HK97_illumina_circular.bam"
@@ -66,24 +64,6 @@ def test_duplicate_normalized_names_are_rejected(tmp_path):
 
     with pytest.raises(ValueError, match="Multiple BAM files map to sample 'sample'"):
         build_bam_catalog(tmp_path, ("sample",), {CONTIG: LENGTH})
-
-
-def test_sidebar_warning_follows_selected_sample_and_contig(tmp_path):
-    catalog = build_bam_catalog(_copy_bam(tmp_path, "sample"), ("sample", "missing"), {CONTIG: LENGTH})
-    sample = Select(value="sample", options=["sample", "missing"])
-    contig = Select(value=CONTIG, options=[CONTIG, "elsewhere"])
-
-    global_status, sample_status = build_bam_warning_controls(
-        catalog, sample, contig, {CONTIG: LENGTH, "elsewhere": 100}
-    )
-
-    assert not global_status.visible
-    assert not sample_status.visible
-    sample.value = "missing"
-    assert sample_status.visible and "No BAM file matches" in sample_status.text
-    sample.value = "sample"
-    contig.value = "elsewhere"
-    assert "no alignment reference" in sample_status.text
 
 
 def test_serve_passes_catalog_into_each_session(monkeypatch, tmp_path):

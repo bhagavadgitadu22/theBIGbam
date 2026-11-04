@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 
+from thebigbam.plotting.controls.read_filters import ReadFilterControls
 from thebigbam.plotting.settings.collection import SettingsCollector, SettingsCollectorBindings
 from thebigbam.plotting.settings.restoration import SettingsRestoreBindings, restore_settings
 
@@ -35,6 +36,11 @@ def _color_row(qualifier, operator, value, color):
 
 def _state(*, populated):
     suffix = "saved" if populated else "default"
+    read_filters = ReadFilterControls(circular_available=True)
+    if populated:
+        row = read_filters.controller.sections[0]["rows"][0]
+        row["subcategory_select"].value = "MAPQ"
+        row["input_ref"]["widget"].value = 30
     widgets = {
         "view_radio": _control(active=0 if populated else 1),
         "sample_select": _control(value=f"sample-{suffix}", options=["sample-default", "sample-saved"]),
@@ -51,6 +57,8 @@ def _state(*, populated):
             _control(labels=["snps", "indels"], active=[1] if populated else [0]),
         ],
         "read_plot_controls": SimpleNamespace(
+            max_discrepancy_window=_control(value=8000 if populated else 10000),
+            filters=read_filters,
             add_reads=_control(active=[0] if populated else []),
             all_reads=_control(active=[0] if populated else []),
             max_reads=_control(value=1200 if populated else 1000),
