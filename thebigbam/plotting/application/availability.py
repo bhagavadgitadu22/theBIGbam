@@ -200,6 +200,10 @@ class AvailabilityController:
         def _resolve_samples(search_term=""):
             """Core logic — does NOT check the lock. search_term additionally
             narrows results server-side (used for SearchableSelect type-ahead)."""
+            # Genome-only databases can omit both Sample and Coverage.
+            # Hidden sample selectors and section titles still resolve here.
+            if not orig_samples:
+                return AvailabilityResult((), 0)
             search_term = (search_term or "").strip()
             scope = _scope()
             cache_key = _cache_key("samples", search_term, scope)

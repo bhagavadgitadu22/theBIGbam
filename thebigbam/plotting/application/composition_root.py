@@ -570,7 +570,7 @@ def create_layout(
 
     def _get_filtered_samples_for_contig(contig):
         contig_id = widgets["contig_name_to_id"].get(contig)
-        if contig_id is None:
+        if not widgets["has_samples"] or contig_id is None:
             return []
         result = list(filtering_repository.samples_for_contig_unbounded(contig_id))
         filtering = get_filtering_filtered_pairs()

@@ -1,6 +1,11 @@
+from types import SimpleNamespace
+
 import duckdb
 import pytest
 
+from thebigbam.plotting.application.availability import AvailabilityBindings, AvailabilityController
+from thebigbam.plotting.application.availability_facade import AvailabilityFacade
+from thebigbam.plotting.application.subject import SubjectBindings, SubjectController
 from thebigbam.plotting.controls.base import build_controls
 from thebigbam.plotting.models.preload import PreloadedPlotData
 from thebigbam.plotting.models.session import CurrentPlotState, PlotSessionContext
@@ -250,3 +255,79 @@ def test_genome_only_preload_without_mapping_tables(tmp_path, has_sample_table, 
     assert widgets["contig_select"].options == ["c1", "c2"]
     assert widgets["sample_select"].options == []
     assert path.read_bytes() == before
+
+    connection = duckdb.connect(str(path), read_only=True)
+    try:
+        repository = FilteringRepository(connection)
+        service = FilteringAvailabilityService(repository)
+        scope = SimpleNamespace(active=0)
+        sample_title = SimpleNamespace(text="")
+        filtered = None
+        availability = AvailabilityController(
+            AvailabilityBindings(
+                availability_service=service,
+                filtering_pairs=lambda: filtered,
+                original_contigs=list(data.contigs),
+                original_samples=list(data.samples),
+                sample_scope=scope,
+                widgets=widgets,
+                sort_sample_select=SimpleNamespace(value="", options=[]),
+                update_completions=AvailabilityFacade.update_widget,
+                total_coverage_count=data.total_coverage_count,
+                filtering_title=SimpleNamespace(text=""),
+                contig_title=SimpleNamespace(text=""),
+                sample_title=sample_title,
+                mag_title=SimpleNamespace(text=""),
+            )
+        )
+        start, end = SimpleNamespace(value=""), SimpleNamespace(value="")
+        subject = SubjectController(
+            SubjectBindings(
+                widgets=widgets,
+                interaction_lock={"locked": False},
+                compute_contigs=availability.compute_contigs,
+                compute_samples=availability.compute_samples,
+                compute_mags=availability.compute_mags,
+                push_completions=AvailabilityFacade.push_search,
+                refresh_contigs=availability.refresh_contigs,
+                refresh_samples=availability.refresh_samples,
+                refresh_mags=availability.refresh_mags,
+                update_titles=availability.update_titles,
+                from_position=start,
+                to_position=end,
+                sample_order_category=SimpleNamespace(value="", options=[]),
+                sample_contig_categories=[],
+                sample_mag_categories=[],
+                sample_current_categories=[],
+            )
+        )
+        subject.attach()
+        for scope.active in (0, 1):
+            for with_filter in (False, True):
+                filtered = (
+                    {
+                        "sql": "SELECT Contig_id, NULL::INTEGER AS Sample_id FROM Contig",
+                        "params": [],
+                        "count_contigs": 2,
+                        "count_samples": 0,
+                        "count_pairs": 2,
+                    }
+                    if with_filter
+                    else None
+                )
+                service.invalidate()
+                availability.invalidate_titles()
+                if has_mags:
+                    widgets["mag_select"].value = "m1"
+                for contig in ("c1", "c2", ""):
+                    widgets["contig_select"].value = contig
+                    availability.refresh_samples()
+                    availability.update_titles()
+                    assert availability.compute_samples("s") == []
+                    assert widgets["sample_select"].options == []
+                    assert "0 available" in sample_title.text
+                    assert start.value == "1"
+                    assert end.value == (str(data.contig_lengths[contig]) if contig else "")
+        assert path.read_bytes() == before
+    finally:
+        connection.close()

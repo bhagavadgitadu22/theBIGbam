@@ -14,28 +14,38 @@ def read_track_config(inputs, widgets, *, diagnose=False, reference_source=None)
     return ReadTrackConfig(inputs.read_plot, widgets["bam_catalog"], classes, widgets["read_colors"], diagnose, reference_source)
 
 
+def read_plot_request(config, sample, members, x_range):
+    """Build the same immutable BAM request for single and multi-sample views."""
+    if config is None or not members:
+        return None
+    bam = config.catalog.by_sample.get(sample)
+    if bam is None or not bam.available:
+        return None
+    options = config.options
+    total_length = max(offset + length for _, length, offset in members)
+    start, end = (x_range.start, x_range.end) if hasattr(x_range, "start") else x_range
+    return ReadPlotRequest(
+        str(bam.path), members[0][0], total_length, int(start), int(end),
+        options.max_reads, options.link_pairs, config.classes, config.colors,
+        plot_height=options.plot_height, read_height=options.read_height,
+        members=tuple(members), sample_name=sample,
+        profiler=ReadProfiler() if config.diagnose else None,
+        event_variables=options.event_variables,
+        filters=options.filters,
+        max_discrepancy_window=options.max_discrepancy_window,
+        reference_source=config.reference_source,
+        circular=bool(config.reference_source is not None and config.reference_source.circular_sample(sample)),
+    )
+
+
 def build_read_tracks(config, samples, members, x_range, cache):
     if config is None:
         return []
-    total_length = max(offset + length for _, length, offset in members)
     figures = []
     for sample in samples:
-        bam = config.catalog.by_sample.get(sample)
-        if bam is None or not bam.available:
+        request = read_plot_request(config, sample, members, x_range)
+        if request is None:
             continue
-        options = config.options
-        request = ReadPlotRequest(
-            str(bam.path), members[0][0], total_length, int(x_range.start), int(x_range.end),
-            options.max_reads, options.link_pairs, config.classes, config.colors,
-            plot_height=options.plot_height, read_height=options.read_height,
-            members=tuple(members), sample_name=sample,
-            profiler=ReadProfiler() if config.diagnose else None,
-            event_variables=options.event_variables,
-            filters=options.filters,
-            max_discrepancy_window=options.max_discrepancy_window,
-            reference_source=config.reference_source,
-            circular=bool(config.reference_source is not None and config.reference_source.circular_sample(sample)),
-        )
         data = prepare_read_plot(request, cache)
         plot, scrollbar = render_read_track(data, request, x_range)
         figures.append((plot, scrollbar))

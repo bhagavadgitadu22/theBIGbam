@@ -11,10 +11,8 @@ from ...models.composition import (
     SingleSampleCompositionRequest,
     TrackSelection,
 )
-from ...models.read_plot import ReadPlotRequest
 from ...repositories.genome_tracks import GenomeTrackRepository
-from ...services.read_selection import database_features, read_classes_for_subplots
-from ...shared.read_diagnostics import ReadProfiler
+from ...services.read_selection import database_features
 from ...shared.timing import rss_mb
 from ..apply_inputs import ApplyInputs
 from ..apply_modes import all_sample_features, one_sample_features, track_visibility, without_gene_map
@@ -22,7 +20,7 @@ from ..apply_pipeline import (
     PlotPresenter,
     PlotResult,
 )
-from ..read_track_pipeline import read_track_config
+from ..read_track_pipeline import read_plot_request, read_track_config
 from ..subject import sample_order_category_for_view
 from .bindings import ApplyBindings
 
@@ -471,32 +469,18 @@ class ApplyRenderEngine:
             )
             read_request = None
             if inputs.read_plot.enabled:
-                catalog = widgets["bam_catalog"]
-                bam_sample = catalog.by_sample.get(sample) if catalog is not None else None
-                if bam_sample is not None and bam_sample.available:
-                    reference_source = GenomeTrackRepository(conn)
-                    read_request = ReadPlotRequest(
-                        bam_path=str(bam_sample.path),
-                        contig=contig,
-                        contig_length=contig_length,
-                        start=xstart,
-                        end=xend,
-                        max_reads=inputs.read_plot.max_reads,
-                        link_pairs=inputs.read_plot.link_pairs,
-                        classes=read_classes_for_subplots(
-                            inputs.read_plot.selected_subplots, widgets["subplot_to_varnames"]
-                        ),
-                        colors=widgets["read_colors"],
-                        plot_height=inputs.read_plot.plot_height,
-                        read_height=inputs.read_plot.read_height,
-                        sample_name=sample,
-                        profiler=ReadProfiler() if enable_timing else None,
-                        event_variables=inputs.read_plot.event_variables,
-                        filters=inputs.read_plot.filters,
-                        max_discrepancy_window=inputs.read_plot.max_discrepancy_window,
-                        reference_source=reference_source,
-                        circular=reference_source.circular_sample(sample),
-                    )
+                read_config = read_track_config(
+                    inputs,
+                    widgets,
+                    diagnose=enable_timing,
+                    reference_source=GenomeTrackRepository(conn),
+                )
+                read_request = read_plot_request(
+                    read_config,
+                    sample,
+                    ((contig, contig_length, 0),),
+                    (xstart, xend),
+                )
 
             print(
                 f"[start_bokeh_server] Generating plot for sample={sample}, contig={contig}, features={requested_features}",

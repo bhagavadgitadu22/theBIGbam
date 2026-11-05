@@ -5,7 +5,12 @@ from types import SimpleNamespace
 import panel as pn
 from bokeh.models import Select, Spinner
 
-from ..models.read_filters import BOOLEAN_READ_FILTERS, READ_FILTER_LABELS, read_filter_operators
+from ..models.read_filters import (
+    READ_FILTER_CHOICES,
+    READ_FILTER_LABELS,
+    SINGLE_VALUE_READ_FILTERS,
+    read_filter_operators,
+)
 from ..shared.styles import panel_control_row, panel_stylesheet
 
 
@@ -33,14 +38,15 @@ class ReadFilterRowFactory:
                "row_wrapper": controls, "minus_btn": minus, "and_div": None}
 
         def update(_attr, _old, _new):
-            boolean = field.value in BOOLEAN_READ_FILTERS
+            boolean = field.value in SINGLE_VALUE_READ_FILTERS
             operator.options = read_filter_operators(field.value)
             if operator.value not in operator.options:
                 operator.value = operator.options[0]
             operator.visible = not boolean
             controls.css_classes = ["control-row", "filtering-row", "read-filter-row", *(["read-filter-boolean"] if boolean else [])]
             if boolean:
-                widget = Select(options=["TRUE", "FALSE"], value="TRUE", sizing_mode="stretch_width", margin=0)
+                options = READ_FILTER_CHOICES.get(field.value, ("TRUE", "FALSE"))
+                widget = Select(options=list(options), value=options[0], sizing_mode="stretch_width", margin=0)
             else:
                 percentage = field.value == "Alignment percentage"
                 widget = Spinner(value=None, step=0.1 if percentage else 1, low=0 if percentage else None,

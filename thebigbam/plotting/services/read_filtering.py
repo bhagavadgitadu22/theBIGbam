@@ -4,7 +4,13 @@ import math
 import operator
 from time import perf_counter
 
-from ..models.read_filters import BOOLEAN_READ_FILTERS, READ_FILTER_FIELDS, READ_FILTER_LABELS, read_filter_operators
+from ..models.read_filters import (
+    BOOLEAN_READ_FILTERS,
+    READ_FILTER_CHOICES,
+    READ_FILTER_FIELDS,
+    READ_FILTER_LABELS,
+    read_filter_operators,
+)
 
 COMPARISONS = {">": operator.gt, "<": operator.lt, "=": operator.eq, "!=": operator.ne}
 
@@ -31,6 +37,11 @@ def validate_read_filters(expression):
                 raise ValueError(f"Unsupported operator for {label}: {rule.operator}.")
             if rule.column in BOOLEAN_READ_FILTERS:
                 _boolean(rule.value)
+                continue
+            if rule.column in READ_FILTER_CHOICES:
+                if rule.value not in READ_FILTER_CHOICES[rule.column]:
+                    choices = " or ".join(READ_FILTER_CHOICES[rule.column])
+                    raise ValueError(f"{label} must be {choices}.")
                 continue
             try:
                 number = float(rule.value)
@@ -72,6 +83,8 @@ def _value(read, field, length, circular):
         return read.end
     if field == "MAPQ":
         return read.mapq
+    if field == "Strand":
+        return "Forward" if read.forward else "Reverse"
     if field == "Insert sizes":
         return abs(read.template_length) if _has_mate(read) and read.mate_same_reference and read.template_length else None
     if field == "Has mate mapped":
@@ -109,7 +122,12 @@ def compile_read_filters(expression, length, circular):
                 position, negate = int(float(rule.value)), rule.operator == "!="
                 predicates.append(lambda read, position=position, negate=negate: _includes(read, position, length, circular) != negate)
             else:
-                expected = _boolean(rule.value) if rule.column in BOOLEAN_READ_FILTERS else float(rule.value)
+                expected = (
+                    _boolean(rule.value)
+                    if rule.column in BOOLEAN_READ_FILTERS
+                    else rule.value if rule.column in READ_FILTER_CHOICES
+                    else float(rule.value)
+                )
                 compare = COMPARISONS[rule.operator]
 
                 def predicate(read, field=rule.column, expected=expected, compare=compare):

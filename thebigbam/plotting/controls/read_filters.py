@@ -2,7 +2,7 @@
 
 from bokeh.models import Select
 
-from ..models.read_filters import BOOLEAN_READ_FILTERS, READ_FILTER_FIELDS
+from ..models.read_filters import BOOLEAN_READ_FILTERS, READ_FILTER_FIELDS, SINGLE_VALUE_READ_FILTERS
 from ..settings.persistence import serialize_filter_sections
 from ..shared.styles import ACTION_CONTROL_MARGIN
 from .filter_projection import expression_from_widgets
@@ -33,7 +33,7 @@ class ReadFilterControls:
                 if item.get("column") not in self.factory.fields:
                     print(f"[settings] Warning: skipped unavailable read filter '{item.get('column')}'.", flush=True)
                     continue
-                if item["column"] in BOOLEAN_READ_FILTERS and item.get("value") in (None, ""):
+                if item["column"] in SINGLE_VALUE_READ_FILTERS and item.get("value") in (None, ""):
                     continue
                 row = self.factory.create_row(section, item["column"], item.get("operator"))
                 value = item.get("value")
