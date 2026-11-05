@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from time import perf_counter
 from typing import Any, Callable
 
 from ..shared.defaults import AUTOCOMPLETE_LIMIT
@@ -24,6 +25,7 @@ class AvailabilityBindings:
     contig_title: Any
     sample_title: Any
     mag_title: Any
+    enable_timing: bool = False
 
 
 @dataclass(frozen=True)
@@ -59,6 +61,7 @@ class AvailabilityController:
         contig_title = bindings.contig_title
         sample_title = bindings.sample_title
         mag_title = bindings.mag_title
+        enable_timing = bindings.enable_timing
 
         _resolution_cache: dict[tuple[Any, ...], AvailabilityResult] = {}
 
@@ -112,13 +115,22 @@ class AvailabilityController:
             scope = _scope()
             cache_key = _cache_key("contigs", search_term, scope)
             if cache_key in _resolution_cache:
+                if enable_timing and search_term:
+                    print(
+                        f"[timing] Contig autocomplete resolver: query_chars={len(search_term)} "
+                        f"cache=hit options={len(_resolution_cache[cache_key].options)}",
+                        flush=True,
+                    )
                 return _resolution_cache[cache_key]
+            started = perf_counter() if enable_timing and search_term else 0
+            query_count_start = getattr(getattr(availability_service, "repository", None), "query_count", 0)
             # Tie-break so the currently-selected contig always survives LIMIT
             # 100 (it's a no-op when nothing is selected, since '' never
             # matches a real contig name) — keeps the cap as a real payload
             # guard while never silently dropping what's already selected.
             preserve_contig = widgets["contig_select"].value
             sample_id = scope.sample_id if scope.one_sample else None
+            search_started = perf_counter() if started else 0
             if sample_id is not None:
                 completions = list(
                     availability_service.contigs_for_sample(
@@ -131,7 +143,9 @@ class AvailabilityController:
                 )
             else:
                 completions = _search("contigs", orig_contigs, search_term, preserve_contig)
+            search_seconds = perf_counter() - search_started if started else 0
 
+            filter_started = perf_counter() if started else 0
             filtered = get_filtering_filtered_pairs()
             if filtered is not None:
                 fsql, fparams = filtered["sql"], filtered["params"]
@@ -145,6 +159,9 @@ class AvailabilityController:
                         preserve=preserve_contig,
                     )
                 )
+            filter_seconds = perf_counter() - filter_started if started else 0
+            count_started = perf_counter() if started else 0
+            if filtered is not None:
                 if sample_id is None and scope.mag_name is None:
                     total_count = filtered.get("count_contigs", 0)
                 else:
@@ -157,8 +174,21 @@ class AvailabilityController:
                 total_count = len(widgets["mag_to_contigs"][scope.mag_name])
             else:
                 total_count = len(orig_contigs)
+            count_seconds = perf_counter() - count_started if started else 0
             result = AvailabilityResult(tuple(completions), total_count)
             _resolution_cache[cache_key] = result
+            if started:
+                elapsed = perf_counter() - started
+                query_count = getattr(getattr(availability_service, "repository", None), "query_count", 0)
+                print(
+                    f"[timing] Contig autocomplete resolver: query_chars={len(search_term)} cache=miss "
+                    f"one_sample={scope.one_sample} sample_selected={scope.sample_id is not None} "
+                    f"mag_selected={scope.mag_name is not None} filters={filtered is not None} "
+                    f"options={len(result.options)} queries={query_count - query_count_start} "
+                    f"search={search_seconds:.3f}s filtering={filter_seconds:.3f}s "
+                    f"count={count_seconds:.3f}s total={elapsed:.3f}s",
+                    flush=True,
+                )
             return result
 
         def _compute_contig_completions(search_term=""):

@@ -53,6 +53,7 @@ class SettingsCollectorBindings:
     translated_sequence_height_input: Any
     views: Any
     widgets: Any
+    freeze_gene_map_cbg: Any = None
 
 
 class SettingsCollector:
@@ -67,6 +68,7 @@ class SettingsCollector:
         db_path = bindings.db_path
         feature_label_select = bindings.feature_label_select
         feature_type_multichoice = bindings.feature_type_multichoice
+        freeze_gene_map_cbg = bindings.freeze_gene_map_cbg
         from_position_input = bindings.from_position_input
         genemap_height_input = bindings.genemap_height_input
         genome_master_cbg = bindings.genome_master_cbg
@@ -143,6 +145,7 @@ class SettingsCollector:
             "variables": serialize_variable_selection(widgets),
             "filtering": serialize_filter_sections(or_sections, inter_section_selects),
             "plotting_params": {
+                "freeze_gene_map": bool(freeze_gene_map_cbg.active) if freeze_gene_map_cbg is not None else False,
                 "show_subplot_titles": bool(show_subplot_titles_cbg.active),
                 "min_coverage_freq": min_coverage_freq_input.value,
                 "max_genemap_window": max_genemap_window_input.value,

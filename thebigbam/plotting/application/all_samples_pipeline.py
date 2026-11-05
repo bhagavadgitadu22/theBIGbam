@@ -41,6 +41,7 @@ def build_all_samples_plot(
     plot_translated_sequence=False,
     same_y_scale=False,
     show_subplot_titles=True,
+    freeze_gene_map=False,
     genemap_size=None,
     sequence_size=None,
     translated_sequence_size=None,
@@ -100,6 +101,7 @@ def build_all_samples_plot(
     genome_track_composer = GenomeTrackPipeline(conn)
     members = ((contig_id, contig_name, locus_size, 0),)
     supplemental_figures = []
+    annotation = None
     threshold = max_genemap_window if max_genemap_window is not None else DEFAULT_GENEMAP_WINDOW
     if genbank_path and end - start <= threshold:
         annotation = genome_track_composer.gene_map(
@@ -138,6 +140,8 @@ def build_all_samples_plot(
         grid = assemble_grid(
             [*supplemental_figures, *genome_figures, *sample_figures],
             show_subplot_titles=show_subplot_titles,
+            gene_map=annotation,
+            freeze_gene_map=freeze_gene_map,
         )
     if enable_timing:
         phases = ", ".join(f"{name}={seconds:.3f}s" for name, seconds in service.phase_seconds.items())

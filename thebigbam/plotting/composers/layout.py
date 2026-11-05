@@ -7,11 +7,30 @@ import time
 from bokeh.layouts import gridplot
 
 
-def assemble_grid(plots, *, empty_message="No plots to display", enable_timing=False, show_subplot_titles=True):
+def assemble_grid(
+    plots,
+    *,
+    empty_message="No plots to display",
+    enable_timing=False,
+    show_subplot_titles=True,
+    gene_map=None,
+    freeze_gene_map=False,
+):
     """Combine individual figures into the application's shared plot grid."""
     figures = [plot for plot in plots if plot is not None]
     if not figures:
         raise ValueError(empty_message)
+    frozen_gene_map = freeze_gene_map and gene_map is not None and any(plot is gene_map for plot in figures)
+    if frozen_gene_map:
+        # Keep the map inside the same Bokeh grid as the tracks so Bokeh
+        # computes their shared x-axis and frame geometry together.
+        gene_map.styles = {
+            **gene_map.styles,
+            "position": "sticky",
+            "top": "0px",
+            "z-index": "10",
+            "background-color": "white",
+        }
     # Keep the scrollbar at the visible left edge, with all plotting frames
     # in the next column so their genomic axes remain aligned.
     has_scrollbars = any(isinstance(plot, tuple) for plot in figures)

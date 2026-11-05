@@ -28,6 +28,7 @@ class ApplyBindings:
     enable_timing: Any
     feature_label_select: Any
     feature_type_multichoice: Any
+    freeze_gene_map_cbg: Any
     from_position_input: Any
     genemap_height_input: Any
     mag_params_category_select: Any

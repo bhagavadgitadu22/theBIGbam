@@ -121,6 +121,15 @@ def assemble_layout(
     placeholder = pn.Column(
         pn.pane.HTML(placeholder_text),
         sizing_mode="stretch_both",
+        width_policy="max",
+        styles={
+            "box-sizing": "border-box",
+            "height": "100vh",
+            "max-height": "100vh",
+            "min-height": "0",
+            "overflow-x": "hidden",
+            "overflow-y": "auto",
+        },
         css_classes=["main-right", "plot-area"],
     )
     left_toggle = pn.widgets.Button(
@@ -238,6 +247,7 @@ def assemble_layout(
         pn.pane.Bokeh(summary_carrier),
         right_shell,
         sizing_mode="stretch_both",
+        width_policy="max",
         css_classes=["main-layout"],
     )
     layout.stylesheets = [stylesheet]

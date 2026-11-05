@@ -51,7 +51,23 @@ class FilteringRepository:
 
     def _values(self, sql, parameters=()):
         self.query_count += 1
-        return tuple(row[0] for row in self.connection.execute(sql, parameters).fetchall())
+        started = time.perf_counter() if self.enable_timing else 0
+        rows = self.connection.execute(sql, parameters).fetchall()
+        if started:
+            self._log_query(sql, time.perf_counter() - started, len(rows))
+        return tuple(row[0] for row in rows)
+
+    @staticmethod
+    def _query_label(sql: str) -> str:
+        return " ".join(sql.split())[:100]
+
+    def _log_query(self, sql: str, elapsed: float, rows: int) -> None:
+        if self.enable_timing:
+            print(
+                f"[timing] Availability SQL: elapsed={elapsed:.3f}s rows={rows} "
+                f"statement={self._query_label(sql)!r}",
+                flush=True,
+            )
 
     def _bounded_names(
         self, table: str, column: str, search_term: str = "", preserve: str = ""
@@ -230,13 +246,15 @@ class FilteringRepository:
         )
         where = f" WHERE {' AND '.join(predicates)}" if predicates else ""
         self.query_count += 1
-        return int(
-            self.connection.execute(
-                f"SELECT COUNT(DISTINCT c.Contig_name) FROM ({sql}) f"
-                f" JOIN Contig c ON c.Contig_id = f.Contig_id{joins}{where}",
-                query_parameters,
-            ).fetchone()[0]
+        query = (
+            f"SELECT COUNT(DISTINCT c.Contig_name) FROM ({sql}) f"
+            f" JOIN Contig c ON c.Contig_id = f.Contig_id{joins}{where}"
         )
+        started = time.perf_counter() if self.enable_timing else 0
+        result = int(self.connection.execute(query, query_parameters).fetchone()[0])
+        if started:
+            self._log_query(query, time.perf_counter() - started, 1)
+        return result
 
     def filtered_samples(
         self,

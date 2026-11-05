@@ -355,6 +355,9 @@ class PlotPresenter:
                 bindings.command_hint_pane,
                 result.grid,
                 sizing_mode="stretch_both",
+                width_policy="max",
+                min_width=0,
+                styles={"box-sizing": "border-box", "min-width": "0", "width": "100%"},
                 css_classes=["benchmark-plot-result"],
             )
         ]

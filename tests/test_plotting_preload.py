@@ -1,4 +1,5 @@
 import duckdb
+import pytest
 
 from thebigbam.plotting.controls.base import build_controls
 from thebigbam.plotting.models.preload import PreloadedPlotData
@@ -208,4 +209,44 @@ def test_bam_metadata_adds_modules_without_writing_to_database(tmp_path, monkeyp
     assert data.read_module_variables["Long-reads"] == ("Read lengths",)
     assert data.read_colors["mismatches"] == "#5a0f0b"
     assert data.subplot_to_varnames["Read lengths"] == ["read_lengths"]
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("has_sample_table", [False, True])
+@pytest.mark.parametrize("has_mags", [False, True])
+def test_genome_only_preload_without_mapping_tables(tmp_path, has_sample_table, has_mags):
+    path = tmp_path / "genome-only.db"
+    _create_preload_database(path)
+    connection = duckdb.connect(str(path))
+    connection.execute("DROP TABLE Coverage")
+    if has_sample_table:
+        connection.execute("DELETE FROM Sample")
+    else:
+        connection.execute("DROP TABLE Sample")
+    connection.execute("DELETE FROM Variable")
+    connection.execute(
+        "INSERT INTO Variable VALUES ('Contig', 'Genome', 'GC content', 1, 'GC content', 'help', 'GC_content', 'dense')"
+    )
+    if has_mags:
+        connection.execute("CREATE TABLE Database_metadata (Key VARCHAR, Value VARCHAR)")
+        connection.execute("INSERT INTO Database_metadata VALUES ('View_mode', 'mag')")
+        connection.execute("CREATE TABLE MAG (MAG_id INTEGER, MAG_name VARCHAR)")
+        connection.execute("CREATE TABLE MAG_contigs_association (MAG_id INTEGER, Contig_id INTEGER)")
+        connection.execute("INSERT INTO MAG VALUES (1, 'm1')")
+        connection.execute("INSERT INTO MAG_contigs_association VALUES (1, 1), (1, 2)")
+    connection.close()
+    before = path.read_bytes()
+
+    data = PreloadRepository(str(path), scale_initializer=lambda _connection: None).load()
+    widgets = build_controls(data)
+
+    assert data.total_coverage_count == 0
+    assert data.samples == ()
+    assert not data.has_samples
+    assert data.has_mags == has_mags
+    assert data.mag_to_sample_ids == {}
+    assert data.mag_to_contigs == ({"m1": ["c2", "c1"]} if has_mags else {})
+    assert data.module_names == ("Genome",)
+    assert widgets["contig_select"].options == ["c1", "c2"]
+    assert widgets["sample_select"].options == []
     assert path.read_bytes() == before

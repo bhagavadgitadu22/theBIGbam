@@ -92,7 +92,7 @@ def test_bam_read_parameters_use_existing_row_sizes_and_defaults():
     )
     assert controls.read_section.visible
     assert controls.read_max_reads.value == 1000
-    assert controls.read_max_discrepancy_window.value == 10_000
+    assert controls.read_max_discrepancy_window.value == 1_000
     assert controls.read_max_discrepancy_window.width == 100
     assert controls.read_discrepancy_window_row.visible
     assert controls.read_max_reads.width == controls.genemap_height.width == 100

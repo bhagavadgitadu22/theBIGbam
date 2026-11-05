@@ -68,6 +68,7 @@ _ENUM_LABELS = {
 _SELECTION_ORDER = {"mag": 0, "contig": 1, "sample": 2}
 _DEFAULT_VALUES = {
     ("plotting_params", "min_coverage_freq"): DEFAULT_MIN_COVERAGE_FREQUENCY,
+    ("plotting_params", "freeze_gene_map"): False,
     ("plotting_params", "show_subplot_titles"): True,
     ("plotting_params", "max_genemap_window"): DEFAULT_GENEMAP_WINDOW,
     ("plotting_params", "max_sequence_window"): DEFAULT_SEQUENCE_WINDOW,

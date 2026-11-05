@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import dataclass
+from time import perf_counter
 from typing import Any, Callable
 
 from bokeh.io import curdoc
@@ -63,6 +64,7 @@ class SubjectBindings:
     sample_mag_categories: list[str]
     sample_current_categories: list[str]
     schedule_transition: Callable[[Callable[[], None]], None] = lambda callback: callback()
+    enable_timing: bool = False
 
 
 class SubjectController:
@@ -92,9 +94,29 @@ class SubjectController:
     def _search(self, widget: Any, compute: Callable[[str], list[str]], event: Any) -> None:
         if not self.bindings.interaction_lock["locked"]:
             request_nonce, query = decode_search_request(event.new)
-            self.bindings.push_completions(widget, compute(query))
-            widget.search_result_query = query
-            widget.search_result_nonce = request_nonce
+            started = perf_counter() if self.bindings.enable_timing and widget is self.bindings.widgets["contig_select"] else 0
+            try:
+                completions = compute(query)
+                self.bindings.push_completions(widget, completions)
+                widget.search_result_query = query
+                widget.search_result_nonce = request_nonce
+            except Exception:
+                if started:
+                    elapsed = perf_counter() - started
+                    print(
+                        f"[timing] Contig autocomplete response: nonce={request_nonce} "
+                        f"query_chars={len(query)} status=error elapsed={elapsed:.3f}s",
+                        flush=True,
+                    )
+                raise
+            if started:
+                elapsed = perf_counter() - started
+                print(
+                    f"[timing] Contig autocomplete response: nonce={request_nonce} "
+                    f"query_chars={len(query)} options={len(completions)} "
+                    f"status=queued elapsed={elapsed:.3f}s",
+                    flush=True,
+                )
 
     def sample_changed(self, event: Any) -> None:
         if self.bindings.interaction_lock["locked"]:

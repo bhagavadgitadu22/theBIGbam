@@ -1,8 +1,6 @@
-"""Candidate reuse preserves spatial sampling while bounding retained memory."""
+"""Candidate reuse preserves uniform sampling while bounding retained memory."""
 
-import math
 import random
-from collections import defaultdict
 from dataclasses import replace
 from pathlib import Path
 
@@ -28,39 +26,21 @@ def _candidates():
     return reads
 
 
-def _reference_sample(reads, end, limit):
-    """Full-population reference for the previous spatial round-robin rule."""
-    bins = defaultdict(list)
-    count = max(1, math.ceil(end / 1000))
-    quota = math.ceil(limit / count)
-    for read in reads:
-        bins[min(count - 1, read.start // 1000)].append(read)
-    def key(read):
-        return read_score(read), read_identity(read)
-    ranked = [sorted(bins[index], key=key)[:quota] for index in sorted(bins)]
-    selected = {}
-    for rank in range(quota):
-        for group in ranked:
-            if len(group) < rank + 1:
-                continue
-            if len(selected) < limit:
-                selected[read_identity(group[rank])] = group[rank]
-    for read in sorted(reads, key=key)[:limit]:
-        if len(selected) < limit:
-            selected.setdefault(read_identity(read), read)
-    return tuple(sorted(selected.values(), key=lambda read: (read.start, read.end, read.name, read.is_read1)))
+def _reference_sample(reads, limit):
+    """Full-population reference for stable hash-ranked uniform sampling."""
+    selected = sorted(reads, key=lambda read: (read_score(read), read_identity(read)))[:limit]
+    return tuple(sorted(selected, key=lambda read: (read.start, read.end, read.name, read.is_read1)))
 
 
-@pytest.mark.parametrize("end", [1_000_000, 100_000_000])
 @pytest.mark.parametrize("limit", [1, 10, 64, 128])
-def test_reservoir_preserves_full_population_selection(end, limit):
+def test_reservoir_preserves_full_population_selection(limit):
     reads = _candidates()
-    pool = build_read_pool(reads, 0, end, 128)
-    direct, total = sample_reads(reads, 0, end, limit)
-    reused, _ = sample_reads(pool.candidates, 0, end, limit)
-    assert reused == direct == _reference_sample(reads, end, limit)
+    pool = build_read_pool(reads, 128)
+    direct, total = sample_reads(reads, limit)
+    reused, _ = sample_reads(pool.candidates, limit)
+    assert reused == direct == _reference_sample(reads, limit)
     assert total == pool.fetched == len(reads)
-    assert len(pool.candidates) <= 3 * pool.capacity
+    assert len(pool.candidates) <= pool.capacity
 
 
 def test_count_changes_reuse_candidates_and_build_only_selected_summaries():
@@ -127,9 +107,9 @@ def test_candidate_hashes_are_reused(monkeypatch):
 
     monkeypatch.setattr("thebigbam.plotting.models.read_candidate.read_score", score)
     reads = _candidates()
-    pool = build_read_pool(reads, 0, 1_000_000, 128)
-    sample_reads(pool.candidates, 0, 1_000_000, 10)
-    sample_reads(pool.candidates, 0, 1_000_000, 100)
+    pool = build_read_pool(reads, 128)
+    sample_reads(pool.candidates, 10)
+    sample_reads(pool.candidates, 100)
     assert len(calls) == len(reads)
 
 

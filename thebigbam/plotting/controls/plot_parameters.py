@@ -38,6 +38,7 @@ class PlotParameterControls:
     separator: Any
     header: Any
     content: Any
+    freeze_gene_map: Any
     show_subplot_titles: Any
     min_coverage_freq: Any
     max_genemap_window: Any
@@ -120,6 +121,7 @@ def build_plot_parameter_controls(
         text="<span style='font-size: 1.2em;'><b>Plotting parameters</b></span>", align="center"
     )
     plotting_params_header = row(plotting_params_title, sizing_mode="stretch_width", align="center")
+    freeze_gene_map = CheckboxGroup(labels=["Freeze gene map"], active=[], margin=(5, 0, 5, 0))
     show_subplot_titles = CheckboxGroup(labels=["Show subplot titles"], active=[0], margin=(5, 0, 5, 0))
 
     ## Plotting parameters useful in both views
@@ -176,7 +178,7 @@ def build_plot_parameter_controls(
     )
     max_window_header, max_window_content = _collapsible_section(
         "Max window size for plotting",
-        [max_genemap_window_row, max_sequence_window_row, read_discrepancy_window_row, max_binning_window_row],
+        [max_genemap_window_row, max_sequence_window_row, max_binning_window_row, read_discrepancy_window_row],
         toggle_stylesheet,
         make_toggle_callback,
     )
@@ -218,7 +220,9 @@ def build_plot_parameter_controls(
         value=DEFAULT_SUBPLOT_HEIGHT, low=10, high=1000, step=10, width=100, margin=(0, 2, 0, 0)
     )
     subplot_height_label = Div(text="Per feature plot (px)", margin=(5, 0, 5, 5))
-    subplot_height_row = row(subplot_height_input, subplot_height_label, sizing_mode="stretch_width")
+    subplot_height_row = row(
+        subplot_height_input, subplot_height_label, sizing_mode="stretch_width", margin=(0, 0, 5, 0)
+    )
 
     read_plot_height_input = Spinner(value=DEFAULT_READ_PLOT_HEIGHT, low=100, high=2000, step=10,
                                      width=100, margin=(0, 2, 0, 0))
@@ -233,7 +237,7 @@ def build_plot_parameter_controls(
     plot_heights_header, plot_heights_content = _collapsible_section(
         "Plot heights",
         [genemap_height_row, sequence_height_row, translated_sequence_height_row,
-         read_plot_height_row, individual_read_height_row, subplot_height_row],
+         subplot_height_row, read_plot_height_row, individual_read_height_row],
         toggle_stylesheet,
         make_toggle_callback,
     )
@@ -447,6 +451,7 @@ def build_plot_parameter_controls(
     read_section = pn.Column(read_params_header, read_params_content,
                              sizing_mode="stretch_width", visible=include_read_plot)
     plotting_params_content = pn.Column(
+        freeze_gene_map,
         show_subplot_titles,
         min_coverage_freq_row,
         max_window_header,
@@ -470,6 +475,7 @@ def build_plot_parameter_controls(
         separator=separator_plotting_params,
         header=plotting_params_header,
         content=plotting_params_content,
+        freeze_gene_map=freeze_gene_map,
         show_subplot_titles=show_subplot_titles,
         min_coverage_freq=min_coverage_freq_input,
         max_genemap_window=max_genemap_window_input,

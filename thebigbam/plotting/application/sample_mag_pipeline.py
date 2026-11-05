@@ -178,6 +178,8 @@ def build_single_sample_plot(conn, request: SingleSampleCompositionRequest):
             top_plots + [annotation_fig] + subplots,
             enable_timing=enable_timing,
             show_subplot_titles=request.display.show_subplot_titles,
+            gene_map=annotation_fig,
+            freeze_gene_map=request.display.freeze_gene_map,
         )
     if enable_timing:
         print(f"[timing] single-sample phases: {phase_timings.format()}", flush=True)
@@ -378,6 +380,8 @@ def build_mag_plot(conn, request: MagCompositionRequest):
             empty_message="No plots to display for MAG view",
             enable_timing=enable_timing,
             show_subplot_titles=request.display.show_subplot_titles,
+            gene_map=annotation_fig,
+            freeze_gene_map=request.display.freeze_gene_map,
         )
     actual_contig_offsets = {name: off for name, _clen, off in members}
     mag_meta = {

@@ -79,19 +79,19 @@ def prepare_read_plot(request: ReadPlotRequest, cache: SessionDataCache | None =
                 source = filtered_candidates(source, request.filters, request.contig_length, request.circular, profiler)
             pool = build_read_pool(
                 source,
-                start, end, max(REUSABLE_READ_CAPACITY, request.max_reads) if cache is not None else request.max_reads,
+                max(REUSABLE_READ_CAPACITY, request.max_reads) if cache is not None else request.max_reads,
             )
             if cache is not None:
                 size = pool.retained_bytes()
                 while size > cache.max_retained_bytes and pool.capacity > request.max_reads:
                     capacity = max(request.max_reads, pool.capacity // 2)
-                    smaller = build_read_pool(pool.candidates, start, end, capacity)
+                    smaller = build_read_pool(pool.candidates, capacity)
                     pool = replace(smaller, fetched=pool.fetched)
                     size = pool.retained_bytes()
                 retained = cache.put(pool_key, pool, retained_bytes=size)
                 if profiler is not None:
                     profiler.count("candidate_cache_stores" if retained else "candidate_cache_oversize")
-        candidates, _ = sample_reads(pool.candidates, start, end, request.max_reads)
+        candidates, _ = sample_reads(pool.candidates, request.max_reads)
         count = pool.fetched
     except (OSError, ValueError) as error:
         if profiler is not None:
@@ -155,7 +155,7 @@ def _prepare_members(request, cache):
         if request.profiler is not None:
             request.profiler.add_time("member_coordinates", perf_counter() - started)
     started = perf_counter() if request.profiler is not None else 0
-    reads, _ = sample_reads(alignments, request.start - 1, request.end, request.max_reads)
+    reads, _ = sample_reads(alignments, request.max_reads)
     if request.profiler is not None:
         request.profiler.add_time("member_resampling", perf_counter() - started)
     return ReadPlotData(reads, fetched, "; ".join(messages) if messages else None, tuple(dict.fromkeys(warnings)), details_loaded)

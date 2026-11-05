@@ -713,6 +713,7 @@ def create_layout(
             contig_title=contig_title,
             sample_title=sample_title,
             mag_title=mag_title,
+            enable_timing=enable_timing,
         )
     )
     availability_facade.attach(availability_controller)
@@ -736,6 +737,7 @@ def create_layout(
             sample_mag_categories=_sample_mag_categories,
             sample_current_categories=_sample_sort_current_categories,
             schedule_transition=schedule_control_transition,
+            enable_timing=enable_timing,
         )
     )
     session_callbacks.attach_subject(subject_controller)

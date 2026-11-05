@@ -54,6 +54,7 @@ class SettingsRestoreBindings:
     translated_sequence_height_input: Any
     views: Any
     widgets: Any
+    freeze_gene_map_cbg: Any = None
 
 
 def _safe_restore(label, function) -> None:
@@ -359,6 +360,12 @@ def restore_settings(settings: Mapping[str, Any], bindings: SettingsRestoreBindi
 
     # 8. Plotting parameters
     pp = settings.get("plotting_params") or {}
+    freeze_gene_map_cbg = bindings.freeze_gene_map_cbg
+    if freeze_gene_map_cbg is not None:
+        _restore(
+            "plotting_params.freeze_gene_map",
+            lambda: setattr(freeze_gene_map_cbg, "active", [0] if pp.get("freeze_gene_map", False) else []),
+        )
     if show_subplot_titles_cbg is not None:
         _restore(
             "plotting_params.show_subplot_titles",

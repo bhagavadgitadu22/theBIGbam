@@ -82,6 +82,12 @@ class PreloadRepository:
             contig_name_to_id = {row[1]: row[0] for row in contig_rows}
             contig_id_to_name = {row[0]: row[1] for row in contig_rows}
 
+            has_coverage_table = (
+                self._execute(
+                    cursor, "SELECT 1 FROM information_schema.tables WHERE table_name = 'Coverage'"
+                ).fetchone()
+                is not None
+            )
             has_sample_table = (
                 self._execute(cursor, "SELECT 1 FROM information_schema.tables WHERE table_name = 'Sample'").fetchone()
                 is not None
@@ -110,8 +116,9 @@ class PreloadRepository:
                     "JOIN MAG_contigs_association mca ON mca.MAG_id = mg.MAG_id "
                     "JOIN Coverage p ON p.Contig_id = mca.Contig_id"
                 )
-                for mag_name, sample_id in self._execute(cursor, sql).fetchall():
-                    mag_to_sample_ids.setdefault(mag_name, set()).add(sample_id)
+                if has_mag_coverage or has_coverage_table:
+                    for mag_name, sample_id in self._execute(cursor, sql).fetchall():
+                        mag_to_sample_ids.setdefault(mag_name, set()).add(sample_id)
 
             tables = tuple(
                 row[0] for row in self._execute(cursor, "SELECT DISTINCT Feature_table_name FROM Variable").fetchall()
@@ -197,7 +204,9 @@ class PreloadRepository:
                         subplot_to_varnames[subplot].append(variable_name)
                     read_colors[variable_name] = color
                 read_module_variables = {module: tuple(choices) for module, choices in grouped.items()}
-            total_coverage_count = self._execute(cursor, "SELECT COUNT(*) FROM Coverage").fetchone()[0]
+            total_coverage_count = (
+                self._execute(cursor, "SELECT COUNT(*) FROM Coverage").fetchone()[0] if has_coverage_table else 0
+            )
             return PreloadedPlotData(
                 annotation_types=annotation_types,
                 has_mags=has_mags,
