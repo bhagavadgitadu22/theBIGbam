@@ -57,6 +57,8 @@ _SETTING_LABELS = {
     "mag_params": "MAG params",
     "sample_params": "Sample params",
     "read_plotting": "Read plotting",
+    "color_template": "Read color template",
+    "color_rules": "Read coloring rules",
     "feature_widgets": "Genome features",
     "coloring": "Coloring",
     "apply_annotation_rules_to_mag_track": "Apply annotation rules to MAG track",
@@ -84,6 +86,12 @@ _DEFAULT_VALUES = {
     ("plotting_params", "read_plotting", "enabled_all"): False,
     ("plotting_params", "read_plotting", "max_reads"): 1000,
     ("plotting_params", "read_plotting", "link_pairs"): False,
+    ("plotting_params", "read_plotting", "color_template"): "Alignment class",
+    ("plotting_params", "read_plotting", "color_rules"): [
+        {"field": "Alignment class", "operator": "=", "value": "Primary", "color": "#999999"},
+        {"field": "Alignment class", "operator": "=", "value": "Secondary", "color": "#1f77b4"},
+        {"field": "Alignment class", "operator": "=", "value": "Supplementary", "color": "#B45C1F"},
+    ],
     ("plotting_params", "read_plotting", "discrepancies"): [],
     ("plotting_params", "read_plotting", "plot_height"): DEFAULT_READ_PLOT_HEIGHT,
     ("plotting_params", "read_plotting", "read_height"): DEFAULT_INDIVIDUAL_READ_HEIGHT,
@@ -144,12 +152,31 @@ def _color_rules(value: Sequence[Any], path: tuple[str, ...]) -> list[HistoryDes
     return lines
 
 
+def _read_color_rules(value: Sequence[Any], path: tuple[str, ...]) -> list[HistoryDescriptionLine]:
+    lines = []
+    for index, rule in enumerate(value, start=1):
+        if not isinstance(rule, Mapping) or not _is_described_value(rule.get("field")):
+            continue
+        random = rule.get("operator") == "Use random colors"
+        if not random and not all(_is_described_value(rule.get(field)) for field in ("value", "color")):
+            continue
+        detail = "Use random colors" if random else f"{rule.get('operator') or '='} {rule['value']} · {rule['color']}"
+        lines.append(
+            HistoryDescriptionLine(
+                f"{'.'.join(path)}.#{index}",
+                f"Read coloring · #{index}: {rule['field']} {detail}",
+            )
+        )
+    return lines
+
+
 _MAPPING_FORMATTERS: dict[
     tuple[str, ...], Callable[[Mapping[str, Any], tuple[str, ...]], list[HistoryDescriptionLine]]
 ] = {("contig", "position_range"): _position_range}
 _LIST_FORMATTERS = {
     "custom_color_rows": _color_rules,
     "mag_track_color_rows": _color_rules,
+    "color_rules": _read_color_rules,
 }
 
 

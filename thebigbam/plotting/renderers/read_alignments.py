@@ -11,12 +11,16 @@ from bokeh.plotting import figure
 from ..models.read_plot import ReadPlotData, ReadPlotRequest
 from ..services.read_coordinates import wrap_interval
 from ..services.read_layout import pack_read_rows
+from ..shared.read_colors import READ_CLASS_COLORS
 from .clipboard import COPY_FEEDBACK_JS
 from .read_events import render_read_events
 from .read_scrollbar import scrollbar_html
 
-COLOR_VARIABLES = {"secondary": "secondary_reads", "supplementary": "supplementary_reads"}
-READ_CLASS_COLORS = {"secondary_reads": "#1f77b4", "supplementary_reads": "#B45C1F"}
+COLOR_VARIABLES = {
+    "primary": "primary_reads",
+    "secondary": "secondary_reads",
+    "supplementary": "supplementary_reads",
+}
 SELECTED_COLOR = "#e03131"
 READ_HIT_TEST_JS = """
     const x = cb_obj.x, y = cb_obj.y;
@@ -44,8 +48,10 @@ READ_HIT_TEST_JS = """
 """
 
 
-def _color(alignment_class: str, colors) -> str:
-    variable = COLOR_VARIABLES.get(alignment_class)
+def _color(read, colors) -> str:
+    if read.color:
+        return read.color
+    variable = COLOR_VARIABLES.get(read.alignment_class)
     return colors.get(variable, READ_CLASS_COLORS[variable]) if variable else "#999999"
 
 
@@ -142,7 +148,7 @@ def render_read_track(data: ReadPlotData, request: ReadPlotRequest, x_range: Ran
             y = layout.row_count - placed.row - 0.5
             half_body = visible.read_height / (2 * row_pitch)
             bottom, top = y - half_body, y + half_body
-            base_color = _color(read.alignment_class, visible.colors)
+            base_color = _color(read, visible.colors)
             color = base_color
             # Keep the alignment body continuous; discrepancy overlays can
             # later render CIGAR-specific gaps and events on top of it.

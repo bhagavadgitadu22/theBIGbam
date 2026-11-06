@@ -9,8 +9,9 @@ from bokeh.layouts import row
 from bokeh.models import CheckboxButtonGroup, CheckboxGroup, Div, InlineStyleSheet
 from bokeh.models.widgets import MultiChoice
 
-from ..shared.styles import section_separator
+from ..shared.styles import FIELD_LABEL_MARGIN, section_separator
 from .collapsible import build_collapsible
+from .read_color_rules import ReadColorRuleControls
 from .read_filters import ReadFilterControls
 
 
@@ -30,6 +31,7 @@ class ReadPlotControls:
     discrepancies: Any = None
     customise_header: Any = None
     customise_content: Any = None
+    color_rules: Any = None
 
 
 def build_read_plot_controls(
@@ -40,6 +42,7 @@ def build_read_plot_controls(
     stylesheet: Any = "",
     circular_available: bool = False,
     max_discrepancy_window: Any = None,
+    strand_colors: Any = None,
     toggle_stylesheet: Any = "",
     make_toggle_callback: Any = None,
 ) -> ReadPlotControls:
@@ -50,6 +53,9 @@ def build_read_plot_controls(
     all_reads = CheckboxButtonGroup(labels=["Read plot"], active=[], sizing_mode="stretch_width", visible=False)
     link_pairs = CheckboxGroup(labels=["Link paired reads"], active=[], sizing_mode="stretch_width")
     filters = ReadFilterControls(stylesheet, circular_available)
+    color_rules = ReadColorRuleControls(
+        stylesheet, circular_available=circular_available, strand_colors=strand_colors,
+    )
     filter_title = Div(text='<span title="These rules select alignments to include in the plot. The initial Alignment class = Primary rule shows primary alignments; add OR rules to include secondary or supplementary alignments. Read length includes soft/hard clips. Alignment length counts aligned query bases (M/I/=/X). '
                  'Read % aligned is 100 × exact matching bases / full read length, including clips. '
                  'Unknown percentages without sufficient CIGAR/MD/NM information do not match numeric comparisons. '
@@ -63,16 +69,19 @@ def build_read_plot_controls(
         filter_title, [filters.content], toggle_stylesheet, make_toggle_callback,
         slug="filter-reads", initially_open=True,
     )
+    discrepancies_label = Div(text="Discrepancies to plot:", margin=FIELD_LABEL_MARGIN)
     discrepancies = MultiChoice(
+        title="",
         options=["Clippings", "Insertions", "Deletions", "Mismatches"],
         value=[],
         placeholder="Choose discrepancies to plot",
         sizing_mode="stretch_width",
+        margin=FIELD_LABEL_MARGIN,
         stylesheets=[InlineStyleSheet(css=":host { background-color: white; }")],
     )
     customise_header, customise_content = build_collapsible(
-        "Customise reads",
-        [Div(text="Discrepancies to plot", margin=(5, 0, 2, 0)), discrepancies,
+        color_rules.title,
+        [color_rules.content, discrepancies_label, discrepancies,
          row(link_pairs, sizing_mode="stretch_width")],
         toggle_stylesheet,
         make_toggle_callback,
@@ -91,4 +100,4 @@ def build_read_plot_controls(
 
     return ReadPlotControls(section, add_reads, all_reads, max_reads, link_pairs, plot_height, read_height,
                             filters, max_discrepancy_window, filter_header, filter_content,
-                            discrepancies, customise_header, customise_content)
+                            discrepancies, customise_header, customise_content, color_rules)

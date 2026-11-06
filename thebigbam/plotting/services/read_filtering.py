@@ -2,6 +2,7 @@
 
 import math
 import operator
+import hashlib
 from time import perf_counter
 
 from ..models.read_filters import (
@@ -9,8 +10,11 @@ from ..models.read_filters import (
     READ_FILTER_CHOICES,
     READ_FILTER_FIELDS,
     READ_FILTER_LABELS,
+    READ_FILTER_CHOICES,
     read_filter_operators,
+    read_color_rule_operators,
 )
+from ..models.filters import FilterExpression, FilterPredicate, FilterSection
 
 COMPARISONS = {">": operator.gt, "<": operator.lt, "=": operator.eq, "!=": operator.ne}
 
@@ -70,7 +74,7 @@ def _non_inward(read, length, circular):
     return not inward
 
 
-def _value(read, field, length, circular):
+def read_filter_value(read, field, length, circular):
     if field == "Read length":
         return read.lengths[0]
     if field == "Alignment length":
@@ -114,29 +118,100 @@ def _fold(functions, connectors, read):
     return result
 
 
+def _compile_predicate(field, operator_name, value, length, circular):
+    if field == "Alignment includes":
+        position, negate = int(float(value)), operator_name == "!="
+        return lambda read: _includes(read, position, length, circular) != negate
+    expected = (
+        _boolean(value)
+        if field in BOOLEAN_READ_FILTERS
+        else value if field in READ_FILTER_CHOICES
+        else float(value)
+    )
+    compare = COMPARISONS[operator_name]
+
+    def predicate(read):
+        actual = read_filter_value(read, field, length, circular)
+        return actual is not None and compare(actual, expected)
+
+    return predicate
+
+
+def compile_read_predicate(field, operator_name, value, length, circular):
+    """Compile one validated read filter/color rule to a reusable predicate."""
+    validate_read_filters(FilterExpression((FilterSection((
+        FilterPredicate("Reads", field, operator_name, value),
+    )),)))
+    return _compile_predicate(field, operator_name, value, length, circular)
+
+
+def validate_read_color_rules(rules):
+    """Validate color predicates before any BAM scan starts."""
+    for rule in rules:
+        if rule.field not in READ_FILTER_FIELDS or rule.operator not in read_color_rule_operators(rule.field):
+            raise ValueError(f"Unsupported read color rule: {rule.field} {rule.operator}.")
+        if rule.operator == "Use random colors":
+            continue
+        if rule.field in READ_FILTER_CHOICES:
+            if rule.operator in ("=", "!=") and rule.value not in READ_FILTER_CHOICES[rule.field]:
+                raise ValueError(f"Invalid value for read color rule {rule.field}: {rule.value}.")
+            if rule.value in (None, ""):
+                raise ValueError(f"Read color rule {rule.field} requires a value.")
+            continue
+        if rule.field in BOOLEAN_READ_FILTERS:
+            _boolean(rule.value)
+            continue
+        try:
+            number = float(rule.value)
+        except (TypeError, ValueError) as error:
+            raise ValueError(f"Read color rule {rule.field} requires a number.") from error
+        if not math.isfinite(number):
+            raise ValueError(f"Read color rule {rule.field} requires a finite number.")
+        if rule.field == "Alignment includes" and (number < 1 or not number.is_integer()):
+            raise ValueError("Alignment includes requires a positive integer position.")
+
+
+def compile_read_color_rule(rule, length, circular):
+    """Compile a color rule to a function returning its color on a match."""
+    validate_read_color_rules((rule,))
+    field, operator_name, expected = rule.field, rule.operator, rule.value
+    if operator_name != "Use random colors" and field not in (set(READ_FILTER_CHOICES) | BOOLEAN_READ_FILTERS):
+        expected = float(expected)
+
+    def color_for(read):
+        if field == "Alignment includes":
+            matched = _includes(read, int(expected), length, circular)
+            if operator_name == "!=":
+                matched = not matched
+            return rule.color if matched else None
+        actual = read_filter_value(read, field, length, circular)
+        if actual is None:
+            return None
+        if operator_name == "Use random colors":
+            digest = hashlib.sha256(str(actual).encode()).hexdigest()
+            return f"#{digest[:6]}"
+        if operator_name in ("has", "has not"):
+            contains = str(expected).lower() in str(actual).lower()
+            matched = contains if operator_name == "has" else not contains
+        else:
+            comparison = COMPARISONS.get(operator_name)
+            if comparison is None:
+                return None
+            matched = comparison(actual, expected)
+        return rule.color if matched else None
+
+    return color_for
+
+
 def compile_read_filters(expression, length, circular):
     validate_read_filters(expression)
     sections, connectors = [], []
     for index, section in enumerate(expression.sections):
         predicates = []
         for rule in section.predicates:
-            if rule.column == "Alignment includes":
-                position, negate = int(float(rule.value)), rule.operator == "!="
-                predicates.append(lambda read, position=position, negate=negate: _includes(read, position, length, circular) != negate)
-            else:
-                expected = (
-                    _boolean(rule.value)
-                    if rule.column in BOOLEAN_READ_FILTERS
-                    else rule.value if rule.column in READ_FILTER_CHOICES
-                    else float(rule.value)
-                )
-                compare = COMPARISONS[rule.operator]
-
-                def predicate(read, field=rule.column, expected=expected, compare=compare):
-                    actual = _value(read, field, length, circular)
-                    return actual is not None and compare(actual, expected)
-
-                predicates.append(predicate)
+            predicates.append(_compile_predicate(
+                rule.column, rule.operator, rule.value, length, circular,
+            ))
         if predicates:
             if sections:
                 connectors.append(expression.connectors[index - 1])

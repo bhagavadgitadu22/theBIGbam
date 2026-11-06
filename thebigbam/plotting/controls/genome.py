@@ -17,7 +17,7 @@ from bokeh.models.widgets import (
     TextInput,
 )
 
-from ..shared.styles import bokeh_control_row
+from ..shared.styles import FIELD_LABEL_MARGIN, bokeh_control_row
 from .collapsible import build_collapsible as _build_collapsible
 from .color_rules import build_color_rule_controls
 
@@ -249,7 +249,7 @@ def build_genome_controls(
             if template_select is not None:
                 customise_children.append(template_select)
             if template_select is not None or color_qualifier_options:
-                customise_children.append(Div(text="Color annotations with:"))
+                customise_children.append(Div(text="Color annotations with:", margin=FIELD_LABEL_MARGIN))
             if color_qualifier_options:
                 customise_children.append(custom_color_column)
             customise_header, customise_content = _build_collapsible(

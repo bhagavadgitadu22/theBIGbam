@@ -10,7 +10,7 @@ from typing import Any, Callable, ClassVar, Generic, TypeVar
 import panel as pn
 
 from ..models.filters import FilterExpression
-from ..services.read_filtering import validate_read_filters
+from ..services.read_filtering import validate_read_color_rules, validate_read_filters
 from ..shared.defaults import DEFAULT_READ_DISCREPANCY_WINDOW
 from ..shared.styles import panel_control_row
 from ..shared.timing import estimate_grid_data_size, rss_mb
@@ -143,6 +143,7 @@ class ApplyRequestBuilder:
                 return ValidationFailure("Read discrepancies window must be at least 1 bp.")
             try:
                 validate_read_filters(getattr(inputs.read_plot, "filters", FilterExpression(())))
+                validate_read_color_rules(getattr(inputs.read_plot, "color_rules", ()))
             except ValueError as error:
                 return ValidationFailure(str(error))
             is_all = mode in (ApplyMode.CONTIG_ALL, ApplyMode.MAG_ALL)

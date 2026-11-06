@@ -15,6 +15,14 @@ from .read_events import ReadEvent
 
 
 @dataclass(frozen=True)
+class ReadColorRule:
+    field: str
+    operator: str
+    value: Any
+    color: str
+
+
+@dataclass(frozen=True)
 class ReadPlotOptions:
     enabled: bool = False
     max_reads: int = 1000
@@ -24,6 +32,7 @@ class ReadPlotOptions:
     event_variables: frozenset[str] = frozenset()
     filters: FilterExpression = FilterExpression(())
     max_discrepancy_window: int = DEFAULT_READ_DISCREPANCY_WINDOW
+    color_rules: tuple[ReadColorRule, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -47,6 +56,7 @@ class ReadPlotRequest:
     circular: bool = False
     filters: FilterExpression = FilterExpression(())
     max_discrepancy_window: int = DEFAULT_READ_DISCREPANCY_WINDOW
+    color_rules: tuple[ReadColorRule, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -74,6 +84,7 @@ class ReadAlignment:
     is_paired: bool
     events: tuple[ReadEvent, ...] = ()
     alignment_id: tuple | None = field(default=None, compare=False, repr=False)
+    color: str | None = None
 
 
 @dataclass(frozen=True)

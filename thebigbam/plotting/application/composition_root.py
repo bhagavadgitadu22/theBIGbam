@@ -1046,12 +1046,22 @@ def create_layout(
         sizing_mode="stretch_width",
         margin=0,
     )
+    read_strand_colors = {
+        str(variable): str(color)
+        for variable, color in conn.execute(
+            "SELECT Variable_name, Color FROM Variable "
+            "WHERE Variable_name IN ('primary_reads_plus_only', 'primary_reads_minus_only')"
+        ).fetchall()
+        if color
+    } if bam_catalog is not None else {}
+    widgets["read_strand_colors"] = read_strand_colors
     read_plot_controls = (
         build_read_plot_controls(
             max_reads=plot_parameters.read_max_reads,
             plot_height=plot_parameters.read_plot_height,
             read_height=plot_parameters.individual_read_height,
             max_discrepancy_window=plot_parameters.read_max_discrepancy_window,
+            strand_colors=read_strand_colors,
             toggle_stylesheet=toggle_stylesheet,
             make_toggle_callback=make_toggle_callback,
             stylesheet=stylesheet,

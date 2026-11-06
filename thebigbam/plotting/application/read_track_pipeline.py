@@ -1,9 +1,10 @@
 """Compose BAM tracks for ordered samples in contig or concatenated MAG coordinates."""
 
 from ..models.read_plot import ReadPlotRequest, ReadTrackConfig
-from ..renderers.read_alignments import READ_CLASS_COLORS, render_read_track
+from ..renderers.read_alignments import render_read_track
 from ..services.read_plots import prepare_read_plot
 from ..shared.read_diagnostics import ReadProfiler
+from ..shared.read_colors import READ_CLASS_COLORS
 
 ALL_READ_CLASSES = frozenset(("primary", "secondary", "supplementary"))
 
@@ -11,8 +12,9 @@ ALL_READ_CLASSES = frozenset(("primary", "secondary", "supplementary"))
 def read_track_config(inputs, widgets, *, diagnose=False, reference_source=None):
     if not inputs.read_plot.enabled:
         return None
+    colors = {**READ_CLASS_COLORS, **widgets.get("read_strand_colors", {})}
     return ReadTrackConfig(inputs.read_plot, widgets["bam_catalog"], ALL_READ_CLASSES,
-                           READ_CLASS_COLORS, diagnose, reference_source)
+                           colors, diagnose, reference_source)
 
 
 def read_plot_request(config, sample, members, x_range):
@@ -34,6 +36,7 @@ def read_plot_request(config, sample, members, x_range):
         event_variables=options.event_variables,
         filters=options.filters,
         max_discrepancy_window=options.max_discrepancy_window,
+        color_rules=options.color_rules,
         reference_source=config.reference_source,
         circular=bool(
             bam.circular

@@ -14,10 +14,42 @@ from ..shared.read_identity import read_identity
 from .read_discrepancies import add_read_discrepancies
 from .read_event_coordinates import project_events
 from .read_filtering import filtered_candidates
-from .read_sampling import build_read_pool, sample_reads
+from .read_filtering import compile_read_color_rule
+from .read_sampling import ReadPool, build_read_pool, sample_reads
 from .read_summaries import summarize_candidate
 
 REUSABLE_READ_CAPACITY = 10_000
+
+
+def _contained_candidate_pool(cache, pool_key, request, start, end):
+    """Reuse a complete cached pool when it covers the requested interval."""
+    if cache is None:
+        return None
+    matches = cache.get_matching(
+        lambda key, pool: (
+            isinstance(key, tuple)
+            and len(key) == len(pool_key)
+            and key[0:4] == pool_key[0:4]
+            and key[6:] == pool_key[6:]
+            and key[4] <= start
+            and key[5] >= end
+            and isinstance(pool, ReadPool)
+            and pool.fetched <= pool.capacity
+        )
+    )
+    if not matches:
+        return None
+    # Prefer the tightest containing interval to keep the in-memory subset work small.
+    _, source = min(matches, key=lambda item: item[0][5] - item[0][4])
+    length = request.contig_length
+
+    def overlaps(read):
+        if read.start < end and read.end > start:
+            return True
+        return bool(request.circular and read.end > length and read.end - length > start)
+
+    candidates = tuple(read for read in source.candidates if overlaps(read))
+    return ReadPool(candidates, len(candidates), max(1, len(candidates)))
 
 
 def _fingerprint(path: str) -> tuple[int, int]:
@@ -42,10 +74,17 @@ def prepare_read_plot(request: ReadPlotRequest, cache: SessionDataCache | None =
     end = min(request.contig_length, request.end)
     if end <= start:
         return ReadPlotData((), 0, "Select a valid contig interval to show reads.")
+    needs_matching = any(
+        rule.column == "Read % aligned" for section in request.filters.sections for rule in section.predicates
+    ) or any(rule.field == "Read % aligned" for rule in request.color_rules)
     region_key = (request.bam_path, _fingerprint(request.bam_path), request.contig,
-                  start, end, tuple(sorted(request.classes)), request.circular, request.filters)
+                  start, end, tuple(sorted(request.classes)), request.circular, request.filters, needs_matching)
     reference_identity = id(getattr(request.reference_source, "conn", request.reference_source))
-    key = ("read_plot", *region_key, request.max_reads, tuple(sorted(request.event_variables)), reference_identity)
+    color_key = tuple(
+        (rule.field, rule.operator, rule.value, rule.color) for rule in request.color_rules
+    )
+    key = ("read_plot", *region_key, request.max_reads, tuple(sorted(request.event_variables)),
+           color_key, reference_identity)
     if cache is not None:
         found, value = cache.get(key)
         if request.profiler is not None:
@@ -59,6 +98,8 @@ def prepare_read_plot(request: ReadPlotRequest, cache: SessionDataCache | None =
         found, cached_pool = cache.get(pool_key)
         if found and (cached_pool.capacity >= request.max_reads or len(cached_pool.candidates) == cached_pool.fetched):
             pool = cached_pool
+        if pool is None:
+            pool = _contained_candidate_pool(cache, pool_key, request, start, end)
         if profiler is not None:
             profiler.count("candidate_cache_hits" if pool is not None else "candidate_cache_misses")
     started = perf_counter() if profiler is not None else 0
@@ -70,8 +111,7 @@ def prepare_read_plot(request: ReadPlotRequest, cache: SessionDataCache | None =
                 request.bam_path, request.contig, start, end, request.classes,
                 **({"profiler": profiler} if profiler is not None else {}),
                 **({"circular_length": request.contig_length} if request.circular else {}),
-                **({"include_matching": True} if any(rule.column == "Read % aligned"
-                    for section in request.filters.sections for rule in section.predicates) else {}),
+                **({"include_matching": True} if needs_matching else {}),
             )
             if profiler is not None:
                 source = timed_bam_reads(source, profiler)
@@ -103,7 +143,16 @@ def prepare_read_plot(request: ReadPlotRequest, cache: SessionDataCache | None =
             filter_elapsed = profiler.seconds.get("read_filtering", 0) - filter_before
             profiler.add_time("sampling", max(0, perf_counter() - started - scan_elapsed - filter_elapsed))
     summary_started = perf_counter() if profiler is not None else 0
-    reads = tuple(summarize_candidate(read) for read in candidates)
+    color_predicates = tuple(
+        compile_read_color_rule(rule, request.contig_length, request.circular)
+        for rule in request.color_rules
+    )
+
+    def summarize(read):
+        color = next((matched for color_rule in color_predicates if (matched := color_rule(read)) is not None), None)
+        return summarize_candidate(read, color)
+
+    reads = tuple(summarize(read) for read in candidates)
     if profiler is not None:
         profiler.add_time("bam_summary", perf_counter() - summary_started)
         profiler.count("summaries_built", len(reads))

@@ -96,6 +96,7 @@ def collect_apply_inputs(bindings) -> ApplyInputs:
             ),
             max_discrepancy_window=int(discrepancy_window.value) if discrepancy_window is not None and discrepancy_window.value is not None else DEFAULT_READ_DISCREPANCY_WINDOW,
             filters=(read_controls.filters.expression() if getattr(read_controls, "filters", None) is not None else FilterExpression(())),
+            color_rules=read_controls.color_rules.rules(),
         )
     if (
         bindings.apply_annotation_rules_cbg is not None

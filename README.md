@@ -35,6 +35,7 @@ See the [changelog](CHANGELOG.md) for changes in each release.
       - [MAG view](#mag-view)
       - [Plotting](#plotting)
       - [Adaptive resolution rendering](#adaptive-resolution-rendering)
+      - [Plotting reads alongside alignment summaries](#plotting-reads-alongside-alignment-summaries)
   * [Mapping](#mapping)
     + [Mapping with circular genome support](#mapping-with-circular-genome-support)
 - [Additional utilities](#additional-utilities)
@@ -391,7 +392,7 @@ When BAM files are provided, a **Read plotting** section appears below the **Var
 
 ![image](https://raw.githubusercontent.com/bhagavadgitadu22/theBIGbam/master/docs/images/VISUALIZATION_READS.png)
 
-A multiselect menu allows you to display discrepancies between reads and the reference sequence, including **deletions, insertions, mismatches, and soft/hard clippings**.
+As with the gene map, custom coloring rules can be defined for individual reads. In addition, discrepancies between reads and the reference sequence can be highlighted, including **deletions, insertions, mismatches, and soft/hard clippings**.
 
 To avoid overcrowding the plots, a maximum of **1,000 reads** are randomly subsampled by default. This limit can be adjusted in the **Plotting parameters** section, along with the overall read plot height and individual read height.
 

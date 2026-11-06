@@ -7,7 +7,12 @@ from typing import Any, Callable
 import panel as pn
 from bokeh.models.widgets import Select
 
-from ..shared.styles import ACTION_CONTROL_MARGIN, panel_control_row, panel_stylesheet
+from ..shared.styles import (
+    ACTION_CONTROL_MARGIN,
+    FILTER_ACTION_ROW_MARGIN,
+    panel_control_row,
+    panel_stylesheet,
+)
 
 
 class FilterSectionController:
@@ -81,7 +86,7 @@ class FilterSectionController:
                     sizing_mode="stretch_width",
                     height=30,
                     control_gap=0,
-                    margin=(3, 0, 6, 0),
+                    margin=FILTER_ACTION_ROW_MARGIN,
                     css_classes=["nested-control-row", "filter-action-row"],
                     stylesheets=[panel_stylesheet(self._stylesheet)],
                 )
@@ -108,7 +113,7 @@ class FilterSectionController:
                     sizing_mode="stretch_width",
                     height=30,
                     control_gap=0,
-                    margin=(3, 0, 6, 0),
+                    margin=FILTER_ACTION_ROW_MARGIN,
                     css_classes=["nested-control-row", "filter-action-row"],
                     stylesheets=[panel_stylesheet(self._stylesheet)],
                 ),
@@ -119,7 +124,7 @@ class FilterSectionController:
                     sizing_mode="stretch_width",
                     height=30,
                     control_gap=0,
-                    margin=(3, 0, 6, 0),
+                    margin=FILTER_ACTION_ROW_MARGIN,
                     css_classes=["nested-control-row", "filter-action-row"],
                     stylesheets=[panel_stylesheet(self._stylesheet)],
                 ),
@@ -161,7 +166,9 @@ class FilterSectionController:
         for index, section in enumerate(self.sections):
             if index:
                 value = old_values[index - 1] if index - 1 < len(old_values) else "AND"
-                connector = Select(options=["AND", "OR"], value=value, height=30, margin=0)
+                connector = Select(
+                    options=["AND", "OR"], value=value, height=30, margin=FILTER_ACTION_ROW_MARGIN
+                )
                 connector.on_change("value", lambda attr, old, new: self._on_change())
                 self.inter_section_selects.append(connector)
                 children.append(connector)

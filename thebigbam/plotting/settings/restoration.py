@@ -320,11 +320,15 @@ def restore_settings(settings: Mapping[str, Any], bindings: SettingsRestoreBindi
             if operator != "Use random colors":
                 widget = row_data["input_ref"]["widget"]
                 value = saved_rule.get("value")
+                if qualifier == "Strand" and value in (1, "1", "+1", "+"):
+                    value = "Forward"
+                elif qualifier == "Strand" and value in (-1, "-1", "-"):
+                    value = "Reverse"
 
                 def _set_color_value(widget=widget, value=value):
                     if isinstance(widget, SearchableSelect) and value:
                         widget.search_query = str(value)
-                    widget.value = value
+                    widget.value = str(value) if isinstance(widget, SearchableSelect) else value
 
                 _restore(f"{label} value", _set_color_value)
                 color = saved_rule.get("color")
@@ -393,6 +397,16 @@ def restore_settings(settings: Mapping[str, Any], bindings: SettingsRestoreBindi
     read_controls = widgets.get("read_plot_controls")
     read_saved = pp.get("read_plotting") or {}
     if read_controls is not None:
+        if getattr(read_controls, "color_rules", None) is not None:
+            template = read_saved.get("color_template", read_saved.get("color_by", "Alignment class"))
+            if template not in read_controls.color_rules.template_select.options:
+                _warn("plotting_params.read_plotting.color_template", f"'{template}' is not available")
+                template = "Alignment class"
+            saved_rules = read_saved.get("color_rules") if "color_rules" in read_saved else None
+            _restore(
+                "plotting_params.read_plotting.color_rules",
+                lambda: read_controls.color_rules.restore(template, saved_rules),
+            )
         if "filters" in read_saved and getattr(read_controls, "filters", None) is not None:
             _restore("plotting_params.read_plotting.filters", lambda: read_controls.filters.restore(read_saved["filters"]))
         if "discrepancies" in read_saved and read_controls.discrepancies is not None:

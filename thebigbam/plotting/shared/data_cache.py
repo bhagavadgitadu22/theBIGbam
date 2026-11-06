@@ -38,6 +38,14 @@ class SessionDataCache:
         self._values.move_to_end(key)
         return True, self._values[key]
 
+    def get_matching(self, predicate) -> tuple[tuple[Hashable, Any], ...]:
+        """Return cached entries matching a caller-owned key predicate, newest last."""
+        matches = [(key, value) for key, value in self._values.items() if predicate(key, value)]
+        for key, _ in matches:
+            self.hits += 1
+            self._values.move_to_end(key)
+        return tuple(matches)
+
     def _remove(self, key: Hashable) -> None:
         self._values.pop(key)
         self.retained_bytes -= self._weights.pop(key, 0)

@@ -10,6 +10,8 @@ from bokeh.models import Div, Spacer, Tooltip
 
 CONTROL_GAP_PX = 4
 ACTION_CONTROL_MARGIN = (0, 0, 0, CONTROL_GAP_PX)
+FIELD_LABEL_MARGIN = (5, 0, 2, 0)
+FILTER_ACTION_ROW_MARGIN = (3, 0, 6, 0)
 
 
 def section_separator() -> Div:

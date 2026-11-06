@@ -18,3 +18,14 @@ def read_filter_operators(field):
     if field in SINGLE_VALUE_READ_FILTERS:
         return ["="]
     return ["=", "!="] if field == "Alignment includes" else [">", "<", "=", "!="]
+
+
+def read_color_rule_operators(field):
+    """Operators available to color rules, independently of read filters."""
+    if field == "Alignment includes":
+        return ["=", "!="]
+    if field in READ_FILTER_CHOICES:
+        return ["=", "!=", "has", "has not", "Use random colors"]
+    if field in BOOLEAN_READ_FILTERS:
+        return ["=", "!=", "Use random colors"]
+    return [">", "<", "=", "!=", "Use random colors"]

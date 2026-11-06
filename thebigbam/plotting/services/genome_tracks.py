@@ -123,7 +123,7 @@ class GenomeTrackService:
                 "locus_tag": locus,
                 "Main_isoform": main_isoform,
                 "Type": feature_type,
-                "Strand": strand,
+                "Strand": "Forward" if strand is not None and int(strand) > 0 else "Reverse" if strand is not None else None,
                 **extra.get(int(aid), {}),
             }
             color = None

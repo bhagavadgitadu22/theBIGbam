@@ -9,7 +9,7 @@ import panel as pn
 from bokeh.models import Div
 from bokeh.models.widgets import ColorPicker, Select, Spinner
 
-from ..shared.styles import panel_control_row, panel_stylesheet
+from ..shared.styles import FIELD_LABEL_MARGIN, panel_control_row, panel_stylesheet
 from .distinct_value_select import build_distinct_value_select
 from .searchable_select import SearchableSelect
 
@@ -44,7 +44,7 @@ def build_color_rule_controls(
             value="(none)",
             options=["(none)", *color_templates],
             sizing_mode="stretch_width",
-            margin=0,
+            margin=FIELD_LABEL_MARGIN,
             css_classes=["sidebar-field"],
         )
 
@@ -87,6 +87,17 @@ def build_color_rule_controls(
         that separates it from the color picker.
         """
         if is_text:
+            if column == "Strand":
+                return SearchableSelect(
+                    name=name,
+                    value="",
+                    options=["Forward", "Reverse"],
+                    placeholder="Choose strand...",
+                    allow_custom=operator in ("has", "has not"),
+                    sizing_mode="stretch_width",
+                    margin=0,
+                    css_classes=["responsive-field", "color-value"],
+                ), False
             # Substring operators retain server suggestions while accepting a
             # literal value that isn't one of the complete distinct values.
             return build_distinct_value_select(
@@ -214,7 +225,7 @@ def build_color_rule_controls(
         def update_color_input_widget(col_name):
             """Rebuild operator options and the value widget for the new column type."""
             col_info = annotation_meta.get(col_name, {})
-            is_text = col_info.get("type") == "text"
+            is_text = col_name == "Strand" or col_info.get("type") == "text"
 
             # Swap operator options for the new type; preserve current operator
             # if still valid, otherwise default back to "=".
@@ -238,7 +249,7 @@ def build_color_rule_controls(
 
         def on_operator_change(attr, old, new):
             col_info = annotation_meta.get(qualifier_select.value, {})
-            is_text = col_info.get("type") == "text"
+            is_text = qualifier_select.value == "Strand" or col_info.get("type") == "text"
             use_random = new == "Use random colors"
 
             # Rebuild only when the selection/free-text mode changes, and keep
