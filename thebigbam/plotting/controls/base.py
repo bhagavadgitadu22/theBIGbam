@@ -9,11 +9,12 @@ from ..shared.defaults import AUTOCOMPLETE_LIMIT
 from .searchable_select import SearchableSelect
 
 
-def build_controls(preloaded: PreloadedPlotData, *, include_read_variables: bool = False):
+def build_controls(preloaded: PreloadedPlotData, bam_samples=()):
     """Create core selection widgets without performing database queries."""
     mags = preloaded.mags
     contigs = preloaded.contigs
-    samples = preloaded.samples
+    bam_only_samples = not preloaded.samples and bool(bam_samples)
+    samples = preloaded.samples or (tuple(bam_samples) if bam_only_samples else ())
     mag_select = SearchableSelect(
         name="benchmark-mag-select",
         value=mags[0] if len(mags) == 1 else "",
@@ -54,14 +55,13 @@ def build_controls(preloaded: PreloadedPlotData, *, include_read_variables: bool
         margin=0,
     )
     db_modules = dict(zip(preloaded.module_names, preloaded.module_variables))
-    read_modules = preloaded.read_module_variables if include_read_variables else {}
     module_names = list(preloaded.module_names)
-    module_names.extend(module for module in read_modules if module not in db_modules)
+    if bam_only_samples:
+        module_names = []
     module_order = {name: index for index, name in enumerate(
         ("Genome", "Coverage", "Misalignment", "RNA", "Long-reads", "Paired-reads", "Phage termini")
     )}
     module_names.sort(key=lambda name: module_order.get(name, len(module_order)))
-    db_subplots = frozenset(subplot for choices in preloaded.module_variables for subplot in choices)
     module_widgets_one = []
     variables_widgets_one = []
     variables_widgets_all = []
@@ -69,7 +69,7 @@ def build_controls(preloaded: PreloadedPlotData, *, include_read_variables: bool
     help_by_module = dict(zip(preloaded.module_names, preloaded.module_helps))
     for module in module_names:
         db_variables = db_modules.get(module, ())
-        variables = tuple(dict.fromkeys((*db_variables, *read_modules.get(module, ()))))
+        variables = db_variables
         help_text = help_by_module.get(module, "")
         module_widgets_one.append(CheckboxGroup(name=f"benchmark-module-{module}", labels=[module], active=[]))
         variables_widgets_one.append(
@@ -95,9 +95,6 @@ def build_controls(preloaded: PreloadedPlotData, *, include_read_variables: bool
         "mags": mags,
         "has_mags": preloaded.has_mags,
         "module_names": tuple(module_names),
-        "db_subplots": db_subplots,
-        "read_subplots": frozenset(subplot for choices in read_modules.values() for subplot in choices),
-        "read_colors": preloaded.read_colors if include_read_variables else {},
         "subplot_to_varnames": preloaded.subplot_to_varnames,
         "module_widgets_one": module_widgets_one,
         "helps_widgets": helps_widgets,
@@ -109,4 +106,5 @@ def build_controls(preloaded: PreloadedPlotData, *, include_read_variables: bool
         "custom_contig_subplots": preloaded.custom_contig_subplots,
         "annotation_types": preloaded.annotation_types,
         "has_samples": preloaded.has_samples,
+        "bam_only_samples": bam_only_samples,
     }

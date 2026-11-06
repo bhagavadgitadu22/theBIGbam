@@ -381,6 +381,24 @@ The binning resolution depends on the window size:
 
 When zooming or panning, you need to re-click **APPLY** to refresh the plots with the current window size. For more information consult [the visualization section](docs/VISUALIZATION.md).
 
+#### Plotting reads alongside alignment summaries
+
+The `serve` command accepts a BAM file or a directory containing BAM files via `-b / --bam_files`. This allows individual reads to be visualized alongside alignment summaries, similarly to [IGV](https://igv.org/), helping investigate unusual mapping patterns that are difficult to interpret from summary statistics alone. 
+
+BAM files should be the same as those used to populate the database, or at least retain the same filenames to ensure that each sample is correctly associated with its BAM file. BAM files can also be provided when serving a database containing no samples. In this case, the **Samples** list is automatically populated from the provided BAM files.
+
+When BAM files are provided, a **Read plotting** section appears below the **Variables** section. This section provides several filters to select which reads mapped to a given reference in a given sample should be displayed. For example, on the figure below, we selected only long reads between 24 and 27 kbp because they exhibited an unusual mapping pattern: many reads had this specific length and nearly all of them aligned to the same start and end positions without covering the entire phage genome. 
+
+![image](https://raw.githubusercontent.com/bhagavadgitadu22/theBIGbam/master/docs/images/VISUALIZATION_READS.png)
+
+A multiselect menu allows you to display discrepancies between reads and the reference sequence, including **deletions, insertions, mismatches, and soft/hard clippings**.
+
+To avoid overcrowding the plots, a maximum of **1,000 reads** are randomly subsampled by default. This limit can be adjusted in the **Plotting parameters** section, along with the overall read plot height and individual read height.
+
+Read plotting is also available in **All Samples** mode and **MAG view**.
+
+Unlike theBIGbam databases, which are designed for compact storage and efficient querying, directly accessing BAM files is more computationally expensive. Each query requires reading and decompressing the relevant portions of the BAM file to retrieve reads aligned to the selected reference. Consequently, read plotting is best suited for smaller datasets, as large BAM files can substantially slow down the interface. For larger datasets, theBIGbam's precomputed, position-level alignment summaries provide a much faster alternative for exploring mapping patterns.
+
 ## Mapping
 
 TheBIGbam is not a read aligner: it relies on [minimap2](https://github.com/lh3/minimap2) or [bwa-mem2](https://github.com/bwa-mem2/bwa-mem2) for alignment, applying minimal modifications to generate output compatible with `thebigbam calculate` command. `thebigbam mapping-per-sample` command produces sorted, indexed BAM files with MD tags. 

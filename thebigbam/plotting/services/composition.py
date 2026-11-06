@@ -64,7 +64,7 @@ class CompositionDataService:
         if request.is_all:
             if self.composition_repository is None:
                 raise ValueError("A composition repository is required for all-sample MAG plots")
-            samples = self.ordered_mag_samples(request, context.mag_id)
+            samples = [] if request.bam_only_samples else self.ordered_mag_samples(request, context.mag_id)
         elif sample_id is not None:
             samples = [(sample_id, request.sample_name)]
         else:

@@ -32,8 +32,6 @@ class PreloadedPlotData(Mapping[str, Any]):
     total_coverage_count: int
     filter_encode: Mapping[str, Any]
     mag_to_contig_offsets: dict[str, dict[str, int]] = field(default_factory=dict)
-    read_module_variables: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
-    read_colors: Mapping[str, str] = field(default_factory=dict)
 
     def __getitem__(self, key: str) -> Any:
         try:

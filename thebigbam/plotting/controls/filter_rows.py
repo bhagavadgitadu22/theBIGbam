@@ -6,7 +6,7 @@ from typing import Any, Callable, Mapping
 
 import panel as pn
 from bokeh.io import curdoc
-from bokeh.models.widgets import Select, Spinner
+from bokeh.models.widgets import Select, Spinner, TextInput
 
 from ..renderers.filter_distributions import FilterVisualizations
 from ..shared.styles import panel_control_row, panel_stylesheet
@@ -188,6 +188,7 @@ class FilterRowFactory:
         # Determine initial column type
         initial_col_info = self.filtering_metadata.get(initial_category, {}).get("columns", {}).get(initial_column, {})
         initial_is_text = initial_col_info.get("type") == "text"
+        initial_is_bam_field = initial_col_info.get("source") == "BAMSample"
 
         # First level select (categories)
         category_select = Select(
@@ -211,7 +212,11 @@ class FilterRowFactory:
 
         # Comparison operator select - "=" and "!=" for text, all operators for numeric
         _default_operator = "=" if initial_is_text else ">"
-        _initial_ops = ["=", "!=", "has", "has not"] if initial_is_text else ["=", ">", "<", "!="]
+        _initial_ops = (
+            ["="] if initial_is_bam_field and initial_col_info.get("is_bool")
+            else ["=", "!=", "has", "has not"] if initial_is_text
+            else ["=", ">", "<", "!="]
+        )
         if initial_operator is not None and initial_operator in _initial_ops:
             _default_operator = initial_operator
         comparison_select = Select(
@@ -231,6 +236,25 @@ class FilterRowFactory:
         )
 
         def make_searchable_input(category, column, *, allow_custom=False):
+            info = self.filtering_metadata.get(category, {}).get("columns", {}).get(column, {})
+            if info.get("source") == "BAMSample":
+                if info.get("is_bool"):
+                    widget = Select(
+                        name=f"benchmark-filter-{row_index}-value",
+                        options=[("", "Choose..."), ("yes", "Yes"), ("no", "No")],
+                        value="",
+                        sizing_mode="stretch_width",
+                        margin=0,
+                    )
+                else:
+                    widget = TextInput(
+                        name=f"benchmark-filter-{row_index}-value",
+                        placeholder="Value...",
+                        sizing_mode="stretch_width",
+                        margin=0,
+                    )
+                widget.on_change("value", lambda attr, old, new: self.refresh())
+                return widget
             return build_distinct_value_select(
                 self.metadata_service,
                 category,
@@ -250,7 +274,7 @@ class FilterRowFactory:
                 allow_custom=_default_operator in ("has", "has not"),
             )
             input_container.objects = [initial_input]
-            initial_is_panel = True
+            initial_is_panel = not initial_is_bam_field
         else:
             _enc_scale = self.filter_encode.get(initial_column)
             _step = 1.0 / _enc_scale if _enc_scale else 1
@@ -306,12 +330,16 @@ class FilterRowFactory:
             category = category_select.value
             col_info = self.filtering_metadata.get(category, {}).get("columns", {}).get(col_name, {})
             is_text = col_info.get("type") == "text"
+            is_bam_field = col_info.get("source") == "BAMSample"
 
             # --- synchronous: update comparison + input widget (no DB) ---
             input_update_state["active"] = True
             try:
                 if is_text:
-                    comparison_select.options = ["=", "!=", "has", "has not"]
+                    comparison_select.options = (
+                        ["="] if is_bam_field and col_info.get("is_bool")
+                        else ["=", "!=", "has", "has not"]
+                    )
                     if comparison_select.value not in comparison_select.options:
                         comparison_select.value = "="
                 else:
@@ -321,16 +349,15 @@ class FilterRowFactory:
             finally:
                 input_update_state["active"] = False
 
+            is_bam_field = col_info.get("source") == "BAMSample"
             if is_text:
                 current_op = comparison_select.value
                 searchable_input = make_searchable_input(
-                    category,
-                    col_name,
-                    allow_custom=current_op in ("has", "has not"),
+                    category, col_name, allow_custom=current_op in ("has", "has not")
                 )
                 input_container.objects = [searchable_input]
                 current_input_ref["widget"] = searchable_input
-                current_input_ref["is_panel"] = True
+                current_input_ref["is_panel"] = not is_bam_field
             else:
                 _enc_scale = self.filter_encode.get(col_name)
                 _step = 1.0 / _enc_scale if _enc_scale else 1
@@ -452,7 +479,7 @@ class FilterRowFactory:
             col_info = self.filtering_metadata.get(category, {}).get("columns", {}).get(col_name, {})
             is_text = col_info.get("type") == "text"
 
-            if is_text:
+            if is_text and col_info.get("source") != "BAMSample":
                 current = current_input_ref["widget"]
                 allow_custom = new in ("has", "has not")
                 if not isinstance(current, SearchableSelect) or current.allow_custom != allow_custom:
@@ -480,6 +507,16 @@ class FilterRowFactory:
             stylesheets=[panel_stylesheet(self.stylesheet)],
             css_classes=["responsive-action", "filter-lookup", f"benchmark-filter-{row_index}-lookup"],
         )
+        def update_lookup_visibility(attr, old, new):
+            del attr, old, new
+            info = self.filtering_metadata.get(category_select.value, {}).get("columns", {}).get(
+                subcategory_select.value, {}
+            )
+            dist_toggle.visible = info.get("source") != "BAMSample"
+
+        category_select.on_change("value", update_lookup_visibility)
+        subcategory_select.on_change("value", update_lookup_visibility)
+        update_lookup_visibility(None, None, None)
 
         # Remove button (Panel button for proper dynamic event handling)
         minus_btn = pn.widgets.Button(

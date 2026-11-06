@@ -297,28 +297,12 @@ mod python {
         Ok((positions, values))
     }
 
-    /// Canonical read-display variable metadata, including modules absent from a database.
-    #[pyfunction]
-    fn read_plot_variables() -> Vec<(String, String, String, i32, String)> {
-        super::VARIABLES.iter()
-            .filter(|variable| variable.module != "Genome")
-            .map(|variable| (
-                variable.module.to_string(),
-                variable.subplot.to_string(),
-                variable.name.to_string(),
-                variable.module_order,
-                variable.color.to_string(),
-            ))
-            .collect()
-    }
-
     /// theBIGbam Rust bindings for Python.
     #[pymodule]
     fn thebigbam_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add_function(wrap_pyfunction!(process_all_samples, m)?)?;
         m.add_function(wrap_pyfunction!(decode_dense_chunk, m)?)?;
         m.add_function(wrap_pyfunction!(decode_sparse_chunk, m)?)?;
-        m.add_function(wrap_pyfunction!(read_plot_variables, m)?)?;
         m.add("__doc__", "theBIGbam Rust bindings - fast BAM processing")?;
         Ok(())
     }

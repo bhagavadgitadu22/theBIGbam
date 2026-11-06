@@ -81,3 +81,4 @@ class MagCompositionRequest:
     data_cache: Any = field(default=None, compare=False, repr=False)
     profiler: Any = field(default=None, compare=False, repr=False)
     read_tracks: ReadTrackConfig | None = None
+    bam_only_samples: bool = False

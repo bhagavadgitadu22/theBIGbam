@@ -178,6 +178,7 @@ class SettingsCollector:
                 "enabled_all": 0 in read_controls.all_reads.active,
                 "max_reads": read_controls.max_reads.value,
                 "link_pairs": 0 in read_controls.link_pairs.active,
+                "discrepancies": list(read_controls.discrepancies.value),
                 "plot_height": read_controls.plot_height.value,
                 "read_height": read_controls.read_height.value,
                 "filters": read_controls.filters.serialize() if getattr(read_controls, "filters", None) is not None else [],

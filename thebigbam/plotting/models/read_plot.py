@@ -19,7 +19,6 @@ class ReadPlotOptions:
     enabled: bool = False
     max_reads: int = 1000
     link_pairs: bool = False
-    selected_subplots: tuple[str, ...] = ()
     plot_height: int = DEFAULT_READ_PLOT_HEIGHT
     read_height: int = DEFAULT_INDIVIDUAL_READ_HEIGHT
     event_variables: frozenset[str] = frozenset()

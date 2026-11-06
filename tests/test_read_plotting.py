@@ -3,18 +3,14 @@
 from __future__ import annotations
 
 from pathlib import Path
-from types import SimpleNamespace
-
 from bokeh.models import CheckboxGroup, Div, HoverTool, RadioButtonGroup, Range1d, Select, Spinner
 
 from thebigbam.plotting.composers.layout import assemble_grid
-from thebigbam.plotting.controls.base import build_controls
 from thebigbam.plotting.controls.read_plotting import build_read_plot_controls
 from thebigbam.plotting.models.read_plot import ReadAlignment, ReadPlotRequest
 from thebigbam.plotting.renderers.read_alignments import SELECTED_COLOR, render_read_alignments, render_read_track
 from thebigbam.plotting.services.read_layout import pack_read_rows
 from thebigbam.plotting.services.read_plots import prepare_read_plot
-from thebigbam.plotting.services.read_selection import database_features, read_classes_for_subplots
 from thebigbam.plotting.shared.data_cache import SessionDataCache
 from thebigbam.plotting.shared.lifecycle import PlotLifecycle
 
@@ -24,35 +20,6 @@ CONTIG = "NC_002167.1"
 
 def _read(name: str, start: int, end: int, *, first: bool = False, paired: bool = False) -> ReadAlignment:
     return ReadAlignment(name, start, end, ((start, end),), True, "primary", 60, f"{end-start}M", None, first, paired)
-
-
-def test_bam_only_variable_choices_stay_out_of_database_features():
-    preloaded = SimpleNamespace(
-        mags=(), contigs=("c1",), samples=("s1",), has_mags=False,
-        module_names=("Genome",), module_variables=(("GC content",),), module_helps=("",),
-        read_module_variables={"Coverage": ("Primary alignments", "Other alignments"),
-                               "Misalignment": ("Clippings", "Indels", "Mismatches")},
-        read_colors={"secondary_reads": "#123456"},
-        subplot_to_varnames={
-            "Primary alignments": ["primary_reads"],
-            "Other alignments": ["secondary_reads", "supplementary_reads"],
-        },
-        contig_name_to_id={}, contig_id_to_name={}, sample_name_to_id={}, sample_id_to_name={},
-        mag_to_contigs={}, contig_to_mag={}, mag_to_sample_ids={}, mag_to_contig_offsets={},
-        custom_contig_subplots=(), annotation_types=(), has_samples=True, contig_lengths={"c1": 100},
-    )
-    widgets = build_controls(preloaded, include_read_variables=True)
-
-    assert widgets["module_names"] == ("Genome", "Coverage", "Misalignment")
-    assert widgets["variables_widgets_one"][1].labels == ["Primary alignments", "Other alignments"]
-    assert widgets["variables_widgets_all"][1].labels == ["Primary alignments", "Other alignments"]
-    assert database_features(
-        ["GC content", "Primary alignments", "Mismatches"],
-        widgets["db_subplots"], widgets["read_subplots"],
-    ) == ["GC content"]
-    assert read_classes_for_subplots(
-        ("Primary alignments", "Other alignments"), widgets["subplot_to_varnames"]
-    ) == frozenset({"primary", "secondary", "supplementary"})
 
 
 def test_read_controls_default_off_and_follow_sample_availability():
@@ -118,24 +85,12 @@ def test_no_selected_read_class_shows_actionable_empty_state():
     data = prepare_read_plot(request)
 
     assert data.alignments == ()
-    assert "Select a read alignment class" in data.message
+    assert data.message == "No read alignment classes were requested."
     plot, scrollbar = render_read_track(data, request, Range1d(1, 500))
     message = plot.renderers[3]
     assert message.data_source.data["y"] == [(plot.y_range.start + plot.y_range.end) / 2]
     assert message.glyph.text_baseline == "middle"
     assert not scrollbar.visible
-
-
-def test_primary_reads_require_primary_or_strand_subplot():
-    variables = {
-        "Primary alignments": ["primary_reads"],
-        "Alignments by strand": ["primary_reads_plus_only", "primary_reads_minus_only"],
-        "Other alignments": ["secondary_reads", "supplementary_reads"],
-    }
-    assert read_classes_for_subplots((), variables) == frozenset()
-    assert read_classes_for_subplots(("Other alignments",), variables) == frozenset({"secondary", "supplementary"})
-    assert read_classes_for_subplots(("Alignments by strand",), variables) == frozenset({"primary"})
-    assert read_classes_for_subplots(("Primary alignments",), variables) == frozenset({"primary"})
 
 
 def test_read_height_arrow_geometry_and_unlimited_window(monkeypatch):

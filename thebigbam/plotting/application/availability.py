@@ -131,7 +131,9 @@ class AvailabilityController:
             preserve_contig = widgets["contig_select"].value
             sample_id = scope.sample_id if scope.one_sample else None
             search_started = perf_counter() if started else 0
-            if sample_id is not None:
+            if widgets.get("bam_only_samples"):
+                completions = _bounded(orig_contigs, search_term, preserve_contig)
+            elif sample_id is not None:
                 completions = list(
                     availability_service.contigs_for_sample(
                         sample_id, search_term, preserve_contig, scope.mag_name
@@ -168,6 +170,8 @@ class AvailabilityController:
                     total_count = availability_service.count_filtered_contigs(
                         fsql, fparams, sample_id=sample_id, mag_name=scope.mag_name
                     )
+            elif widgets.get("bam_only_samples"):
+                total_count = len(orig_contigs)
             elif sample_id is not None:
                 total_count = availability_service.count_contigs_for_sample(sample_id, scope.mag_name)
             elif scope.mag_name:
@@ -216,7 +220,9 @@ class AvailabilityController:
             preserve_sort_sample = mag_params_sort_sample_select.value
             contig_id = scope.contig_id if scope.one_sample else None
             scoped_mag = scope.mag_name if contig_id is None else None
-            if contig_id is not None:
+            if widgets.get("bam_only_samples"):
+                completions = _bounded(orig_samples, search_term, preserve_sample)
+            elif contig_id is not None:
                 completions = list(
                     availability_service.samples_for_contig(contig_id, search_term, preserve_sample)
                 )
@@ -254,6 +260,8 @@ class AvailabilityController:
                     total_count = availability_service.count_filtered_samples(
                         fsql, fparams, contig_id=contig_id, mag_name=scoped_mag
                     )
+            elif widgets.get("bam_only_samples"):
+                total_count = len(orig_samples)
             elif contig_id is not None:
                 total_count = availability_service.count_samples_for_contig(contig_id)
             elif scope.one_sample and scope.mag_name:

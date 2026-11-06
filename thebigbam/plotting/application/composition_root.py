@@ -3,6 +3,7 @@
 import json
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -36,6 +37,7 @@ from ..repositories.preload import PreloadRepository
 from ..services.filter_metadata import FilterMetadataService
 from ..services.filter_query import FilterQueryBuilder
 from ..services.filtering import FilterExpressionService, FilteringAvailabilityService
+from ..services.bam_sample_filters import expression_requires_bam_counts, filtering_metadata_for_mode
 from ..settings.history import HistoryEntry
 from ..settings.history_descriptions import HistoryDescriptionContext
 from ..settings.scenario import ScenarioRecorder
@@ -78,6 +80,7 @@ _estimate_grid_data_size = estimate_grid_data_size
 
 _TIMING = None
 _current_op: str = "idle"
+_BAM_COUNT_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="thebigbam-bam-count")
 
 
 def _set_current_operation(operation: str) -> None:
@@ -179,11 +182,11 @@ def _start_rss_watchdog(interval: int = 5) -> None:
     start_rss_watchdog(lambda: _current_op, interval)
 
 
-def preload_db_data(db_path, enable_timing=False, include_read_variables=False):
+def preload_db_data(db_path, enable_timing=False):
     """Run all expensive DB queries once at startup. Returns a dict of pure data."""
     started = time.perf_counter()
     repository = PreloadRepository(db_path)
-    preloaded = repository.load(include_read_variables=include_read_variables)
+    preloaded = repository.load()
     if enable_timing:
         elapsed = time.perf_counter() - started
         print(
@@ -304,7 +307,14 @@ def create_layout(
     conn = duckdb.connect(db_path, read_only=True)
     filtering_repository = FilteringRepository(conn, enable_timing=enable_timing)
     availability_service = FilteringAvailabilityService(filtering_repository)
-    widgets = build_controls(preloaded, include_read_variables=bam_catalog is not None)
+    widgets = build_controls(
+        preloaded,
+        bam_samples=tuple(bam_catalog.by_sample) if bam_catalog is not None else (),
+    )
+    if widgets["bam_only_samples"]:
+        sample_ids = filtering_repository.configure_bam_samples(bam_catalog, widgets["samples"])
+        widgets["sample_name_to_id"] = sample_ids
+        widgets["sample_id_to_name"] = {sample_id: name for name, sample_id in sample_ids.items()}
 
     _sync_from_to_for_selected_contig = session_callbacks.sync_selected_contig_position
 
@@ -384,7 +394,9 @@ def create_layout(
         css_classes=["section-header"],
     )
 
-    filtering_metadata = preloaded["filtering_metadata"]
+    filtering_metadata = filtering_metadata_for_mode(
+        preloaded["filtering_metadata"], bam_only=widgets.get("bam_only_samples", False)
+    )
     filter_metadata_service = FilterMetadataService(
         FilterMetadataRepository(db_path, filtering_metadata, enable_timing=enable_timing),
         SERVER_HISTOGRAM_CACHE,
@@ -472,9 +484,15 @@ def create_layout(
         widgets=widgets,
         expression_service=FilterExpressionService(
             filtering_repository,
-            FilterQueryBuilder(filtering_metadata, preloaded.filter_encode, has_samples=widgets["has_samples"]),
+            FilterQueryBuilder(
+                filtering_metadata,
+                preloaded.filter_encode,
+                has_samples=widgets["has_samples"],
+                bam_sample_mode=widgets.get("bam_only_samples", False),
+            ),
             has_mags=widgets["has_mags"],
         ),
+        filtering_metadata=filtering_metadata,
         metadata_service=filter_metadata_service,
         refresh=mark_filters_dirty,
         make_toggle_callback=make_toggle_callback,
@@ -506,6 +524,7 @@ def create_layout(
         margin=(8, 0, 3, 0),
     )
     filter_ui.update({"apply": filter_apply_button})
+    filter_count_status = Div(text="", visible=False, margin=(0, 0, 4, 0))
 
     def _apply_filters_clicked():
         if not filter_panel.projection.has_pending_changes():
@@ -538,7 +557,36 @@ def create_layout(
                 interactions.end()
                 mark_filters_dirty()
 
-        curdoc().add_next_tick_callback(_run)
+        doc = curdoc()
+        draft_expression = filter_panel.projection.draft_expression()
+        if widgets.get("bam_only_samples") and expression_requires_bam_counts(draft_expression):
+            catalog = widgets.get("bam_catalog")
+            if catalog is not None:
+                filter_count_status.text = "Counting primary BAM records before applying filters…"
+                filter_count_status.visible = True
+                future = _BAM_COUNT_EXECUTOR.submit(
+                    lambda: [catalog.primary_read_summary(name) for name in catalog.by_sample]
+                )
+
+                def _counts_ready(done):
+                    def _continue_on_document_thread():
+                        try:
+                            done.result()
+                            filtering_repository.update_bam_sample_counts(catalog)
+                        except Exception as error:
+                            filter_count_status.text = f"Could not count BAM records: {error}"
+                            interactions.end()
+                            mark_filters_dirty()
+                            return
+                        filter_count_status.text = ""
+                        filter_count_status.visible = False
+                        _run()
+
+                    doc.add_next_tick_callback(_continue_on_document_thread)
+
+                future.add_done_callback(_counts_ready)
+                return True
+        doc.add_next_tick_callback(_run)
         return True
 
     filter_apply_button.on_click(lambda _event: _apply_filters_clicked())
@@ -551,6 +599,7 @@ def create_layout(
     )
     filtering_content = pn.Column(
         filter_panel.content,
+        filter_count_status,
         filter_apply_row,
         sizing_mode="stretch_width",
     )
@@ -570,7 +619,16 @@ def create_layout(
 
     def _get_filtered_samples_for_contig(contig):
         contig_id = widgets["contig_name_to_id"].get(contig)
-        if not widgets["has_samples"] or contig_id is None:
+        if contig_id is None:
+            return []
+        if widgets.get("bam_only_samples"):
+            filtering = get_filtering_filtered_pairs()
+            if filtering is None:
+                return list(widgets["samples"])
+            return list(availability_service.filtered_samples(
+                filtering["sql"], filtering["params"], contig_id=contig_id, limit=None,
+            ))
+        if not widgets["has_samples"]:
             return []
         result = list(filtering_repository.samples_for_contig_unbounded(contig_id))
         filtering = get_filtering_filtered_pairs()
@@ -591,6 +649,13 @@ def create_layout(
         return result
 
     def _get_filtered_samples_for_mag(mag_name):
+        if widgets.get("bam_only_samples"):
+            filtering = get_filtering_filtered_pairs()
+            if filtering is None:
+                return list(widgets["samples"])
+            return list(availability_service.filtered_samples(
+                filtering["sql"], filtering["params"], mag_name=mag_name, limit=None,
+            ))
         sample_ids = widgets["mag_to_sample_ids"].get(mag_name, set())
         result = [sample for sample in orig_samples if widgets["sample_name_to_id"].get(sample) in sample_ids]
         filtering = get_filtering_filtered_pairs()
@@ -984,14 +1049,20 @@ def create_layout(
     read_plot_controls = (
         build_read_plot_controls(
             max_reads=plot_parameters.read_max_reads,
-            link_pairs=plot_parameters.read_link_pairs,
             plot_height=plot_parameters.read_plot_height,
             read_height=plot_parameters.individual_read_height,
             max_discrepancy_window=plot_parameters.read_max_discrepancy_window,
             toggle_stylesheet=toggle_stylesheet,
             make_toggle_callback=make_toggle_callback,
             stylesheet=stylesheet,
-            circular_available=bool(GenomeTrackRepository(conn).circular_samples(tuple(bam_catalog.by_sample))),
+            circular_available=(
+                any(bam.available and bam.circular for bam in bam_catalog.by_sample.values())
+                if widgets.get("bam_only_samples")
+                else bool(GenomeTrackRepository(conn).circular_samples(tuple(
+                    name for name, bam in bam_catalog.by_sample.items()
+                    if bam.available and name in preloaded.sample_name_to_id
+                )))
+            ),
         )
         if bam_catalog is not None
         else None
@@ -999,6 +1070,9 @@ def create_layout(
     widgets["bam_catalog"] = bam_catalog
     widgets["read_plot_controls"] = read_plot_controls
     if read_plot_controls is not None:
+        variables_section_one.children.append(read_plot_controls.add_reads)
+        variables_section_all.children.append(read_plot_controls.all_reads)
+
         def update_read_toggle(_attr, _old, _new):
             read_plot_controls.add_reads.visible = views.active == 0
             read_plot_controls.all_reads.visible = views.active == 1
@@ -1040,7 +1114,9 @@ def create_layout(
     )
     session_callbacks.attach_scope(scope_transition)
     if read_plot_controls is not None:
-        read_plot_controls.all_reads.on_change("active", scope_transition.read_plot_changed)
+        read_plot_controls.all_reads.on_change(
+            "active", scope_transition.variable_callback(read_plot_controls.all_reads)
+        )
     controller = scope_transition.plot_controller
     for variable_group in widgets["variables_widgets_all"]:
         variable_group.on_change("active", scope_transition.variable_callback(variable_group))
@@ -1088,6 +1164,7 @@ def create_layout(
             read_section=read_plot_controls.section if read_plot_controls is not None else None,
         ),
         has_samples=widgets["has_samples"],
+        bam_only_samples=widgets.get("bam_only_samples", False),
         summary_carrier=summary_carrier,
         stylesheet=stylesheet,
         timing_models=(timing_relay.ping, timing_relay.ack),

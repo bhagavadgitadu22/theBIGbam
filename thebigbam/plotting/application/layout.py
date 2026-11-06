@@ -58,6 +58,7 @@ def assemble_layout(
     summary_carrier: Any,
     stylesheet: Any,
     history_drawer: Any,
+    bam_only_samples: bool = False,
     timing_models: tuple[Any, ...] = (),
 ) -> AssembledLayout:
     filtering_separator = separator()
@@ -95,6 +96,7 @@ def assemble_layout(
     else:
         children = [
             parts.logo,
+            *([parts.sample_scope] if bam_only_samples else []),
             parts.filtering_header,
             parts.filtering_content,
             parts.mag_separator,
@@ -105,6 +107,8 @@ def assemble_layout(
             parts.contig_header,
             parts.contig_select,
             parts.below_contig_content,
+            *([parts.sample_section, variable_separator, parts.variables_one, parts.variables_all]
+              if bam_only_samples else []),
             *([parts.read_section] if parts.read_section is not None else []),
             parts.plotting_separator,
             parts.plotting_header,

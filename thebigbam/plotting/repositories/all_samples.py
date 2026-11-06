@@ -49,6 +49,8 @@ class AllSamplesRepository(FeatureRepository):
         return [(int(sid), str(name)) for sid, name in rows]
 
     def order_samples(self, contig_id, samples, ordering):
+        if not samples:
+            return []
         source = ordering.source or "Sample"
         column = ordering.column
         if not _IDENTIFIER.fullmatch(source) or not _IDENTIFIER.fullmatch(column):

@@ -16,6 +16,7 @@ from .read_events import render_read_events
 from .read_scrollbar import scrollbar_html
 
 COLOR_VARIABLES = {"secondary": "secondary_reads", "supplementary": "supplementary_reads"}
+READ_CLASS_COLORS = {"secondary_reads": "#1f77b4", "supplementary_reads": "#B45C1F"}
 SELECTED_COLOR = "#e03131"
 READ_HIT_TEST_JS = """
     const x = cb_obj.x, y = cb_obj.y;
@@ -45,7 +46,7 @@ READ_HIT_TEST_JS = """
 
 def _color(alignment_class: str, colors) -> str:
     variable = COLOR_VARIABLES.get(alignment_class)
-    return colors.get(variable, "#999999") if variable else "#999999"
+    return colors.get(variable, READ_CLASS_COLORS[variable]) if variable else "#999999"
 
 
 def _cigar_preview(cigar: str) -> str:

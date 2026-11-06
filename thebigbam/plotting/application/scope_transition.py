@@ -70,16 +70,17 @@ class ScopeTransitionController:
             bindings = self.bindings
             if bindings.interaction_lock["locked"] or bindings.sample_scope.active != 1:
                 return
-            reads = bindings.widgets.get("read_plot_controls")
-            if reads is not None and 0 in reads.all_reads.active:
-                return
             added = set(new or ()) - set(old or ())
             selected = next(iter(added)) if added else (new[-1] if new else None)
+            groups = list(bindings.widgets["variables_widgets_all"])
+            reads = bindings.widgets.get("read_plot_controls")
+            if reads is not None:
+                groups.append(reads.all_reads)
             document = curdoc()
             document.hold("combine")
             bindings.interaction_lock["locked"] = True
             try:
-                for other in bindings.widgets["variables_widgets_all"]:
+                for other in groups:
                     target = [selected] if other is group and selected is not None else []
                     if other.active != target:
                         other.active = target
@@ -88,22 +89,6 @@ class ScopeTransitionController:
                 document.unhold()
 
         return callback
-
-    def read_plot_changed(self, attr: str, old: list[int], new: list[int]) -> None:
-        """Leaving read mode clears the multi-selection before exclusivity resumes."""
-        if 0 not in old or 0 in new:
-            return
-        bindings = self.bindings
-        document = curdoc()
-        document.hold("combine")
-        was_locked = bindings.interaction_lock["locked"]
-        bindings.interaction_lock["locked"] = True
-        try:
-            for group in bindings.widgets["variables_widgets_all"]:
-                group.active = []
-        finally:
-            bindings.interaction_lock["locked"] = was_locked
-            document.unhold()
 
     def view_changed(self, attr: str, old: int, new: int) -> None:
         bindings = self.bindings

@@ -27,7 +27,7 @@ def _fingerprint(path: str) -> tuple[int, int]:
 
 def prepare_read_plot(request: ReadPlotRequest, cache: SessionDataCache | None = None) -> ReadPlotData:
     if not request.classes:
-        return ReadPlotData((), 0, "Select a read alignment class in Variables to show reads.")
+        return ReadPlotData((), 0, "No read alignment classes were requested.")
     if request.max_reads < 1:
         return ReadPlotData((), 0, "Number of subsampled reads must be at least 1.")
     if request.event_variables and abs(request.end - request.start) > request.max_discrepancy_window:
@@ -70,7 +70,7 @@ def prepare_read_plot(request: ReadPlotRequest, cache: SessionDataCache | None =
                 request.bam_path, request.contig, start, end, request.classes,
                 **({"profiler": profiler} if profiler is not None else {}),
                 **({"circular_length": request.contig_length} if request.circular else {}),
-                **({"include_matching": True} if any(rule.column == "Alignment percentage"
+                **({"include_matching": True} if any(rule.column == "Read % aligned"
                     for section in request.filters.sections for rule in section.predicates) else {}),
             )
             if profiler is not None:

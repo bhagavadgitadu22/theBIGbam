@@ -12,7 +12,6 @@ from ...models.composition import (
     TrackSelection,
 )
 from ...repositories.genome_tracks import GenomeTrackRepository
-from ...services.read_selection import database_features
 from ...shared.timing import rss_mb
 from ..apply_inputs import ApplyInputs
 from ..apply_modes import all_sample_features, one_sample_features, track_visibility, without_gene_map
@@ -132,7 +131,7 @@ class ApplyRenderEngine:
         if is_all:
             # ALL SAMPLES mode: pick one sample-level variable (same logic as contig-view all-samples)
             mag_requested_features, selected_var = all_sample_features(
-                combined_features_cbg, active_variables_widgets, read_mode=inputs.read_plot.enabled,
+                combined_features_cbg, active_variables_widgets,
             )
             if selected_var:
                 mag_requested_features.append(selected_var)
@@ -146,10 +145,6 @@ class ApplyRenderEngine:
             mag_requested_features = [f for f in mag_requested_features if f != "Gene map"]
             mag_allowed_samples = None
 
-        mag_requested_features = database_features(
-            mag_requested_features, widgets.get("db_subplots", frozenset(mag_requested_features)),
-            widgets.get("read_subplots", frozenset()),
-        )
 
         # Read MAG contig sort parameters
         _sort_cat = mag_params_category_select.value
@@ -236,6 +231,7 @@ class ApplyRenderEngine:
             max_track_dots=max_track_dots,
             is_all=is_all,
             allowed_samples=frozenset(mag_allowed_samples) if mag_allowed_samples is not None else None,
+            bam_only_samples=bool(widgets.get("bam_only_samples")),
             max_samples=int(max_samples_input.value),
             enable_timing=enable_timing,
             ordering=MagOrdering(_sort_source, _sort_metric, _sort_ascending, _sort_sample_name),
@@ -397,8 +393,12 @@ class ApplyRenderEngine:
             #   - Gene map (index 0) is handled via genbank_path
             #   - Other Genome features (Repeats, etc.) are passed via genome_features parameter
             genome_features, selected_var = all_sample_features(
-                combined_features_cbg, active_variables_widgets, read_mode=inputs.read_plot.enabled,
+                combined_features_cbg, active_variables_widgets,
             )
+            bam_only_samples = bool(widgets.get("bam_only_samples"))
+            bam_sample_names = list(_get_filtered_samples_for_contig(contig)) if bam_only_samples else None
+            if bam_only_samples:
+                selected_var = None
 
             filtered_samples = _get_filtered_samples_for_contig(contig)
 
@@ -453,6 +453,8 @@ class ApplyRenderEngine:
                 profiler=profiler,
                 read_tracks=read_track_config(inputs, widgets, diagnose=enable_timing,
                                               reference_source=GenomeTrackRepository(conn)),
+                bam_only_samples=bam_only_samples,
+                bam_sample_names=bam_sample_names,
             )
             if enable_timing:
                 _step = time.perf_counter() - t_plot
@@ -464,9 +466,7 @@ class ApplyRenderEngine:
         else:
             # One-sample view: collect possibly-many requested features and call per-sample plot
             selected_features = one_sample_features(combined_features_cbg, active_variables_widgets)
-            requested_features = database_features(
-                selected_features, widgets["db_subplots"], widgets["read_subplots"]
-            )
+            requested_features = selected_features
             read_request = None
             if inputs.read_plot.enabled:
                 read_config = read_track_config(
@@ -493,7 +493,7 @@ class ApplyRenderEngine:
                 t_plot = time.perf_counter()
             request = SingleSampleCompositionRequest(
                 contig_name=contig,
-                sample_name=sample or None,
+                sample_name=(sample if sample in widgets["sample_name_to_id"] else None),
                 xstart=xstart,
                 xend=xend,
                 genbank_path=genbank_path,

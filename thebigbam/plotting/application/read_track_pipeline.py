@@ -1,17 +1,18 @@
 """Compose BAM tracks for ordered samples in contig or concatenated MAG coordinates."""
 
 from ..models.read_plot import ReadPlotRequest, ReadTrackConfig
-from ..renderers.read_alignments import render_read_track
+from ..renderers.read_alignments import READ_CLASS_COLORS, render_read_track
 from ..services.read_plots import prepare_read_plot
-from ..services.read_selection import read_classes_for_subplots
 from ..shared.read_diagnostics import ReadProfiler
+
+ALL_READ_CLASSES = frozenset(("primary", "secondary", "supplementary"))
 
 
 def read_track_config(inputs, widgets, *, diagnose=False, reference_source=None):
     if not inputs.read_plot.enabled:
         return None
-    classes = read_classes_for_subplots(inputs.read_plot.selected_subplots, widgets["subplot_to_varnames"])
-    return ReadTrackConfig(inputs.read_plot, widgets["bam_catalog"], classes, widgets["read_colors"], diagnose, reference_source)
+    return ReadTrackConfig(inputs.read_plot, widgets["bam_catalog"], ALL_READ_CLASSES,
+                           READ_CLASS_COLORS, diagnose, reference_source)
 
 
 def read_plot_request(config, sample, members, x_range):
@@ -34,7 +35,10 @@ def read_plot_request(config, sample, members, x_range):
         filters=options.filters,
         max_discrepancy_window=options.max_discrepancy_window,
         reference_source=config.reference_source,
-        circular=bool(config.reference_source is not None and config.reference_source.circular_sample(sample)),
+        circular=bool(
+            bam.circular
+            or (config.reference_source is not None and config.reference_source.circular_sample(sample))
+        ),
     )
 
 

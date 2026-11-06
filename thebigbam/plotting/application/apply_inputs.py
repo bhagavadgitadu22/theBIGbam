@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ..models.filters import FilterExpression
-from ..models.read_events import EVENT_VARIABLES
+from ..models.read_events import READ_DISCREPANCY_CHOICES
 from ..models.read_plot import ReadPlotOptions
 from ..shared.defaults import DEFAULT_READ_DISCREPANCY_WINDOW
 
@@ -73,7 +73,7 @@ def collect_apply_inputs(bindings) -> ApplyInputs:
     """Read all controls once so downstream branches operate on stable values."""
     widgets = bindings.widgets
     has_samples = widgets["has_samples"]
-    is_all = bindings.views.active == 1 if has_samples else False
+    is_all = bindings.views.active == 1 if has_samples or widgets.get("bam_only_samples") else False
     feature_types = bindings.feature_type_multichoice.value if bindings.feature_type_multichoice is not None else None
     genbank_path = bindings.db_path if feature_types else None
     custom_colors = _color_rules(bindings.custom_color_rows, allow_random=True)
@@ -90,18 +90,12 @@ def collect_apply_inputs(bindings) -> ApplyInputs:
             plot_height=int(read_controls.plot_height.value),
             read_height=int(read_controls.read_height.value),
             event_variables=frozenset(
-                variable for group in active_variables for index in group.active
-                for variable in widgets["subplot_to_varnames"].get(group.labels[index], ())
-                if variable in EVENT_VARIABLES
+                event
+                for choice in read_controls.discrepancies.value
+                for event in READ_DISCREPANCY_CHOICES[choice]
             ),
             max_discrepancy_window=int(discrepancy_window.value) if discrepancy_window is not None and discrepancy_window.value is not None else DEFAULT_READ_DISCREPANCY_WINDOW,
             filters=(read_controls.filters.expression() if getattr(read_controls, "filters", None) is not None else FilterExpression(())),
-            selected_subplots=tuple(
-                label
-                for group in active_variables
-                for index in group.active
-                if (label := group.labels[index]) in widgets["read_subplots"]
-            ),
         )
     if (
         bindings.apply_annotation_rules_cbg is not None
@@ -113,7 +107,7 @@ def collect_apply_inputs(bindings) -> ApplyInputs:
         contig=widgets["contig_select"].value,
         has_samples=has_samples,
         is_all=is_all,
-        sample=widgets["sample_select"].value if has_samples else None,
+        sample=(widgets["sample_select"].value if has_samples or widgets.get("bam_only_samples") else None),
         selected_feature_types=feature_types,
         genbank_path=genbank_path,
         plot_isoforms=(

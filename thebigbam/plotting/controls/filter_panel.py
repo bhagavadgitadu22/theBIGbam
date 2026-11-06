@@ -43,6 +43,7 @@ def build_filter_panel(
     enable_timing: bool,
     set_operation: Callable[[str], None],
     record_action: Callable[[str, Mapping[str, Any]], Any] | None = None,
+    filtering_metadata: Mapping[str, Any] | None = None,
     header: Any | None = None,
     toggle: Any | None = None,
 ) -> FilterPanel:
@@ -67,7 +68,7 @@ def build_filter_panel(
         )
         header = row(toggle, title, help_button, sizing_mode="stretch_width", align="center")
 
-    metadata = preloaded["filtering_metadata"]
+    metadata = filtering_metadata if filtering_metadata is not None else preloaded["filtering_metadata"]
     options = ParameterOptionCatalog.from_filtering_metadata(metadata)
     visualizations = FilterVisualizations(
         metadata_service,

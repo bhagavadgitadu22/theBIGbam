@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any, Mapping
 
 from ..models.filters import CompiledFilter, FilterExpression, FilterPredicate, FilterSection
+from .bam_sample_filters import BAM_SAMPLE_TABLE
 
 SOURCE_TABLES = {
     "MAG": "MAG",
@@ -37,10 +38,12 @@ class FilterQueryBuilder:
         filter_encode: Mapping[str, float],
         *,
         has_samples: bool,
+        bam_sample_mode: bool = False,
     ) -> None:
         self.metadata = filtering_metadata
         self.filter_encode = filter_encode
         self.has_samples = has_samples
+        self.bam_sample_mode = bam_sample_mode
 
     @staticmethod
     def _combine(parts, connectors):
@@ -99,7 +102,7 @@ class FilterQueryBuilder:
         column_type = info.get("type", "numeric")
         is_bool = info.get("is_bool", False)
         if is_bool:
-            value = value.lower() == "yes" if isinstance(value, str) else bool(value)
+            value = value.lower() in {"yes", "true", "1"} if isinstance(value, str) else bool(value)
         elif column_type == "text" and not isinstance(value, str):
             value = str(value)
         elif column_type == "numeric" and isinstance(value, str):
@@ -154,12 +157,18 @@ class FilterQueryBuilder:
                 f'WHERE c."{column}" {operator} ?'
             )
         elif predicate.category == "Sample":
-            sql = (
-                "SELECT DISTINCT c.Contig_id, s.Sample_id FROM Sample s "
-                "LEFT JOIN Coverage p ON s.Sample_id = p.Sample_id "
-                "LEFT JOIN Contig c ON p.Contig_id = c.Contig_id "
-                f'WHERE s."{column}" {operator} ?'
-            )
+            if self.bam_sample_mode:
+                sql = (
+                    "SELECT DISTINCT c.Contig_id, s.Sample_id FROM Contig c "
+                    f'CROSS JOIN "{BAM_SAMPLE_TABLE}" s WHERE s."{column}" {operator} ?'
+                )
+            else:
+                sql = (
+                    "SELECT DISTINCT c.Contig_id, s.Sample_id FROM Sample s "
+                    "LEFT JOIN Coverage p ON s.Sample_id = p.Sample_id "
+                    "LEFT JOIN Contig c ON p.Contig_id = c.Contig_id "
+                    f'WHERE s."{column}" {operator} ?'
+                )
         elif predicate.category == "MAG":
             sql = (
                 f"SELECT DISTINCT c.Contig_id, {sample_id} AS Sample_id FROM MAG mg "
@@ -219,7 +228,13 @@ class FilterQueryBuilder:
         if not parts:
             return None
         sql, parameters, scope = self._combine(parts, connectors)
-        if self.has_samples and scope != "sample":
+        if self.bam_sample_mode and scope != "sample":
+            sql = (
+                "SELECT DISTINCT _result.Contig_id, COALESCE(_result.Sample_id, _bam.Sample_id) AS Sample_id "
+                f"FROM ({sql}) _result LEFT JOIN \"{BAM_SAMPLE_TABLE}\" _bam "
+                "ON _result.Sample_id IS NULL"
+            )
+        elif self.has_samples and scope != "sample":
             # Resolve any contig-scoped wildcard only after all AND/OR
             # composition. Sample-specific predicates have already replaced
             # it through COALESCE, so mixed annotation/MAG filters avoid the

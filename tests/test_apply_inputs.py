@@ -59,12 +59,11 @@ def test_collect_apply_inputs_parses_rules_and_stable_display_values():
         max_discrepancy_window=_value(5000),
         add_reads=SimpleNamespace(active=[]), all_reads=SimpleNamespace(active=[0]), max_reads=_value(100),
         link_pairs=SimpleNamespace(active=[]), plot_height=_value(400), read_height=_value(14),
+        discrepancies=_value([]),
     )
-    widgets["variables_widgets_all"] = [SimpleNamespace(labels=["Primary", "Indels"], active=[0, 1])]
-    widgets["read_subplots"] = frozenset({"Primary", "Indels"})
-    widgets["subplot_to_varnames"] = {"Primary": ["primary_reads"], "Indels": ["insertions", "deletions"]}
+    widgets["variables_widgets_all"] = [SimpleNamespace(labels=["Coverage"], active=[])]
     bindings.max_sequence_window_input = _value(300)
     selected = collect_apply_inputs(bindings)
     assert selected.read_plot.enabled
-    assert selected.read_plot.event_variables == frozenset({"insertions", "deletions"})
+    assert selected.read_plot.event_variables == frozenset()
     assert selected.read_plot.max_discrepancy_window == 5000

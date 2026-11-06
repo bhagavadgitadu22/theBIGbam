@@ -11,7 +11,6 @@ import panel as pn
 
 from ..models.filters import FilterExpression
 from ..services.read_filtering import validate_read_filters
-from ..services.read_selection import database_features
 from ..shared.defaults import DEFAULT_READ_DISCREPANCY_WINDOW
 from ..shared.styles import panel_control_row
 from ..shared.timing import estimate_grid_data_size, rss_mb
@@ -150,6 +149,12 @@ class ApplyRequestBuilder:
             catalog = self.bindings.widgets.get("bam_catalog")
             if catalog is None or (not is_all and not inputs.sample):
                 return ValidationFailure("Select a sample with an indexed BAM to plot reads.")
+            if self.bindings.widgets.get("bam_only_samples"):
+                filtered_names = self.bindings._get_filtered_samples_for_contig(inputs.contig)
+                if is_all and not filtered_names:
+                    return ValidationFailure("No BAM samples match the current filters.")
+                if not is_all and inputs.sample not in filtered_names:
+                    return ValidationFailure("The selected BAM sample is excluded by the current filters.")
             warning = None if is_all else catalog.warning_for_sample(
                 inputs.sample,
                 inputs.contig if mode is ApplyMode.CONTIG_ONE else None,
@@ -157,28 +162,10 @@ class ApplyRequestBuilder:
             )
             if warning:
                 return ValidationFailure(warning)
-        if mode is ApplyMode.CONTIG_ONE:
-            selected = [
-                *self._selected_labels(self.bindings.combined_features_cbg),
-                *(label for group in inputs.active_variables_widgets for label in self._selected_labels(group)),
-            ]
-            db_selected = database_features(
-                selected,
-                self.bindings.widgets.get("db_subplots", frozenset(selected)),
-                self.bindings.widgets.get("read_subplots", frozenset()),
-            )
-            if selected and not db_selected and not inputs.read_plot.enabled:
-                return ValidationFailure("Select Add read plot to display BAM-only variables.")
         if mode not in (ApplyMode.CONTIG_ALL, ApplyMode.MAG_ALL):
             return None
         genome_features = self._selected_labels(self.bindings.combined_features_cbg)
         selected_variable = any(self._selected_labels(group) for group in inputs.active_variables_widgets)
-        if not inputs.read_plot.enabled:
-            read_only = self.bindings.widgets.get("read_subplots", frozenset()) - self.bindings.widgets.get(
-                "db_subplots", frozenset()
-            )
-            if any(label in read_only for group in inputs.active_variables_widgets for label in self._selected_labels(group)):
-                return ValidationFailure("Select Read plot to display BAM-only variables.")
         if mode is ApplyMode.MAG_ALL:
             genome_features = [feature for feature in genome_features if feature != "Gene map"]
         if not selected_variable and not genome_features and not inputs.read_plot.enabled:

@@ -30,15 +30,18 @@ class ReadFilterControls:
             section = self.controller.create_section()
             section["rows"].clear()
             for item in block.get("rows", []):
-                if item.get("column") not in self.factory.fields:
-                    print(f"[settings] Warning: skipped unavailable read filter '{item.get('column')}'.", flush=True)
+                column = item.get("column")
+                if column == "Alignment percentage":
+                    column = "Read % aligned"
+                if column not in self.factory.fields:
+                    print(f"[settings] Warning: skipped unavailable read filter '{column}'.", flush=True)
                     continue
-                if item["column"] in SINGLE_VALUE_READ_FILTERS and item.get("value") in (None, ""):
+                if column in SINGLE_VALUE_READ_FILTERS and item.get("value") in (None, ""):
                     continue
-                row = self.factory.create_row(section, item["column"], item.get("operator"))
+                row = self.factory.create_row(section, column, item.get("operator"))
                 value = item.get("value")
                 if value is not None:
-                    if item["column"] in BOOLEAN_READ_FILTERS and isinstance(value, bool):
+                    if column in BOOLEAN_READ_FILTERS and isinstance(value, bool):
                         value = "TRUE" if value else "FALSE"
                     row["input_ref"]["widget"].value = value
                 if section["rows"]:

@@ -3,6 +3,12 @@
 from dataclasses import dataclass
 
 EVENT_VARIABLES = frozenset(("mismatches", "insertions", "deletions", "left_clippings", "right_clippings"))
+READ_DISCREPANCY_CHOICES = {
+    "Clippings": frozenset(("left_clippings", "right_clippings")),
+    "Insertions": frozenset(("insertions",)),
+    "Deletions": frozenset(("deletions",)),
+    "Mismatches": frozenset(("mismatches",)),
+}
 
 
 @dataclass(frozen=True)

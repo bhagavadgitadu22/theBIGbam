@@ -11,6 +11,7 @@ from typing import Any
 import duckdb
 
 from ..models.filters import CompiledFilter, FilterResult
+from ..services.bam_sample_filters import BAM_SAMPLE_TABLE
 from ..shared.defaults import AUTOCOMPLETE_LIMIT
 
 
@@ -22,6 +23,42 @@ class FilteringRepository:
         self.query_count = 0
         self.last_filter_phases: dict[str, float] = {}
         self._filter_tables: OrderedDict[str, None] = OrderedDict()
+        self.sample_table = "Sample"
+        self.bam_sample_ids: dict[str, int] = {}
+
+    def configure_bam_samples(self, catalog, sample_names) -> dict[str, int]:
+        """Create a connection-local Sample relation backed by supplied BAMs."""
+        self.connection.execute(
+            f'''CREATE TEMP TABLE IF NOT EXISTS "{BAM_SAMPLE_TABLE}" (
+                Sample_id BIGINT,
+                Sample_name VARCHAR,
+                Number_of_reads BIGINT,
+                Number_of_mapped_reads BIGINT,
+                Circular_mapping BOOLEAN
+            )'''
+        )
+        self.connection.execute(f'DELETE FROM "{BAM_SAMPLE_TABLE}"')
+        self.bam_sample_ids = {name: -index for index, name in enumerate(sample_names, 1)}
+        rows = [
+            (sample_id, name, None, None, bool(catalog.by_sample[name].circular))
+            for name, sample_id in self.bam_sample_ids.items()
+        ]
+        if rows:
+            self.connection.executemany(
+                f'INSERT INTO "{BAM_SAMPLE_TABLE}" VALUES (?, ?, ?, ?, ?)', rows
+            )
+        self.sample_table = BAM_SAMPLE_TABLE
+        return dict(self.bam_sample_ids)
+
+    def update_bam_sample_counts(self, catalog) -> None:
+        """Copy already-computed primary counts into the temporary filter relation."""
+        for name, sample_id in self.bam_sample_ids.items():
+            total, mapped = catalog.primary_read_summary(name)
+            self.connection.execute(
+                f'UPDATE "{BAM_SAMPLE_TABLE}" SET Number_of_reads = ?, '
+                "Number_of_mapped_reads = ? WHERE Sample_id = ?",
+                [total, mapped, sample_id],
+            )
 
     @staticmethod
     def _filter_table(compiled: CompiledFilter) -> str:
@@ -107,7 +144,7 @@ class FilteringRepository:
         return self._bounded_names("Contig", "Contig_name", search_term, preserve)
 
     def samples(self, search_term: str = "", preserve: str = "") -> tuple[str, ...]:
-        return self._bounded_names("Sample", "Sample_name", search_term, preserve)
+        return self._bounded_names(self.sample_table, "Sample_name", search_term, preserve)
 
     def mags(self, search_term: str = "", preserve: str = "") -> tuple[str, ...]:
         return self._bounded_names("MAG", "MAG_name", search_term, preserve)
@@ -275,7 +312,7 @@ class FilteringRepository:
         limit_clause = " LIMIT 100" if limit is not None else ""
         return self._values(
             f"SELECT DISTINCT s.Sample_name FROM ({sql}) f"
-            " JOIN Sample s ON s.Sample_id = f.Sample_id"
+            f' JOIN "{self.sample_table}" s ON s.Sample_id = f.Sample_id'
             f"{joins}{where}"
             f" ORDER BY (s.Sample_name = ? OR s.Sample_name = ?) DESC, s.Sample_name{limit_clause}",
             query_parameters,
@@ -297,7 +334,7 @@ class FilteringRepository:
         return int(
             self.connection.execute(
                 f"SELECT COUNT(DISTINCT s.Sample_name) FROM ({sql}) f"
-                " JOIN Sample s ON s.Sample_id = f.Sample_id"
+                f' JOIN "{self.sample_table}" s ON s.Sample_id = f.Sample_id'
                 f"{joins}{where}",
                 query_parameters,
             ).fetchone()[0]

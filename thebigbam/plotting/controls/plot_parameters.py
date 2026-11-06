@@ -69,7 +69,6 @@ class PlotParameterControls:
     sample_mag_categories: list[str]
     read_section: Any
     read_max_reads: Any
-    read_link_pairs: Any
     read_plot_height: Any
     individual_read_height: Any
     read_height_row: Any
@@ -443,9 +442,8 @@ def build_plot_parameter_controls(
     read_max_reads = Spinner(value=1000, low=1, step=100, width=100, margin=(0, 2, 0, 0))
     read_count_row = row(read_max_reads, Div(text="Number of subsampled reads", margin=(5, 0, 5, 5)),
                          sizing_mode="stretch_width", margin=(5, 0, 5, 0))
-    read_link_pairs = CheckboxGroup(labels=["Link paired reads"], active=[], sizing_mode="stretch_width")
     read_params_header, read_params_content = _collapsible_section(
-        "Read plotting", [read_count_row, row(read_link_pairs, sizing_mode="stretch_width")],
+        "Read plotting", [read_count_row],
         toggle_stylesheet, make_toggle_callback,
     )
     read_section = pn.Column(read_params_header, read_params_content,
@@ -506,7 +504,6 @@ def build_plot_parameter_controls(
         sample_mag_categories=_sample_mag_categories,
         read_section=read_section,
         read_max_reads=read_max_reads,
-        read_link_pairs=read_link_pairs,
         read_plot_height=read_plot_height_input,
         individual_read_height=individual_read_height_input,
         read_height_row=read_plot_height_row,

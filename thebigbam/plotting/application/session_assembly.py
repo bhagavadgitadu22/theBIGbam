@@ -24,6 +24,7 @@ def finalize_session(
     *,
     parts: LayoutParts,
     has_samples: bool,
+    bam_only_samples: bool = False,
     summary_carrier: Any,
     stylesheet: Any,
     timing_models: tuple[Any, ...],
@@ -33,6 +34,7 @@ def finalize_session(
     assembled = assemble_layout(
         parts,
         has_samples=has_samples,
+        bam_only_samples=bam_only_samples,
         summary_carrier=summary_carrier,
         stylesheet=stylesheet,
         timing_models=timing_models,

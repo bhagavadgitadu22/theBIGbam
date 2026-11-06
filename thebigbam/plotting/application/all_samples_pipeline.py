@@ -59,6 +59,8 @@ def build_all_samples_plot(
     data_cache=None,
     profiler=None,
     read_tracks=None,
+    bam_only_samples=False,
+    bam_sample_names=None,
 ):
     """Generate an all-samples plot through repository, service and renderer layers."""
     started = time.perf_counter()
@@ -79,6 +81,7 @@ def build_all_samples_plot(
         genome_features=_expand_genome_features(genome_features),
         data_cache=data_cache,
         profiler=profiler,
+        allow_empty_samples=bam_only_samples,
     )
     service = AllSamplesDataService(repository)
     with phase_timings.phase("service"):
@@ -92,7 +95,19 @@ def build_all_samples_plot(
     with render_phase:
         shared_xrange, genome_figures, sample_figures = renderer.render_figures(plot_data, subplot_size, same_y_scale)
     if read_tracks is not None:
-        samples = service.ordered_samples(contig_id, request)
+        if bam_only_samples:
+            # With no database samples, BAMs are the source of truth for the
+            # ALL SAMPLES read tracks. Preserve an explicitly empty filtered
+            # list, but fall back to the catalog when the caller omits it.
+            names = bam_sample_names
+            if names is None:
+                names = tuple(
+                    name for name in read_tracks.catalog.by_sample
+                    if request.allowed_samples is None or name in request.allowed_samples
+                )
+            samples = [(None, name) for name in names[:max_samples]]
+        else:
+            samples = service.ordered_samples(contig_id, request)
         sample_figures.extend(build_read_tracks(
             read_tracks, [name for _, name in samples], ((contig_name, locus_size, 0),),
             shared_xrange, data_cache,

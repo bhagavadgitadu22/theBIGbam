@@ -185,21 +185,9 @@ def test_column_scales_are_scoped_to_each_database_connection():
     second.close()
 
 
-def test_bam_metadata_adds_modules_without_writing_to_database(tmp_path, monkeypatch):
-    import thebigbam_rs
-
+def test_preload_variables_are_limited_to_database_metadata(tmp_path):
     path = tmp_path / "read-catalog.db"
     _create_preload_database(path)
-    monkeypatch.setattr(
-        thebigbam_rs,
-        "read_plot_variables",
-        lambda: [
-            ("Coverage", "Primary alignments", "primary_reads", 1, "#333333"),
-            ("Misalignment", "Mismatches", "mismatches", 3, "#5a0f0b"),
-            ("Long-reads", "Read lengths", "read_lengths", 1, "#ed8b00"),
-        ],
-        raising=False,
-    )
     before = path.read_bytes()
     data = PreloadRepository(
         str(path),
@@ -208,12 +196,10 @@ def test_bam_metadata_adds_modules_without_writing_to_database(tmp_path, monkeyp
         filtering_metadata_loader=lambda _path: {},
         mag_mode_loader=lambda _connection: False,
         mag_map_loader=lambda _connection: ({}, {}),
-    ).load(include_read_variables=True)
+    ).load()
 
-    assert data.read_module_variables["Misalignment"] == ("Mismatches",)
-    assert data.read_module_variables["Long-reads"] == ("Read lengths",)
-    assert data.read_colors["mismatches"] == "#5a0f0b"
-    assert data.subplot_to_varnames["Read lengths"] == ["read_lengths"]
+    assert data.module_names == ("Coverage",)
+    assert data.module_variables == (("Primary alignments",),)
     assert path.read_bytes() == before
 
 

@@ -361,12 +361,16 @@ def build_mag_plot(conn, request: MagCompositionRequest):
         )
 
     if request.read_tracks is not None:
-        read_samples = (
-            [name for _, name in CompositionDataService(
+        if is_all and request.bam_only_samples:
+            read_samples = list(request.allowed_samples or ())
+            if request.max_samples is not None:
+                read_samples = read_samples[:request.max_samples]
+        elif is_all:
+            read_samples = [name for _, name in CompositionDataService(
                 feature_repository, repository, cache=request.data_cache, profiler=profiler,
             ).ordered_mag_samples(request, context.mag_id)]
-            if is_all else [sample_name]
-        )
+        else:
+            read_samples = [sample_name]
         subplots.extend(build_read_tracks(
             request.read_tracks, read_samples, members, shared_xrange, request.data_cache,
         ))

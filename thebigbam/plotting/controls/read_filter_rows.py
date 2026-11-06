@@ -48,7 +48,7 @@ class ReadFilterRowFactory:
                 options = READ_FILTER_CHOICES.get(field.value, ("TRUE", "FALSE"))
                 widget = Select(options=list(options), value=options[0], sizing_mode="stretch_width", margin=0)
             else:
-                percentage = field.value == "Alignment percentage"
+                percentage = field.value == "Read % aligned"
                 widget = Spinner(value=None, step=0.1 if percentage else 1, low=0 if percentage else None,
                                  high=100 if percentage else None, placeholder="Value...", sizing_mode="stretch_width", margin=0)
             container.objects = [widget]

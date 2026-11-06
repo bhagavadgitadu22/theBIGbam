@@ -61,6 +61,7 @@ class AllSamplesPlotRequest:
     genome_features: tuple[str, ...] = ()
     data_cache: Any = field(default=None, compare=False, repr=False)
     profiler: Any = field(default=None, compare=False, repr=False)
+    allow_empty_samples: bool = False
 
 
 @dataclass(frozen=True)

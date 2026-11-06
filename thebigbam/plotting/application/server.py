@@ -117,9 +117,7 @@ def run_serve(args) -> int:
         scenario_paths = ScenarioPathAllocator(requested_path)
 
     print("\nPreloading database data...", flush=True)
-    preloaded = application.preload_db_data(
-        args.db, enable_timing=enable_timing, include_read_variables=bool(args.bam_files)
-    )
+    preloaded = application.preload_db_data(args.db, enable_timing=enable_timing)
     bam_catalog = None
     if args.bam_files:
         try:

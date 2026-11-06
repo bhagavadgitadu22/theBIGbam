@@ -1,11 +1,13 @@
-"""Read variable toggles and the shared AND/OR read-filter editor."""
+"""Read plot selection, filtering, and discrepancy display controls."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any
 
-from bokeh.models import CheckboxButtonGroup, CheckboxGroup, Div
+from bokeh.layouts import row
+from bokeh.models import CheckboxButtonGroup, CheckboxGroup, Div, InlineStyleSheet
+from bokeh.models.widgets import MultiChoice
 
 from ..shared.styles import section_separator
 from .collapsible import build_collapsible
@@ -25,12 +27,14 @@ class ReadPlotControls:
     max_discrepancy_window: Any = None
     filter_header: Any = None
     filter_content: Any = None
+    discrepancies: Any = None
+    customise_header: Any = None
+    customise_content: Any = None
 
 
 def build_read_plot_controls(
     *,
     max_reads: Any,
-    link_pairs: CheckboxGroup,
     plot_height: Any,
     read_height: Any,
     stylesheet: Any = "",
@@ -44,28 +48,47 @@ def build_read_plot_controls(
 
     add_reads = CheckboxButtonGroup(labels=["Read plot"], active=[], sizing_mode="stretch_width")
     all_reads = CheckboxButtonGroup(labels=["Read plot"], active=[], sizing_mode="stretch_width", visible=False)
+    link_pairs = CheckboxGroup(labels=["Link paired reads"], active=[], sizing_mode="stretch_width")
     filters = ReadFilterControls(stylesheet, circular_available)
-    filter_title = Div(text='<span title="Read length includes soft/hard clips. Alignment length counts aligned query bases (M/I/=/X). '
-                 'Alignment (%) is 100 × exact matching bases / full read length, including clips. '
+    filter_title = Div(text='<span title="These rules select alignments to include in the plot. The initial Alignment class = Primary rule shows primary alignments; add OR rules to include secondary or supplementary alignments. Read length includes soft/hard clips. Alignment length counts aligned query bases (M/I/=/X). '
+                 'Read % aligned is 100 × exact matching bases / full read length, including clips. '
                  'Unknown percentages without sufficient CIGAR/MD/NM information do not match numeric comparisons. '
                  'Coordinates are 1-based and local to the contig, including in MAG view. Alignment includes uses the alignment span. '
                  'Alignment end is the BAM end coordinate, which may exceed contig length for circular reads. '
+                 'Alignment class identifies primary, secondary, and supplementary records. '
                  'Insert sizes use absolute SAM TLEN; unknown sizes do not match numeric filters. '
                  'Non-inward pair tests the orientation of mapped, same-contig mates, not the proper-pair flag. '
-                 'Circular means an alignment crosses the origin in a circular-mapping sample.">Filter reads:</span>')
+                 'Circular means an alignment crosses the origin in a circular-mapping sample.">Select alignments to show</span>')
     filter_header, filter_content = build_collapsible(
-        filter_title, [filters.content], toggle_stylesheet, make_toggle_callback, slug="filter-reads",
+        filter_title, [filters.content], toggle_stylesheet, make_toggle_callback,
+        slug="filter-reads", initially_open=True,
+    )
+    discrepancies = MultiChoice(
+        options=["Clippings", "Insertions", "Deletions", "Mismatches"],
+        value=[],
+        placeholder="Choose discrepancies to plot",
+        sizing_mode="stretch_width",
+        stylesheets=[InlineStyleSheet(css=":host { background-color: white; }")],
+    )
+    customise_header, customise_content = build_collapsible(
+        "Customise reads",
+        [Div(text="Discrepancies to plot", margin=(5, 0, 2, 0)), discrepancies,
+         row(link_pairs, sizing_mode="stretch_width")],
+        toggle_stylesheet,
+        make_toggle_callback,
+        slug="customise-reads",
     )
     section = pn.Column(
         section_separator(),
         Div(text="<span style='font-size: 1.2em;'><b>Read plotting</b></span>"),
-        add_reads,
-        all_reads,
         filter_header,
         filter_content,
+        customise_header,
+        customise_content,
         sizing_mode="stretch_width",
         margin=0,
     )
 
     return ReadPlotControls(section, add_reads, all_reads, max_reads, link_pairs, plot_height, read_height,
-                            filters, max_discrepancy_window, filter_header, filter_content)
+                            filters, max_discrepancy_window, filter_header, filter_content,
+                            discrepancies, customise_header, customise_content)

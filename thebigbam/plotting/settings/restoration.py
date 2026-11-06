@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any, Mapping
 
 from ..controls.searchable_select import SearchableSelect
+from ..services.bam_sample_filters import migrate_legacy_bam_filtering
 
 
 @dataclass(frozen=True)
@@ -105,6 +106,7 @@ def _restore_genome_features(contig_settings, bindings) -> None:
 
 def restore_settings(settings: Mapping[str, Any], bindings: SettingsRestoreBindings) -> None:
     """Restore compatible values and warn about fields unavailable in this database."""
+    settings = migrate_legacy_bam_filtering(dict(settings))
     apply_annotation_rules_cbg = bindings.apply_annotation_rules_cbg
     color_qualifier_options = bindings.color_qualifier_options
     create_color_row = bindings.create_color_row
@@ -161,7 +163,11 @@ def restore_settings(settings: Mapping[str, Any], bindings: SettingsRestoreBindi
         (
             "sample",
             widgets["sample_select"],
-            widgets.get("sample_name_to_id", widgets["sample_select"].options),
+            (
+                widgets.get("samples", widgets["sample_select"].options)
+                if widgets.get("bam_only_samples")
+                else widgets.get("sample_name_to_id", widgets["sample_select"].options)
+            ),
         ),
         (
             "contig",
@@ -197,13 +203,8 @@ def restore_settings(settings: Mapping[str, Any], bindings: SettingsRestoreBindi
         _restore("contig.position_range.to", lambda: setattr(to_position_input, "value", position_range["to"]))
 
     # 4. Module / variable checkboxes (matched by name, not index)
-    # Enable multi-selection before restoring ALL SAMPLES variable choices.
     read_controls = widgets.get("read_plot_controls")
     read_saved = ((settings.get("plotting_params") or {}).get("read_plotting") or {})
-    if read_controls is not None and "enabled_all" in read_saved:
-        _restore("plotting_params.read_plotting.enabled_all", lambda: setattr(
-            read_controls.all_reads, "active", [0] if read_saved["enabled_all"] else [],
-        ))
 
     for mod_name, mod_settings in (settings.get("variables") or {}).items():
         if mod_name not in widgets["module_names"]:
@@ -233,6 +234,11 @@ def restore_settings(settings: Mapping[str, Any], bindings: SettingsRestoreBindi
                 f"variables.{mod_name}.{scope_key}",
                 lambda cbg=cbg, indices=indices: setattr(cbg, "active", indices),
             )
+
+    if read_controls is not None and "enabled_all" in read_saved:
+        _restore("plotting_params.read_plotting.enabled_all", lambda: setattr(
+            read_controls.all_reads, "active", [0] if read_saved["enabled_all"] else [],
+        ))
 
     # 5. Filtering query builder
     saved_filtering = settings.get("filtering") or []
@@ -389,6 +395,13 @@ def restore_settings(settings: Mapping[str, Any], bindings: SettingsRestoreBindi
     if read_controls is not None:
         if "filters" in read_saved and getattr(read_controls, "filters", None) is not None:
             _restore("plotting_params.read_plotting.filters", lambda: read_controls.filters.restore(read_saved["filters"]))
+        if "discrepancies" in read_saved and read_controls.discrepancies is not None:
+            valid_discrepancies = [
+                item for item in read_saved["discrepancies"] if item in read_controls.discrepancies.options
+            ]
+            _restore("plotting_params.read_plotting.discrepancies", lambda: setattr(
+                read_controls.discrepancies, "value", valid_discrepancies,
+            ))
         for key, control in (
             ("max_reads", read_controls.max_reads),
             ("plot_height", read_controls.plot_height),
@@ -400,11 +413,14 @@ def restore_settings(settings: Mapping[str, Any], bindings: SettingsRestoreBindi
                          lambda control=control, value=read_saved[key]: setattr(control, "value", value))
         for key, control in (
             ("enabled", read_controls.add_reads),
-            ("link_pairs", read_controls.link_pairs),
         ):
             if key in read_saved:
                 _restore(f"plotting_params.read_plotting.{key}",
                          lambda control=control, value=read_saved[key]: setattr(control, "active", [0] if value else []))
+        if "link_pairs" in read_saved:
+            _restore("plotting_params.read_plotting.link_pairs", lambda: setattr(
+                read_controls.link_pairs, "active", [0] if read_saved["link_pairs"] else [],
+            ))
 
     mag_params = pp.get("mag_params") or {}
     if mag_params.get("category") in mag_params_category_select.options:

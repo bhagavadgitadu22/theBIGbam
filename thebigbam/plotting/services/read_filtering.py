@@ -49,8 +49,8 @@ def validate_read_filters(expression):
                 raise ValueError(f"{label} requires a number.") from error
             if not math.isfinite(number):
                 raise ValueError(f"{label} requires a finite number.")
-            if rule.column == "Alignment percentage" and not 0 <= number <= 100:
-                raise ValueError("Alignment (%) must be between 0 and 100.")
+            if rule.column == "Read % aligned" and not 0 <= number <= 100:
+                raise ValueError("Read % aligned must be between 0 and 100.")
             if rule.column == "Alignment includes" and (number < 1 or not number.is_integer()):
                 raise ValueError("Alignment includes requires a positive integer position.")
 
@@ -75,7 +75,7 @@ def _value(read, field, length, circular):
         return read.lengths[0]
     if field == "Alignment length":
         return read.lengths[1]
-    if field == "Alignment percentage":
+    if field == "Read % aligned":
         return read.alignment_percentage
     if field == "Alignment start":
         return read.start + 1
@@ -85,6 +85,8 @@ def _value(read, field, length, circular):
         return read.mapq
     if field == "Strand":
         return "Forward" if read.forward else "Reverse"
+    if field == "Alignment class":
+        return read.alignment_class.title()
     if field == "Insert sizes":
         return abs(read.template_length) if _has_mate(read) and read.mate_same_reference and read.template_length else None
     if field == "Has mate mapped":
