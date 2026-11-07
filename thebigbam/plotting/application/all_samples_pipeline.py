@@ -102,16 +102,22 @@ def build_all_samples_plot(
             names = bam_sample_names
             if names is None:
                 names = tuple(
-                    name for name in read_tracks.catalog.by_sample
+                    name
+                    for name in read_tracks.catalog.by_sample
                     if request.allowed_samples is None or name in request.allowed_samples
                 )
             samples = [(None, name) for name in names[:max_samples]]
         else:
             samples = service.ordered_samples(contig_id, request)
-        sample_figures.extend(build_read_tracks(
-            read_tracks, [name for _, name in samples], ((contig_name, locus_size, 0),),
-            shared_xrange, data_cache,
-        ))
+        sample_figures.extend(
+            build_read_tracks(
+                read_tracks,
+                [name for _, name in samples],
+                ((contig_name, locus_size, 0),),
+                shared_xrange,
+                data_cache,
+            )
+        )
 
     genome_track_composer = GenomeTrackPipeline(conn)
     members = ((contig_id, contig_name, locus_size, 0),)

@@ -90,7 +90,9 @@ def _rule_color(value, rule, value_range=None):
         return f"#{digest[:6]}"
     if mode == "gradient" and value_range is not None:
         return gradient_color(
-            float(value), value_range, rule.get("color", "#2166ac"),
+            float(value),
+            value_range,
+            rule.get("color", "#2166ac"),
             rule.get("gradient_end_color", "#b2182b"),
         )
     return rule.get("color")
@@ -134,12 +136,23 @@ class GenomeTrackService:
                 "locus_tag": locus,
                 "Main_isoform": main_isoform,
                 "Type": feature_type,
-                "Strand": "Forward" if strand is not None and int(strand) > 0 else "Reverse" if strand is not None else None,
+                "Strand": "Forward"
+                if strand is not None and int(strand) > 0
+                else "Reverse"
+                if strand is not None
+                else None,
                 **extra.get(int(aid), {}),
             }
-            annotation_records.append((
-                aid, feature_start, feature_end, strand, feature_type, qualifiers,
-            ))
+            annotation_records.append(
+                (
+                    aid,
+                    feature_start,
+                    feature_end,
+                    strand,
+                    feature_type,
+                    qualifiers,
+                )
+            )
         gradient_ranges = {}
         for index, rule in enumerate(color_rules):
             if rule.get("match_mode") == "gradient":

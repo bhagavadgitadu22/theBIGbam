@@ -1,4 +1,5 @@
 import duckdb
+
 from thebigbam.database.calculating_data import _retryable_sample_names
 
 

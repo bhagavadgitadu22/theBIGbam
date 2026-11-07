@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+
 from bokeh.models import CheckboxGroup, Div, HoverTool, RadioButtonGroup, Range1d, Select, Spinner
 
 from thebigbam.plotting.composers.layout import assemble_grid

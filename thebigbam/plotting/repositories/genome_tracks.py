@@ -88,8 +88,9 @@ class GenomeTrackRepository:
         if not exists:
             return frozenset()
         marks = ",".join("?" for _ in sample_names)
-        rows = self._execute(f"SELECT Sample_name FROM Sample WHERE Circular_mapping AND Sample_name IN ({marks})",
-                             list(sample_names)).fetchall()
+        rows = self._execute(
+            f"SELECT Sample_name FROM Sample WHERE Circular_mapping AND Sample_name IN ({marks})", list(sample_names)
+        ).fetchall()
         return frozenset(row[0] for row in rows)
 
     def cds(self, contig_name, start, end):

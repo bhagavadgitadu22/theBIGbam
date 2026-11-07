@@ -7,9 +7,9 @@ from bokeh.models import Div, TextInput
 from bokeh.models.widgets import ColorPicker, Select, Spinner
 
 from ..models.read_filters import (
+    READ_FILTER_CHOICES,
     READ_FILTER_FIELDS,
     READ_FILTER_LABELS,
-    READ_FILTER_CHOICES,
     read_color_rule_operators,
 )
 from ..models.read_plot import ReadColorRule

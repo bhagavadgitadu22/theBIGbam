@@ -102,16 +102,23 @@ def test_read_only_all_samples_respects_filter_order_and_limit(repository_db, mo
     from thebigbam.plotting.application.all_samples_pipeline import build_all_samples_plot
     from thebigbam.plotting.models.read_plot import ReadPlotData, ReadPlotOptions, ReadTrackConfig
 
-    monkeypatch.setattr("thebigbam.plotting.application.read_track_pipeline.prepare_read_plot",
-                        lambda *args: ReadPlotData((), 0))
+    monkeypatch.setattr(
+        "thebigbam.plotting.application.read_track_pipeline.prepare_read_plot", lambda *args: ReadPlotData((), 0)
+    )
     names = ("sample_002", "sample_003", "sample_004")
-    catalog = SimpleNamespace(by_sample={
-        name: SimpleNamespace(path=f"{name}.bam", available=True) for name in names
-    })
+    catalog = SimpleNamespace(by_sample={name: SimpleNamespace(path=f"{name}.bam", available=True) for name in names})
     config = ReadTrackConfig(ReadPlotOptions(enabled=True), catalog, frozenset({"primary"}), {})
     grid = build_all_samples_plot(
-        repository_db, None, "c1", xstart=1, xend=100, allowed_samples=set(names),
-        order_by_source="Sample", order_by_column="rank", max_samples=2, read_tracks=config,
+        repository_db,
+        None,
+        "c1",
+        xstart=1,
+        xend=100,
+        allowed_samples=set(names),
+        order_by_source="Sample",
+        order_by_column="rank",
+        max_samples=2,
+        read_tracks=config,
     )
     titles = [plot.title.text for plot in grid.select({"type": figure})]
     assert len(titles) == 2

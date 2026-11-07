@@ -5,8 +5,8 @@ from dataclasses import replace
 from ..models.read_plot import ReadPlotRequest, ReadTrackConfig
 from ..renderers.read_alignments import render_read_track
 from ..services.read_plots import prepare_read_plot, recolor_gradient_alignments
-from ..shared.read_diagnostics import ReadProfiler
 from ..shared.read_colors import READ_CLASS_COLORS
+from ..shared.read_diagnostics import ReadProfiler
 
 ALL_READ_CLASSES = frozenset(("primary", "secondary", "supplementary"))
 

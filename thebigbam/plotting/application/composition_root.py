@@ -34,10 +34,10 @@ from ..repositories.filtering import FilteringRepository
 from ..repositories.genome_controls import GenomeControlRepository
 from ..repositories.genome_tracks import GenomeTrackRepository
 from ..repositories.preload import PreloadRepository
+from ..services.bam_sample_filters import expression_requires_bam_counts, filtering_metadata_for_mode
 from ..services.filter_metadata import FilterMetadataService
 from ..services.filter_query import FilterQueryBuilder
 from ..services.filtering import FilterExpressionService, FilteringAvailabilityService
-from ..services.bam_sample_filters import expression_requires_bam_counts, filtering_metadata_for_mode
 from ..settings.history import HistoryEntry
 from ..settings.history_descriptions import HistoryDescriptionContext
 from ..settings.scenario import ScenarioRecorder

@@ -5,7 +5,6 @@ from __future__ import annotations
 from collections.abc import Iterable
 from typing import Any
 
-
 EMPATHI_COLORS = {
     "adsorption-related": "#feb2ff",
     "cell_wall_depolymerase": "#f37c76",

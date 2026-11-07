@@ -97,7 +97,8 @@ class MagTrackRenderer:
                     const index = data.x0.findIndex((start, i) => start <= cb_obj.x && cb_obj.x <= data.x1[i]);
                     if (index < 0) return;
                     const name = data.name[index];
-                    """ + COPY_FEEDBACK_JS,
+                    """
+                    + COPY_FEEDBACK_JS,
                 ),
             )
         plot.tags.append(

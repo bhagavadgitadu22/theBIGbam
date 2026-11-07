@@ -8,8 +8,8 @@ from time import perf_counter
 
 from ..models.read_plot import ReadPlotData, ReadPlotRequest
 from ..repositories.bam_reads import fetch_read_candidates
-from ..shared.data_cache import SessionDataCache
 from ..shared.color_gradients import gradient_color
+from ..shared.data_cache import SessionDataCache
 from ..shared.read_diagnostics import timed_bam_reads
 from ..shared.read_identity import read_identity
 from .read_discrepancies import add_read_discrepancies

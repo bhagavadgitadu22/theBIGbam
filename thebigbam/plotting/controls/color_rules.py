@@ -9,8 +9,8 @@ import panel as pn
 from bokeh.models import Div
 from bokeh.models.widgets import ColorPicker, Select, Spinner
 
-from ..shared.styles import FIELD_LABEL_MARGIN, panel_control_row, panel_stylesheet
 from ..shared.read_colors import DEFAULT_READ_GRADIENT_END, DEFAULT_READ_GRADIENT_START
+from ..shared.styles import FIELD_LABEL_MARGIN, panel_control_row, panel_stylesheet
 from .distinct_value_select import build_distinct_value_select
 from .searchable_select import SearchableSelect
 

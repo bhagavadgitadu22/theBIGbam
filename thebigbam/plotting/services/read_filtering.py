@@ -1,19 +1,19 @@
 """Compile shared AND/OR expressions into alignment predicates before sampling."""
 
+import hashlib
 import math
 import operator
-import hashlib
 from time import perf_counter
 
+from ..models.filters import FilterExpression, FilterPredicate, FilterSection
 from ..models.read_filters import (
     BOOLEAN_READ_FILTERS,
     READ_FILTER_CHOICES,
     READ_FILTER_FIELDS,
     READ_FILTER_LABELS,
-    read_filter_operators,
     read_color_rule_operators,
+    read_filter_operators,
 )
-from ..models.filters import FilterExpression, FilterPredicate, FilterSection
 from ..shared.color_gradients import gradient_color
 
 COMPARISONS = {">": operator.gt, "<": operator.lt, "=": operator.eq, "!=": operator.ne}

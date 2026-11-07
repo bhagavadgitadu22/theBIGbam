@@ -1,6 +1,13 @@
 # Changelog
 
-## 0.8.0
+## 0.9.0 (2026-11-07)
+
+- Add BAM-backed read alignment plots to `serve`, including BAM-only sample browsing and multi-sample views.
+- Add read filtering, alignment-class and strand coloring, customizable discrepancy tracks, and paired-read linking.
+- Add gradient and random-color rules for read and genomic annotation tracks.
+- Improve plotting performance, zoom stability, and gene-map navigation controls.
+
+## 0.8.0 (2026-10-22)
 
 - Default modules coverage and misalignment only for `calculate`.
 - Add BLAST scopes: `none` (default), `termini`, `contig`, `mag`, and `all`.
@@ -10,23 +17,23 @@
 - Fix repeat intervals, hit identities, partner tooltips, and selection handling.
 - Upgrade note: rebuild legacy undirected BLAST hit tracks before using them.
 
-## 0.7.0
+## 0.7.0 (2026-09-04)
 
 - Add session history and navigation between previous application states.
 - Save and restore complete sessions, including history.
 
-## 0.6.0
+## 0.6.0 (2026-08-25)
 
 - Add APPLY FILTERS to control when filter changes take effect.
 - Add scenario recording and replay benchmarks.
 - Improve filtering responsiveness and interface styling.
 
-## 0.5.0
+## 0.5.0 (2026-08-21)
 
 - Save plotting settings and restore them with `serve --json`.
 - Reorganize plotting code and fix server startup issues.
 
-## 0.4.0
+## 0.4.0 (2026-07-06)
 
 - Add interactive filter histograms and treemaps.
 - Add MAG track markers and contig ordering within MAGs.
@@ -36,7 +43,7 @@
 - Improve annotation matching and add `--keep-multiple`.
 - Preserve empty samples and correct counts after data removal.
 
-## 0.3.0
+## 0.3.0 (2026-05-20)
 
 - Add MAG calculation and visualization.
 - Add the RNA module and splicing features.
@@ -45,26 +52,26 @@
 - Add annotation-file extension and mapping-data purge utilities.
 - Speed up plotting, exports, and database writes.
 
-## 0.1.5
+## 0.1.5 (2026-03-11)
 
 - Update dependency version guidance and release packaging.
 
-## 0.1.4
+## 0.1.4 (2026-03-09)
 
 - Simplify installation instructions and fix the logo.
 
-## 0.1.3
+## 0.1.3 (2026-03-08)
 
 - Fix Conda build dependencies and Python compatibility constraints.
 
-## 0.1.2
+## 0.1.2 (2026-03-08)
 
 - Require Python 3.10 or newer and update Rust bindings accordingly.
 
-## 0.1.1
+## 0.1.1 (2026-03-08)
 
 - Update installation documentation and release configuration.
 
-## 0.1.0
+## 0.1.0 (2026-03-07)
 
 - Initial release of BAM processing, genome visualization, and circular mapping tools.
