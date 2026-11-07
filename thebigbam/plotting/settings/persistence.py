@@ -74,15 +74,19 @@ def serialize_filter_expression(expression: FilterExpression) -> list[dict[str, 
 
 def serialize_color_rows(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     """Serialize annotation coloring rules."""
-    return [
-        {
+    serialized = []
+    for row in rows:
+        operator = row["operator_select"].value
+        rule = {
             "qualifier": row["qualifier_select"].value,
-            "operator": row["operator_select"].value,
-            "value": row["input_ref"]["widget"].value,
+            "operator": operator,
+            "value": None if operator in ("Use random colors", "Use color gradient") else row["input_ref"]["widget"].value,
             "color": row["color_picker"].color,
         }
-        for row in rows
-    ]
+        if operator == "Use color gradient":
+            rule["gradient_end_color"] = row["gradient_end_picker"].color
+        serialized.append(rule)
+    return serialized
 
 
 def save_settings_document(

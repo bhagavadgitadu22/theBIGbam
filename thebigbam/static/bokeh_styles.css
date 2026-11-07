@@ -327,6 +327,34 @@ html, body {
   width: 100%;
 }
 
+.read-color-random,
+:host(.read-color-random) {
+  grid-template-columns: minmax(0, 3fr) minmax(0, 5.7fr) 0 0 30px;
+}
+
+.read-color-gradient,
+:host(.read-color-gradient) {
+  grid-template-columns: minmax(0, 3fr) minmax(0, 2fr) 0 88px 30px;
+}
+
+.genomic-color-gradient,
+:host(.genomic-color-gradient) {
+  grid-template-columns: minmax(0, 3fr) minmax(0, 2fr) 0 88px 30px;
+}
+
+.genomic-color-random,
+:host(.genomic-color-random) {
+  grid-template-columns: minmax(0, 3fr) minmax(0, 5.7fr) 0 0 30px;
+}
+
+.color-value-slot,
+:host(.color-value-slot) {
+  box-sizing: border-box;
+  min-width: 0;
+  overflow: visible;
+  width: 100%;
+}
+
 .read-filter-row,
 :host(.read-filter-row) {
   grid-template-columns: minmax(0, 2.5fr) minmax(0, 1fr) minmax(0, 2fr);

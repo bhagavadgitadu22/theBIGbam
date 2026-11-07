@@ -9,12 +9,16 @@ from time import perf_counter
 from ..models.read_plot import ReadPlotData, ReadPlotRequest
 from ..repositories.bam_reads import fetch_read_candidates
 from ..shared.data_cache import SessionDataCache
+from ..shared.color_gradients import gradient_color
 from ..shared.read_diagnostics import timed_bam_reads
 from ..shared.read_identity import read_identity
 from .read_discrepancies import add_read_discrepancies
 from .read_event_coordinates import project_events
-from .read_filtering import filtered_candidates
-from .read_filtering import compile_read_color_rule
+from .read_filtering import (
+    compile_read_color_rule,
+    filtered_candidates,
+    read_filter_value,
+)
 from .read_sampling import ReadPool, build_read_pool, sample_reads
 from .read_summaries import summarize_candidate
 
@@ -57,6 +61,35 @@ def _fingerprint(path: str) -> tuple[int, int]:
     return stat.st_size, stat.st_mtime_ns
 
 
+def recolor_gradient_alignments(alignments, rules, ranges=None):
+    """Apply one shared value range to gradient rules across plotted alignments."""
+    if ranges is None:
+        ranges = {}
+        for index, rule in enumerate(rules):
+            if rule.operator != "Use color gradient":
+                continue
+            values = [
+                alignment.gradient_value for alignment in alignments
+                if alignment.gradient_rule_index == index and alignment.gradient_value is not None
+            ]
+            if values:
+                ranges[index] = (min(values), max(values))
+    recolored = []
+    for alignment in alignments:
+        index = alignment.gradient_rule_index
+        if index is None or index not in ranges:
+            recolored.append(alignment)
+            continue
+        rule = rules[index]
+        recolored.append(replace(
+            alignment,
+            color=gradient_color(
+                alignment.gradient_value, ranges[index], rule.color, rule.gradient_end_color,
+            ),
+        ))
+    return tuple(recolored)
+
+
 def prepare_read_plot(request: ReadPlotRequest, cache: SessionDataCache | None = None) -> ReadPlotData:
     if not request.classes:
         return ReadPlotData((), 0, "No read alignment classes were requested.")
@@ -81,7 +114,8 @@ def prepare_read_plot(request: ReadPlotRequest, cache: SessionDataCache | None =
                   start, end, tuple(sorted(request.classes)), request.circular, request.filters, needs_matching)
     reference_identity = id(getattr(request.reference_source, "conn", request.reference_source))
     color_key = tuple(
-        (rule.field, rule.operator, rule.value, rule.color) for rule in request.color_rules
+        (rule.field, rule.operator, rule.value, rule.color, rule.gradient_end_color)
+        for rule in request.color_rules
     )
     key = ("read_plot", *region_key, request.max_reads, tuple(sorted(request.event_variables)),
            color_key, reference_identity)
@@ -143,14 +177,36 @@ def prepare_read_plot(request: ReadPlotRequest, cache: SessionDataCache | None =
             filter_elapsed = profiler.seconds.get("read_filtering", 0) - filter_before
             profiler.add_time("sampling", max(0, perf_counter() - started - scan_elapsed - filter_elapsed))
     summary_started = perf_counter() if profiler is not None else 0
+    gradient_ranges = {}
+    for index, rule in enumerate(request.color_rules):
+        if rule.operator != "Use color gradient":
+            continue
+        values = [
+            read_filter_value(read, rule.field, request.contig_length, request.circular)
+            for read in candidates
+        ]
+        values = [float(value) for value in values if value is not None]
+        if values:
+            gradient_ranges[index] = (min(values), max(values))
     color_predicates = tuple(
-        compile_read_color_rule(rule, request.contig_length, request.circular)
-        for rule in request.color_rules
+        compile_read_color_rule(
+            rule, request.contig_length, request.circular, gradient_ranges.get(index),
+        )
+        for index, rule in enumerate(request.color_rules)
     )
 
     def summarize(read):
-        color = next((matched for color_rule in color_predicates if (matched := color_rule(read)) is not None), None)
-        return summarize_candidate(read, color)
+        color, gradient_rule_index, gradient_value = None, None, None
+        for index, color_rule in enumerate(color_predicates):
+            color = color_rule(read)
+            if color is not None:
+                if request.color_rules[index].operator == "Use color gradient":
+                    gradient_rule_index = index
+                    gradient_value = read_filter_value(
+                        read, request.color_rules[index].field, request.contig_length, request.circular,
+                    )
+                break
+        return summarize_candidate(read, color, gradient_rule_index, gradient_value)
 
     reads = tuple(summarize(read) for read in candidates)
     if profiler is not None:
@@ -160,7 +216,9 @@ def prepare_read_plot(request: ReadPlotRequest, cache: SessionDataCache | None =
         profiler.count("candidate_pool_capacity", pool.capacity)
     reads, warnings, details_loaded = add_read_discrepancies(reads, candidates, request, cache)
     empty_message = "No reads match the read filters in this interval." if request.filters.active else "No selected reads overlap this interval."
-    result = ReadPlotData(reads, count, None if reads else empty_message, warnings, details_loaded)
+    result = ReadPlotData(
+        reads, count, None if reads else empty_message, warnings, details_loaded, gradient_ranges,
+    )
     if cache is not None:
         if details_loaded:
             cache.put(key, result)
@@ -171,7 +229,7 @@ def prepare_read_plot(request: ReadPlotRequest, cache: SessionDataCache | None =
 
 def _prepare_members(request, cache):
     """Fetch visible member intervals, then pack reads in concatenated coordinates."""
-    alignments, messages, warnings = [], [], []
+    alignments, messages, warnings, ranges_by_rule = [], [], [], {}
     fetched, details_loaded = 0, True
     for name, length, offset in request.members:
         start, end = max(1, request.start - offset), min(length, request.end - offset)
@@ -183,6 +241,12 @@ def _prepare_members(request, cache):
         fetched += data.fetched
         details_loaded &= data.details_loaded
         warnings.extend(data.warnings)
+        for index, (low, high) in data.gradient_ranges.items():
+            if index in ranges_by_rule:
+                old_low, old_high = ranges_by_rule[index]
+                ranges_by_rule[index] = (min(old_low, low), max(old_high, high))
+            else:
+                ranges_by_rule[index] = (low, high)
         if data.message:
             messages.append(f"{name}: {data.message}")
         started = perf_counter() if request.profiler is not None else 0
@@ -193,18 +257,30 @@ def _prepare_members(request, cache):
             while left < read.end:
                 local = left % length
                 width = min(read.end - left, length - local)
+                gradient_value = read.gradient_value
+                if (
+                    read.gradient_rule_index is not None
+                    and request.color_rules[read.gradient_rule_index].field in {"Alignment start", "Alignment end"}
+                    and gradient_value is not None
+                ):
+                    gradient_value += offset
                 alignments.append(replace(
                     read, start=local + offset, end=local + width + offset,
                     blocks=((local + offset, local + width + offset),),
                     mate_start=read.mate_start + offset if read.mate_start is not None else None,
                     events=project_events(read.events, left, left + width, length, offset, read_start=read.start),
                     alignment_id=(name, *(read.alignment_id or read_identity(read))),
+                    gradient_value=gradient_value,
                 ))
                 left += width
         if request.profiler is not None:
             request.profiler.add_time("member_coordinates", perf_counter() - started)
     started = perf_counter() if request.profiler is not None else 0
     reads, _ = sample_reads(alignments, request.max_reads)
+    reads = recolor_gradient_alignments(reads, request.color_rules, ranges_by_rule)
     if request.profiler is not None:
         request.profiler.add_time("member_resampling", perf_counter() - started)
-    return ReadPlotData(reads, fetched, "; ".join(messages) if messages else None, tuple(dict.fromkeys(warnings)), details_loaded)
+    return ReadPlotData(
+        reads, fetched, "; ".join(messages) if messages else None,
+        tuple(dict.fromkeys(warnings)), details_loaded, ranges_by_rule,
+    )

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from ..shared.color_gradients import gradient_color, numeric_color_range
+
 
 class MagOverviewService:
     def __init__(self, repository, cache=None, profiler=None) -> None:
@@ -38,6 +40,29 @@ class MagOverviewService:
         colors_by_annotation = {}
         for rule in color_rules:
             try:
+                if rule.get("match_mode") == "gradient":
+                    key = rule.get("qualifier_key")
+                    values = self._cached(
+                        ("mag_overview", "values", contig_ids, key),
+                        lambda key=key: self.repository.annotation_values(key, contig_ids),
+                    )
+                    numeric = {}
+                    for annotation_id, value in values:
+                        value_range = numeric_color_range((value,))
+                        if value_range is not None:
+                            numeric[annotation_id] = value_range[0]
+                    value_range = numeric_color_range(numeric.values())
+                    if value_range is None:
+                        continue
+                    for annotation_id, value in numeric.items():
+                        colors_by_annotation.setdefault(
+                            annotation_id,
+                            gradient_color(
+                                value, value_range, rule.get("color", "#2166ac"),
+                                rule.get("gradient_end_color", "#b2182b"),
+                            ),
+                        )
+                    continue
                 rule_key = (rule.get("qualifier_key"), rule.get("match_mode", "exact"), rule.get("value"))
                 matching = self._cached(
                     ("mag_overview", "matches", contig_ids, rule_key),

@@ -1,8 +1,10 @@
 """Compose BAM tracks for ordered samples in contig or concatenated MAG coordinates."""
 
+from dataclasses import replace
+
 from ..models.read_plot import ReadPlotRequest, ReadTrackConfig
 from ..renderers.read_alignments import render_read_track
-from ..services.read_plots import prepare_read_plot
+from ..services.read_plots import prepare_read_plot, recolor_gradient_alignments
 from ..shared.read_diagnostics import ReadProfiler
 from ..shared.read_colors import READ_CLASS_COLORS
 
@@ -48,12 +50,32 @@ def read_plot_request(config, sample, members, x_range):
 def build_read_tracks(config, samples, members, x_range, cache):
     if config is None:
         return []
-    figures = []
+    prepared = []
     for sample in samples:
         request = read_plot_request(config, sample, members, x_range)
         if request is None:
             continue
-        data = prepare_read_plot(request, cache)
+        prepared.append((request, prepare_read_plot(request, cache)))
+
+    ranges = {}
+    for _, data in prepared:
+        for index, (low, high) in data.gradient_ranges.items():
+            if index in ranges:
+                old_low, old_high = ranges[index]
+                ranges[index] = (min(old_low, low), max(old_high, high))
+            else:
+                ranges[index] = (low, high)
+    alignments = recolor_gradient_alignments(
+        tuple(alignment for _, data in prepared for alignment in data.alignments),
+        config.options.color_rules,
+        ranges,
+    )
+
+    figures, cursor = [], 0
+    for request, data in prepared:
+        count = len(data.alignments)
+        data = replace(data, alignments=alignments[cursor:cursor + count], gradient_ranges=ranges)
+        cursor += count
         plot, scrollbar = render_read_track(data, request, x_range)
         figures.append((plot, scrollbar))
     return figures

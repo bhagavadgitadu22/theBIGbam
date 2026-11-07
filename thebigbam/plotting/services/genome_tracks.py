@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from typing import Any, Mapping
 
 from ..repositories.genome_tracks import GenomeTrackRepository
+from ..shared.color_gradients import gradient_color, numeric_color_range
 
 
 @dataclass(frozen=True)
@@ -66,6 +67,8 @@ def _matches(value, rule):
     expected = rule.get("value")
     if mode == "random":
         return value is not None
+    if mode == "gradient":
+        return numeric_color_range((value,)) is not None
     if mode == "has":
         return expected is not None and str(expected).lower() in str(value or "").lower()
     if mode == "has_not":
@@ -80,10 +83,16 @@ def _matches(value, rule):
     return value == expected or str(value) == str(expected)
 
 
-def _rule_color(value, rule):
-    if rule.get("match_mode") == "random":
+def _rule_color(value, rule, value_range=None):
+    mode = rule.get("match_mode")
+    if mode == "random":
         digest = hashlib.sha256(str(value).encode()).hexdigest()
         return f"#{digest[:6]}"
+    if mode == "gradient" and value_range is not None:
+        return gradient_color(
+            float(value), value_range, rule.get("color", "#2166ac"),
+            rule.get("gradient_end_color", "#b2182b"),
+        )
     return rule.get("color")
 
 
@@ -115,9 +124,11 @@ class GenomeTrackService:
         rule_keys = [rule.get("qualifier_key") for rule in color_rules if rule.get("qualifier_key")]
         wanted_keys = tuple(dict.fromkeys([key for key in [label_key, *rule_keys] if key]))
         extra = self.repository.qualifiers(annotation_ids, wanted_keys)
-        features = []
+        annotation_records = []
         for aid, feature_start, feature_end, strand, feature_type, main_isoform, product, function, locus in rows:
             qualifiers = {
+                "Start": feature_start,
+                "End": feature_end,
                 "product": product,
                 "function": function,
                 "locus_tag": locus,
@@ -126,11 +137,23 @@ class GenomeTrackService:
                 "Strand": "Forward" if strand is not None and int(strand) > 0 else "Reverse" if strand is not None else None,
                 **extra.get(int(aid), {}),
             }
+            annotation_records.append((
+                aid, feature_start, feature_end, strand, feature_type, qualifiers,
+            ))
+        gradient_ranges = {}
+        for index, rule in enumerate(color_rules):
+            if rule.get("match_mode") == "gradient":
+                gradient_ranges[index] = numeric_color_range(
+                    qualifiers.get(rule.get("qualifier_key")) for *_, qualifiers in annotation_records
+                )
+
+        features = []
+        for aid, feature_start, feature_end, strand, feature_type, qualifiers in annotation_records:
             color = None
-            for rule in color_rules:
+            for index, rule in enumerate(color_rules):
                 value = qualifiers.get(rule.get("qualifier_key"))
                 if _matches(value, rule):
-                    color = _rule_color(value, rule)
+                    color = _rule_color(value, rule, gradient_ranges.get(index))
                     break
             features.append(
                 AnnotationFeatureData(

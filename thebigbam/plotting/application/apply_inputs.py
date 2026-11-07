@@ -46,6 +46,7 @@ _OPERATOR_MODES = {
     "<": "lt",
     ">": "gt",
     "Use random colors": "random",
+    "Use color gradient": "gradient",
 }
 
 
@@ -59,6 +60,14 @@ def _color_rules(rows, *, allow_random: bool) -> list[dict[str, Any]]:
         if mode == "random":
             if allow_random:
                 rules.append({"qualifier_key": key, "match_mode": "random"})
+            continue
+        if mode == "gradient":
+            rules.append({
+                "qualifier_key": key,
+                "match_mode": "gradient",
+                "color": row["color_picker"].color,
+                "gradient_end_color": row["gradient_end_picker"].color,
+            })
             continue
         raw_value = row["input_ref"]["widget"].value
         color = row["color_picker"].color

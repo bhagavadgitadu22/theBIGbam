@@ -226,3 +226,44 @@ def test_sample_options_and_title_share_selected_mag_scope_without_contig(subjec
 
     assert widgets["sample_select"].options == ["GL34_UP"]
     assert "1 available" in sample_title.text
+
+
+@pytest.mark.parametrize("sample_ids", [{}, {"m1": set()}])
+def test_mag_without_sample_coverage_has_empty_options_and_zero_count(sample_ids):
+    widgets = {
+        "has_mags": True,
+        "contig_select": _select(),
+        "sample_select": _select(),
+        "mag_select": _select("m1"),
+        "sample_name_to_id": {"s1": 1},
+        "contig_name_to_id": {"c1": 1},
+        "mag_to_contigs": {"m1": ["c1"]},
+        "mag_to_sample_ids": sample_ids,
+    }
+    sample_title = SimpleNamespace(text="")
+    sort_sample = _select()
+    controller = AvailabilityController(
+        AvailabilityBindings(
+            availability_service=AvailabilityService(),
+            filtering_pairs=lambda: None,
+            original_contigs=["c1"],
+            original_samples=["s1"],
+            sample_scope=SimpleNamespace(active=0),
+            widgets=widgets,
+            sort_sample_select=sort_sample,
+            update_completions=lambda widget, values: setattr(widget, "options", list(values)),
+            total_coverage_count=0,
+            filtering_title=SimpleNamespace(text=""),
+            contig_title=SimpleNamespace(text=""),
+            sample_title=sample_title,
+            mag_title=SimpleNamespace(text=""),
+        )
+    )
+
+    controller.refresh_samples()
+    controller.update_titles()
+
+    assert widgets["sample_select"].options == []
+    assert sort_sample.options == []
+    assert "0 available" in sample_title.text
+    assert controller.sort_samples_for_mag(["s1"]) == []

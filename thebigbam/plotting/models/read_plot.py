@@ -20,6 +20,7 @@ class ReadColorRule:
     operator: str
     value: Any
     color: str
+    gradient_end_color: str | None = None
 
 
 @dataclass(frozen=True)
@@ -85,6 +86,8 @@ class ReadAlignment:
     events: tuple[ReadEvent, ...] = ()
     alignment_id: tuple | None = field(default=None, compare=False, repr=False)
     color: str | None = None
+    gradient_rule_index: int | None = field(default=None, compare=False, repr=False)
+    gradient_value: float | None = field(default=None, compare=False, repr=False)
 
 
 @dataclass(frozen=True)
@@ -94,3 +97,4 @@ class ReadPlotData:
     message: str | None = None
     warnings: tuple[str, ...] = ()
     details_loaded: bool = True
+    gradient_ranges: Mapping[int, tuple[float, float]] = field(default_factory=dict, compare=False, repr=False)

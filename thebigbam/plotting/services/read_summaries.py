@@ -5,7 +5,7 @@ from ..shared.read_cigar import CIGAR
 from ..shared.read_identity import read_identity
 
 
-def summarize_candidate(read, color=None):
+def summarize_candidate(read, color=None, gradient_rule_index=None, gradient_value=None):
     position = read.start
     blocks = []
     for match in CIGAR.finditer(read.cigar):
@@ -20,4 +20,6 @@ def summarize_candidate(read, color=None):
         read.mapq, read.cigar, read.mate_start, read.is_read1, read.is_paired,
         alignment_id=read_identity(read),
         color=color,
+        gradient_rule_index=gradient_rule_index,
+        gradient_value=gradient_value,
     )

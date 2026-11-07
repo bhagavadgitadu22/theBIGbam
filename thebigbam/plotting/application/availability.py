@@ -227,7 +227,8 @@ class AvailabilityController:
                     availability_service.samples_for_contig(contig_id, search_term, preserve_sample)
                 )
             elif scope.one_sample and scope.mag_name:
-                allowed_sids = widgets["mag_to_sample_ids"][scope.mag_name]
+                # MAGs without coverage rows are absent from this sparse map.
+                allowed_sids = widgets["mag_to_sample_ids"].get(scope.mag_name, set())
                 completions = [
                     sample
                     for sample in orig_samples
@@ -265,7 +266,7 @@ class AvailabilityController:
             elif contig_id is not None:
                 total_count = availability_service.count_samples_for_contig(contig_id)
             elif scope.one_sample and scope.mag_name:
-                total_count = len(widgets["mag_to_sample_ids"][scope.mag_name])
+                total_count = len(widgets["mag_to_sample_ids"].get(scope.mag_name, set()))
             else:
                 total_count = len(orig_samples)
             result = AvailabilityResult(tuple(completions), total_count)
@@ -281,8 +282,8 @@ class AvailabilityController:
             if not widgets["has_mags"]:
                 return base_completions
             sel_mag = sel_mag if sel_mag is not None else widgets["mag_select"].value
-            if sel_mag and sel_mag in widgets["mag_to_sample_ids"]:
-                allowed_sids = widgets["mag_to_sample_ids"][sel_mag]
+            if sel_mag:
+                allowed_sids = widgets["mag_to_sample_ids"].get(sel_mag, set())
                 _s2id = widgets["sample_name_to_id"]
                 return [s for s in base_completions if _s2id.get(s) in allowed_sids]
             return base_completions

@@ -10,11 +10,11 @@ from ..models.read_filters import (
     READ_FILTER_CHOICES,
     READ_FILTER_FIELDS,
     READ_FILTER_LABELS,
-    READ_FILTER_CHOICES,
     read_filter_operators,
     read_color_rule_operators,
 )
 from ..models.filters import FilterExpression, FilterPredicate, FilterSection
+from ..shared.color_gradients import gradient_color
 
 COMPARISONS = {">": operator.gt, "<": operator.lt, "=": operator.eq, "!=": operator.ne}
 
@@ -150,6 +150,10 @@ def validate_read_color_rules(rules):
     for rule in rules:
         if rule.field not in READ_FILTER_FIELDS or rule.operator not in read_color_rule_operators(rule.field):
             raise ValueError(f"Unsupported read color rule: {rule.field} {rule.operator}.")
+        if rule.operator == "Use color gradient":
+            if rule.field in READ_FILTER_CHOICES or rule.field in BOOLEAN_READ_FILTERS or rule.field == "Alignment includes":
+                raise ValueError(f"Color gradients require a numeric read field, not {rule.field}.")
+            continue
         if rule.operator == "Use random colors":
             continue
         if rule.field in READ_FILTER_CHOICES:
@@ -171,14 +175,19 @@ def validate_read_color_rules(rules):
             raise ValueError("Alignment includes requires a positive integer position.")
 
 
-def compile_read_color_rule(rule, length, circular):
+def compile_read_color_rule(rule, length, circular, gradient_range=None):
     """Compile a color rule to a function returning its color on a match."""
     validate_read_color_rules((rule,))
     field, operator_name, expected = rule.field, rule.operator, rule.value
-    if operator_name != "Use random colors" and field not in (set(READ_FILTER_CHOICES) | BOOLEAN_READ_FILTERS):
+    if operator_name not in ("Use random colors", "Use color gradient") and field not in (set(READ_FILTER_CHOICES) | BOOLEAN_READ_FILTERS):
         expected = float(expected)
 
     def color_for(read):
+        if operator_name == "Use color gradient":
+            actual = read_filter_value(read, field, length, circular)
+            if actual is None or gradient_range is None:
+                return None
+            return gradient_color(float(actual), gradient_range, rule.color, rule.gradient_end_color)
         if field == "Alignment includes":
             matched = _includes(read, int(expected), length, circular)
             if operator_name == "!=":

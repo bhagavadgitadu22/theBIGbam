@@ -10,6 +10,7 @@ from bokeh.models import Div
 from bokeh.models.widgets import ColorPicker, Select, Spinner
 
 from ..shared.styles import FIELD_LABEL_MARGIN, panel_control_row, panel_stylesheet
+from ..shared.read_colors import DEFAULT_READ_GRADIENT_END, DEFAULT_READ_GRADIENT_START
 from .distinct_value_select import build_distinct_value_select
 from .searchable_select import SearchableSelect
 
@@ -77,7 +78,7 @@ def build_color_rule_controls(
     )
 
     TEXT_OPS = ["=", "!=", "has", "has not", "Use random colors"]
-    NUMERIC_OPS = ["=", ">", "<", "!=", "Use random colors"]
+    NUMERIC_OPS = ["=", ">", "<", "!=", "Use random colors", "Use color gradient"]
 
     def _build_color_value_widget(is_text, operator, *, category="Annotations", column="", name):
         """Return the value widget that matches (type, operator).
@@ -137,7 +138,7 @@ def build_color_rule_controls(
         rule_index = len(target)
         initial_key = color_qualifier_options[0] if color_qualifier_options else ""
         initial_info = annotation_meta.get(initial_key, {})
-        initial_is_text = initial_info.get("type") == "text"
+        initial_is_text = initial_key == "Strand" or initial_info.get("type") == "text"
 
         qualifier_select = Select(
             name=f"benchmark-{rule_kind}-rule-{rule_index}-qualifier",
@@ -145,6 +146,7 @@ def build_color_rule_controls(
             value=initial_key,
             sizing_mode="stretch_width",
             margin=0,
+            styles={"grid-column": "1"},
             css_classes=["responsive-field", "color-qualifier"],
         )
 
@@ -154,6 +156,7 @@ def build_color_rule_controls(
             value="=",
             sizing_mode="stretch_width",
             margin=0,
+            styles={"grid-column": "2"},
             css_classes=["responsive-field", "color-operator"],
         )
 
@@ -175,6 +178,27 @@ def build_color_rule_controls(
             css_classes=["responsive-action", "color-picker-field"],
         )
 
+        gradient_end_picker = ColorPicker(
+            color=DEFAULT_READ_GRADIENT_END,
+            width=42,
+            height=30,
+            margin=0,
+            css_classes=["responsive-action", "color-picker-field", "gradient-color-picker"],
+        )
+        color_slot = pn.Row(
+            color_picker,
+            gradient_end_picker,
+            sizing_mode="fixed",
+            width=88,
+            height=30,
+            margin=0,
+            css_classes=["gradient-color-pair"],
+            stylesheets=[panel_stylesheet(stylesheet)],
+            styles={
+                "grid-column": "4", "column-gap": "4px", "gap": "4px", "align-items": "center",
+            },
+        )
+
         minus_btn = pn.widgets.Button(
             name="\u2212",
             width=30,
@@ -182,13 +206,22 @@ def build_color_rule_controls(
             margin=0,
             stylesheets=[panel_stylesheet(stylesheet)],
             css_classes=["responsive-action", "color-remove"],
+            styles={"grid-column": "5"},
         )
 
+        value_slot = pn.Row(
+            initial_input,
+            sizing_mode="stretch_width",
+            margin=0,
+            css_classes=["color-value-slot"],
+            stylesheets=[panel_stylesheet(stylesheet)],
+            styles={"grid-column": "3"},
+        )
         row_widget = panel_control_row(
             qualifier_select,
             operator_select,
-            initial_input,
-            color_picker,
+            value_slot,
+            color_slot,
             minus_btn,
             sizing_mode="stretch_width",
             margin=(2, 0, 2, 0),
@@ -199,28 +232,52 @@ def build_color_rule_controls(
             stylesheets=[panel_stylesheet(stylesheet)],
         )
 
-        VALUE_IDX = 2  # position of the value widget inside row_widget
-
         row_data = {
             "qualifier_select": qualifier_select,
             "operator_select": operator_select,
             "input_ref": current_input_ref,
             "color_picker": color_picker,
+            "gradient_end_picker": gradient_end_picker,
+            "color_slot": color_slot,
+            "gradient_initialized": False,
             "minus_btn": minus_btn,
             "row_widget": row_widget,
+            "value_slot": value_slot,
+            "target_rows": target,
         }
 
         def _swap_value_widget(new_widget, is_panel):
-            row_widget[VALUE_IDX] = new_widget
             current_input_ref["widget"] = new_widget
             current_input_ref["is_panel"] = is_panel
+            value_slot.objects = [new_widget]
 
-        def _apply_random_visibility():
-            use_random = operator_select.value == "Use random colors"
-            current_input_ref["widget"].visible = not use_random
+        def _apply_mode_visibility(mode=None):
+            mode = mode or operator_select.value
+            use_random = mode == "Use random colors"
+            use_gradient = mode == "Use color gradient"
+            value_slot.visible = not (use_random or use_gradient)
             color_picker.visible = not use_random
-            # Responsive flex sizing lets the remaining fields absorb the
-            # space released by hidden random-color controls.
+            gradient_end_picker.visible = use_gradient
+            color_slot.visible = not use_random
+            color_slot.width = 88 if use_gradient else 42
+            classes = [
+                name for name in row_widget.css_classes
+                if name not in {"genomic-color-random", "genomic-color-gradient"}
+            ]
+            if use_random:
+                classes.append("genomic-color-random")
+            if use_gradient:
+                classes.append("genomic-color-gradient")
+            row_widget.css_classes = classes
+            styles = dict(row_widget.styles)
+            styles["grid-template-columns"] = (
+                "minmax(0, 3fr) minmax(0, 2fr) 0 88px 30px"
+                if use_gradient else
+                "minmax(0, 3fr) minmax(0, 5.7fr) 0 0 30px"
+                if use_random else
+                "minmax(0, 3fr) minmax(0, 2fr) minmax(0, 2.5fr) 42px 30px"
+            )
+            row_widget.styles = styles
 
         def update_color_input_widget(col_name):
             """Rebuild operator options and the value widget for the new column type."""
@@ -240,7 +297,7 @@ def build_color_rule_controls(
             _swap_value_widget(new_widget, is_panel)
 
             # Respect random-mode visibility even after a qualifier swap.
-            _apply_random_visibility()
+            _apply_mode_visibility()
 
         def on_qualifier_change(attr, old, new):
             update_color_input_widget(new)
@@ -251,10 +308,16 @@ def build_color_rule_controls(
             col_info = annotation_meta.get(qualifier_select.value, {})
             is_text = qualifier_select.value == "Strand" or col_info.get("type") == "text"
             use_random = new == "Use random colors"
+            use_gradient = new == "Use color gradient"
+
+            if use_gradient and old != new and not row_data["gradient_initialized"]:
+                color_picker.color = DEFAULT_READ_GRADIENT_START
+                gradient_end_picker.color = DEFAULT_READ_GRADIENT_END
+                row_data["gradient_initialized"] = True
 
             # Rebuild only when the selection/free-text mode changes, and keep
             # the current value across that mode transition.
-            if is_text and not use_random:
+            if is_text and not use_random and not use_gradient:
                 allow_custom = new in ("has", "has not")
                 cur = current_input_ref["widget"]
                 if not isinstance(cur, SearchableSelect) or cur.allow_custom != allow_custom:
@@ -264,7 +327,7 @@ def build_color_rule_controls(
                     new_input.value = cur.value or ""
                     _swap_value_widget(new_input, is_panel)
 
-            _apply_random_visibility()
+            _apply_mode_visibility(new)
 
         operator_select.on_change("value", on_operator_change)
 
@@ -277,6 +340,7 @@ def build_color_rule_controls(
                 _rebuild()
 
         minus_btn.on_click(remove_row_callback)
+        _apply_mode_visibility(operator_select.value)
         return row_data
 
     def rebuild_color_rows():

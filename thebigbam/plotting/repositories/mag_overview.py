@@ -29,6 +29,24 @@ class MagOverviewRepository:
             )
         )
 
+    def annotation_values(self, qualifier_key, contig_ids):
+        """Fetch stored values for one annotation field without color logic."""
+        if not contig_ids:
+            return ()
+        placeholders = ",".join("?" * len(contig_ids))
+        if qualifier_key in _CORE_ANNOTATION_COLUMNS:
+            sql = (
+                f'SELECT Annotation_id, "{qualifier_key}" FROM Contig_annotation_core '
+                f"WHERE Contig_id IN ({placeholders})"
+            )
+            return tuple(self._execute(sql, contig_ids))
+        return tuple(self._execute(
+            "SELECT a.Annotation_id, aq.Value FROM Contig_annotation_core a "
+            "JOIN Annotation_qualifier aq ON aq.Annotation_id = a.Annotation_id "
+            f"WHERE aq.Key = ? AND a.Contig_id IN ({placeholders})",
+            [qualifier_key, *contig_ids],
+        ))
+
     def matching_annotation_ids(self, rule, contig_ids):
         key = rule["qualifier_key"]
         mode = rule.get("match_mode", "exact")

@@ -318,19 +318,20 @@ def restore_settings(settings: Mapping[str, Any], bindings: SettingsRestoreBindi
             if operator in row_data["operator_select"].options:
                 row_data["operator_select"].value = operator
             if operator != "Use random colors":
-                widget = row_data["input_ref"]["widget"]
-                value = saved_rule.get("value")
-                if qualifier == "Strand" and value in (1, "1", "+1", "+"):
-                    value = "Forward"
-                elif qualifier == "Strand" and value in (-1, "-1", "-"):
-                    value = "Reverse"
+                if operator != "Use color gradient":
+                    widget = row_data["input_ref"]["widget"]
+                    value = saved_rule.get("value")
+                    if qualifier == "Strand" and value in (1, "1", "+1", "+"):
+                        value = "Forward"
+                    elif qualifier == "Strand" and value in (-1, "-1", "-"):
+                        value = "Reverse"
 
-                def _set_color_value(widget=widget, value=value):
-                    if isinstance(widget, SearchableSelect) and value:
-                        widget.search_query = str(value)
-                    widget.value = str(value) if isinstance(widget, SearchableSelect) else value
+                    def _set_color_value(widget=widget, value=value):
+                        if isinstance(widget, SearchableSelect) and value:
+                            widget.search_query = str(value)
+                        widget.value = str(value) if isinstance(widget, SearchableSelect) else value
 
-                _restore(f"{label} value", _set_color_value)
+                    _restore(f"{label} value", _set_color_value)
                 color = saved_rule.get("color")
                 if color:
                     _restore(
@@ -338,6 +339,15 @@ def restore_settings(settings: Mapping[str, Any], bindings: SettingsRestoreBindi
                         lambda row_data=row_data, color=color: setattr(row_data["color_picker"], "color", color),
                     )
             target_rows.append(row_data)
+            if operator == "Use color gradient":
+                end_color = saved_rule.get("gradient_end_color")
+                if end_color:
+                    _restore(
+                        f"{label} gradient end color",
+                        lambda row_data=row_data, end_color=end_color: setattr(
+                            row_data["gradient_end_picker"], "color", end_color,
+                        ),
+                    )
         rebuild_fn()
 
     coloring = contig_settings.get("coloring") or {}

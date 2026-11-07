@@ -138,15 +138,21 @@ def _color_rules(value: Sequence[Any], path: tuple[str, ...]) -> list[HistoryDes
     prefix = "Contig · Coloring ·" if path[-1] == "custom_color_rows" else "Contig · MAG coloring ·"
     lines = []
     for index, rule in enumerate(value, start=1):
-        if not isinstance(rule, Mapping) or not all(
-            _is_described_value(rule.get(field)) for field in ("qualifier", "value", "color")
-        ):
+        if not isinstance(rule, Mapping) or not _is_described_value(rule.get("qualifier")):
             continue
+        operator = rule.get("operator") or "="
+        if operator == "Use random colors":
+            detail = "Use random colors"
+        elif operator == "Use color gradient":
+            detail = f"Use color gradient · {rule.get('color')} → {rule.get('gradient_end_color')}"
+        else:
+            if not all(_is_described_value(rule.get(field)) for field in ("value", "color")):
+                continue
+            detail = f"{operator} {rule['value']} · {rule['color']}"
         lines.append(
             HistoryDescriptionLine(
                 f"{'.'.join(path)}.#{index}",
-                f"{prefix} #{index}: {rule['qualifier']} {rule.get('operator') or '='} "
-                f"{rule['value']} · {rule['color']}",
+                f"{prefix} #{index}: {rule['qualifier']} {detail}",
             )
         )
     return lines
@@ -157,10 +163,17 @@ def _read_color_rules(value: Sequence[Any], path: tuple[str, ...]) -> list[Histo
     for index, rule in enumerate(value, start=1):
         if not isinstance(rule, Mapping) or not _is_described_value(rule.get("field")):
             continue
-        random = rule.get("operator") == "Use random colors"
-        if not random and not all(_is_described_value(rule.get(field)) for field in ("value", "color")):
+        operator = rule.get("operator")
+        random = operator == "Use random colors"
+        gradient = operator == "Use color gradient"
+        if not random and not gradient and not all(_is_described_value(rule.get(field)) for field in ("value", "color")):
             continue
-        detail = "Use random colors" if random else f"{rule.get('operator') or '='} {rule['value']} · {rule['color']}"
+        if random:
+            detail = "Use random colors"
+        elif gradient:
+            detail = f"Use color gradient · {rule.get('color')} → {rule.get('gradient_end_color')}"
+        else:
+            detail = f"{operator or '='} {rule['value']} · {rule['color']}"
         lines.append(
             HistoryDescriptionLine(
                 f"{'.'.join(path)}.#{index}",

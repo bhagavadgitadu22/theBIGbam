@@ -13,7 +13,11 @@ from ..models.read_filters import (
     read_color_rule_operators,
 )
 from ..models.read_plot import ReadColorRule
-from ..shared.read_colors import read_color_templates
+from ..shared.read_colors import (
+    DEFAULT_READ_GRADIENT_END,
+    DEFAULT_READ_GRADIENT_START,
+    read_color_templates,
+)
 from ..shared.styles import FIELD_LABEL_MARGIN, panel_control_row, panel_stylesheet
 
 
@@ -95,6 +99,7 @@ class ReadColorRuleControls:
             value=initial_field,
             sizing_mode="stretch_width",
             margin=0,
+            styles={"grid-column": "1"},
             css_classes=["responsive-field", "color-qualifier"],
         )
         operator = Select(
@@ -103,6 +108,7 @@ class ReadColorRuleControls:
             value="=",
             sizing_mode="stretch_width",
             margin=0,
+            styles={"grid-column": "2"},
             css_classes=["responsive-field", "color-operator"],
         )
         if initial.get("operator") in operator.options:
@@ -110,17 +116,39 @@ class ReadColorRuleControls:
         value = _color_value_widget(
             initial_field, operator.value, name=f"benchmark-read-color-rule-{rule_index}-value"
         )
-        value.visible = operator.value != "Use random colors"
+        value.visible = operator.value not in ("Use random colors", "Use color gradient")
         if initial.get("value") not in (None, ""):
             value.value = initial["value"]
         color = ColorPicker(
-            color=initial.get("color", "#cccccc"),
+            color=initial.get(
+                "color",
+                DEFAULT_READ_GRADIENT_START if operator.value == "Use color gradient" else "#cccccc",
+            ),
             width=42,
             height=30,
             margin=0,
             css_classes=["responsive-action", "color-picker-field"],
         )
-        color.visible = operator.value != "Use random colors"
+        gradient_end = ColorPicker(
+            color=initial.get("gradient_end_color", DEFAULT_READ_GRADIENT_END),
+            width=42,
+            height=30,
+            margin=0,
+            css_classes=["responsive-action", "color-picker-field", "gradient-color-picker"],
+        )
+        color_slot = pn.Row(
+            color,
+            gradient_end,
+            sizing_mode="fixed",
+            width=88,
+            height=30,
+            margin=0,
+            css_classes=["gradient-color-pair"],
+            stylesheets=[panel_stylesheet(self.stylesheet)],
+            styles={
+                "grid-column": "4", "column-gap": "4px", "gap": "4px", "align-items": "center",
+            },
+        )
         minus = pn.widgets.Button(
             name="−",
             width=30,
@@ -128,20 +156,57 @@ class ReadColorRuleControls:
             margin=0,
             stylesheets=[panel_stylesheet(self.stylesheet)],
             css_classes=["responsive-action", "color-remove"],
+            styles={"grid-column": "5"},
+        )
+        value_slot = pn.Row(
+            value,
+            sizing_mode="stretch_width",
+            margin=0,
+            css_classes=["color-value-slot"],
+            stylesheets=[panel_stylesheet(self.stylesheet)],
+            styles={"grid-column": "3"},
         )
         row_widget = panel_control_row(
             field,
             operator,
-            value,
-            color,
+            value_slot,
+            color_slot,
             minus,
             sizing_mode="stretch_width",
             margin=(2, 0, 2, 0),
             css_classes=["responsive-control-row", "coloring-row", "read-coloring-row"],
             stylesheets=[panel_stylesheet(self.stylesheet)],
         )
-        row = {"field": field, "operator": operator, "value": value, "color": color,
+        row = {"field": field, "operator": operator, "value": value, "value_slot": value_slot,
+               "color": color, "gradient_end": gradient_end, "color_slot": color_slot,
+               "gradient_initialized": operator.value == "Use color gradient",
                "minus": minus, "row_widget": row_widget}
+
+        def update_mode_visibility(mode):
+            random = mode == "Use random colors"
+            gradient = mode == "Use color gradient"
+            value_slot.visible = not (random or gradient)
+            color.visible = not random
+            gradient_end.visible = gradient
+            color_slot.visible = not random
+            color_slot.width = 88 if gradient else 42
+            classes = [name for name in row_widget.css_classes if name not in {"read-color-random", "read-color-gradient"}]
+            if random:
+                classes.append("read-color-random")
+            if gradient:
+                classes.append("read-color-gradient")
+            row_widget.css_classes = classes
+            styles = dict(row_widget.styles)
+            styles["grid-template-columns"] = (
+                "minmax(0, 3fr) minmax(0, 2fr) 0 88px 30px"
+                if gradient else
+                "minmax(0, 3fr) minmax(0, 5.7fr) 0 0 30px"
+                if random else
+                "minmax(0, 3fr) minmax(0, 2fr) minmax(0, 2.5fr) 42px 30px"
+            )
+            row_widget.styles = styles
+
+        update_mode_visibility(operator.value)
 
         def update_field(_attr, _old, new):
             choices = read_color_rule_operators(new)
@@ -151,24 +216,26 @@ class ReadColorRuleControls:
             new_value = _color_value_widget(
                 new, operator.value, name=f"benchmark-read-color-rule-{rule_index}-value"
             )
-            new_value.visible = operator.value != "Use random colors"
-            color.visible = operator.value != "Use random colors"
-            row_widget[2] = new_value
             row["value"] = new_value
+            value_slot.objects = [new_value]
+            update_mode_visibility(operator.value)
 
         field.on_change("value", update_field)
 
-        def update_operator(_attr, _old, new):
-            current_value = row["value"].value
+        def update_operator(_attr, old, new):
+            current_value = getattr(row["value"], "value", None)
             new_value = _color_value_widget(
                 field.value, new, name=f"benchmark-read-color-rule-{rule_index}-value"
             )
-            if new != "Use random colors" and current_value not in (None, ""):
+            if new == "Use color gradient" and old != new and not row["gradient_initialized"]:
+                color.color = DEFAULT_READ_GRADIENT_START
+                gradient_end.color = DEFAULT_READ_GRADIENT_END
+                row["gradient_initialized"] = True
+            if new not in ("Use random colors", "Use color gradient") and current_value not in (None, ""):
                 new_value.value = current_value
-            new_value.visible = new != "Use random colors"
-            color.visible = new != "Use random colors"
-            row_widget[2] = new_value
             row["value"] = new_value
+            value_slot.objects = [new_value]
+            update_mode_visibility(new)
 
         operator.on_change("value", update_operator)
         minus.on_click(lambda _event: self._remove_rule(row))
@@ -201,24 +268,32 @@ class ReadColorRuleControls:
         rules = []
         for row in self.rows:
             operator = row["operator"].value
-            value = None if operator == "Use random colors" else row["value"].value
-            if operator != "Use random colors" and (value is None or value == ""):
+            value = None if operator in ("Use random colors", "Use color gradient") else row["value"].value
+            if operator not in ("Use random colors", "Use color gradient") and (value is None or value == ""):
                 continue
             rules.append(ReadColorRule(
                 row["field"].value,
                 operator,
                 value,
                 row["color"].color,
+                row["gradient_end"].color if operator == "Use color gradient" else None,
             ))
         return tuple(rules)
 
     def serialize(self):
-        return [
-            {"field": row["field"].value, "operator": row["operator"].value,
-             "value": None if row["operator"].value == "Use random colors" else row["value"].value,
-             "color": row["color"].color}
-            for row in self.rows
-        ]
+        serialized = []
+        for row in self.rows:
+            operator = row["operator"].value
+            rule = {
+                "field": row["field"].value,
+                "operator": operator,
+                "value": None if operator in ("Use random colors", "Use color gradient") else row["value"].value,
+                "color": row["color"].color,
+            }
+            if operator == "Use color gradient":
+                rule["gradient_end_color"] = row["gradient_end"].color
+            serialized.append(rule)
+        return serialized
 
     def restore(self, template, rules=None):
         template = template if template in self.templates else "Alignment class"
@@ -239,5 +314,6 @@ class ReadColorRuleControls:
             elif field == "Strand" and value in (-1, "-1", "-"):
                 value = "Reverse"
             valid.append({"field": field, "operator": operator, "value": value,
-                          "color": rule.get("color", "#cccccc")})
+                          "color": rule.get("color", "#cccccc"),
+                          "gradient_end_color": rule.get("gradient_end_color", DEFAULT_READ_GRADIENT_END)})
         self._replace_rules(valid)

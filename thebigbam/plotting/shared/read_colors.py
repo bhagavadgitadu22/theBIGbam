@@ -19,6 +19,9 @@ READ_STRAND_VARIABLES = {
     "Reverse": "primary_reads_minus_only",
 }
 
+DEFAULT_READ_GRADIENT_START = "#2166ac"
+DEFAULT_READ_GRADIENT_END = "#b2182b"
+
 
 def read_color_templates(strand_colors=None):
     """Return independent built-in rule sets using the database strand palette."""
