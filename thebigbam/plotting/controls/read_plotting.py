@@ -56,15 +56,7 @@ def build_read_plot_controls(
     color_rules = ReadColorRuleControls(
         stylesheet, circular_available=circular_available, strand_colors=strand_colors,
     )
-    filter_title = Div(text='<span title="These rules select alignments to include in the plot. The initial Alignment class = Primary rule shows primary alignments; add OR rules to include secondary or supplementary alignments. Read length includes soft/hard clips. Alignment length counts aligned query bases (M/I/=/X). '
-                 'Read % aligned is 100 × exact matching bases / full read length, including clips. '
-                 'Unknown percentages without sufficient CIGAR/MD/NM information do not match numeric comparisons. '
-                 'Coordinates are 1-based and local to the contig, including in MAG view. Alignment includes uses the alignment span. '
-                 'Alignment end is the BAM end coordinate, which may exceed contig length for circular reads. '
-                 'Alignment class identifies primary, secondary, and supplementary records. '
-                 'Insert sizes use absolute SAM TLEN; unknown sizes do not match numeric filters. '
-                 'Non-inward pair tests the orientation of mapped, same-contig mates, not the proper-pair flag. '
-                 'Circular means an alignment crosses the origin in a circular-mapping sample.">Select alignments to show</span>')
+    filter_title = Div(text="Filter alignments to show")
     filter_header, filter_content = build_collapsible(
         filter_title, [filters.content], toggle_stylesheet, make_toggle_callback,
         slug="filter-reads", initially_open=True,

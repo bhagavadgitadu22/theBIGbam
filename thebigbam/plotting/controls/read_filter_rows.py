@@ -18,7 +18,15 @@ def build_read_filter_value_widget(field, *, name=None):
     """Build the field-specific value input shared by read filters and color rules."""
     if field in SINGLE_VALUE_READ_FILTERS:
         options = READ_FILTER_CHOICES.get(field, ("TRUE", "FALSE"))
-        return Select(options=list(options), value=options[0], name=name, sizing_mode="stretch_width", margin=0)
+        # An untouched read-filter row is an empty draft. In particular, don't
+        # silently filter to the first Alignment class (Primary).
+        return Select(
+            options=[("", "Choose..."), *options],
+            value="",
+            name=name,
+            sizing_mode="stretch_width",
+            margin=0,
+        )
     percentage = field == "Read % aligned"
     return Spinner(
         value=None,

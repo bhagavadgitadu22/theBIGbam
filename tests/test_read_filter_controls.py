@@ -2,7 +2,7 @@
 
 import duckdb
 from bokeh.events import ButtonClick
-from bokeh.models import CheckboxGroup, Spinner
+from bokeh.models import Spinner
 
 from thebigbam.plotting.controls.filtering import FilterSectionController
 from thebigbam.plotting.controls.read_filters import ReadFilterControls
@@ -20,18 +20,18 @@ def test_read_filter_rows_switch_numeric_position_and_boolean_inputs():
     assert isinstance(controls.controller, FilterSectionController)
     assert not controls.expression().active
     row = controls.controller.sections[0]["rows"][0]
-    assert ("Alignment percentage", "Alignment (%)") in row["subcategory_select"].options
+    assert ("Read % aligned", "Read % aligned") in row["subcategory_select"].options
     _set(row, "MAPQ", 30)
     assert row["comparison_select"].visible
     assert row["comparison_select"].options == [">", "<", "=", "!="]
-    _set(row, "Alignment percentage", 95.5)
+    _set(row, "Read % aligned", 95.5)
     spinner = row["input_ref"]["widget"]
-    assert spinner.step == .1 and spinner.low == 0 and spinner.high == 100
+    assert spinner.step == 0.1 and spinner.low == 0 and spinner.high == 100
     _set(row, "Alignment includes", 123)
     assert row["comparison_select"].options == ["=", "!="]
     _set(row, "Has mate mapped", "FALSE")
     assert not row["comparison_select"].visible
-    assert row["input_ref"]["widget"].options == ["TRUE", "FALSE"]
+    assert row["input_ref"]["widget"].options == [("", "Choose..."), "TRUE", "FALSE"]
     expression = controls.expression()
     assert expression.sections[0].predicates[0].value == "FALSE"
     assert expression.sections[0].predicates[0].operator == "="
@@ -81,18 +81,23 @@ def test_restoring_unavailable_circular_filter_does_not_create_hidden_predicate(
 
 
 def test_read_filter_collapse_button_matches_annotation_toggle_and_preserves_rules():
-    controls = build_read_plot_controls(max_reads=Spinner(value=1000), link_pairs=CheckboxGroup(),
-                                        plot_height=Spinner(value=400), read_height=Spinner(value=14),
-                                        toggle_stylesheet=":host { color: red; }")
+    controls = build_read_plot_controls(
+        max_reads=Spinner(value=1000),
+        plot_height=Spinner(value=400),
+        read_height=Spinner(value=14),
+        toggle_stylesheet=":host { color: red; }",
+    )
     button, title = controls.filter_header.children
-    assert "Filter reads:" in title.text
+    assert title.text == "Filter alignments to show"
     assert button.width == button.height == 20
-    assert button.button_type == "primary" and button.label == "▶"
+    assert button.button_type == "primary" and button.label == "▼"
     assert button.stylesheets == [":host { color: red; }"]
-    assert not controls.filter_content.visible
+    assert controls.filter_content.visible
+    assert not controls.filters.expression().active
     _set(controls.filters.controller.sections[0]["rows"][0], "MAPQ", 30)
     expression = controls.filters.expression()
     button._trigger_event(ButtonClick(model=button))
-    assert controls.filter_content.visible and button.label == "▼"
+    assert not controls.filter_content.visible and button.label == "▶"
     button._trigger_event(ButtonClick(model=button))
-    assert not controls.filter_content.visible and controls.filters.expression() == expression
+    assert controls.filter_content.visible and button.label == "▼"
+    assert controls.filters.expression() == expression
