@@ -106,7 +106,9 @@ def test_read_only_all_samples_respects_filter_order_and_limit(repository_db, mo
         "thebigbam.plotting.application.read_track_pipeline.prepare_read_plot", lambda *args: ReadPlotData((), 0)
     )
     names = ("sample_002", "sample_003", "sample_004")
-    catalog = SimpleNamespace(by_sample={name: SimpleNamespace(path=f"{name}.bam", available=True) for name in names})
+    catalog = SimpleNamespace(
+        by_sample={name: SimpleNamespace(path=f"{name}.bam", available=True, circular=False) for name in names}
+    )
     config = ReadTrackConfig(ReadPlotOptions(enabled=True), catalog, frozenset({"primary"}), {})
     grid = build_all_samples_plot(
         repository_db,

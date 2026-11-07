@@ -5,6 +5,7 @@ from bokeh.models import InlineStyleSheet, Spinner
 from thebigbam.plotting.controls.color_rules import build_color_rule_controls
 from thebigbam.plotting.controls.searchable_select import SearchableSelect
 from thebigbam.plotting.repositories.color_templates import ColorTemplateRepository
+from thebigbam.plotting.shared.styles import FIELD_LABEL_MARGIN
 
 
 class MetadataService:
@@ -165,7 +166,7 @@ def test_color_rule_fields_use_shared_proportional_layout():
     ]
     assert row["row_widget"].styles["gap"] == "4px"
     assert controls.template_select.css_classes == ["sidebar-field"]
-    assert controls.template_select.margin == 0
+    assert controls.template_select.margin == FIELD_LABEL_MARGIN
     assert controls.feature_label_select.css_classes == ["sidebar-field"]
     assert controls.feature_label_select.margin == 0
 
